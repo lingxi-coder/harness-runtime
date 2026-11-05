@@ -52,9 +52,9 @@
 //!   / `isSimpleTarget`), and skips fd-duplications (`2>&1`). It does not model
 //!   heredocs or subshell-redirect bookkeeping (those are passthrough/`deny`
 //!   concerns, not new asks).
-//! - **Lexical containment**, reusing [`crate::filesystem`]'s
-//!   `path_in_allowed_working_path` — same already-accepted no-`realpath`
-//!   divergence as the rest of the crate.
+//! - Containment uses [`crate::filesystem::path_in_allowed_working_path`],
+//!   including its discovered symlink-resolved forms; the old lexical-only
+//!   divergence does not describe the current helper.
 //! - **Only the containment ASK**, not the deny-rule / allow-rule branches of
 //!   `validatePath`/`isPathAllowed` (those are the policy walks' job). The
 //!   `/dev/null` carve-out and the tilde/shell-expansion pre-guards ARE ported,

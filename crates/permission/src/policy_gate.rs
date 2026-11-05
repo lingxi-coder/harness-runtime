@@ -505,6 +505,10 @@ fn permission_result_to_core(
     use core_permission::PermissionToolCheckResult as C;
     let metadata = |metadata: &PermissionMetadata| core_permission::PermissionToolCheckMetadata {
         matched_rules: metadata.matched_rules.clone(),
+        matched_ask_rule: metadata
+            .matched_ask_rule
+            .as_ref()
+            .map(permission_rule_to_core),
         permission_suggestions: metadata.permission_suggestions.clone(),
         blocked_path: metadata.blocked_path.clone(),
     };
@@ -612,12 +616,19 @@ fn hook_allow_preflight_tool_check_evaluation(
                     .unwrap_or_else(|| deny_reason_string(reason, name)),
             ),
         },
-        PermissionResult::Ask { reason, prompt, .. } => ModToolCheckVerdict {
+        PermissionResult::Ask {
+            reason,
+            prompt,
+            metadata,
+            ..
+        } => ModToolCheckVerdict {
             decision: ModToolCheckDecision::Ask,
             rule: mod_check_rule(
                 reason,
                 PermissionBehavior::Ask,
-                ctx.matched_ask_rule.as_ref(),
+                matched_ask_rule(metadata)
+                    .as_ref()
+                    .or(ctx.matched_ask_rule.as_ref()),
             ),
             reason: Some(match reason {
                 PermissionDecisionReason::MatchedRule { .. } => format!(
@@ -649,6 +660,10 @@ fn permission_result_from_core(
     use core_permission::PermissionToolCheckResult as C;
     let metadata = |metadata: &core_permission::PermissionToolCheckMetadata| PermissionMetadata {
         matched_rules: metadata.matched_rules.clone(),
+        matched_ask_rule: metadata
+            .matched_ask_rule
+            .as_ref()
+            .map(permission_rule_from_core),
         permission_suggestions: metadata.permission_suggestions.clone(),
         blocked_path: metadata.blocked_path.clone(),
     };
@@ -1425,7 +1440,11 @@ impl PolicyPermissionGate {
             // constraints, `$IFS`/bash-safety, sed, PowerShell containment,
             // edit-read-deny) are `type:"other"` in the oracle too and `_pt`
             // SKIPS them — so they must NOT block a hook allow.
-            PermissionResult::Ask { reason, .. } if Self::is_pt_ask_reason(reason) => Some(result),
+            PermissionResult::Ask {
+                reason, metadata, ..
+            } if metadata.matched_ask_rule.is_some() || Self::is_pt_ask_reason(reason) => {
+                Some(result)
+            }
             _ => None,
         };
         (mode, verdict)
@@ -1458,8 +1477,10 @@ impl PolicyPermissionGate {
             // and reports `Other`, so ranking it with the mode fallback would
             // put it BELOW `Allow` and let an allow matched in the other
             // coordinate space silently write a read-denied file.
-            PermissionResult::Ask { reason, .. }
-                if !matches!(reason, PermissionDecisionReason::PermissionMode { .. }) =>
+            PermissionResult::Ask {
+                reason, metadata, ..
+            } if metadata.matched_ask_rule.is_some()
+                || !matches!(reason, PermissionDecisionReason::PermissionMode { .. }) =>
             {
                 3
             }
@@ -1968,7 +1989,11 @@ impl PolicyPermissionGate {
             } => PermissionDecision::Deny {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
-            PermissionResult::Ask { ref reason, .. } => {
+            PermissionResult::Ask {
+                ref reason,
+                ref metadata,
+                ..
+            } => {
                 if self.policy.is_restricted_protected_mutation(name, input) {
                     // Protected restricted writes must never enter the
                     // classifier or an unsuppressed transport path. A TUI or
@@ -1990,14 +2015,25 @@ impl PolicyPermissionGate {
                     }
                     return decision;
                 }
+                let ask_rule_reason = metadata
+                    .matched_ask_rule
+                    .as_ref()
+                    .map(|rule| PermissionDecisionReason::MatchedRule { rule: rule.clone() });
                 match self
-                    .auto_mode_classifier_result(mode, reason, name, input, false, &|| {
-                        self.accept_edits_fast_path(
-                            name,
-                            input,
-                            &FoldedPermissionContext::default(),
-                        )
-                    })
+                    .auto_mode_classifier_result(
+                        mode,
+                        ask_rule_reason.as_ref().unwrap_or(reason),
+                        name,
+                        input,
+                        false,
+                        &|| {
+                            self.accept_edits_fast_path(
+                                name,
+                                input,
+                                &FoldedPermissionContext::default(),
+                            )
+                        },
+                    )
                     .await
                 {
                     Ok(AutoModeClassifierResult::Classified(classified)) => {
@@ -2014,7 +2050,9 @@ impl PolicyPermissionGate {
                         };
                     }
                 }
-                if read_only_default_auto_allows(name, reason, mode) {
+                if metadata.matched_ask_rule.is_none()
+                    && read_only_default_auto_allows(name, reason, mode)
+                {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allow rather than ask-storm (phase-2 stand-in for the
                     // per-tool default). An explicit `ask` rule (tool-wide or
@@ -2135,10 +2173,14 @@ impl PolicyPermissionGate {
                 // Skipping the classifier outright (what this did) kept the
                 // allow side right and silently dropped the deny side, turning
                 // every hook-asked dangerous action into a user prompt.
+                let ask_rule_reason = metadata
+                    .matched_ask_rule
+                    .as_ref()
+                    .map(|rule| PermissionDecisionReason::MatchedRule { rule: rule.clone() });
                 let fallback_decision_reason = match self
                     .auto_mode_classifier_result(
                         mode,
-                        reason,
+                        ask_rule_reason.as_ref().unwrap_or(reason),
                         name,
                         input,
                         ctx.is_non_interactive_session,
@@ -2163,7 +2205,9 @@ impl PolicyPermissionGate {
                     }
                     AutoModeClassifierResult::NoDecision => None,
                 };
-                if read_only_default_auto_allows(name, reason, mode) {
+                if metadata.matched_ask_rule.is_none()
+                    && read_only_default_auto_allows(name, reason, mode)
+                {
                     self.record_auto_mode_non_deny(mode);
                     Ok(PermissionOutcome::Allow {
                         updated_input: None,
@@ -2199,7 +2243,7 @@ impl PolicyPermissionGate {
                     // reason does not support it instead of emitting metadata
                     // for an unrelated Ask.
                     ctx2.classifier_approvable = classifier_approvable(reason);
-                    ctx2.matched_ask_rule = matched_ask_rule(reason);
+                    ctx2.matched_ask_rule = matched_ask_rule(metadata);
                     ctx2.auto_mode_prompt =
                         self.auto_prompt_for_ask(mode, name, input, reason, &ctx2);
                     // Tool-specific policy producers take precedence; retain an
@@ -2288,11 +2332,19 @@ impl PolicyPermissionGate {
                 behavior_ask: false,
                 content_blocks: Vec::new(),
             }),
-            PermissionResult::Ask { ref reason, .. } => {
+            PermissionResult::Ask {
+                ref reason,
+                ref metadata,
+                ..
+            } => {
+                let ask_rule_reason = metadata
+                    .matched_ask_rule
+                    .as_ref()
+                    .map(|rule| PermissionDecisionReason::MatchedRule { rule: rule.clone() });
                 match self
                     .auto_mode_classifier_result(
                         mode,
-                        reason,
+                        ask_rule_reason.as_ref().unwrap_or(reason),
                         name,
                         input,
                         is_non_interactive_session,
@@ -2319,7 +2371,9 @@ impl PolicyPermissionGate {
                     }
                     AutoModeClassifierResult::NoDecision => {}
                 }
-                if read_only_default_auto_allows(name, reason, mode) {
+                if metadata.matched_ask_rule.is_none()
+                    && read_only_default_auto_allows(name, reason, mode)
+                {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt. No rule matched, so no scope.
                     Ok(PermissionResolution::Allow {
@@ -3183,19 +3237,27 @@ impl PermissionGate for PolicyPermissionGate {
                         .unwrap_or_else(|| deny_reason_string(&reason, name)),
                 ),
             },
-            PermissionResult::Ask { reason, prompt, .. } => {
-                let allowed_without_classifier = read_only_default_auto_allows(name, &reason, mode)
-                    || (mode == PermissionMode::Auto
-                        && reason_allows_classifier(&reason)
-                        && (self.accept_edits_fast_path(name, input, &folded)
-                            || crate::mode_policy::is_auto_mode_safe_tool(name)));
+            PermissionResult::Ask {
+                reason,
+                prompt,
+                metadata,
+                ..
+            } => {
+                let matched_ask =
+                    matched_ask_rule(metadata).or_else(|| ctx.matched_ask_rule.clone());
+                let allowed_without_classifier = metadata.matched_ask_rule.is_none()
+                    && (read_only_default_auto_allows(name, &reason, mode)
+                        || (mode == PermissionMode::Auto
+                            && reason_allows_classifier(&reason)
+                            && (self.accept_edits_fast_path(name, input, &folded)
+                                || crate::mode_policy::is_auto_mode_safe_tool(name))));
                 if allowed_without_classifier {
                     ModToolCheckVerdict {
                         decision: ModToolCheckDecision::Allow,
                         rule: mod_check_rule(
                             &reason,
                             PermissionBehavior::Allow,
-                            ctx.matched_ask_rule.as_ref(),
+                            matched_ask.as_ref(),
                         ),
                         reason: None,
                     }
@@ -3205,7 +3267,7 @@ impl PermissionGate for PolicyPermissionGate {
                         rule: mod_check_rule(
                             &reason,
                             PermissionBehavior::Ask,
-                            ctx.matched_ask_rule.as_ref(),
+                            matched_ask.as_ref(),
                         ),
                         reason: Some(match &reason {
                             PermissionDecisionReason::MatchedRule { .. } => format!(
@@ -3310,7 +3372,7 @@ impl PermissionGate for PolicyPermissionGate {
             prompt_context.decision_reason = serialize_decision_reason(&reason);
         }
         prompt_context.classifier_approvable = classifier_approvable(&reason);
-        prompt_context.matched_ask_rule = matched_ask_rule(&reason);
+        prompt_context.matched_ask_rule = matched_ask_rule(&metadata);
         prompt_context.auto_mode_prompt =
             self.auto_prompt_for_ask(mode, name, input, &reason, &prompt_context);
         if metadata.permission_suggestions.is_some() {
@@ -3554,6 +3616,33 @@ impl PermissionGate for PolicyPermissionGate {
 
     fn apply_permission_updates(&self, updates: &[Utf16JsonProjection]) {
         PolicyPermissionGate::apply_permission_updates(self, updates);
+    }
+
+    fn replace_mcp_server_policy_rules(
+        &self,
+        rules: Vec<core_permission::PermissionToolCheckRule>,
+    ) {
+        let rules: Vec<_> = rules
+            .iter()
+            .filter(|rule| {
+                rule.source == core_permission::PermissionToolCheckRuleSource::McpServerPolicy
+            })
+            .map(permission_rule_from_core)
+            .collect();
+        let mut live = self
+            .live_state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let source = PermissionRuleSource::McpServerPolicy;
+        live.allow_rules.remove(&source);
+        live.ask_rules.remove(&source);
+        live.deny_rules.remove(&source);
+        for rule in rules {
+            Self::rule_bucket_mut(&mut live, rule.behavior)
+                .entry(source)
+                .or_default()
+                .push(rule);
+        }
     }
 
     async fn persist_permission_updates(&self, updates: &[Utf16JsonProjection]) {
@@ -4365,25 +4454,17 @@ fn classifier_approvable(reason: &PermissionDecisionReason) -> Option<bool> {
     has_safety_check.then_some(all_approvable)
 }
 
-/// The `matched_ask_rule` control-request field — 1:1 with the 2.1.218
-/// `matched_ask_rule` SDK schema (`b.object({source,tool_name,rule_content?})`).
-///
-/// The oracle sets this ONLY in the *ask-rule substitution* case: a
-/// `permissions.ask` rule forced the prompt **but the ask carries the tool's own
-/// `decision_reason`** (a richer tool-minted ask), so the rule "rides here
-/// **instead of** `decision_reason_type: 'rule'`". `matched_ask_rule` and
-/// `decision_reason_type: "rule"` are therefore MUTUALLY EXCLUSIVE.
-///
-/// This port collapses a plain ask-RULE match into a top-level
-/// [`PermissionDecisionReason::MatchedRule`] ⇒ `decision_reason_type: "rule"`, so
-/// the rule is already conveyed by the type and there is no tool-minted reason to
-/// substitute against — the substitution case is never produced. Deriving the
-/// field from a bare `MatchedRule` (the previous behavior) emitted BOTH
-/// `decision_reason_type: "rule"` AND `matched_ask_rule` for the same ask, which
-/// the oracle never does. There is no substitution producer in the port, so this
-/// is always `None`.
-fn matched_ask_rule(_reason: &PermissionDecisionReason) -> Option<MatchedAskRule> {
-    None
+/// Native 2.1.318 `Ybn` keeps a matched ask rule alongside the tool's own
+/// reason. Plain rule-only prompts have no substitution and omit this field.
+fn matched_ask_rule(metadata: &PermissionMetadata) -> Option<MatchedAskRule> {
+    metadata
+        .matched_ask_rule
+        .as_ref()
+        .map(|rule| MatchedAskRule {
+            source: rule.source.lingxi_settings_source().to_owned(),
+            tool_name: rule.value.tool_name.clone(),
+            rule_content: rule.value.rule_content.clone(),
+        })
 }
 
 /// Serialize a [`PermissionDecisionReason`] to the free-text `decision_reason`

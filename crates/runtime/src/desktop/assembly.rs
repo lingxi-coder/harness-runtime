@@ -3123,6 +3123,7 @@ pub async fn build_with_credential_stack(
             mut mode,
             mode_preference_allowed,
             bypass_disabled,
+            persistent_bypass_consent,
             auto_mode_disabled,
             classify_all_shell,
             classifier_auto_mode_settings,
@@ -3227,10 +3228,8 @@ pub async fn build_with_credential_stack(
                 // full bypass at startup to a user who was never asked.
                 let bypass_ok = permission::boot_agent_may_adopt_bypass(
                     bypass_disabled,
-                    // `kM()` — truthy in ANY tier.
-                    raw_tier_refs.iter().copied().any(
-                        permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json,
-                    ),
+                    // 2.1.318 `GBt`/`Ugt`: only persistent user/managed consent.
+                    persistent_bypass_consent,
                     migrations::global_config::global_config_path()
                         .and_then(|p| migrations::global_config::read_map(&p).ok())
                         .and_then(|m| {
@@ -3319,6 +3318,8 @@ pub async fn build_with_credential_stack(
                 // in an interactive launch. `interactive_session` is the
                 // `host.launchOptions.isInteractive()` twin resolved above.
                 .with_interactive_session(interactive_session);
+        policy.remote_mcp_server_policy_bypass_exempt =
+            mcp::tool_policy::remote_server_policy_bypass_exempt();
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.

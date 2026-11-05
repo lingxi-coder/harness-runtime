@@ -150,15 +150,15 @@ pub(super) fn sandbox_auto_allow_from_settings_tiers(
 pub(super) fn append_mcp_permission_rules(
     rules: &mut Vec<permission::PermissionRule>,
     servers: &[mcp::McpServerConfig],
-    allow_managed_permission_rules_only: bool,
+    _allow_managed_permission_rules_only: bool,
 ) {
-    if allow_managed_permission_rules_only {
-        return;
-    }
+    // This bucket is supplied by the host, outside the settings-rule tiers.
+    // `allowManagedPermissionRulesOnly` cannot discard SDK/remote restrictions.
     for server in servers {
+        let policies = mcp::tool_policy::startup_permission_policies(server);
         rules.extend(permission::permission_rules_from_mcp_tool_policies(
             &server.name,
-            &server.tools,
+            &policies,
         ));
     }
 }
@@ -246,6 +246,9 @@ pub(super) struct BootPermissionTiers {
     /// Sticky `disableBypassPermissionsMode: "disable"` killswitch — true when
     /// ANY tier (managed included) disables `BypassPermissions` mode.
     pub(super) bypass_disabled: bool,
+    /// Persistent bypass consent from user/managed settings (2.1.318 `Ugt`).
+    /// Invocation-only flags and repository files cannot grant this consent.
+    pub(super) persistent_bypass_consent: bool,
     /// Sticky `disableAutoMode: "disable"` killswitch (claude-code `Bpa()`) —
     /// true when ANY tier disables auto mode at either settings position. Set on
     /// the boot policy and applied at mode-load (auto → default downgrade).
@@ -387,6 +390,7 @@ pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(
     // below, so unsupported routes safely downgrade to Default.
     let mut mode = permission::PermissionMode::Auto;
     let mut bypass_disabled = false;
+    let mut persistent_bypass_consent = false;
     let mut auto_mode_disabled = false;
     let mut classify_all_shell = false;
     let mut additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
@@ -421,6 +425,8 @@ pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            persistent_bypass_consent |=
+                permission::cli_mode::persistent_bypass_consent_from_settings_source(source, &raw);
             match permission::permission_rules_from_settings_json(&raw, source) {
                 Ok(mut r) => {
                     // parity 2.1.210: warn when a `Write`/`NotebookEdit`/
@@ -551,6 +557,13 @@ pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(
         .collect::<Vec<_>>();
     trusted_auto_mode_sources_complete &= !managed_snapshot.read_failed();
     for raw in &managed_tiers {
+        persistent_bypass_consent |=
+            permission::cli_mode::persistent_bypass_consent_from_settings_source(
+                permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Managed,
+                ),
+                raw,
+            );
         trusted_auto_mode_raw_tiers.push(raw.clone());
         match permission::permission_rules_from_settings_json(
             raw,
@@ -630,6 +643,7 @@ pub(super) async fn load_boot_permission_tiers_with_policy_snapshot(
         mode,
         mode_preference_allowed: mode_preference_allowed && !managed_snapshot.read_failed(),
         bypass_disabled,
+        persistent_bypass_consent,
         auto_mode_disabled,
         classify_all_shell,
         classifier_auto_mode_settings,

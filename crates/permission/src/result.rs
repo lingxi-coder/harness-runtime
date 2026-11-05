@@ -379,6 +379,10 @@ pub struct PermissionMetadata {
         deserialize_with = "raw_text_array::deserialize"
     )]
     pub matched_rules: Vec<Utf16JsonProjection>,
+    /// An ask rule whose tool-local check supplied the richer Ask reason.
+    /// Native `Ybn` keeps this independently of `decisionReason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_ask_rule: Option<PermissionRule>,
     /// Raw `PermissionUpdate[]` suggestions offered with an Ask decision.
     /// Keeping the wire-shaped value here lets the lower permission engine
     /// retain tool-specific suggestions without depending on the CLI control

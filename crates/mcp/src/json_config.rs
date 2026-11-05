@@ -321,6 +321,30 @@ fn strip_to_claudeai_proxy_schema(
     ))
 }
 
+/// Native 2.1.318 `zOs` (@258326041) declares SDK `tools` as
+/// `T(ar()).optional().catch(void 0)`: one malformed entry discards the
+/// complete optional tools field, while the SDK server remains valid.
+/// HTTP/SSE schemas deliberately omit this catch and stay strict. Valid
+/// declarations, including supported branded policy aliases, are unchanged.
+fn catch_sdk_tool_policy_field(raw: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    use std::borrow::Cow;
+    if raw.get("type").and_then(serde_json::Value::as_str) != Some("sdk") {
+        return Cow::Borrowed(raw);
+    }
+    let Some(tools) = raw.get("tools") else {
+        return Cow::Borrowed(raw);
+    };
+    if de_tool_policy_entries(tools).is_ok() {
+        return Cow::Borrowed(raw);
+    }
+    let mut caught = raw.clone();
+    caught
+        .as_object_mut()
+        .expect("sdk discriminator requires an object")
+        .remove("tools");
+    Cow::Owned(caught)
+}
+
 /// Coerce a JSON value to a positive-integer millisecond count, mirroring the
 /// claude-code `request_timeout_ms` zod schema `E.number().int().positive()
 /// .optional().catch(void 0)`: a positive integer is kept; anything else
@@ -769,6 +793,7 @@ fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) ->
 #[must_use]
 pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
     let stripped = strip_to_claudeai_proxy_schema(raw_entry);
+    let stripped = catch_sdk_tool_policy_field(stripped.as_ref());
     let Ok(entry) = McpJsonEntry::deserialize(stripped.as_ref()) else {
         return false;
     };
@@ -822,7 +847,8 @@ fn build_entry(
         // BEFORE `me.data` is used; serde cannot do that per-variant, so
         // `claudeai-proxy` gets the strip explicitly (see
         // [`strip_to_claudeai_proxy_schema`]).
-        let raw_entry = strip_to_claudeai_proxy_schema(raw_entry);
+        let stripped = strip_to_claudeai_proxy_schema(raw_entry);
+        let raw_entry = catch_sdk_tool_policy_field(stripped.as_ref());
         let entry: McpJsonEntry = match McpJsonEntry::deserialize(raw_entry.as_ref()) {
             Ok(e) => e,
             Err(e) => {
@@ -3457,6 +3483,69 @@ mod tests {
         assert_eq!(tool["org_max_permission"], "ask");
         assert!(tool.get("permissionPolicy").is_none());
         assert!(tool.get("orgMaxPermission").is_none());
+    }
+
+    #[test]
+    fn sdk_malformed_tool_policies_drop_the_optional_field_not_the_server() {
+        let malformed = [
+            serde_json::Value::Null,
+            serde_json::json!("not an array"),
+            serde_json::json!({"name":"write"}),
+            serde_json::json!([null]),
+            serde_json::json!([{"name":7}]),
+            serde_json::json!([{"name":"write","permission_policy":"invalid"}]),
+            serde_json::json!([{"name":"write","permission_policy":false}]),
+            serde_json::json!([
+                {"name":"first","permission_policy":"always_deny"},
+                {"name":"invalid","permission_policy":"invalid"}
+            ]),
+        ];
+        for tools in malformed {
+            let sdk = serde_json::json!({"type":"sdk","name":"sdk-server","tools":tools});
+            assert!(server_entry_shape_is_valid(&sdk), "{sdk}");
+            let parsed = build_server_from_json_entry("srv", &sdk, ConfigScope::Dynamic)
+                .expect("the SDK catch must keep an otherwise-valid server");
+            assert!(parsed.tools.is_empty(), "{sdk}");
+
+            for transport in ["http", "sse"] {
+                let strict = serde_json::json!({
+                    "type":transport,"url":"https://mcp.test","tools":tools
+                });
+                assert!(!server_entry_shape_is_valid(&strict), "{strict}");
+                assert!(
+                    build_server_from_json_entry("srv", &strict, ConfigScope::Dynamic).is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sdk_valid_tool_policies_and_brand_organization_metadata_remain_intact() {
+        let raw = serde_json::json!({
+            "type":"sdk","name":"sdk-server",
+            "tools":[
+                {"name":"ask","permission_policy":"always_ask","org_max_permission":"ask"},
+                {"name":"deny","permissionPolicy":"always_deny","orgMaxPermission":"blocked"}
+            ]
+        });
+        let parsed = build_server_from_json_entry("srv", &raw, ConfigScope::Dynamic).unwrap();
+        assert_eq!(parsed.tools.len(), 2);
+        assert_eq!(
+            parsed.tools[0].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysAsk)
+        );
+        assert_eq!(
+            parsed.tools[0].org_max_permission,
+            Some(McpPermissionCeiling::Ask)
+        );
+        assert_eq!(
+            parsed.tools[1].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysDeny)
+        );
+        assert_eq!(
+            parsed.tools[1].org_max_permission,
+            Some(McpPermissionCeiling::Deny)
+        );
     }
 
     #[test]

@@ -1723,27 +1723,8 @@ impl McpClient {
                     .and_modify(|current| *current = current.strictest(ceiling))
                     .or_insert(ceiling);
             }
-            // A server-declared always-ask/deny policy is also a tighten-only
-            // ceiling for this side-map. `always_allow` contributes the
-            // neutral `allow` value, preserving strictest-wins semantics when
-            // an org ceiling is present for the same raw tool name.
-            if let Some(policy) = tool.permission_policy {
-                let policy_ceiling = match policy {
-                    lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow => {
-                        McpPermissionCeiling::Allow
-                    }
-                    lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk => {
-                        McpPermissionCeiling::Ask
-                    }
-                    lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny => {
-                        McpPermissionCeiling::Deny
-                    }
-                };
-                org_ceilings
-                    .entry(tool.name.as_str())
-                    .and_modify(|current| *current = current.strictest(policy_ceiling))
-                    .or_insert(policy_ceiling);
-            }
+            // `permission_policy` is a separately gated rule producer; it is
+            // not organization provenance and must not become a ceiling.
         }
 
         let mut effective = BTreeMap::new();
@@ -4208,6 +4189,13 @@ mod constructor_tests {
                         permission_policy: None,
                         org_max_permission: Some(McpPermissionCeiling::Deny),
                     },
+                    McpConfiguredToolPolicyDto {
+                        name: "local".into(),
+                        permission_policy: Some(
+                            lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny,
+                        ),
+                        org_max_permission: None,
+                    },
                 ],
                 BTreeMap::from([(String::from("write"), McpPermissionCeiling::Ask)]),
             );
@@ -4225,10 +4213,20 @@ mod constructor_tests {
             always_load: None,
             requires_user_interaction: false,
         }];
+        tools.push(McpToolDto {
+            tool_name: "local".into(),
+            full_name: "mcp__srv__local".into(),
+            ..tools[0].clone()
+        });
         client.apply_config_permission_ceilings(&mut tools);
         assert_eq!(
             client.effective_max_permission("write"),
             Some(McpPermissionCeiling::Deny)
+        );
+        assert_eq!(
+            client.effective_max_permission("local"),
+            None,
+            "permission_policy is not an organization ceiling"
         );
     }
 }

@@ -96,6 +96,7 @@ pub mod raw_conn;
 pub mod registry;
 pub mod server_gate;
 pub mod tool_identity;
+pub mod tool_policy;
 pub mod tool_schema;
 #[cfg(test)]
 mod tracing_capture;

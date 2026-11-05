@@ -16,6 +16,7 @@ use crate::prefix_lock_recovery::PrefixLockRecoveryState;
 struct State {
     account_call_id: Option<String>,
     account_output_committed: bool,
+    private_output: bool,
     account_replay_error: Option<crate::LlmError>,
     account_failed: std::collections::HashSet<String>,
     account_renewed: std::collections::HashSet<String>,
@@ -77,11 +78,21 @@ pub(crate) fn http_retry_decline_is_terminal(
 }
 
 impl ModelCallRetryScope {
-    pub(crate) fn record_account_output(&self) {
+    /// An internal classifier accumulator has not committed any response to
+    /// its caller. Failed partial output may be discarded and replayed.
+    pub(crate) fn with_private_output(self) -> Self {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .account_output_committed = true;
+            .private_output = true;
+        self
+    }
+
+    pub(crate) fn record_account_output(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.private_output {
+            state.account_output_committed = true;
+        }
     }
     pub(crate) fn record_account_stream_error(&self, error: &crate::LlmError) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -443,6 +454,21 @@ tokio::task_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_classifier_output_does_not_latch_the_account_replay_guard() {
+        let error = crate::LlmError::TransportTimeout {
+            message: "body deadline".into(),
+        };
+        let ordinary = ModelCallRetryScope::default();
+        ordinary.record_account_output();
+        ordinary.record_account_stream_error(&error);
+        assert!(ordinary.account_replay_error().is_some());
+        let classifier = ModelCallRetryScope::default().with_private_output();
+        classifier.record_account_output();
+        classifier.record_account_stream_error(&error);
+        assert!(classifier.account_replay_error().is_none());
+    }
 
     #[test]
     fn http_fallback_matches_current_native_gates() {

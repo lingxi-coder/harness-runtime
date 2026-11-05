@@ -270,7 +270,24 @@ fn inspect_missing_required_input(
 
 /// Native 2.1.290 `Urn` returns the organization ceiling as an `other` reason
 /// with this exact user-facing message (`Rrn` + `zl(name, reason)`).
-fn native_organization_ask_result(mut result: PermissionResult) -> PermissionResult {
+fn native_organization_ask_result(result: PermissionResult) -> PermissionResult {
+    let mut result = match result {
+        // Organization provenance is its own authority. Do not rely on the
+        // combined local ceiling also having been installed by a builder.
+        PermissionResult::Allow { metadata, .. } => PermissionResult::Ask {
+            reason: PermissionDecisionReason::Other {
+                reason: "Your organization requires approval for this tool".into(),
+            },
+            prompt: permission::result::PermissionPrompt {
+                title: "Permission required".into(),
+                message: "Your organization requires approval for this tool".into(),
+                options: vec!["Allow once".into(), "Deny".into()],
+            },
+            pending_classifier_check: None,
+            metadata,
+        },
+        other => other,
+    };
     if let PermissionResult::Ask { reason, prompt, .. } = &mut result {
         let message = "Your organization requires approval for this tool".to_string();
         *reason = PermissionDecisionReason::Other {
@@ -1000,9 +1017,8 @@ impl MCPTool {
     }
 
     /// Preserve the organization-only permission ceiling used by Native
-    /// `mcpInfo.effectiveMaxPermission`. Local `permission_policy` remains in
-    /// `effective_max_permission` for enforcement but must not create a Mod
-    /// `ceiling` property.
+    /// `mcpInfo.effectiveMaxPermission`. `permission_policy` declarations are
+    /// separately gated rules and must not create a Mod `ceiling` property.
     #[must_use]
     pub fn with_organization_max_permission(
         mut self,
@@ -1792,11 +1808,8 @@ impl Tool for MCPTool {
     /// which `turn_loop` fills from [`Self::requires_user_interaction`] and
     /// `TuiPermissionGate` reads to hide the persistent-grant row.
     ///
-    /// KNOWN NARROWING (reported, not fixed here): the oracle raises this ask
-    /// inside `Aon`, whose tool-wide ALLOW-rule arm (`W=NLe(he(r),e)`) runs
-    /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
-    /// `turn_loop` only consults a tool's `check_permissions` when no rule
-    /// matched, so an allow rule still bypasses this arm in the port.
+    /// The dispatch layer evaluates this tool check after explicit deny rules
+    /// and protects its MCP ask over a pre-existing allow rule or bypass mode.
     async fn check_permissions(&self, input: &UJP, _: &ToolUseContext) -> PermissionResult {
         if self.full_name.is_none() {
             let Some(full_name) = source_string_at(input, "/full_name") else {
@@ -3546,32 +3559,10 @@ pub fn configured_permission_ceiling(
     config: &mcp::McpServerConfig,
     tool_name: &str,
 ) -> Option<lingxi_core::host::McpPermissionCeiling> {
-    let mut ceiling = config.tool_permissions.get(tool_name).copied();
-    for configured in config
-        .tools
-        .iter()
-        .filter(|configured| configured.name == tool_name)
-    {
-        if let Some(policy) = configured.permission_policy {
-            let policy_ceiling = match policy {
-                lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow => {
-                    lingxi_core::host::McpPermissionCeiling::Allow
-                }
-                lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk => {
-                    lingxi_core::host::McpPermissionCeiling::Ask
-                }
-                lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny => {
-                    lingxi_core::host::McpPermissionCeiling::Deny
-                }
-            };
-            ceiling =
-                Some(ceiling.map_or(policy_ceiling, |current| current.strictest(policy_ceiling)));
-        }
-        if let Some(org_ceiling) = configured.org_max_permission {
-            ceiling = Some(ceiling.map_or(org_ceiling, |current| current.strictest(org_ceiling)));
-        }
-    }
-    ceiling
+    // Native `permission_policy` declarations create rules only at their
+    // eligible host/scope seam. Treating them as metadata ceilings changes
+    // local sessions and prevents remote bypass exemptions from taking effect.
+    configured_organization_max_permission(config, tool_name)
 }
 
 fn max_permission_from_ceiling(
@@ -3611,7 +3602,11 @@ pub async fn build_registered_mcp_tools(
 ) -> Vec<(lingxi_core::types::McpConnectionId, Vec<Arc<dyn Tool>>)> {
     use mcp::McpConnectionState;
 
-    let conns = registry.connections.read().await;
+    let conns = mcp::tool_policy::catalog_snapshot_with_permission_policies(
+        registry,
+        ctx.permission_gate.as_deref(),
+    )
+    .await;
     let mut out: Vec<(lingxi_core::types::McpConnectionId, Vec<Arc<dyn Tool>>)> = Vec::new();
     // Oracle `k` in the dial round at `cc-238.js @243875044`
     // (`if(fe.capabilities?.resources&&!k)k=!0,ne=[...ne,K8,Z8,Yme]`): the three
@@ -3649,6 +3644,13 @@ pub async fn build_registered_mcp_tools(
             }
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
+                // Native 2.1.318 `Qj` (@266988106) removes organization-
+                // blocked tools from the model catalog. `permission_policy`
+                // declarations are not organization metadata ceilings.
+                .filter(|dto| {
+                    configured_organization_max_permission(config, &dto.tool_name)
+                        != Some(McpPermissionCeiling::Deny)
+                })
                 .map(|dto| {
                     let tool = MCPTool::new_for_tool(
                         ctx.clone(),
@@ -4457,7 +4459,7 @@ mod tests {
             "write".into(),
             source_fixture(&json!({"type":"object"})),
             None,
-            Some(McpPermissionCeiling::Ask),
+            None,
             None,
             true,
             false,
@@ -4469,14 +4471,12 @@ mod tests {
                 .await,
             Some(McpPermissionCeiling::Ask)
         );
-        let result = native_organization_ask_result(permission::clamp_mcp_permission_result(
-            allow_mcp("test"),
-            org_capped.name(),
-            Some(McpToolMaxPermission::Ask),
-            None,
-            false,
-            true,
-        ));
+        let result = org_capped
+            .check_permissions(
+                &source_fixture(&json!({})),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
         let PermissionResult::Ask { reason, prompt, .. } = result else {
             panic!("an explicit organization ask must remain Ask");
         };
@@ -6458,7 +6458,7 @@ mod resource_tool_gating_tests {
     }
 
     #[tokio::test]
-    async fn shared_builder_applies_strictest_configured_permission_ceiling() {
+    async fn shared_builder_filters_org_blocked_without_turning_local_rules_into_caps() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
         let connection_id = lingxi_core::types::McpConnectionId::new();
         let mut server_config = config("srv");
@@ -6478,6 +6478,11 @@ mod resource_tool_gating_tests {
                 permission_policy: None,
                 org_max_permission: Some(McpPermissionCeiling::Ask),
             },
+            McpConfiguredToolPolicyDto {
+                name: "local-deny".into(),
+                permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny),
+                org_max_permission: None,
+            },
         ];
         server_config.tool_permissions = std::collections::BTreeMap::from([
             ("allow".into(), McpPermissionCeiling::Allow),
@@ -6494,7 +6499,12 @@ mod resource_tool_gating_tests {
                     era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
-                tools: vec![dto("srv", "allow"), dto("srv", "ask"), dto("srv", "deny")],
+                tools: vec![
+                    dto("srv", "allow"),
+                    dto("srv", "ask"),
+                    dto("srv", "deny"),
+                    dto("srv", "local-deny"),
+                ],
                 resources: vec![],
                 resource_templates: vec![],
                 prompts: vec![],
@@ -6512,6 +6522,24 @@ mod resource_tool_gating_tests {
         assert_eq!(built.len(), 1);
         let registered = &built[0].1;
         assert_eq!(registered.len(), 3);
+        let native_fixture: Value = serde_json::from_str(include_str!(
+            "../../../mcp/tests/fixtures/claude_2_1_318_policy_upstream_urls.json"
+        ))
+        .unwrap();
+        let expected_names: Vec<String> =
+            serde_json::from_value(native_fixture["catalogFilter"]["expectedNames"].clone())
+                .unwrap();
+        assert_eq!(
+            registered
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+        assert_eq!(registered[2].name(), dto("srv", "local-deny").full_name);
+        assert!(registered
+            .iter()
+            .all(|tool| tool.name() != dto("srv", "deny").full_name));
 
         assert!(matches!(
             registered[0]
@@ -6538,7 +6566,7 @@ mod resource_tool_gating_tests {
                     &tool_api::test_support::fresh_ctx()
                 )
                 .await,
-            PermissionResult::Deny { .. }
+            PermissionResult::Allow { .. }
         ));
     }
 

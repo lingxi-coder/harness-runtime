@@ -1028,6 +1028,28 @@ fn config_url(config: &Value) -> Option<&str> {
     config.get("url").and_then(Value::as_str)
 }
 
+/// Native 2.1.318 `ARs` (@259518296): session proxy URLs also identify
+/// their upstream through every `mcp_url` query parameter. The native guard
+/// searches the serialized URL for these route markers; it does not require
+/// an Anthropic hostname or restrict the marker to the pathname.
+fn session_proxy_upstream_urls(candidate: &str) -> Vec<String> {
+    let Ok(url) = url::Url::parse(candidate) else {
+        return Vec::new();
+    };
+    const ROUTES: [&str; 4] = [
+        "/v2/session_ingress/shttp/mcp/",
+        "/v2/session_ingress/mcp/ws/",
+        "/v2/ccr-sessions/",
+        "/v1/code/",
+    ];
+    if !ROUTES.iter().any(|route| url.as_str().contains(route)) {
+        return Vec::new();
+    }
+    url.query_pairs()
+        .filter_map(|(name, value)| (name == "mcp_url").then(|| value.into_owned()))
+        .collect()
+}
+
 fn matcher_name_matches(matcher: &Utf16JsonProjection, name: &str) -> bool {
     projection_string_equals(matcher, name)
 }
@@ -1451,6 +1473,7 @@ pub fn is_denied_with_env(
     }
     if let Some(url) = config_url(config) {
         let iu = get(url);
+        let upstream_urls = session_proxy_upstream_urls(&iu);
         for m in denied {
             if let Some(su) = m.server_url.as_ref() {
                 // Native URL matching passes policy strings through `new URL`,
@@ -1460,7 +1483,11 @@ pub fn is_denied_with_env(
                     continue;
                 };
                 let expansion = expand_policy_url(&su, &envs.env, Some(&envs.fallback_env));
-                if url_matches(&iu, &expansion.expanded) {
+                if url_matches(&iu, &expansion.expanded)
+                    || upstream_urls
+                        .iter()
+                        .any(|upstream| url_matches(upstream, &expansion.expanded))
+                {
                     return true;
                 }
             }
@@ -2297,6 +2324,75 @@ mod tests {
     }
     fn http(u: &str) -> Value {
         serde_json::json!({"type":"http","url":u})
+    }
+
+    #[test]
+    fn session_proxy_upstream_urls_match_318_native_oracle() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_318_policy_upstream_urls.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let candidate = case["url"].as_str().unwrap();
+            let expected: Vec<String> = serde_json::from_value(case["expected"].clone()).unwrap();
+            assert_eq!(
+                session_proxy_upstream_urls(candidate),
+                expected,
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn deny_url_covers_each_session_proxy_upstream_without_broadening_allowlist() {
+        let policy = McpPolicy {
+            denied: Some(matcher(r#"[{"serverUrl":"https://blocked.test"}]"#)),
+            allowed: None,
+        };
+        let envs = PolicyExpansionEnv {
+            env: IndexMap::new(),
+            fallback_env: IndexMap::new(),
+        };
+        for route in [
+            "/v2/session_ingress/shttp/mcp/server",
+            "/v2/session_ingress/mcp/ws/server",
+            "/v2/ccr-sessions/session/mcp",
+            "/v1/code/sessions/session/mcp",
+        ] {
+            // Query order must not let an allowed first upstream conceal the
+            // denied second one. Native uses searchParams.getAll, not get.
+            let proxy = format!(
+                "https://proxy.test{route}?mcp_url=https%3A%2F%2Fallowed.test&mcp_url=https%3A%2F%2Fblocked.test%2Fmcp"
+            );
+            assert!(is_denied_with_env(
+                "connector",
+                &http(&proxy),
+                &policy,
+                &envs
+            ));
+            assert!(!is_allowed_with_env(
+                "connector",
+                &http(&proxy),
+                &policy,
+                &envs
+            ));
+            let allow_upstream_only = McpPolicy {
+                denied: None,
+                allowed: policy.denied.clone(),
+            };
+            assert!(!is_allowed_with_env(
+                "connector",
+                &http(&proxy),
+                &allow_upstream_only,
+                &envs
+            ));
+        }
+        assert!(!is_denied_with_env(
+            "ordinary",
+            &http("https://proxy.test/ordinary?mcp_url=https%3A%2F%2Fblocked.test"),
+            &policy,
+            &envs
+        ));
     }
 
     #[test]

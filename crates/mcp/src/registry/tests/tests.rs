@@ -630,6 +630,266 @@ impl McpTransport for DirectInProcessMock {
 
 struct NoopWake;
 
+fn sdk_initialize_config(deny: bool) -> McpServerConfig {
+    crate::build_server_from_json_entry(
+        "sdk-race",
+        &serde_json::json!({
+            "type": "sdk", "name": "sdk-race",
+            "tools": if deny { serde_json::json!([{"name":"write", "permission_policy":"always_deny"}]) } else { serde_json::json!([]) }
+        }),
+        ConfigScope::Dynamic,
+    ).unwrap()
+}
+
+#[tokio::test]
+async fn concurrent_sdk_initialize_preserves_later_restrictions() {
+    let transport = Arc::new(BridgeMock::new(&["write"]));
+    let registry = McpRegistry::new(transport.clone());
+    // Queue two calls on the same lifecycle lock before either can register.
+    let held = registry.connections.write().await;
+    let mut first = Box::pin(registry.register_sdk_initialize(sdk_initialize_config(false)));
+    let mut second = Box::pin(registry.register_sdk_initialize(sdk_initialize_config(true)));
+    assert!(futures_util::poll!(first.as_mut()).is_pending());
+    assert!(futures_util::poll!(second.as_mut()).is_pending());
+    drop(held);
+    let (first, second) = tokio::join!(first, second);
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(transport.connect_calls.load(Ordering::SeqCst), 1);
+    let rules = crate::tool_policy::catalog_permission_rules(&*registry.connections.read().await);
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0].behavior,
+        lingxi_core::host::permission_gate::PermissionToolCheckBehavior::Deny
+    );
+}
+
+#[tokio::test]
+async fn sdk_initialize_policies_precede_a_slow_first_handshake_and_survive_refresh() {
+    use lingxi_core::host::permission_gate::PermissionToolCheckBehavior;
+    let transport = Arc::new(BridgeMock::new(&["write"]));
+    let registry = McpRegistry::new(transport.clone());
+    registry
+        .register_sdk_initialize(sdk_initialize_config(false))
+        .await
+        .unwrap();
+    let gate = PausedPolicyGate {
+        first: AtomicBool::new(false),
+        entered: std::sync::Barrier::new(1),
+        resume: std::sync::Barrier::new(1),
+        rules: TestMutex::new(vec![]),
+    };
+    let mut slow = sdk_initialize_config(false);
+    slow.name = "slow".into();
+    slow.spec = McpTransportSpec::SdkControl {
+        control_channel_id: "slow".into(),
+    };
+    let configs = [slow.clone(), sdk_initialize_config(true)];
+    // The slow server is deliberately first, before the existing server update.
+    crate::tool_policy::apply_sdk_initialize_policies(&registry, &configs, &gate).await;
+    assert_eq!(
+        transport.connect_calls.load(Ordering::SeqCst),
+        1,
+        "policy intake must not dial"
+    );
+    let has_deny = || {
+        gate.rules.lock().unwrap().iter().any(|r| {
+            r.tool_name == "mcp__sdk-race__write" && r.behavior == PermissionToolCheckBehavior::Deny
+        })
+    };
+    assert!(has_deny());
+    transport.block_connect.store(true, Ordering::SeqCst);
+    let mut connect = Box::pin(registry.register_sdk_initialize(slow));
+    assert!(futures_util::poll!(connect.as_mut()).is_pending());
+    crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+    assert!(
+        has_deny(),
+        "catalog refresh must retain the pending batch restriction"
+    );
+    transport.connect_release.notify_one();
+    connect.await.unwrap();
+    registry
+        .register_sdk_initialize(configs[1].clone())
+        .await
+        .unwrap();
+    registry.disconnect("sdk-race").await.unwrap();
+    crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+    assert!(
+        !has_deny(),
+        "explicit retirement still retracts the catalog's policies"
+    );
+}
+
+#[tokio::test]
+async fn sdk_initialize_restrictions_are_visible_even_before_registration() {
+    let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
+    let gate = PausedPolicyGate {
+        first: AtomicBool::new(false),
+        entered: std::sync::Barrier::new(1),
+        resume: std::sync::Barrier::new(1),
+        rules: TestMutex::new(vec![]),
+    };
+    crate::tool_policy::apply_sdk_initialize_policies(
+        &registry,
+        &[sdk_initialize_config(true)],
+        &gate,
+    )
+    .await;
+    crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+    assert_eq!(gate.rules.lock().unwrap().len(), 1);
+    registry
+        .register_sdk_initialize(sdk_initialize_config(true))
+        .await
+        .unwrap();
+    let mut weaker = sdk_initialize_config(true);
+    weaker.tools[0].permission_policy = Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk);
+    crate::tool_policy::apply_sdk_initialize_policies(&registry, &[weaker], &gate).await;
+    assert_eq!(
+        gate.rules.lock().unwrap().len(),
+        1,
+        "catalog and pending declarations share one strictest rule"
+    );
+    assert_eq!(
+        gate.rules.lock().unwrap()[0].behavior,
+        lingxi_core::host::permission_gate::PermissionToolCheckBehavior::Deny
+    );
+    // Empty initialize does not revoke an earlier declaration.
+    crate::tool_policy::apply_sdk_initialize_policies(
+        &registry,
+        &[sdk_initialize_config(false)],
+        &gate,
+    )
+    .await;
+    assert_eq!(gate.rules.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn removing_sdk_servers_retires_pending_and_registered_policies() {
+    use lingxi_core::host::permission_gate::PermissionToolCheckBehavior;
+    // Cover a pending initialize, direct connected removal, and removal after
+    // disconnect has already retracted the published catalog rule.
+    for phase in 0..3 {
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
+        let gate = PausedPolicyGate {
+            first: AtomicBool::new(false),
+            entered: std::sync::Barrier::new(1),
+            resume: std::sync::Barrier::new(1),
+            rules: TestMutex::new(vec![]),
+        };
+        crate::tool_policy::apply_sdk_initialize_policies(
+            &registry,
+            &[sdk_initialize_config(true)],
+            &gate,
+        )
+        .await;
+        if phase > 0 {
+            registry
+                .register_sdk_initialize(sdk_initialize_config(true))
+                .await
+                .unwrap();
+        }
+        if phase == 2 {
+            registry.disconnect("sdk-race").await.unwrap();
+            crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+            assert!(gate.rules.lock().unwrap().is_empty());
+        }
+        registry.remove("sdk-race").await.unwrap();
+        crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+        assert!(registry.get_config("sdk-race").await.is_none());
+        assert!(gate.rules.lock().unwrap().is_empty(), "phase {phase}");
+
+        // A new registration with the same name starts a new policy lifetime.
+        let mut replacement = sdk_initialize_config(true);
+        replacement.tools[0].permission_policy =
+            Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk);
+        crate::tool_policy::apply_sdk_initialize_policies(&registry, &[replacement.clone()], &gate)
+            .await;
+        registry.register_sdk_initialize(replacement).await.unwrap();
+        crate::tool_policy::synchronize_permission_policies(&registry, &gate).await;
+        let rules = gate.rules.lock().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].behavior, PermissionToolCheckBehavior::Ask);
+    }
+}
+
+struct PausedPolicyGate {
+    first: AtomicBool,
+    entered: std::sync::Barrier,
+    resume: std::sync::Barrier,
+    rules: TestMutex<Vec<lingxi_core::host::permission_gate::PermissionToolCheckRule>>,
+}
+
+#[async_trait]
+impl lingxi_core::host::permission_gate::PermissionGate for PausedPolicyGate {
+    async fn check(
+        &self,
+        _: &str,
+        _: &Utf16JsonProjection,
+    ) -> lingxi_core::host::permission_gate::PermissionDecision {
+        lingxi_core::host::permission_gate::PermissionDecision::Allow
+    }
+
+    fn replace_mcp_server_policy_rules(
+        &self,
+        rules: Vec<lingxi_core::host::permission_gate::PermissionToolCheckRule>,
+    ) {
+        if self.first.swap(false, Ordering::SeqCst) {
+            self.entered.wait();
+            self.resume.wait();
+        }
+        *self.rules.lock().unwrap() = rules;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_catalog_publication_cannot_erase_a_new_sdk_deny() {
+    let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&["write"]))));
+    registry
+        .register_sdk_initialize(sdk_initialize_config(false))
+        .await
+        .unwrap();
+    let gate = Arc::new(PausedPolicyGate {
+        first: AtomicBool::new(true),
+        entered: std::sync::Barrier::new(2),
+        resume: std::sync::Barrier::new(2),
+        rules: TestMutex::new(vec![]),
+    });
+    let old = {
+        let registry = registry.clone();
+        let gate = gate.clone();
+        tokio::spawn(async move {
+            crate::tool_policy::catalog_snapshot_with_permission_policies(
+                &registry,
+                Some(gate.as_ref()),
+            )
+            .await;
+        })
+    };
+    gate.entered.wait();
+    registry
+        .register_sdk_initialize(sdk_initialize_config(true))
+        .await
+        .unwrap();
+    let mut newer = Box::pin(crate::tool_policy::synchronize_permission_policies(
+        &registry,
+        gate.as_ref(),
+    ));
+    let queued = futures_util::poll!(newer.as_mut()).is_pending();
+    gate.resume.wait();
+    old.await.unwrap();
+    // Complete only if it was pending: without the fix this future has already
+    // published and the resumed old snapshot has just erased its deny.
+    if queued {
+        newer.await;
+    }
+    let rules = gate.rules.lock().unwrap();
+    assert_eq!(rules.len(), 1, "old publication erased a newer deny");
+    assert_eq!(
+        rules[0].behavior,
+        lingxi_core::host::permission_gate::PermissionToolCheckBehavior::Deny
+    );
+}
+
 impl Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
 }

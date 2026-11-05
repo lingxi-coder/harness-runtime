@@ -637,6 +637,13 @@ pub struct McpRegistry {
     /// holding the public connection-state lock across transport or OAuth I/O.
     /// Different servers still progress independently.
     lifecycle_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Keep permission snapshots and their gate publication in the same order
+    /// across startup, catalog refresh and SDK initialize tasks.
+    pub(crate) permission_policy_publish_lock: Arc<Mutex<()>>,
+    /// Initialize declarations arrive before SDK handshakes. Keep their
+    /// restrictions available to every catalog publisher during that gap.
+    pub(crate) sdk_initialize_permission_rules:
+        Arc<StdMutex<crate::tool_policy::SdkInitializeRules>>,
     /// Single-flight guard for the XAA token resolve chain, keyed by
     /// `oauth::server_key`. Mirrors the oracle's `_refreshInProgress`
     /// promise-sharing guard on `tokens()`/`xaaRefresh()` (@182213696, §26b
@@ -1039,6 +1046,8 @@ impl McpRegistry {
             plugin_mcp_admission: self.plugin_mcp_admission.clone(),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
+            permission_policy_publish_lock: Arc::clone(&self.permission_policy_publish_lock),
+            sdk_initialize_permission_rules: Arc::clone(&self.sdk_initialize_permission_rules),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
             clients: Arc::clone(&self.clients),
             failure_diagnostics: Arc::clone(&self.failure_diagnostics),
@@ -1088,6 +1097,8 @@ impl McpRegistry {
             plugin_mcp_admission: None,
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
+            permission_policy_publish_lock: Arc::new(Mutex::new(())),
+            sdk_initialize_permission_rules: Arc::new(StdMutex::new(Default::default())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
             clients: Arc::new(RwLock::new(IndexMap::new())),
             failure_diagnostics: Arc::new(RwLock::new(HashMap::new())),
@@ -1870,6 +1881,35 @@ impl McpRegistry {
             .iter()
             .find(|(k, _)| normalize_name_for_mcp(k) == name)
             .map(|(_, v)| v.config().clone())
+    }
+
+    /// Add initialize-time SDK policies without replacing a registered
+    /// transport or changing first-registration options. Native initialize
+    /// never removes a previous ask/deny; duplicates therefore accumulate
+    /// into the strictest effective policy. First registration and later policy
+    /// merges share one lifecycle lock, including concurrent initialize calls.
+    pub async fn register_sdk_initialize(&self, incoming: McpServerConfig) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(&incoming.name);
+        let _guard = lifecycle.lock().await;
+        let mut connections = self.connections.write().await;
+        let Some(state) = connections.get_mut(&incoming.name) else {
+            drop(connections);
+            return self.connect_locked(incoming, None).await.map(|_| ());
+        };
+        let current = state.config_mut();
+        if matches!(current.spec, McpTransportSpec::SdkControl { .. })
+            && matches!(incoming.spec, McpTransportSpec::SdkControl { .. })
+        {
+            for policy in &incoming.tools {
+                if !current.tools.iter().any(|existing| {
+                    existing.name == policy.name
+                        && existing.permission_policy == policy.permission_policy
+                }) {
+                    current.tools.push(policy.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Register a host-trusted plugin identity against an already materialized
@@ -4957,6 +4997,18 @@ impl McpRegistry {
                 _ => None,
             }
         }) else {
+            if remove_state {
+                // An initialize may have published policies before this server
+                // was registered. Removing that pending entry must retire its
+                // declarations as well, without racing another publication.
+                let _publication = self.permission_policy_publish_lock.lock().await;
+                if !self.connections.read().await.contains_key(name) {
+                    self.sdk_initialize_permission_rules
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(name);
+                }
+            }
             return Ok(());
         };
 
@@ -4969,6 +5021,14 @@ impl McpRegistry {
         }
 
         let transitioned = {
+            // Capture/publication sees either the old connection and policies
+            // or neither. Otherwise a removed state would look like an SDK
+            // initialize that has not started its handshake yet.
+            let _publication = if remove_state {
+                Some(self.permission_policy_publish_lock.lock().await)
+            } else {
+                None
+            };
             let mut conns = self.connections.write().await;
             let same_generation = match conns.get(name) {
                 Some(McpConnectionState::Connected {
@@ -5013,6 +5073,10 @@ impl McpRegistry {
             if same_generation {
                 if remove_state {
                     conns.remove(name);
+                    self.sdk_initialize_permission_rules
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(name);
                 } else {
                     conns.insert(
                         name.to_string(),

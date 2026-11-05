@@ -1,7 +1,8 @@
 //! Permission engine: rule-driven authorization with mode fallback.
 //!
-//! M1.3 ships minimal `authorize`. Plan 03 (Tools) wires classifiers and
-//! shadow detection.
+//! Rules, tool-local guards, live modes, classifier review and host prompt
+//! transports share this policy. See `docs/parity/permission-2.1.318.md` for
+//! the current artifact baseline and the limits of the behavioral evidence.
 
 #![forbid(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: this crate had
@@ -129,7 +130,10 @@ pub use dangerous_perms::{
     is_dangerous_classifier_permission_with_flag, is_dangerous_powershell_permission,
     is_dangerous_task_permission, DangerousPermissionInfo,
 };
-pub use dangerous_removal::{check_dangerous_removal, is_dangerous_removal_path, DangerousRemoval};
+pub use dangerous_removal::{
+    check_dangerous_removal, check_dangerous_removal_with_working_dirs, is_dangerous_removal_path,
+    DangerousRemoval,
+};
 pub use defaults_per_tool::{
     install_tool_default_extension, is_divergence_tool, tool_default, tool_default_names,
     tool_default_row, ToolDefaultExtension,

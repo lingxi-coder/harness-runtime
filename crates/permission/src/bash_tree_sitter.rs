@@ -2,7 +2,8 @@
 //! claude-code `src/utils/bash/treeSitterAnalysis.ts` that `bashSecurity.ts`
 //! actually consumes. Compiled only under the `bash-ast` feature.
 
-use tree_sitter::{Node, Parser, Tree};
+use std::time::{Duration, Instant};
+use tree_sitter::{Node, ParseOptions, Parser, Tree};
 
 /// Max command length the AST path will parse, mirroring Native 2.1.291's
 /// `utils/bash/parser.ts` `command.length > MAX_COMMAND_LENGTH` check. JavaScript
@@ -10,16 +11,21 @@ use tree_sitter::{Node, Parser, Tree};
 /// rather than Rust UTF-8 bytes or Unicode scalar values. Over-length (and empty)
 /// commands return `None`, matching Native's parser wrapper.
 const MAX_COMMAND_LENGTH: usize = 10_000;
+const PARSE_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_PARSE_NODES: usize = 50_000;
+
+/// Resource exhaustion is distinct from an unavailable parser: the security
+/// caller must ask instead of retrying its legacy allow heuristics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParseBudgetExceeded;
 
 /// Parse `command` as bash. `None` when the command is empty / over the length
 /// cap (legacy fallback, claude-code `parser.ts:59`), the parser can't be built,
 /// or the parse fails outright. A successful-but-error tree still returns `Some`.
 ///
-/// Acknowledged divergence: claude-code also fail-CLOSES on a parse abort
-/// (`PARSE_TIMEOUT_MS=50` / `MAX_NODES=50_000` → `PARSE_ABORTED`). tree-sitter-bash
-/// here has no node/time budget; a pathological parse runs to completion and
-/// yields a normal tree. Low risk (tree-sitter-bash is robust); a budget could be
-/// added later via the pinned parser's timeout API.
+/// Native's parser budget is 50 ms / 50,000 constructed nodes. Tree-sitter
+/// has a different parser implementation, so the node cap here bounds the
+/// returned tree before semantic walks; the time budget also interrupts parse.
 fn parse(command: &str) -> Option<Tree> {
     parse_raw(command)
 }
@@ -33,14 +39,16 @@ fn parse(command: &str) -> Option<Tree> {
 /// `set_language` setup. The returned [`Tree`] OWNS the parse; callers must keep
 /// it alive for as long as they borrow [`Node`]s from `tree.root_node()`.
 ///
-/// Acknowledged divergence (see [`parse`]): no node/time budget, so the
-/// `PARSE_ABORTED` distinction is unreachable here.
 #[must_use]
 pub(crate) fn parse_raw(command: &str) -> Option<Tree> {
+    parse_raw_with_budget(command).ok().flatten()
+}
+
+pub(crate) fn parse_raw_with_budget(command: &str) -> Result<Option<Tree>, ParseBudgetExceeded> {
     if command.is_empty() || command.encode_utf16().count() > MAX_COMMAND_LENGTH {
-        return None;
+        return Ok(None);
     }
-    parse_source(command)
+    parse_source_with_limits(command, PARSE_TIMEOUT, MAX_PARSE_NODES)
 }
 
 /// Parse an internal syntax completion while applying the input cap to the
@@ -62,10 +70,57 @@ pub(crate) fn parse_raw_with_internal_suffix(
 }
 
 fn parse_source(command: &str) -> Option<Tree> {
+    parse_source_with_limits(command, PARSE_TIMEOUT, MAX_PARSE_NODES)
+        .ok()
+        .flatten()
+}
+
+fn parse_source_with_limits(
+    command: &str,
+    timeout: Duration,
+    max_nodes: usize,
+) -> Result<Option<Tree>, ParseBudgetExceeded> {
+    let started = Instant::now();
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
-    parser.set_language(&language).ok()?;
-    parser.parse(command, None)
+    if parser.set_language(&language).is_err() {
+        return Ok(None);
+    }
+    let mut exhausted = false;
+    let mut progress = |_: &tree_sitter::ParseState| {
+        exhausted = started.elapsed() >= timeout;
+        exhausted
+    };
+    let tree = parser.parse_with_options(
+        &mut |offset, _| command.as_bytes().get(offset..).unwrap_or_default(),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    );
+    if exhausted {
+        return Err(ParseBudgetExceeded);
+    }
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
+    // Iterative cursor walk includes named nodes and operator terminals and
+    // cannot overflow the Rust stack on a deeply nested input.
+    let mut cursor = tree.walk();
+    let mut count = 0usize;
+    loop {
+        count += 1;
+        if count > max_nodes || count % 128 == 0 && started.elapsed() >= timeout {
+            return Err(ParseBudgetExceeded);
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                drop(cursor);
+                return Ok(Some(tree));
+            }
+        }
+    }
 }
 
 /// Iterate ALL children of `node` (named + anonymous operator tokens). One
@@ -94,6 +149,18 @@ fn walk_has_operator(node: Node) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_resource_exhaustion_is_distinct_from_unavailability() {
+        assert!(parse_source_with_limits("echo x", PARSE_TIMEOUT, 2).is_err());
+        let command = format!("echo {}", "x ".repeat(400));
+        assert!(parse_source_with_limits(&command, Duration::ZERO, MAX_PARSE_NODES).is_err());
+        assert!(
+            parse_source_with_limits("echo x", PARSE_TIMEOUT, MAX_PARSE_NODES)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn real_operators_detected() {

@@ -13,33 +13,13 @@
 //! suspicious Windows path shapes (NTFS ADS, 8.3 short names, long-path
 //! prefixes, trailing dot/space, DOS device names, `...`, UNC).
 //!
-//! ## Wiring is DEFERRED (PERM.1 prerequisite)
-//! claude-code runs these safety asks FIRST (`filesystem.ts:1242`+), ahead of
-//! the `mode === 'acceptEdits' && isInWorkingDir` auto-allow branch
-//! (`:1360-1375`). That auto-allow branch is PERM Batch 1 and has **not landed
-//! yet** — [`crate::policy::PermissionPolicy::authorize`] has no `AcceptEdits`
-//! working-dir auto-allow to gate. So this batch lands the pure guard + its
-//! unit tests + the `lib.rs` re-export ONLY; it does NOT touch `policy.rs`'s
-//! decision flow and is fully behavior-neutral at runtime (exercised only by
-//! the tests below). When PERM.1 lands the `AcceptEdits` branch, it should call
-//! [`check_path_safety_for_auto_edit`] BEFORE the working-dir allow and, on
-//! [`AutoEditSafety::Unsafe`], surface the reason via
-//! [`crate::result::PermissionDecisionReason::SafetyCheck`] and fall through to
-//! ask (never auto-allow).
+//! The policy invokes this guard before acceptEdits grants and when deciding
+//! whether a restricted-mode mutation targets protected configuration.
 //!
 //! ## Documented divergences from `filesystem.ts` (forced / bounded, not gaps)
-//! - **Lexical, not `realpath`.** claude-code's `checkPathSafetyForAutoEdit`
-//!   checks BOTH the original path AND the on-disk symlink-resolved path set
-//!   (`getPathsForPermissionCheck`, `realpathSync`) to defeat symlink-escape.
-//!   This port is lexical-only (consistent with [`crate::filesystem`]'s
-//!   already-accepted "Lexical, not `realpath`" decision): we check only the
-//!   one lexically-expanded path. Symlink-escape hardening is a known,
-//!   pre-accepted divergence in this crate.
-//! - **ADS colon check is `cfg!(windows)`-gated, not WSL-aware.** TS gates the
-//!   NTFS-ADS colon scan on `getPlatform() === 'windows' || getPlatform() ===
-//!   'wsl'`. The Rust build has no `getPlatform()` / WSL probe, so the colon
-//!   check runs under `cfg!(windows)` only — a Linux/macOS host that is really
-//!   WSL/DrvFs will NOT get the colon check. Documented WSL gap.
+//! The guard checks the original and discoverable symlink-resolved path forms.
+//! The ADS colon check runs on Windows and WSL; WSL detection follows Native's
+//! environment and `/proc/version` probes and can be injected in pure tests.
 //! - **UNC `containsVulnerableUncPath` is `cfg!(windows)`-gated.** In TS that
 //!   helper returns early `false` off-Windows (`getPlatform() !== 'windows'`),
 //!   so its use inside `hasSuspiciousWindowsPathPattern` (step 6) is already
@@ -262,12 +242,49 @@ pub fn is_dangerous_file_path_to_auto_edit(path: &Path, raw: &str) -> bool {
 ///    (matches the TS helper's `getPlatform() !== 'windows'` early return).
 #[must_use]
 pub fn has_suspicious_windows_path_pattern(raw: &str) -> bool {
+    has_suspicious_windows_path_pattern_for_platform(raw, auto_edit_platform())
+}
+
+fn auto_edit_platform() -> &'static str {
+    if cfg!(windows) {
+        return "windows";
+    }
+    if cfg!(target_os = "linux") {
+        static WSL: OnceLock<bool> = OnceLock::new();
+        if *WSL.get_or_init(|| {
+            ["WSL_DISTRO_NAME", "WSL_INTEROP"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+                || std::fs::read_to_string("/proc/version").is_ok_and(|version| {
+                    let version = version.to_lowercase();
+                    version.contains("microsoft") || version.contains("wsl")
+                })
+        }) {
+            return "wsl";
+        }
+        return "linux";
+    }
+    "other"
+}
+
+/// Pure Native `OJt` platform seam. `platform` uses Native's `windows`, `wsl`,
+/// `macos`, and `linux` spellings; unknown platforms keep the common checks.
+#[must_use]
+pub fn has_suspicious_windows_path_pattern_for_platform(raw: &str, platform: &str) -> bool {
+    // Native Q0/OJt checks the NT device namespace before platform gates.
+    if raw.starts_with("\\??\\")
+        || raw.starts_with("/??/")
+        || raw.starts_with("\\??/")
+        || raw.starts_with("/??\\")
+    {
+        return true;
+    }
     // 1. NTFS Alternate Data Streams — `:` after position 2 (skip `C:\`).
     //    Examples: `file.txt::$DATA`, `.bashrc:hidden`, `settings.json:stream`.
     //    `cfg!(windows)`-gated; TS additionally gates on `wsl` (see module doc).
-    if cfg!(windows) {
-        // `path.indexOf(':', 2) !== -1` — a colon at byte index >= 2.
-        if raw.char_indices().any(|(idx, c)| idx >= 2 && c == ':') {
+    if matches!(platform, "windows" | "wsl") {
+        // JavaScript's offset counts UTF-16 units, not Rust UTF-8 bytes.
+        if raw.encode_utf16().skip(2).any(|unit| unit == b':' as u16) {
             return true;
         }
     }
@@ -319,7 +336,7 @@ pub fn has_suspicious_windows_path_pattern(raw: &str) -> bool {
 
     // 7. Vulnerable UNC paths (`cfg!(windows)`-gated; TS helper returns false
     //    off-Windows). Examples: `\\server\share`, `//192.168.1.1/share`.
-    if contains_vulnerable_unc_path(raw) {
+    if contains_vulnerable_unc_path(raw, platform) {
         return true;
     }
 
@@ -337,14 +354,17 @@ pub fn has_suspicious_windows_path_pattern(raw: &str) -> bool {
 ///    `Unsafe { classifier_approvable: true }`.
 /// 4. Otherwise → [`AutoEditSafety::Safe`].
 ///
-/// Lexical-only path set (one expanded path, no symlink resolution) — see the
-/// module-header divergence note.
+/// Check every discoverable permission spelling, including symlink landings.
 #[must_use]
 pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSafety {
-    let expanded = crate::filesystem::expand_path(raw, roots);
+    let paths = crate::filesystem::permission_rule_path_forms(Path::new(raw), roots).spellings;
 
     // 1. Suspicious Windows path patterns (runs on the original path string).
-    if has_suspicious_windows_path_pattern(raw) {
+    if has_suspicious_windows_path_pattern(raw)
+        || paths
+            .iter()
+            .any(|path| has_suspicious_windows_path_pattern(&path.to_string_lossy()))
+    {
         return AutoEditSafety::Unsafe {
             message: format!(
                 "Claude requested permissions to write to {raw}, which contains a suspicious Windows path pattern that requires manual approval."
@@ -354,7 +374,10 @@ pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSa
     }
 
     // 2. Claude config files.
-    if is_lingxi_config_file_path(&expanded, roots) {
+    if paths
+        .iter()
+        .any(|path| is_lingxi_config_file_path(path, roots))
+    {
         return AutoEditSafety::Unsafe {
             message: format!(
                 "Claude requested permissions to write to {raw}, but you haven't granted it yet."
@@ -364,7 +387,10 @@ pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSa
     }
 
     // 3. Dangerous files / directories.
-    if is_dangerous_file_path_to_auto_edit(&expanded, raw) {
+    if paths
+        .iter()
+        .any(|path| is_dangerous_file_path_to_auto_edit(path, raw))
+    {
         return AutoEditSafety::Unsafe {
             message: format!(
                 "Claude requested permissions to edit {raw} which is a sensitive file."
@@ -440,8 +466,8 @@ fn path_at_or_under(path: &str, base: &str) -> bool {
 /// runtime. They are NOT dead code: `cfg!(windows)` is a runtime `bool` const
 /// (not a `#[cfg]` attribute), so the call sites remain compiled and reachable
 /// on every target, keeping the helpers exercisable.
-fn contains_vulnerable_unc_path(raw: &str) -> bool {
-    if !cfg!(windows) {
+fn contains_vulnerable_unc_path(raw: &str, platform: &str) -> bool {
+    if platform != "windows" {
         return false;
     }
 

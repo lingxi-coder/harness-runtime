@@ -1,0 +1,526 @@
+{
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "function": "ARs",
+  "byteRange": [
+    259518296,
+    259518433
+  ],
+  "cases": [
+    {
+      "url": "https://proxy.test/v2/session_ingress/shttp/mcp/a?mcp_url=https%3A%2F%2Fupstream.test%2Fmcp",
+      "expected": [
+        "https://upstream.test/mcp"
+      ]
+    },
+    {
+      "url": "wss://proxy.test/v2/session_ingress/mcp/ws/a?mcp_url=https%3A%2F%2Fone.test&mcp_url=https%3A%2F%2Ftwo.test",
+      "expected": [
+        "https://one.test",
+        "https://two.test"
+      ]
+    },
+    {
+      "url": "https://proxy.test/v2/ccr-sessions/session/mcp?mcp_url=https%3A%2F%2Fupstream.test",
+      "expected": [
+        "https://upstream.test"
+      ]
+    },
+    {
+      "url": "https://proxy.test/v1/code/sessions/session/mcp?mcp_url=https%3A%2F%2Fupstream.test",
+      "expected": [
+        "https://upstream.test"
+      ]
+    },
+    {
+      "url": "https://proxy.test/ordinary?mcp_url=https%3A%2F%2Fupstream.test",
+      "expected": []
+    },
+    {
+      "url": "https://proxy.test/v1/code/mcp?mcp_url=&mcp_url=not+a+url",
+      "expected": [
+        "",
+        "not a url"
+      ]
+    },
+    {
+      "url": "https://proxy.test/v1/code/mcp?MCP_URL=https%3A%2F%2Fupstream.test",
+      "expected": []
+    },
+    {
+      "url": "https://proxy.test/v1/code/mcp?mcp_url=https%3A%2F%2F%E4%B8%AD%E6%96%87.test%2F%E8%B7%AF%E5%BE%84",
+      "expected": [
+        "https://中文.test/路径"
+      ]
+    },
+    {
+      "url": "https://proxy.test/ordinary?hint=/v1/code/&mcp_url=https%3A%2F%2Fupstream.test",
+      "expected": [
+        "https://upstream.test"
+      ]
+    },
+    {
+      "url": "https://proxy.test/ordinary?mcp_url=https%3A%2F%2Fupstream.test#/v2/ccr-sessions/",
+      "expected": [
+        "https://upstream.test"
+      ]
+    },
+    {
+      "url": "https://proxy.test/v1/code/mcp?mcp_url=%FF",
+      "expected": [
+        "�"
+      ]
+    },
+    {
+      "url": "not a URL /v1/code/?mcp_url=https://upstream.test",
+      "expected": []
+    }
+  ],
+  "catalogFilter": {
+    "function": "Qj",
+    "byteRange": [
+      266987976,
+      266988473
+    ],
+    "tools": [
+      {
+        "name": "mcp__srv__allow",
+        "mcpInfo": {
+          "effectiveMaxPermission": "allow"
+        }
+      },
+      {
+        "name": "mcp__srv__ask",
+        "mcpInfo": {
+          "effectiveMaxPermission": "ask"
+        }
+      },
+      {
+        "name": "mcp__srv__deny",
+        "mcpInfo": {
+          "effectiveMaxPermission": "blocked"
+        }
+      },
+      {
+        "name": "mcp__srv__local-deny"
+      }
+    ],
+    "expectedNames": [
+      "mcp__srv__allow",
+      "mcp__srv__ask",
+      "mcp__srv__local-deny"
+    ],
+    "scope": "Organization ceiling predicate with unrelated catalog filters stubbed to admit; local permission rules are outside this function."
+  },
+  "startupPolicies": {
+    "functions": [
+      "rjn",
+      "Nyt",
+      "i4i"
+    ],
+    "byteRanges": [
+      [
+        257934789,
+        257935058
+      ],
+      [
+        257937157,
+        257938204
+      ]
+    ],
+    "startupGateOffset": 278315381,
+    "cases": [
+      {
+        "type": "http",
+        "scope": "dynamic",
+        "remote": false,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "http",
+        "scope": "dynamic",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [
+            "mcp__srv__allow"
+          ],
+          "ask": [
+            "mcp__srv__ask"
+          ],
+          "deny": [
+            "mcp__srv__deny"
+          ]
+        }
+      },
+      {
+        "type": "http",
+        "scope": "dynamic",
+        "remote": true,
+        "seedEnabled": false,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "sse",
+        "scope": "dynamic",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [
+            "mcp__srv__allow"
+          ],
+          "ask": [
+            "mcp__srv__ask"
+          ],
+          "deny": [
+            "mcp__srv__deny"
+          ]
+        }
+      },
+      {
+        "type": "http",
+        "scope": "user",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "http",
+        "scope": "agent",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "http",
+        "scope": "claudeai",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "stdio",
+        "scope": "dynamic",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "claudeai-proxy",
+        "scope": "dynamic",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "ask": [],
+          "deny": []
+        }
+      },
+      {
+        "type": "sdk",
+        "scope": "dynamic",
+        "remote": false,
+        "seedEnabled": false,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "deny": [
+            "mcp__srv__deny"
+          ],
+          "ask": [
+            "mcp__srv__ask"
+          ]
+        }
+      },
+      {
+        "type": "sdk",
+        "scope": "agent",
+        "remote": true,
+        "seedEnabled": true,
+        "tools": [
+          {
+            "name": "allow",
+            "permission_policy": "always_allow"
+          },
+          {
+            "name": "ask",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ],
+        "expected": {
+          "allow": [],
+          "deny": [
+            "mcp__srv__deny"
+          ],
+          "ask": [
+            "mcp__srv__ask"
+          ]
+        }
+      }
+    ],
+    "scope": "SDK tighten-only rule producer and remote startup seed with valid normalized tool names; full SDK host and remote refresh lifecycle excluded."
+  },
+  "sdkToolsSchema": {
+    "factory": "zOs",
+    "byteRange": [
+      258326041,
+      258326267
+    ],
+    "sourceSha256": "c6092033c0308fb804e7741025f7a555355717b5e17d1c9133a3a32e0040796b",
+    "invalidToolsField": "discard optional tools field; retain otherwise-valid SDK server",
+    "scope": "Hash-pinned static schema declaration; the full Zod parser is not replayed."
+  },
+  "sdkInitializePolicies": {
+    "function": "Ie",
+    "byteRange": [
+      257936383,
+      257936504
+    ],
+    "cases": [
+      {
+        "input": null,
+        "expected": null
+      },
+      {
+        "input": "not a list",
+        "expected": null
+      },
+      {
+        "input": {
+          "name": "not a list"
+        },
+        "expected": null
+      },
+      {
+        "input": [],
+        "expected": []
+      },
+      {
+        "input": [
+          {
+            "name": "deny",
+            "permission_policy": "always_deny",
+            "org_max_permission": "blocked"
+          }
+        ],
+        "expected": [
+          {
+            "name": "deny",
+            "permission_policy": "always_deny"
+          }
+        ]
+      },
+      {
+        "input": [
+          {
+            "name": "unknown",
+            "permission_policy": "invalid"
+          },
+          {
+            "name": "boolean",
+            "permission_policy": false
+          }
+        ],
+        "expected": [
+          {
+            "name": "unknown",
+            "permission_policy": "always_ask"
+          },
+          {
+            "name": "boolean",
+            "permission_policy": "always_ask"
+          }
+        ]
+      },
+      {
+        "input": [
+          {
+            "name": "plain"
+          },
+          {
+            "permission_policy": "always_deny"
+          },
+          {
+            "name": 7
+          },
+          null
+        ],
+        "expected": [
+          {
+            "name": "plain"
+          }
+        ]
+      }
+    ],
+    "scope": "Actual pure native SDK initialize policy-list normalization; registered-server lifecycle is tested in the runtime."
+  },
+  "scope": "Native upstream URL extraction and isolated organization catalog filtering; connector identity aliases and the complete live policy pipeline are not replayed."
+}

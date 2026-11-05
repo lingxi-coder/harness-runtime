@@ -660,7 +660,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     let configured_mcp_policy_rules: Vec<permission::PermissionRule> = configured_mcp
         .iter()
         .flat_map(|server| {
-            permission::permission_rules_from_mcp_tool_policies(&server.name, &server.tools)
+            permission::permission_rules_from_mcp_tool_policies(
+                &server.name,
+                &mcp::tool_policy::startup_permission_policies(server),
+            )
         })
         .collect();
     let mcp_reload_generations = Arc::new(StdMutex::new(HashMap::new()));
@@ -1594,6 +1597,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_working_dirs(additional_working_dirs)
             .with_block_reads_outside_working_directories(block_reads_outside_working_directories)
             .with_plan_files(plan_files.clone());
+        policy.remote_mcp_server_policy_bypass_exempt =
+            mcp::tool_policy::remote_server_policy_bypass_exempt();
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
         subagent_bypass_gates.bypass_disabled = bypass_disabled;

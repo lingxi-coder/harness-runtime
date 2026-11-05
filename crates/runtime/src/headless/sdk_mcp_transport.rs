@@ -840,6 +840,9 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
                     config[key] = json!(true);
                 }
             }
+            if let Some(tools) = sdk_initialize_tool_policies(&settings) {
+                config["tools"] = tools;
+            }
         }
         servers.insert(name.to_owned(), config);
     }
@@ -848,6 +851,37 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
         ::mcp::ConfigScope::Dynamic,
     )
     .unwrap_or_default()
+}
+
+/// Native `Lyt`/`Ie`/`rjn` (2.1.318 @257935226/@257936383/@257934789):
+/// initialize ignores non-list policy fields and nameless entries, coerces an
+/// unknown policy to always-ask, and ignores SDK organization-cap declarations.
+fn sdk_initialize_tool_policies(settings: &Utf16JsonProjection) -> Option<Value> {
+    let tools = settings.get_property("tools")?;
+    let count = tools.array_len()?;
+    let mut policies = Vec::new();
+    for index in 0..count {
+        let Some(tool) = tools.get_index(index) else {
+            continue;
+        };
+        let Some(name) = tool
+            .get_property("name")
+            .and_then(JsonValueView::code_units)
+            .and_then(|units| String::from_utf16(units).ok())
+        else {
+            continue;
+        };
+        let mut policy = json!({"name":name});
+        if let Some(value) = tool.get_property("permission_policy") {
+            policy["permission_policy"] = json!(match value.as_str() {
+                Some("always_allow") => "always_allow",
+                Some("always_deny") => "always_deny",
+                _ => "always_ask",
+            });
+        }
+        policies.push(policy);
+    }
+    Some(Value::Array(policies))
 }
 
 fn projection_u64_at(projection: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
@@ -922,21 +956,123 @@ mod tests {
             "parked"
         );
         drop(transport); // Only the assembled runtime may retain the decorated transport.
-        let initialize =
-            Utf16JsonProjection::parse(r#"{"request":{"sdkMcpServers":["fixture"]}}"#).unwrap();
+        let initialize = Utf16JsonProjection::parse(
+            r#"{"request":{"sdkMcpServers":["fixture"],"sdkMcpServerConfigs":{"fixture":{"timeout":5000,"tools":[{"name":"factory-backed","permission_policy":"always_deny"}]}}}}"#,
+        ).unwrap();
         let configs = sdk_servers_from_initialize(&initialize);
         assert_eq!(configs.len(), 1);
 
+        // Policy intake precedes the initialize reply and any transport work.
+        runtime
+            .orchestrator
+            .apply_sdk_mcp_initialize_policies(&configs)
+            .await;
+        assert!(runtime
+            .enforcing_permission_gate
+            .as_ref()
+            .unwrap()
+            .tool_wide_deny_names()
+            .await
+            .contains(&"mcp__fixture__factory-backed".into()));
+        assert!(runtime.mcp_registry.get_config("fixture").await.is_none());
         runtime.orchestrator.connect_sdk_mcp_servers(configs).await;
         runtime
             .mcp_registry
             .ensure_connected_client("fixture")
             .await
             .expect("registry must use the factory's paired raw-connection provider");
+        let gate = runtime.enforcing_permission_gate.as_ref().unwrap();
+        assert!(gate
+            .tool_wide_deny_names()
+            .await
+            .contains(&"mcp__fixture__factory-backed".into()));
+        gate.apply_permission_updates(&[Utf16JsonProjection::parse(
+            r#"{"type":"addRules","destination":"session","behavior":"deny","rules":[{"toolName":"Read"}]}"#,
+        ).unwrap()]);
+
+        // Re-initialize an already connected SDK server: first-registration
+        // options stand, new ask/deny restrictions accumulate, and an empty
+        // policy list cannot remove an earlier initialize restriction.
+        let update = Utf16JsonProjection::parse(
+            r#"{"request":{"sdkMcpServers":["fixture"],"sdkMcpServerConfigs":{"fixture":{"timeout":9000,"tools":[{"name":"later","permission_policy":"always_deny"}]}}}}"#,
+        ).unwrap();
+        runtime
+            .orchestrator
+            .connect_sdk_mcp_servers(sdk_servers_from_initialize(&update))
+            .await;
+        assert_eq!(
+            runtime
+                .mcp_registry
+                .get_config("fixture")
+                .await
+                .unwrap()
+                .timeout_ms,
+            Some(5000)
+        );
+        let names = gate.tool_wide_deny_names().await;
+        assert!(names.contains(&"mcp__fixture__factory-backed".into()));
+        assert!(names.contains(&"mcp__fixture__later".into()));
+        let empty = Utf16JsonProjection::parse(
+            r#"{"request":{"sdkMcpServers":["fixture"],"sdkMcpServerConfigs":{"fixture":{"tools":[]}}}}"#,
+        ).unwrap();
+        runtime
+            .orchestrator
+            .connect_sdk_mcp_servers(sdk_servers_from_initialize(&empty))
+            .await;
+        assert!(gate
+            .tool_wide_deny_names()
+            .await
+            .contains(&"mcp__fixture__later".into()));
+
+        runtime.mcp_registry.disconnect("fixture").await.unwrap();
+        ::mcp::tool_policy::synchronize_permission_policies(&runtime.mcp_registry, gate.as_ref())
+            .await;
+        let names = gate.tool_wide_deny_names().await;
+        assert!(!names.iter().any(|name| name.starts_with("mcp__fixture__")));
+        assert!(
+            names.contains(&"Read".into()),
+            "SDK retirement must preserve session rules"
+        );
 
         let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
         assert!(shutdown.complete, "{:?}", shutdown.errors);
         stream.finish().await.unwrap();
+    }
+
+    #[test]
+    fn sdk_initialize_tool_policies_follow_native_tolerant_control_schema() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../../mcp/tests/fixtures/claude_2_1_318_policy_upstream_urls.json"
+        ))
+        .unwrap();
+        for case in native["sdkInitializePolicies"]["cases"].as_array().unwrap() {
+            let settings =
+                Utf16JsonProjection::from_serde_value(&json!({"tools":case["input"]})).unwrap();
+            assert_eq!(
+                sdk_initialize_tool_policies(&settings).unwrap_or(Value::Null),
+                case["expected"],
+                "{case}"
+            );
+        }
+        let frame = Utf16JsonProjection::parse(r#"{"request":{"sdkMcpServers":["fixture"],"sdkMcpServerConfigs":{"fixture":{"tools":[{"name":"deny","permission_policy":"always_deny","org_max_permission":"blocked"},{"name":"unknown","permission_policy":"invalid"},{"name":"plain"},{"permission_policy":"always_deny"},{"name":7}]}}}}"#).unwrap();
+        let configs = sdk_servers_from_initialize(&frame);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].tools.len(), 3);
+        assert_eq!(
+            configs[0].tools[0].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysDeny)
+        );
+        assert_eq!(
+            configs[0].tools[1].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysAsk)
+        );
+        assert_eq!(configs[0].tools[2].permission_policy, None);
+        assert!(configs[0]
+            .tools
+            .iter()
+            .all(|tool| tool.org_max_permission.is_none()));
+        let not_list = Utf16JsonProjection::parse(r#"{"tools":{"name":"ignored"}}"#).unwrap();
+        assert_eq!(sdk_initialize_tool_policies(&not_list), None);
     }
 
     fn endpoint() -> (Endpoint, mpsc::UnboundedReceiver<jsonrpc::Message>) {

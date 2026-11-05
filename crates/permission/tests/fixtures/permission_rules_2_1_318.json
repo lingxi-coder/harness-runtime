@@ -1,0 +1,667 @@
+{
+  "fileMatches": [
+    {
+      "pattern": "{src,lib}/a.txt",
+      "input": "src/a.txt",
+      "expected": false
+    },
+    {
+      "pattern": "{src,lib}/a.txt",
+      "input": "{src,lib}/a.txt",
+      "expected": true
+    },
+    {
+      "pattern": "src/[A-].txt",
+      "input": "src/A.txt",
+      "expected": true
+    },
+    {
+      "pattern": "src/[A-].txt",
+      "input": "src/.txt",
+      "expected": true
+    },
+    {
+      "pattern": "src/[A-].txt",
+      "input": "src/.txt",
+      "expected": false
+    },
+    {
+      "pattern": "src/[!A-].txt",
+      "input": "src/.txt",
+      "expected": true
+    },
+    {
+      "pattern": "src/[!A-].txt",
+      "input": "src/.txt",
+      "expected": false
+    },
+    {
+      "pattern": "[Z-a]",
+      "input": "A",
+      "expected": true
+    },
+    {
+      "pattern": "[Z-a]",
+      "input": "z",
+      "expected": true
+    },
+    {
+      "pattern": "[!a]",
+      "input": "b",
+      "expected": false
+    },
+    {
+      "pattern": "[!a]",
+      "input": "a",
+      "expected": true
+    },
+    {
+      "pattern": "[^a]",
+      "input": "b",
+      "expected": false
+    },
+    {
+      "pattern": "[σ-τ]",
+      "input": "ς",
+      "expected": true
+    },
+    {
+      "pattern": "Secret",
+      "input": "secret",
+      "expected": true
+    },
+    {
+      "pattern": "Secret",
+      "input": "SECRET/data",
+      "expected": true
+    },
+    {
+      "pattern": "σ",
+      "input": "ς",
+      "expected": true
+    },
+    {
+      "pattern": "K",
+      "input": "K",
+      "expected": false
+    },
+    {
+      "pattern": "s",
+      "input": "ſ",
+      "expected": false
+    },
+    {
+      "pattern": "I",
+      "input": "ı",
+      "expected": false
+    },
+    {
+      "pattern": "#secret",
+      "input": "#secret",
+      "expected": true
+    },
+    {
+      "pattern": "a\\",
+      "input": "a\\",
+      "expected": true
+    },
+    {
+      "pattern": "﻿.env",
+      "input": ".env",
+      "expected": true
+    },
+    {
+      "pattern": "a[",
+      "input": "a[",
+      "expected": false
+    },
+    {
+      "pattern": "[z-a]",
+      "input": "z",
+      "expected": false
+    },
+    {
+      "pattern": "[a--c]",
+      "input": "c",
+      "expected": false
+    },
+    {
+      "pattern": "[a--c]",
+      "input": "[a--c]",
+      "expected": true
+    },
+    {
+      "pattern": "[z-a]",
+      "input": "[z-a]",
+      "expected": false
+    },
+    {
+      "pattern": "[z-ab]",
+      "input": "[z-ab]",
+      "expected": false
+    },
+    {
+      "pattern": "[z-ab]",
+      "input": "b",
+      "expected": true
+    }
+  ],
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "ranges": [
+    {
+      "start": 257596352,
+      "end": 257600809,
+      "sha256": "4e7d69e9f11d1e51955d24e4a6707df75541cc4e23381297cea64fe8adcc1f15"
+    },
+    {
+      "start": 258462296,
+      "end": 258463435,
+      "sha256": "d9928db605cc7bd64b97c402b23aa65d4471f63d88c88e1ff8fa38b725a5341b"
+    },
+    {
+      "start": 263614393,
+      "end": 263618845,
+      "sha256": "3b0428dfdebce68eaf10fbacf7d298836aa07ec1de2ec3a45ffbc162d21d1b2f"
+    },
+    {
+      "start": 263867738,
+      "end": 263868768,
+      "sha256": "341ba21e3aa770e3b1bd3dc85621e72b7b24eec507a561fc2c6f76e02e8b756f"
+    },
+    {
+      "start": 263770994,
+      "end": 263771262,
+      "sha256": "7d4935f56dd01876fd387159b9f8e3e638046b3ef9930ce8a31b295003992ddf"
+    },
+    {
+      "start": 263870842,
+      "end": 263871677,
+      "sha256": "30dc94045954a5f9f6511ed2e2a01fcc436ecda542cd7154cd147b982efffd47"
+    }
+  ],
+  "scope": "Pure rule parser/public aliases, wildcard, gitignore validation and cwd rebasing; eval/REPL feature gate fixed off, POSIX path implementation. No live permission UI/model/network execution.",
+  "parses": [
+    {
+      "input": "Task",
+      "expected": {
+        "toolName": "Agent"
+      }
+    },
+    {
+      "input": "Task(general-purpose)",
+      "expected": {
+        "toolName": "Agent",
+        "ruleContent": "general-purpose"
+      }
+    },
+    {
+      "input": "Agent",
+      "expected": {
+        "toolName": "Agent"
+      }
+    },
+    {
+      "input": "AgentOutputTool",
+      "expected": {
+        "toolName": "AgentOutputTool"
+      }
+    },
+    {
+      "input": "BashOutputTool",
+      "expected": {
+        "toolName": "BashOutputTool"
+      }
+    },
+    {
+      "input": "AgentOutput",
+      "expected": {
+        "toolName": "AgentOutput"
+      }
+    },
+    {
+      "input": "BashOutput",
+      "expected": {
+        "toolName": "BashOutput"
+      }
+    },
+    {
+      "input": "KillShell",
+      "expected": {
+        "toolName": "TaskStop"
+      }
+    },
+    {
+      "input": "Brief",
+      "expected": {
+        "toolName": "SendUserMessage"
+      }
+    },
+    {
+      "input": "Eval",
+      "expected": {
+        "toolName": "Eval"
+      }
+    },
+    {
+      "input": "Bash()",
+      "expected": {
+        "toolName": "Bash"
+      }
+    },
+    {
+      "input": "Bash(*)",
+      "expected": {
+        "toolName": "Bash"
+      }
+    },
+    {
+      "input": "Bash(x)y",
+      "expected": {
+        "toolName": "Bash(x)y"
+      }
+    },
+    {
+      "input": "Bash)x(y)",
+      "expected": {
+        "toolName": "Bash)x(y)"
+      }
+    },
+    {
+      "input": "Bash\\(name(x)",
+      "expected": {
+        "toolName": "Bash\\(name(x)"
+      }
+    },
+    {
+      "input": "Bash(echo \\(x\\))",
+      "expected": {
+        "toolName": "Bash",
+        "ruleContent": "echo (x)"
+      }
+    },
+    {
+      "input": "(foo)",
+      "expected": {
+        "toolName": "(foo)"
+      }
+    }
+  ],
+  "serializations": [
+    {
+      "input": {
+        "toolName": "Read",
+        "ruleContent": ""
+      },
+      "expected": "Read"
+    },
+    {
+      "input": {
+        "toolName": "Read",
+        "ruleContent": "a(b)"
+      },
+      "expected": "Read(a\\(b\\))"
+    }
+  ],
+  "wildcards": [
+    {
+      "input": [
+        "*",
+        "abc"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "git *",
+        "git"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "git *",
+        "git add"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "cat /a/**/b",
+        "cat /a/b"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "\u0000ESCAPED_STAR\u0000",
+        "*"
+      ],
+      "expected": false
+    },
+    {
+      "input": [
+        "x\u0000GLOBSTAR\u0000y",
+        "x/y"
+      ],
+      "expected": false
+    },
+    {
+      "input": [
+        "a\u0000*b",
+        "a\u0000xxb"
+      ],
+      "expected": false
+    },
+    {
+      "input": [
+        "*",
+        "x"
+      ],
+      "expected": false
+    },
+    {
+      "input": [
+        "﻿*﻿",
+        "x"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "git  *",
+        "git\tstatus",
+        false,
+        true
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "GIT *",
+        "git status",
+        true,
+        true
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "echo \\*",
+        "echo *"
+      ],
+      "expected": true
+    },
+    {
+      "input": [
+        "*",
+        "\n"
+      ],
+      "expected": true
+    }
+  ],
+  "prefixes": [
+    {
+      "input": "git:*",
+      "expected": "git"
+    },
+    {
+      "input": "git\nfoo:*",
+      "expected": null
+    },
+    {
+      "input": "git\rfoo:*",
+      "expected": null
+    },
+    {
+      "input": "git foo:*",
+      "expected": null
+    },
+    {
+      "input": ":*",
+      "expected": null
+    }
+  ],
+  "rebases": [
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/secrets/**",
+        "rootPath": "/proj/secrets"
+      },
+      "expected": [
+        "/**"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/secrets/**",
+        "rootPath": "/proj/secrets/nested"
+      },
+      "expected": [
+        "/**"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/s*/**/*.key",
+        "rootPath": "/proj/secrets"
+      },
+      "expected": [
+        "/**/*.key"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/**/secrets/*.key",
+        "rootPath": "/proj/x"
+      },
+      "expected": [
+        "/**/secrets/*.key"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/**/secrets/*.key",
+        "rootPath": "/proj/secrets"
+      },
+      "expected": [
+        "/*.key",
+        "/**/secrets/*.key"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/secrets/",
+        "rootPath": "/proj/secrets"
+      },
+      "expected": [
+        "/"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/secrets/*.key",
+        "rootPath": "/else"
+      },
+      "expected": []
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/src/**",
+        "rootPath": "/proj/vendor"
+      },
+      "expected": []
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/a/b/**",
+        "rootPath": "/proj/a"
+      },
+      "expected": [
+        "/b/**"
+      ]
+    },
+    {
+      "input": {
+        "patternRoot": "/proj",
+        "pattern": "/a/**/b/**",
+        "rootPath": "/proj/a/b"
+      },
+      "expected": [
+        "/**",
+        "/**/b/**"
+      ]
+    }
+  ],
+  "preprocess": [
+    {
+      "input": " /**",
+      "allow": false,
+      "expected": "\\ /**"
+    },
+    {
+      "input": " /**",
+      "allow": true,
+      "expected": " /**"
+    },
+    {
+      "input": "a\\\\\\",
+      "allow": false,
+      "expected": "a\\\\\\\\"
+    },
+    {
+      "input": "a\\\\\\",
+      "allow": true,
+      "expected": null
+    },
+    {
+      "input": "#secret",
+      "allow": false,
+      "expected": "\\#secret"
+    },
+    {
+      "input": "#secret",
+      "allow": true,
+      "expected": null
+    },
+    {
+      "input": "!#secret",
+      "allow": false,
+      "expected": "!#secret"
+    },
+    {
+      "input": "!#secret",
+      "allow": true,
+      "expected": "!#secret"
+    },
+    {
+      "input": "a[",
+      "allow": false,
+      "expected": "a["
+    },
+    {
+      "input": "a[",
+      "allow": true,
+      "expected": "a["
+    },
+    {
+      "input": "a\\",
+      "allow": false,
+      "expected": "a\\\\"
+    },
+    {
+      "input": "a\\",
+      "allow": true,
+      "expected": null
+    },
+    {
+      "input": " ",
+      "allow": false,
+      "expected": "\\ "
+    },
+    {
+      "input": " ",
+      "allow": true,
+      "expected": null
+    },
+    {
+      "input": "!",
+      "allow": false,
+      "expected": null
+    },
+    {
+      "input": "!",
+      "allow": true,
+      "expected": "!"
+    },
+    {
+      "input": "/a//b/**",
+      "allow": false,
+      "expected": "/a/b/**"
+    },
+    {
+      "input": "/a//b/**",
+      "allow": true,
+      "expected": "/a/b/**"
+    },
+    {
+      "input": "﻿.env",
+      "allow": false,
+      "expected": ".env"
+    },
+    {
+      "input": "﻿.env",
+      "allow": true,
+      "expected": ".env"
+    },
+    {
+      "input": "foo/**",
+      "allow": false,
+      "expected": "foo/**"
+    },
+    {
+      "input": "foo/**",
+      "allow": true,
+      "expected": "foo/**"
+    },
+    {
+      "input": "[a--c]",
+      "allow": false,
+      "expected": "\\[a--c\\]"
+    },
+    {
+      "input": "[a--c]",
+      "allow": true,
+      "expected": null
+    },
+    {
+      "input": "[z-a]",
+      "allow": false,
+      "expected": "[z-a]"
+    },
+    {
+      "input": "[z-a]",
+      "allow": true,
+      "expected": "[z-a]"
+    },
+    {
+      "input": "[z-ab]",
+      "allow": false,
+      "expected": "[z-ab]"
+    },
+    {
+      "input": "[z-ab]",
+      "allow": true,
+      "expected": "[z-ab]"
+    }
+  ]
+}

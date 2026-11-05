@@ -25,9 +25,10 @@
 //! `P.startsWith("/") ? "!"+P : "!**/"+P`, `Glob` emits `"!"+P` (because every
 //! rooted entry already carries a leading `/`).
 
-use crate::filesystem::{pattern_with_root, FsRoots};
+use crate::filesystem::{pattern_with_root, prepare_permission_pattern, FsRoots};
 use crate::policy::PermissionPolicy;
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 /// Resolve every active `Read`-`deny` rule in `policy` to a ripgrep `--glob`
@@ -65,10 +66,11 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
     };
 
     // ── U4e: group read-deny relativePatterns by resolved root ──────────────
-    // `null` root patterns live under the `None` key; rooted patterns under
-    // `Some(root)`. A BTreeMap keeps iteration deterministic across runs.
-    let mut by_root: BTreeMap<Option<PathBuf>, Vec<String>> = BTreeMap::new();
-    for (&source, rules) in &policy.deny_rules {
+    // Native preserves source and root insertion order.
+    let mut by_root: IndexMap<Option<PathBuf>, Vec<String>> = IndexMap::new();
+    let mut sources = policy.deny_rules.iter().collect::<Vec<_>>();
+    sources.sort_by_key(|(source, _)| std::cmp::Reverse(source.priority()));
+    for (&source, rules) in sources {
         for rule in rules {
             // Read-deny only: the rule must target the `Read` tool and carry a
             // content (path) pattern (`ruleContentField: "path"`). Tool-wide
@@ -80,13 +82,28 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
                 continue;
             };
             let (rel_pattern, root) = pattern_with_root(pattern, source, roots);
-            // `u = l.replace(/\/{2,}/g, "/")` — collapse repeated slashes.
-            let rel_pattern = collapse_slashes(&rel_pattern);
+            let Some(rel_pattern) = prepare_permission_pattern(&rel_pattern, rule.behavior) else {
+                continue;
+            };
+            // Native HJt exports only positive deny patterns to Grep/Glob.
+            if rel_pattern.starts_with('!') {
+                continue;
+            }
             // De-dup within a root group (TS uses a Map<pattern, rule>, so a
             // repeated pattern keeps a single entry).
+            let twins = root
+                .as_ref()
+                .map(|root| policy.historical_permission_patterns(root, &rel_pattern))
+                .unwrap_or_default();
             let bucket = by_root.entry(root).or_default();
             if !bucket.contains(&rel_pattern) {
                 bucket.push(rel_pattern);
+            }
+            for twin in twins {
+                let bucket = by_root.entry(Some(PathBuf::from("/"))).or_default();
+                if !bucket.contains(&twin) {
+                    bucket.push(twin);
+                }
             }
         }
     }
@@ -95,10 +112,30 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
     // `n = new Set(byRoot.get(null) ?? [])` — the unrooted patterns pass
     // through verbatim. Then each rooted pattern is rebased onto cwd.
     let mut out: Vec<String> = Vec::new();
+    // Native's search wrapper Kgr/C4 applies LJt to both the lexical and
+    // canonical search roots. This includes /var -> /private/var on macOS;
+    // a physical deny twin must not vanish when the search uses that alias.
+    let mut search_roots = vec![cwd.to_path_buf()];
+    if let Ok(canonical) = std::fs::canonicalize(cwd) {
+        if !search_roots.contains(&canonical) {
+            search_roots.push(canonical);
+        }
+    }
     if let Some(unrooted) = by_root.get(&None) {
         for p in unrooted {
             if !out.contains(p) {
                 out.push(p.clone());
+            }
+            // Multi-component unrooted patterns are also rebased against the
+            // session cwd when a search starts below it (Native LJt).
+            if p.trim_end_matches('/').contains('/') {
+                for search_root in &search_roots {
+                    for glob in relativize_for_cwd(&roots.cwd, p, search_root) {
+                        if !out.contains(&glob) {
+                            out.push(glob);
+                        }
+                    }
+                }
             }
         }
     }
@@ -107,9 +144,11 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
             continue; // null handled above
         };
         for pattern in patterns {
-            if let Some(glob) = relativize_for_cwd(root, pattern, cwd) {
-                if !out.contains(&glob) {
-                    out.push(glob);
+            for search_root in &search_roots {
+                for glob in relativize_for_cwd(root, pattern, search_root) {
+                    if !out.contains(&glob) {
+                        out.push(glob);
+                    }
                 }
             }
         }
@@ -126,7 +165,7 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
 /// - joined path under cwd → `/<joined.slice(cwd.len())>` (`AHo(r.slice(n.length))`).
 /// - else, relative cwd→root: if it escapes (`""`/`..`/`../…`) → `None`;
 ///   otherwise `/<rel>/pattern` (`AHo(join(rel, pattern))`).
-fn relativize_for_cwd(pattern_root: &Path, pattern: &str, cwd: &Path) -> Option<String> {
+fn relativize_for_cwd(pattern_root: &Path, pattern: &str, cwd: &Path) -> Vec<String> {
     // `r = posix.join(patternRoot, pattern)`.
     let joined = posix_join(pattern_root, pattern);
     let o = case_fold(pattern_root); // IA(patternRoot)
@@ -134,7 +173,7 @@ fn relativize_for_cwd(pattern_root: &Path, pattern: &str, cwd: &Path) -> Option<
 
     if o == s {
         // root == cwd → AHo(pattern) = "/" + pattern.
-        return Some(aho(pattern));
+        return vec![aho(pattern)];
     }
     // `IA(r).startsWith(`${s}/`)` — the joined path lives under cwd.
     let s_with_sep = format!("{s}/");
@@ -143,15 +182,73 @@ fn relativize_for_cwd(pattern_root: &Path, pattern: &str, cwd: &Path) -> Option<
         // by the cwd byte length (TS slices the un-folded `r`).
         let cwd_str = cwd.to_string_lossy();
         let sliced = &joined[cwd_str.len()..];
-        return Some(aho(sliced));
+        return vec![aho(sliced)];
     }
     // `i = posix.relative(s, o)` — cwd → patternRoot. Drop if it escapes.
     let rel = posix_relative_str(cwd, pattern_root);
     if rel.is_empty() || rel == ".." || rel.starts_with("../") {
-        return None;
+        let inside = posix_relative_str(pattern_root, cwd);
+        if inside.is_empty() || inside == ".." || inside.starts_with("../") {
+            return Vec::new();
+        }
+        return residual_patterns(pattern, &inside.split('/').collect::<Vec<_>>())
+            .into_iter()
+            .map(|pattern| aho(&pattern))
+            .collect();
     }
     // `AHo(posix.join(i, pattern))`.
-    Some(aho(&posix_join_str(&rel, pattern)))
+    vec![aho(&posix_join_str(&rel, pattern))]
+}
+
+/// Native `mh`: consume the search directory's components through a glob,
+/// retaining every possible suffix when a globstar can span several levels.
+fn residual_patterns(pattern: &str, components: &[&str]) -> Vec<String> {
+    let parts = pattern
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    let suffix = if pattern.ends_with('/') { "/" } else { "" };
+    let mut stack = vec![(0usize, 0usize)];
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    while let Some((rest, at)) = stack.pop() {
+        if !seen.insert((rest, at)) {
+            continue;
+        }
+        if at == components.len() {
+            let value = if rest == parts.len() {
+                "**".to_owned()
+            } else {
+                format!("{}{suffix}", parts[rest..].join("/"))
+            };
+            if !out.contains(&value) {
+                out.push(value);
+            }
+            continue;
+        }
+        let Some(part) = parts.get(rest) else {
+            if !out.iter().any(|pattern| pattern == "**") {
+                out.push("**".into());
+            }
+            continue;
+        };
+        if *part == "**" {
+            stack.push((rest, at + 1));
+            stack.push((rest + 1, at));
+            continue;
+        }
+        let part = if part.starts_with(['!', '#']) {
+            format!("\\{part}")
+        } else {
+            (*part).to_owned()
+        };
+        let trimmed = part.trim_end_matches(' ');
+        let part = format!("{}{}", trimmed, "\\ ".repeat(part.len() - trimmed.len()));
+        if crate::filesystem::native_ignore_matches_component(&part, components[at]) {
+            stack.push((rest + 1, at + 1));
+        }
+    }
+    out
 }
 
 /// `AHo(e) = posix.join("/", e)` — prepend `/` and normalize the join.
@@ -159,8 +256,7 @@ fn aho(rel: &str) -> String {
     // posix.join("/", rel) collapses `//` at the seam and a trailing slash is
     // preserved only when present; a leading `/` on `rel` is fine (join keeps a
     // single separator). Implement directly to avoid platform `Path` surprises.
-    let trimmed = rel.strip_prefix('/').unwrap_or(rel);
-    format!("/{trimmed}")
+    posix_join_str("/", rel)
 }
 
 /// `e.toLowerCase().replace(/ı/g,"i").replace(/ſ/g,"s")` — `IA`.
@@ -169,24 +265,6 @@ fn case_fold(p: &Path) -> String {
         .to_lowercase()
         .replace('\u{0131}', "i")
         .replace('\u{017f}', "s")
-}
-
-/// `relativePattern.replace(/\/{2,}/g, "/")` — collapse runs of `/` to one.
-fn collapse_slashes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_slash = false;
-    for ch in s.chars() {
-        if ch == '/' {
-            if !prev_slash {
-                out.push('/');
-            }
-            prev_slash = true;
-        } else {
-            out.push(ch);
-            prev_slash = false;
-        }
-    }
-    out
 }
 
 /// `posix.join(base, rel)` for an absolute `base` path and a relative string,
@@ -297,6 +375,67 @@ mod tests {
     }
 
     #[test]
+    fn ancestor_cwd_rebasing_matches_official_318() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_rules_2_1_318.json"
+        ))
+        .unwrap();
+        for case in fixture["rebases"].as_array().unwrap() {
+            let input = &case["input"];
+            let actual = relativize_for_cwd(
+                Path::new(input["patternRoot"].as_str().unwrap()),
+                input["pattern"].as_str().unwrap(),
+                Path::new(input["rootPath"].as_str().unwrap()),
+            );
+            assert_eq!(serde_json::json!(actual), case["expected"], "{case}");
+        }
+    }
+
+    #[test]
+    fn deny_pattern_preprocessing_matches_official_318() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_rules_2_1_318.json"
+        ))
+        .unwrap();
+        for case in fixture["preprocess"].as_array().unwrap() {
+            let behavior = if case["allow"].as_bool().unwrap() {
+                PermissionBehavior::Allow
+            } else {
+                PermissionBehavior::Deny
+            };
+            assert_eq!(
+                serde_json::json!(prepare_permission_pattern(
+                    case["input"].as_str().unwrap(),
+                    behavior
+                )),
+                case["expected"],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn negated_deny_is_not_an_exclusion_glob() {
+        let policy = policy_with(
+            vec![read_deny("!public/**", PermissionRuleSource::Session)],
+            "/proj",
+        );
+        assert!(read_deny_exclude_globs(&policy, Path::new("/proj")).is_empty());
+    }
+
+    #[test]
+    fn deny_follows_search_into_restricted_directory() {
+        let policy = policy_with(
+            vec![read_deny("/secrets/**", PermissionRuleSource::Session)],
+            "/proj",
+        );
+        assert_eq!(
+            read_deny_exclude_globs(&policy, Path::new("/proj/secrets/nested")),
+            ["/**"]
+        );
+    }
+
+    #[test]
     fn relative_rule_passes_through_verbatim() {
         // `Read(./secrets/**)` → unrooted, leading `./` stripped → `secrets/**`.
         let p = policy_with(
@@ -307,7 +446,10 @@ mod tests {
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
-        assert_eq!(globs, vec!["secrets/**".to_string()]);
+        assert_eq!(
+            globs,
+            vec!["secrets/**".to_string(), "/secrets/**".to_string()]
+        );
     }
 
     #[test]
@@ -474,7 +616,10 @@ mod tests {
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
-        assert_eq!(globs, vec!["secrets/**".to_string()]);
+        assert_eq!(
+            globs,
+            vec!["secrets/**".to_string(), "/secrets/**".to_string()]
+        );
     }
 
     #[test]

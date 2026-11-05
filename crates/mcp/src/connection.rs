@@ -526,6 +526,21 @@ impl McpConnectionState {
         }
     }
 
+    pub(crate) fn config_mut(&mut self) -> &mut McpServerConfig {
+        match self {
+            Self::Disconnected { config, .. }
+            | Self::Connecting { config, .. }
+            | Self::AwaitingOAuth { config, .. }
+            | Self::NeedsAuth { config, .. }
+            | Self::Connected { config, .. }
+            | Self::Cached { config, .. }
+            | Self::HealthChecking { config, .. }
+            | Self::Reconnecting { config, .. }
+            | Self::Failed { config, .. }
+            | Self::Stopped { config } => config,
+        }
+    }
+
     /// Transport-kind label of the connection's config — `"stdio"`,
     /// `"sse"`, `"http"`, etc. Used by [`crate::registry::McpRegistry::snapshot`]
     /// (M6-07) to populate `McpServerInfo::transport`.

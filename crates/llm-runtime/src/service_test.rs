@@ -1576,6 +1576,117 @@ mod tests {
     struct StalledNonStreamTransport {
         body: bool,
     }
+
+    struct ClassifierStreamTransport {
+        phase: u8,
+    }
+
+    struct ClassifierRetryTransport {
+        failures: Vec<u8>,
+        sent: std::sync::atomic::AtomicUsize,
+    }
+
+    fn classifier_stream_chunks(text: &str, complete: bool) -> Vec<bytes::Bytes> {
+        let mut events = vec![
+            serde_json::json!({"type":"response.created","response":{"id":"r","model":"model","output":[]}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m","role":"assistant","status":"in_progress","content":[]}}),
+            serde_json::json!({"type":"response.content_part.added","item_id":"m","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+            serde_json::json!({"type":"response.output_text.delta","item_id":"m","output_index":0,"content_index":0,"delta":text}),
+        ];
+        if complete {
+            events.push(serde_json::json!({"type":"response.completed","response":{"id":"r","model":"model","status":"completed","output":[{"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}));
+        }
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n").into())
+            .collect()
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ClassifierRetryTransport {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            let index = self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(phase) = self.failures.get(index) {
+                if matches!(*phase, 5 | 6) {
+                    return Ok(lingxi_llm_client::StreamResponse {
+                        status: 503,
+                        headers: vec![
+                            ("content-type".into(), "application/json".into()),
+                            ("x-should-retry".into(), "false".into()),
+                        ],
+                        body: if *phase == 6 {
+                            futures::stream::pending().boxed()
+                        } else {
+                            futures::stream::once(async {
+                                Ok(r#"{"error":{"message":"explicit retry decline","type":"api_error"}}"#.into())
+                            })
+                            .boxed()
+                        },
+                    });
+                }
+                if *phase != 4 {
+                    return ClassifierStreamTransport { phase: *phase }
+                        .send(request)
+                        .await;
+                }
+                return Ok(lingxi_llm_client::StreamResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "text/event-stream".into())],
+                    body: futures::stream::iter(
+                        classifier_stream_chunks("discard this partial", false)
+                            .into_iter()
+                            .map(Ok),
+                    )
+                    .chain(futures::stream::pending())
+                    .boxed(),
+                });
+            }
+            Ok(lingxi_llm_client::StreamResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body: futures::stream::iter(
+                    classifier_stream_chunks("<block>no", true)
+                        .into_iter()
+                        .map(Ok),
+                )
+                .boxed(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ClassifierStreamTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            if self.phase == 0 {
+                return std::future::pending().await;
+            }
+            tokio::time::sleep(Duration::from_millis(3)).await;
+            let body = if self.phase == 2 {
+                futures::stream::unfold((), |()| async {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    Some((Ok(": heartbeat\n\n".into()), ()))
+                })
+                .boxed()
+            } else {
+                futures::stream::pending().boxed()
+            };
+            Ok(lingxi_llm_client::StreamResponse {
+                status: if self.phase == 3 { 500 } else { 200 },
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body,
+            })
+        }
+    }
     #[async_trait::async_trait]
     impl Transport for StalledNonStreamTransport {
         async fn send(
@@ -3061,6 +3172,211 @@ mod tests {
             service.model_validation_account_generation(),
             service.fast_availability.generation()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classifier_attempt_deadline_uses_trusted_override_and_preserves_default() {
+        for body in [false, true] {
+            for override_ms in [None, Some(17)] {
+                let service = make_adapter_with_retries(
+                    Arc::new(StalledNonStreamTransport { body }),
+                    Some(0),
+                );
+                let probe = Arc::new(AttemptProbe::default());
+                service.set_model_attempt_hooks(Arc::new(probe.clone()));
+                let mut request = registered_request();
+                request.execution.classifier_attempt_timeout_ms = override_ms;
+                let expected = override_ms.map(Duration::from_millis).unwrap_or_else(|| {
+                    crate::model::request_timeout::non_stream_timeout().unwrap()
+                });
+                let started = tokio::time::Instant::now();
+                let result = tokio::time::timeout(
+                    expected + Duration::from_secs(1),
+                    service.execute_classifier_request(request, 0),
+                )
+                .await;
+                assert!(
+                    matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
+                    "{result:?}"
+                );
+                assert_eq!(started.elapsed(), expected);
+                assert_eq!(
+                    *probe.events.lock().unwrap(),
+                    vec!["begin", "dispatch", "finish-owned", "settled"]
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classifier_stream_deadline_bounds_headers_body_heartbeats_and_error_body() {
+        use futures::StreamExt;
+        for protocol in [
+            ProtocolFamily::AnthropicMessages,
+            ProtocolFamily::OpenAiResponses,
+        ] {
+            for phase in 0..4 {
+                let mut service = make_adapter_for_protocol_with_transport(
+                    protocol,
+                    ProviderId::Custom {
+                        name: "classifier-test".into(),
+                    },
+                    "https://example.test",
+                    "p",
+                    "model",
+                    Arc::new(ClassifierStreamTransport { phase }),
+                );
+                service.settings_max_retries = Some(0);
+                let probe = Arc::new(AttemptProbe::default());
+                service.set_model_attempt_hooks(Arc::new(probe.clone()));
+                let mut request = registered_request();
+                request.input.model = "model".into();
+                request.profile = Some("p".into());
+                request.execution.isolated_query = true;
+                request.execution.query_source = Some("auto_mode".into());
+                request.execution.classifier_attempt_timeout_ms = Some(17);
+                let started = tokio::time::Instant::now();
+                let result = tokio::time::timeout(Duration::from_millis(100), async {
+                    let mut stream = service.stream_request(request).await?;
+                    while let Some(event) = stream.next().await {
+                        event?;
+                    }
+                    Ok::<(), LlmError>(())
+                })
+                .await;
+                assert!(
+                    matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
+                    "{protocol:?} phase={phase}: {result:?}"
+                );
+                assert_eq!(
+                    started.elapsed(),
+                    Duration::from_millis(17),
+                    "{protocol:?} phase={phase}"
+                );
+                assert_eq!(
+                    *probe.events.lock().unwrap(),
+                    vec!["begin", "dispatch", "finish-owned", "settled"]
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classifier_stream_retries_bodies_and_headers_with_one_shared_budget() {
+        use std::sync::atomic::Ordering;
+        for failures in [
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![4],
+            vec![0, 1],
+            vec![1, 0],
+            vec![0, 3],
+            vec![3, 0],
+        ] {
+            let transport = Arc::new(ClassifierRetryTransport {
+                failures: failures.clone(),
+                sent: Default::default(),
+            });
+            let mut service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::OpenAiResponses,
+                ProviderId::Custom {
+                    name: "classifier-test".into(),
+                },
+                "https://example.test",
+                "p",
+                "model",
+                transport.clone(),
+            );
+            // Classifier-owned retry control wins over an ordinary zero-retry setting.
+            service.settings_max_retries = Some(0);
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let mut request = registered_request();
+            request.input.model = "model".into();
+            request.profile = Some("p".into());
+            request.execution.query_source = Some("auto_mode".into());
+            request.execution.classifier_attempt_timeout_ms = Some(17);
+            let response = tokio::time::timeout(
+                Duration::from_secs(10),
+                service.execute_classifier_stream_request(request, 1),
+            )
+            .await
+            .unwrap();
+            assert_eq!(transport.sent.load(Ordering::SeqCst), 2, "{failures:?}");
+            if failures.len() == 1 {
+                let response = response.unwrap();
+                let text: String = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        crate::history::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    text, "<block>no",
+                    "failed partial output must not leak into the retry"
+                );
+            } else {
+                assert!(
+                    matches!(response, Err(LlmError::TransportTimeout { .. })),
+                    "{failures:?}: {response:?}"
+                );
+            }
+            let events = probe.events.lock().unwrap();
+            assert_eq!(
+                events.iter().filter(|event| **event == "dispatch").count(),
+                2
+            );
+            assert_eq!(
+                events.iter().filter(|event| **event == "settled").count(),
+                2
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classifier_stream_preserves_terminal_header_retry_decisions() {
+        use std::sync::atomic::Ordering;
+        for phase in [5, 6] {
+            let transport = Arc::new(ClassifierRetryTransport {
+                failures: vec![phase],
+                sent: Default::default(),
+            });
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::OpenAiResponses,
+                ProviderId::Custom {
+                    name: "classifier-test".into(),
+                },
+                "https://example.test",
+                "p",
+                "model",
+                transport.clone(),
+            );
+            let mut request = LlmRequest::new("model").with_user_text("classify");
+            request.profile = Some("p".into());
+            request.input.max_tokens = Some(100);
+            request.execution.query_source = Some("auto_mode".into());
+            request.execution.classifier_attempt_timeout_ms = Some(17);
+            let error = service
+                .execute_classifier_stream_request(request, 3)
+                .await
+                .unwrap_err();
+            if phase == 5 {
+                assert!(
+                    matches!(error.classification_source(), LlmError::ProviderInternal),
+                    "{error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, LlmError::TransportTimeout { .. }),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(transport.sent.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test(start_paused = true)]

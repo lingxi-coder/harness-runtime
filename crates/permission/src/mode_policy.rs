@@ -73,7 +73,9 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "SendMessage",
 ];
 
-/// The 2.1.270 AUTO-MODE safe allowlist — 1:1 with the binary's `ojo` set, read
+/// The native AUTO-MODE safe allowlist, rechecked against 2.1.318 `fUo`/`pUo`
+/// (byte offset 268795799). The removed TaskOutput tool is no longer included.
+/// Originally ported from the 2.1.270 binary's `ojo` set, read
 /// by `Sft(e,n)` (src_169588164.js @2150529) and consumed by the auto-mode
 /// decision `dKo` as:
 ///
@@ -121,7 +123,6 @@ const AUTO_MODE_SAFE_TOOLS: &[&str] = &[
     "TaskUpdate",
     "TaskList",
     "TaskStop",
-    "TaskOutput",
     "GetTask",
     // Plan-mode UI (`TC`, `Dy`).
     "EnterPlanMode",
@@ -165,7 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_mode_safe_set_matches_270_ojo() {
+    fn auto_mode_safe_set_matches_318_builtin_subset() {
         // Every row the binary's `ojo` carries that this port can advertise.
         for t in [
             "Read",
@@ -185,7 +186,6 @@ mod tests {
             "TaskUpdate",
             "TaskList",
             "TaskStop",
-            "TaskOutput",
             "GetTask",
             "EnterPlanMode",
             "ExitPlanMode",
@@ -197,7 +197,27 @@ mod tests {
         ] {
             assert!(is_auto_mode_safe_tool(t), "{t} is in 2.1.270 `ojo`");
         }
-        assert_eq!(AUTO_MODE_SAFE_TOOLS.len(), 26);
+        assert_eq!(AUTO_MODE_SAFE_TOOLS.len(), 25);
+        // 2.1.318 removed TaskOutput; its replacement is Read of the task's
+        // output file. Retaining its old safe-list row silently bypassed the
+        // classifier for a tool the latest native allowlist no longer grants.
+        assert!(!is_auto_mode_safe_tool("TaskOutput"));
+    }
+
+    #[test]
+    fn auto_mode_safe_builtins_match_318_native_predicate() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        for row in fixture["builtins"].as_array().unwrap() {
+            let name = row["name"].as_str().unwrap();
+            assert_eq!(
+                is_auto_mode_safe_tool(name),
+                row["expected"].as_bool().unwrap(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

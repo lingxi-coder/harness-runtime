@@ -74,8 +74,8 @@ pub struct CliModeSettings {
     /// The bg-disclaimer downgrade only applies in background sessions
     /// (`xlc()` short-circuits `!Pi()` → false otherwise).
     pub is_bg_session: bool,
-    /// `MODE-BG-DISCLAIMER-02`: does ANY settings tier set
-    /// `skipDangerousModePermissionPrompt` truthy (claude-code `Pq()`)? When set,
+    /// Does a user or managed settings tier set
+    /// `skipDangerousModePermissionPrompt` truthy (2.1.318 `Ugt()`)? When set,
     /// the user has already accepted the Bypass Permissions disclaimer, so the
     /// bg-session downgrade does NOT apply.
     pub skip_dangerous_mode_permission_prompt: bool,
@@ -92,7 +92,7 @@ impl CliModeSettings {
     ///
     /// `xlc(e){if(!Pi())return!1;if(e==="bypassPermissions")return!Pq()&&
     /// !St().bypassPermissionsModeAccepted;return!1}` — i.e. true iff this is a
-    /// background session AND no tier set `skipDangerousModePermissionPrompt`
+    /// background session AND no user/managed tier set `skipDangerousModePermissionPrompt`
     /// AND `bypassPermissionsModeAccepted` is unset. A `--bg` daemon cannot show
     /// the interactive disclaimer, so bypass must be earned beforehand.
     #[must_use]
@@ -137,7 +137,27 @@ pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced
 /// a background session's requested `bypassPermissions` is downgraded to
 /// `default` because the disclaimer was never accepted interactively. Em-dash is
 /// U+2014.
-pub(crate) const BYPASS_DISCLAIMER_DOWNGRADE_MSG: &str = "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first";
+const BYPASS_DISCLAIMER_DOWNGRADE_TEMPLATE: &str = "Permission mode downgraded to default: bypass in a background worker needs consent recorded in your user settings \u{2014} add \"skipDangerousModePermissionPrompt\": true to ~/{{config_dir}}/settings.json (accepting the interactive disclaimer writes the same key, but that dialog is skipped while consent already exists in {{config_dir}}/settings.local.json or via --settings, which does not count here). A launch with user settings off does not read that file: relaunch with them on";
+
+fn bypass_disclaimer_downgrade_message() -> String {
+    branding::render_namespace_template(BYPASS_DISCLAIMER_DOWNGRADE_TEMPLATE)
+}
+
+/// Persistent bypass consent (2.1.318 `Ugt`, native byte offset 259220203).
+/// Repository files and invocation-only `--settings` may suppress an interactive
+/// disclaimer, but cannot grant bypass to a background worker or boot agent.
+#[must_use]
+pub fn persistent_bypass_consent_from_settings_source(
+    source: crate::PermissionRuleSource,
+    raw: &str,
+) -> bool {
+    matches!(
+        source,
+        crate::PermissionRuleSource::Settings(
+            lingxi_core::types::SettingsScope::User | lingxi_core::types::SettingsScope::Managed
+        )
+    ) && crate::loader::skip_dangerous_mode_permission_prompt_from_settings_json(raw)
+}
 
 /// Notice shown when an IDE-owned session has not consented to bypassing
 /// permissions, so the settings default is ignored.
@@ -292,7 +312,7 @@ pub fn initial_permission_mode_from_cli_with_ide(
 
     if dangerously_skip {
         if bg_bypass_downgrade {
-            notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+            notification = Some(bypass_disclaimer_downgrade_message());
             ordered.push(PermissionMode::Default);
         } else {
             ordered.push(PermissionMode::BypassPermissions);
@@ -300,7 +320,7 @@ pub fn initial_permission_mode_from_cli_with_ide(
     }
     if let Some(cli) = cli_mode {
         if cli == PermissionMode::BypassPermissions && bg_bypass_downgrade {
-            notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+            notification = Some(bypass_disclaimer_downgrade_message());
             ordered.push(PermissionMode::Default);
         } else {
             ordered.push(cli);
@@ -367,7 +387,7 @@ pub fn initial_permission_mode_from_cli_with_ide(
                     }
                 } else if bg_bypass_downgrade {
                     if ordered.is_empty() {
-                        notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+                        notification = Some(bypass_disclaimer_downgrade_message());
                     }
                     ordered.push(PermissionMode::Default);
                 } else {
@@ -977,7 +997,7 @@ mod tests {
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
-        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
+        assert_eq!(notice, Some(bypass_disclaimer_downgrade_message()));
     }
 
     #[test]
@@ -1015,7 +1035,7 @@ mod tests {
         let (mode, notice) =
             initial_permission_mode_from_cli(None, true, None, false, &bg_gate_tripping());
         assert_eq!(mode, PermissionMode::Default);
-        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
+        assert_eq!(notice, Some(bypass_disclaimer_downgrade_message()));
     }
 
     #[test]
@@ -1028,7 +1048,7 @@ mod tests {
             &bg_gate_tripping(),
         );
         assert_eq!(mode, PermissionMode::Default);
-        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
+        assert_eq!(notice, Some(bypass_disclaimer_downgrade_message()));
     }
 
     #[test]
@@ -1080,10 +1100,15 @@ mod tests {
 
     #[test]
     fn bg_downgrade_message_is_byte_exact() {
-        assert_eq!(
-            BYPASS_DISCLAIMER_DOWNGRADE_MSG,
-            "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first"
-        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        let expected = fixture["backgroundBypassNotice"]
+            .as_str()
+            .unwrap()
+            .replace(".claude", branding::DOT_DIR);
+        assert_eq!(bypass_disclaimer_downgrade_message(), expected);
     }
 }
 
@@ -1097,7 +1122,7 @@ mod tests {
 /// ```
 ///
 /// `O_()` is the `disableBypassPermissionsMode` killswitch and `kM()` is
-/// `skipDangerousModePermissionPrompt` in any tier. So the killswitch is only
+/// `skipDangerousModePermissionPrompt` in user or managed settings. The killswitch is only
 /// HALF the gate: bypass must also have been earned, either by the user
 /// accepting the disclaimer once (`bypassPermissionsModeAccepted`) or by a
 /// settings tier waiving the prompt. Without that second half, one frontmatter
@@ -1132,5 +1157,43 @@ mod boot_agent_bypass_tests {
     #[test]
     fn the_killswitch_overrides_having_earned_it() {
         assert!(!boot_agent_may_adopt_bypass(true, true, true));
+    }
+
+    #[test]
+    fn persistent_consent_matches_318_user_and_managed_source_oracle() {
+        use crate::PermissionRuleSource;
+        use lingxi_core::types::SettingsScope;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        let sources = [
+            (
+                "userSettings",
+                PermissionRuleSource::Settings(SettingsScope::User),
+            ),
+            (
+                "projectSettings",
+                PermissionRuleSource::Settings(SettingsScope::Project),
+            ),
+            (
+                "localSettings",
+                PermissionRuleSource::Settings(SettingsScope::Local),
+            ),
+            ("flagSettings", PermissionRuleSource::FlagSettings),
+            (
+                "policySettings",
+                PermissionRuleSource::Settings(SettingsScope::Managed),
+            ),
+        ];
+        for row in fixture["consent"].as_array().unwrap() {
+            let actual = sources.iter().any(|(name, source)| {
+                super::persistent_bypass_consent_from_settings_source(
+                    *source,
+                    &row["settings"][*name].to_string(),
+                )
+            });
+            assert_eq!(actual, row["expected"].as_bool().unwrap(), "{row}");
+        }
     }
 }

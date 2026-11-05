@@ -803,7 +803,13 @@ pub fn test_rule_pattern(
     behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
 ) -> RulePatternMatch {
-    test_rule_pattern_impl(input_path, pattern, source, behavior, roots, false)
+    test_rule_pattern_units(
+        &input_path.encode_utf16().collect::<Vec<_>>(),
+        &pattern.encode_utf16().collect::<Vec<_>>(),
+        source,
+        behavior,
+        roots,
+    )
 }
 
 fn test_rule_pattern_impl(
@@ -816,6 +822,29 @@ fn test_rule_pattern_impl(
 ) -> RulePatternMatch {
     let file_abs = expand_path(input_path, roots);
     let (rel_pattern, root_opt) = pattern_with_root(pattern, source, roots);
+    let Some(rel_pattern) = prepare_permission_pattern(&rel_pattern, behavior) else {
+        return RulePatternMatch::NoMatch;
+    };
+    // Native `Tn/hh` compiles non-allow rooted patterns against both their
+    // stored name and their physical landing. Resolving only the input misses
+    // a deny reached through another name for the same symlink target.
+    if behavior != crate::rule::PermissionBehavior::Allow {
+        if let Some(root) = &root_opt {
+            if let Some(twin) = physical_permission_pattern(root, &rel_pattern) {
+                let matched = test_rule_pattern_impl(
+                    input_path,
+                    &format!("/{twin}"),
+                    source,
+                    behavior,
+                    roots,
+                    source_units,
+                );
+                if matched != RulePatternMatch::NoMatch {
+                    return matched;
+                }
+            }
+        }
+    }
     let effective_root = root_opt.unwrap_or_else(|| roots.cwd.clone());
 
     let rel_str = posix_relative(&effective_root, &file_abs);
@@ -893,11 +922,21 @@ fn test_rule_pattern_impl(
         None => (stripped, false),
     };
 
-    let target = Path::new("/").join(&rel_str);
+    let target = Path::new("/").join(native_ignore_case_fold(&rel_str));
     let matched = if source_units {
-        cached_source_glob(stripped)
-            .and_then(|matcher| matcher.matched_path_or_any_parents(&target))
-            == Some(false)
+        let Some(matcher) = cached_source_glob(stripped) else {
+            return RulePatternMatch::NoMatch;
+        };
+        if matcher.regex.is_none() {
+            // Resource exhaustion cannot grant an allow or erase a restriction,
+            // including a negated restriction whose exception is unverified.
+            return if behavior == crate::rule::PermissionBehavior::Allow {
+                RulePatternMatch::NoMatch
+            } else {
+                RulePatternMatch::Match
+            };
+        }
+        matcher.matched_path_or_any_parents(&target) == Some(false)
     } else {
         let Some(gitignore) = cached_gitignore(stripped) else {
             return RulePatternMatch::NoMatch;
@@ -914,6 +953,175 @@ fn test_rule_pattern_impl(
     } else {
         RulePatternMatch::Match
     }
+}
+
+/// Native 2.1.318 `Dn/es`: normalize repeated slashes and a leading BOM;
+/// unusable allow patterns are dropped, while deny/ask patterns spell literal
+/// paths. This prevents a comment or trailing backslash silently disabling a
+/// non-allow rule.
+pub(crate) fn prepare_permission_pattern(
+    pattern: &str,
+    behavior: crate::rule::PermissionBehavior,
+) -> Option<String> {
+    let mut normalized = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if ch != '/' || !normalized.ends_with('/') {
+            normalized.push(ch);
+        }
+    }
+    let blank = normalized.trim_matches(crate::source_input::is_js_trim_char);
+    if !(blank.is_empty() || blank == "/**") {
+        let bom = if normalized.starts_with('\u{feff}') {
+            Some('\u{feff}')
+        } else if normalized.starts_with('\u{ffe7f}') {
+            Some('\u{ffe7f}')
+        } else {
+            None
+        };
+        if let Some(bom) = bom {
+            let rest = normalized.strip_prefix(bom).expect("matched BOM");
+            normalized = if rest.starts_with(['!', '#']) {
+                format!("\\{rest}")
+            } else {
+                rest.to_owned()
+            };
+            if let Some(rest) = normalized.strip_prefix(bom) {
+                normalized = format!("[{bom}]{rest}");
+            }
+        }
+    }
+    let allow = behavior == crate::rule::PermissionBehavior::Allow;
+    let validation = normalized.strip_suffix("/**").map_or_else(
+        || normalized.clone(),
+        |remainder| {
+            if remainder.chars().all(|ch| ch == '/') {
+                "/**".into()
+            } else if remainder.contains('/') || !allow || remainder.starts_with(['!', '#']) {
+                remainder.to_owned()
+            } else {
+                format!("/{remainder}")
+            }
+        },
+    );
+    if !allow
+        && validation.strip_prefix('!').is_some_and(|rest| {
+            rest.trim_matches(crate::source_input::is_js_trim_char)
+                .is_empty()
+        })
+    {
+        return None;
+    }
+    // `ui`'s skip predicate uses the original glob before the ignore library
+    // drops it. A trailing even run of backslashes remains a literal slash.
+    let trailing_slashes = validation
+        .chars()
+        .rev()
+        .take_while(|ch| *ch == '\\')
+        .count();
+    let invalid_range = globset::GlobBuilder::new(&strip_native_reversed_ascii_ranges(&validation))
+        .backslash_escape(true)
+        .build()
+        .is_err_and(|error| matches!(error.kind(), globset::ErrorKind::InvalidRange(..)));
+    let skipped = invalid_range
+        || validation
+            .trim_matches(crate::source_input::is_js_trim_char)
+            .is_empty()
+        || validation.starts_with('#')
+        || trailing_slashes % 2 == 1;
+    if !skipped {
+        return Some(normalized);
+    }
+    let negated = normalized.starts_with('!');
+    if negated != allow {
+        return None;
+    }
+    let body = normalized.strip_prefix('!').unwrap_or(&normalized);
+    let (body, suffix) = body
+        .strip_suffix("/**")
+        .map_or((body, ""), |body| (body, "/**"));
+    let body = unescape_permission_glob(body);
+    Some(format!(
+        "{}{}{suffix}",
+        if negated { "!" } else { "" },
+        escape_permission_glob(&body, false)
+    ))
+}
+
+fn unescape_permission_glob(pattern: &str) -> String {
+    let mut chars = pattern.chars().peekable();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && chars.peek().is_some_and(|next| {
+                "\\[]!#()|+^$*?".contains(*next) || crate::source_input::is_js_trim_char(*next)
+            })
+        {
+            out.push(chars.next().expect("peeked character"));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn escape_permission_glob(pattern: &str, escape_stars: bool) -> String {
+    let trimmed = pattern.trim_end_matches(crate::source_input::is_js_trim_char);
+    let mut out = String::new();
+    for (index, ch) in pattern.char_indices() {
+        if "\\[]()|+^$".contains(ch)
+            || escape_stars && ch == '*'
+            || index == 0 && matches!(ch, '!' | '#')
+            || index >= trimmed.len()
+        {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Native `hh` for a POSIX rooted pattern. Only the fixed leading path is
+/// resolved; wildcard components stay in the pattern.
+pub(crate) fn physical_permission_pattern(root: &Path, pattern: &str) -> Option<String> {
+    let rest = pattern.strip_prefix('/')?;
+    let segments = rest.split('/').collect::<Vec<_>>();
+    let count = segments
+        .iter()
+        .take_while(|segment| {
+            if segment.is_empty() {
+                return false;
+            }
+            let mut escaped = false;
+            for ch in segment.chars() {
+                if !escaped && matches!(ch, '*' | '?' | '[') {
+                    return false;
+                }
+                escaped = !escaped && ch == '\\';
+            }
+            true
+        })
+        .count();
+    if count == 0 {
+        return None;
+    }
+    let prefix = segments[..count]
+        .iter()
+        .fold(root.to_path_buf(), |prefix, segment| {
+            prefix.join(unescape_permission_glob(segment))
+        });
+    let resolved = resolve_deepest_existing_ancestor(&prefix)?;
+    if resolved == prefix
+        || resolved.parent() == Some(resolved.as_path())
+        || resolved == Path::new("/")
+    {
+        return None;
+    }
+    let mut twin = escape_permission_glob(resolved.to_str()?, true);
+    if count < segments.len() {
+        twin.push('/');
+        twin.push_str(&segments[count..].join("/"));
+    }
+    Some(twin)
 }
 
 /// `test_rule_pattern` over exact source UTF-16 path/pattern strings. The
@@ -974,7 +1182,8 @@ pub(crate) fn test_rule_pattern_units(
 }
 
 struct SourceGlobMatcher {
-    regex: regex::Regex,
+    /// None is an explicit resource-budget failure, never a syntax failure.
+    regex: Option<regex::Regex>,
     is_whitelist: bool,
     is_only_dir: bool,
 }
@@ -982,19 +1191,41 @@ struct SourceGlobMatcher {
 impl SourceGlobMatcher {
     /// Mirror `Gitignore::matched_path_or_any_parents` for one source glob.
     fn matched_path_or_any_parents(&self, target: &Path) -> Option<bool> {
+        let Some(regex) = &self.regex else {
+            return Some(false);
+        };
         let relative = target.strip_prefix("/").ok()?;
         for (index, path) in relative.ancestors().enumerate() {
             let is_dir = index > 0;
             if (!self.is_only_dir || is_dir)
                 && path
                     .to_str()
-                    .is_some_and(|candidate| self.regex.is_match(candidate))
+                    .is_some_and(|candidate| regex.is_match(&native_ignore_case_fold(candidate)))
             {
                 return Some(self.is_whitelist);
             }
         }
         None
     }
+}
+
+const MAX_SOURCE_GLOB_UNITS: usize = 32_768;
+const MAX_SOURCE_GLOB_REGEX_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SOURCE_GLOB_COMPILED_BYTES: usize = 8 * 1024 * 1024;
+
+fn exhausted_source_glob() -> SourceGlobMatcher {
+    tracing::warn!("permission glob exceeded its compilation budget; retaining restrictions and withholding grants");
+    SourceGlobMatcher {
+        regex: None,
+        is_whitelist: false,
+        is_only_dir: false,
+    }
+}
+
+#[derive(Debug)]
+enum SourceGlobBuildError {
+    Invalid,
+    BudgetExceeded,
 }
 
 fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
@@ -1020,9 +1251,35 @@ fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>
     built
 }
 
+/// One `ignore().add(pattern).ignores(component)` check for Native `mh`'s
+/// cwd-to-glob walk. Preserve source units before matching case-insensitively.
+pub(crate) fn native_ignore_matches_component(pattern: &str, component: &str) -> bool {
+    let pattern = pattern.encode_utf16().collect::<Vec<_>>();
+    let component = component.encode_utf16().collect::<Vec<_>>();
+    let Some(mapped) = crate::source_input::exact_operation_strings(&[&pattern, &component]) else {
+        return false;
+    };
+    cached_source_glob(&mapped[0])
+        .and_then(|matcher| matcher.matched_path_or_any_parents(&Path::new("/").join(&mapped[1])))
+        == Some(false)
+}
+
 fn build_source_glob(pattern: &str) -> Option<SourceGlobMatcher> {
+    if pattern
+        .encode_utf16()
+        .take(MAX_SOURCE_GLOB_UNITS + 1)
+        .count()
+        > MAX_SOURCE_GLOB_UNITS
+    {
+        return Some(exhausted_source_glob());
+    }
     let prepared = source_gitignore_pattern(pattern)?;
-    let glob = match globset::GlobBuilder::new(&prepared.actual)
+    let (actual, classes) = match native_ignore_case_fold_glob(&prepared.actual) {
+        Ok(value) => value,
+        Err(SourceGlobBuildError::BudgetExceeded) => return Some(exhausted_source_glob()),
+        Err(SourceGlobBuildError::Invalid) => return None,
+    };
+    let glob = match globset::GlobBuilder::new(&actual)
         .literal_separator(true)
         .case_insensitive(false)
         .backslash_escape(true)
@@ -1046,11 +1303,16 @@ fn build_source_glob(pattern: &str) -> Option<SourceGlobMatcher> {
         );
         return None;
     };
+    let Some(unicode_regex) = expand_source_glob_classes(&unicode_regex, classes) else {
+        return Some(exhausted_source_glob());
+    };
     let regex = match regex::RegexBuilder::new(&unicode_regex)
         .dot_matches_new_line(true)
+        .size_limit(MAX_SOURCE_GLOB_COMPILED_BYTES)
         .build()
     {
         Ok(regex) => regex,
+        Err(regex::Error::CompiledTooBig(_)) => return Some(exhausted_source_glob()),
         Err(error) => {
             tracing::warn!(
                 pattern = %pattern,
@@ -1061,7 +1323,7 @@ fn build_source_glob(pattern: &str) -> Option<SourceGlobMatcher> {
         }
     };
     Some(SourceGlobMatcher {
-        regex,
+        regex: Some(regex),
         is_whitelist: prepared.is_whitelist,
         is_only_dir: prepared.is_only_dir,
     })
@@ -1199,7 +1461,8 @@ fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::G
         }
     }
     let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
-    if let Err(e) = builder.add_line(None, pattern) {
+    let folded_pattern = native_ignore_case_fold(pattern);
+    if let Err(e) = builder.add_line(None, &folded_pattern) {
         // An unbuildable glob (e.g. an unbalanced char class) matches nothing.
         // That is fail-CLOSED for an allow rule (safe) but fail-OPEN for a deny
         // rule (the deny silently does nothing), and it diverges from npm
@@ -1230,6 +1493,346 @@ fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::G
         }
     }
     Some(compiled)
+}
+
+/// ECMAScript non-Unicode `/i` canonicalization used by bundled node-ignore.
+/// It folds BMP characters one unit at a time and never folds a non-ASCII
+/// character to ASCII; Rust's Unicode `/i` would additionally match ſ and K.
+fn native_ignore_case_fold(value: &str) -> String {
+    value.chars().map(native_ignore_case_fold_char).collect()
+}
+
+fn native_ignore_case_fold_char(ch: char) -> char {
+    let mapped = (0xf0000..=0xfff7f).contains(&(ch as u32));
+    let code = if mapped {
+        ch as u32 - 0xf0000 + 0x80
+    } else {
+        ch as u32
+    };
+    if code > 0xffff {
+        return ch;
+    }
+    let Some(original) = char::from_u32(code) else {
+        return ch;
+    };
+    let mut upper = original.to_uppercase();
+    let first = upper.next().expect("uppercase is nonempty");
+    let folded = if upper.next().is_some() || !original.is_ascii() && first.is_ascii() {
+        original
+    } else {
+        first
+    };
+    if mapped && !folded.is_ascii() {
+        char::from_u32(0xf0000 + folded as u32 - 0x80).expect("mapped BMP unit")
+    } else {
+        folded
+    }
+}
+
+/// Case-fold each member of a class rather than its endpoints: `[Z-a]`
+/// remains a valid range under `/i`. Node-ignore treats leading `!` and `^`
+/// as class literals; globset would otherwise interpret them as negation.
+fn native_ignore_case_fold_glob(
+    pattern: &str,
+) -> Result<(String, Vec<(char, String)>), SourceGlobBuildError> {
+    let chars = strip_native_reversed_ascii_ranges(pattern)
+        .chars()
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut classes = Vec::new();
+    let mut class_markers = std::collections::HashMap::<Vec<char>, char>::new();
+    let mut class_bytes = 0usize;
+    let mut marker_code = 0xe000;
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        if ch == '\\' {
+            out.push(ch);
+            at += 1;
+            if let Some(ch) = chars.get(at) {
+                out.push(native_ignore_case_fold_char(*ch));
+                at += 1;
+            }
+            continue;
+        }
+        if ch != '[' {
+            // Node-ignore treats braces literally; globset supports brace
+            // alternatives, which would otherwise broaden an allow rule.
+            if matches!(ch, '{' | '}') {
+                out.push('\\');
+            }
+            out.push(native_ignore_case_fold_char(ch));
+            at += 1;
+            continue;
+        }
+        let end = (at + 1..chars.len())
+            .find(|index| chars[*index] == ']')
+            .ok_or(SourceGlobBuildError::Invalid)?;
+        if let Some(marker) = class_markers.get(&chars[at + 1..end]) {
+            out.push(*marker);
+            at = end + 1;
+            continue;
+        }
+        let mut members = Vec::<(u32, u32)>::new();
+        let mut mapped_ranges = Vec::new();
+        let mut raw_ranges = Vec::new();
+        let mut index = at + 1;
+        while index < end {
+            if chars[index] == '\\' && index + 1 < end {
+                let folded = native_ignore_case_fold_char(chars[index + 1]) as u32;
+                members.push((folded, folded));
+                index += 2;
+                continue;
+            }
+            if index + 2 < end && chars[index + 1] == '-' {
+                let decode = |ch: char| {
+                    if (0xf0000..=0xfff7f).contains(&(ch as u32)) {
+                        ch as u32 - 0xf0000 + 0x80
+                    } else {
+                        ch as u32
+                    }
+                };
+                let start = decode(chars[index]);
+                let finish = decode(chars[index + 2]);
+                // Native rejects the whole invalid class; dropping only an
+                // empty range would turn `[a--c]` into an allow for `c`.
+                if start > finish {
+                    return Err(SourceGlobBuildError::Invalid);
+                }
+                let ranges = if chars[index] as u32 >= 0xf0000 || chars[index + 2] as u32 >= 0xf0000
+                {
+                    &mut mapped_ranges
+                } else {
+                    &mut raw_ranges
+                };
+                if start <= finish.min(0xffff) {
+                    ranges.push((start, finish.min(0xffff)));
+                }
+                index += 3;
+            } else {
+                let ch = if chars[index] == '\\' && index + 1 < end {
+                    index += 1;
+                    chars[index]
+                } else {
+                    chars[index]
+                };
+                let folded = native_ignore_case_fold_char(ch) as u32;
+                members.push((folded, folded));
+                index += 1;
+            }
+        }
+        // Fold the union, not every spelling of overlapping ranges. This also
+        // bounds work for thousands of wide ranges inside a single class.
+        for (mapped, ranges) in [(false, raw_ranges), (true, mapped_ranges)] {
+            for (start, end) in merge_source_glob_ranges(ranges) {
+                append_folded_bmp_ranges(&mut members, start, end, mapped);
+            }
+        }
+        if members.is_empty() {
+            return Err(SourceGlobBuildError::Invalid);
+        }
+        while char::from_u32(marker_code).is_none_or(|marker| pattern.contains(marker)) {
+            marker_code += 1;
+        }
+        let marker = char::from_u32(marker_code).ok_or(SourceGlobBuildError::Invalid)?;
+        marker_code += 1;
+        out.push(marker);
+        let class = compact_source_glob_class(members);
+        class_bytes = class_bytes.saturating_add(class.len());
+        if class_bytes > MAX_SOURCE_GLOB_REGEX_BYTES {
+            return Err(SourceGlobBuildError::BudgetExceeded);
+        }
+        class_markers.insert(chars[at + 1..end].to_vec(), marker);
+        classes.push((marker, class));
+        at = end + 1;
+    }
+    Ok((out, classes))
+}
+
+/// Consecutive source units with consecutive canonical values need only one
+/// interval. Build the BMP table once, rather than enumerating it per range.
+fn folded_bmp_ranges() -> &'static [(u32, u32, u32)] {
+    static RANGES: std::sync::OnceLock<Vec<(u32, u32, u32)>> = std::sync::OnceLock::new();
+    RANGES.get_or_init(|| {
+        let fold =
+            |unit| char::from_u32(unit).map_or(unit, |ch| native_ignore_case_fold_char(ch) as u32);
+        let mut result = Vec::new();
+        let mut start = 0;
+        let mut first = fold(0);
+        let mut previous = first;
+        for unit in 1..=0xffff {
+            let folded = fold(unit);
+            if folded != previous + 1 {
+                result.push((start, unit - 1, first));
+                start = unit;
+                first = folded;
+            }
+            previous = folded;
+        }
+        result.push((start, 0xffff, first));
+        result
+    })
+}
+
+fn append_folded_bmp_ranges(out: &mut Vec<(u32, u32)>, start: u32, end: u32, mapped: bool) {
+    if start > end {
+        return;
+    }
+    let ranges = folded_bmp_ranges();
+    let first = ranges.partition_point(|(_, to, _)| *to < start);
+    for &(from, to, folded) in &ranges[first..] {
+        if from > end {
+            break;
+        }
+        let a = folded + start.max(from) - from;
+        let b = folded + end.min(to) - from;
+        if mapped {
+            if a < 0x80 {
+                out.push((a, b.min(0x7f)));
+            }
+            if b >= 0x80 {
+                out.push((0xf0000 + a.max(0x80) - 0x80, 0xf0000 + b - 0x80));
+            }
+        } else if a <= 0xdfff && b >= 0xd800 {
+            if a < 0xd800 {
+                out.push((a, b.min(0xd7ff)));
+            }
+            out.push((0xfffd, 0xfffd));
+            if b > 0xdfff {
+                out.push((a.max(0xe000), b));
+            }
+        } else {
+            out.push((a, b));
+        }
+    }
+}
+
+fn merge_source_glob_ranges(mut members: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    members.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in members {
+        if let Some(last) = merged
+            .last_mut()
+            .filter(|last| start <= last.1.saturating_add(1))
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+fn compact_source_glob_class(members: Vec<(u32, u32)>) -> String {
+    let mut class = String::from("[");
+    for (start, end) in merge_source_glob_ranges(members) {
+        class.push_str(&format!(r"\x{{{start:x}}}"));
+        if end != start {
+            class.push_str(&format!(r"-\x{{{end:x}}}"));
+        }
+    }
+    class.push(']');
+    class
+}
+
+/// Replace markers in one pass. Respect escaped backslashes, and bound the
+/// expanded output before allocating an arbitrarily large regex string.
+fn expand_source_glob_classes(regex: &str, classes: Vec<(char, String)>) -> Option<String> {
+    let classes = classes
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut out = String::new();
+    let mut chars = regex.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let mut escape = String::from("\\");
+            if let Some(next) = chars.next() {
+                escape.push(next);
+                if next == 'x' && chars.peek() == Some(&'{') {
+                    escape.push(chars.next()?);
+                    for next in chars.by_ref() {
+                        escape.push(next);
+                        if next == '}' {
+                            break;
+                        }
+                    }
+                    if let Some(marker) = escape
+                        .strip_prefix(r"\x{")
+                        .and_then(|s| s.strip_suffix('}'))
+                        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                        .and_then(char::from_u32)
+                    {
+                        if let Some(class) = classes.get(&marker) {
+                            if out.len().saturating_add(class.len()) > MAX_SOURCE_GLOB_REGEX_BYTES {
+                                return None;
+                            }
+                            out.push_str(class);
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.push_str(&escape);
+        } else if let Some(class) = classes.get(&ch) {
+            if out.len().saturating_add(class.len()) > MAX_SOURCE_GLOB_REGEX_BYTES {
+                return None;
+            }
+            out.push_str(class);
+        } else {
+            out.push(ch);
+        }
+        if out.len() > MAX_SOURCE_GLOB_REGEX_BYTES {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Node-ignore's `Jd` removes reversed `[0-z]-[0-z]` ranges before compiling
+/// a class. Other invalid ranges (e.g. `a--`) still invalidate the expression.
+fn strip_native_reversed_ascii_ranges(pattern: &str) -> String {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] == '\\' && at + 1 < chars.len() {
+            out.extend(&chars[at..at + 2]);
+            at += 2;
+            continue;
+        }
+        let end = if chars[at] == '[' {
+            (at + 1..chars.len())
+                .find(|index| matches!(chars[*index], ']' | '/'))
+                .filter(|index| chars[*index] == ']')
+        } else {
+            None
+        };
+        let Some(end) = end else {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        };
+        out.push('[');
+        at += 1;
+        while at < end {
+            if at + 2 < end
+                && chars[at + 1] == '-'
+                && ('0'..='z').contains(&chars[at])
+                && ('0'..='z').contains(&chars[at + 2])
+            {
+                if chars[at] <= chars[at + 2] {
+                    out.extend(&chars[at..at + 3]);
+                }
+                at += 3;
+            } else {
+                out.push(chars[at]);
+                at += 1;
+            }
+        }
+        out.push(']');
+        at = end + 1;
+    }
+    out
 }
 
 /// Normalize a path string for case-insensitive comparison — port of
@@ -1376,6 +1979,92 @@ pub fn path_in_allowed_working_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_unicode_classes_stay_compact_and_match_through_the_public_path() {
+        let pattern = "[\u{0080}-\u{ffff}]".repeat(64);
+        let (actual, classes) = native_ignore_case_fold_glob(&pattern).unwrap();
+        assert_eq!(classes.len(), 1, "repeated classes share one expansion");
+        assert!(
+            classes[0].1.len() < 32_768,
+            "folded intervals must stay compact"
+        );
+        assert_eq!(actual.chars().count(), 64);
+        let overlapping = format!(
+            "[{}]",
+            (0x80..0x880)
+                .map(|start| format!("{}-\u{ffff}", char::from_u32(start).unwrap()))
+                .collect::<String>()
+        );
+        let (_, overlapping_classes) = native_ignore_case_fold_glob(&overlapping).unwrap();
+        assert_eq!(
+            overlapping_classes[0].1, classes[0].1,
+            "overlapping wide ranges must have the same bounded representation as their union"
+        );
+        let units = pattern.encode_utf16().collect::<Vec<_>>();
+        let mapped = crate::source_input::exact_operation_strings(&[&units]).unwrap();
+        assert!(
+            build_source_glob(&mapped[0]).unwrap().regex.is_some(),
+            "a short legal pattern must not exhaust the budget"
+        );
+        assert_eq!(
+            test_rule_pattern(
+                &format!("/proj/{}", "Ā".repeat(64)),
+                &pattern,
+                PermissionRuleSource::Session,
+                crate::rule::PermissionBehavior::Deny,
+                &roots()
+            ),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern(
+                &format!("/proj/{}a", "Ā".repeat(63)),
+                &pattern,
+                PermissionRuleSource::Session,
+                crate::rule::PermissionBehavior::Deny,
+                &roots()
+            ),
+            RulePatternMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn exhausted_glob_budget_withholds_grants_and_retains_restrictions() {
+        let pattern = "?".repeat(MAX_SOURCE_GLOB_UNITS + 1);
+        for (behavior, expected) in [
+            (
+                crate::rule::PermissionBehavior::Allow,
+                RulePatternMatch::NoMatch,
+            ),
+            (
+                crate::rule::PermissionBehavior::Ask,
+                RulePatternMatch::Match,
+            ),
+            (
+                crate::rule::PermissionBehavior::Deny,
+                RulePatternMatch::Match,
+            ),
+        ] {
+            assert_eq!(
+                test_rule_pattern(
+                    "/proj/file",
+                    &pattern,
+                    PermissionRuleSource::Session,
+                    behavior,
+                    &roots()
+                ),
+                expected
+            );
+        }
+        let oversized = vec![('\u{e000}', "x".repeat(MAX_SOURCE_GLOB_REGEX_BYTES / 2 + 1))];
+        assert!(expand_source_glob_classes("\u{e000}\u{e000}", oversized).is_none());
+        let literal = r"\\x{E000}";
+        assert_eq!(
+            expand_source_glob_classes(literal, vec![('\u{e000}', "[A-Z]".into())]).unwrap(),
+            literal
+        );
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     macro_rules! source_json {
@@ -1483,8 +2172,8 @@ mod tests {
         let lower_case = "/proj/src/a.txt".encode_utf16().collect::<Vec<_>>();
         assert_eq!(
             test_rule_pattern_units(&lower_case, &literal, source, behavior, &roots()),
-            RulePatternMatch::NoMatch,
-            "path globs stay case-sensitive"
+            RulePatternMatch::Match,
+            "Native node-ignore uses case-insensitive glob matching"
         );
     }
 
@@ -1604,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn source_path_glob_negated_class_uses_mapped_unit_order() {
+    fn source_path_glob_bang_class_is_literal_and_preserves_mapped_order() {
         let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
         let behavior = crate::rule::PermissionBehavior::Deny;
         let mut pattern = "src/[!A-".encode_utf16().collect::<Vec<_>>();
@@ -1614,11 +2303,11 @@ mod tests {
         let outside = path_units("/proj/src/", &[0x0081], ".txt");
         assert_eq!(
             test_rule_pattern_units(&inside, &pattern, source, behavior, &roots()),
-            RulePatternMatch::NoMatch
+            RulePatternMatch::Match
         );
         assert_eq!(
             test_rule_pattern_units(&outside, &pattern, source, behavior, &roots()),
-            RulePatternMatch::Match
+            RulePatternMatch::NoMatch
         );
     }
 
@@ -1630,7 +2319,10 @@ mod tests {
             .and_then(|matcher| matcher.matched_path_or_any_parents(&target));
         let gitignore_match = cached_gitignore(pattern).map(|matcher| {
             matcher
-                .matched_path_or_any_parents(&target, false)
+                .matched_path_or_any_parents(
+                    Path::new(&native_ignore_case_fold(&target.to_string_lossy())),
+                    false,
+                )
                 .is_ignore()
         });
         assert_eq!(source_match, Some(false));

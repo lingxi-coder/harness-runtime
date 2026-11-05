@@ -1,8 +1,8 @@
 //! `PermissionPolicy::authorize` — rule-driven decision + mode fallback.
 //!
-//! Classifiers and shadow detection are wired in Plan 03 (Tools System).
-//! M1.3 evaluates rules in priority order (deny first, then allow) and
-//! falls back to the active mode for unmatched calls.
+//! Deny and ask rules precede grants. Tool-local safety checks retain their
+//! provenance, and unmatched calls continue through the active mode and the
+//! live classifier/prompt gate.
 
 use crate::auto_edit_safety::{check_path_safety_for_auto_edit, AutoEditSafety};
 use crate::defaults_per_tool::tool_default;
@@ -585,11 +585,18 @@ pub struct PermissionPolicy {
     /// resolves this from the launch mode/flag. Subject to the same
     /// [`Self::bypass_killswitch_active`] override as `BypassPermissions`.
     pub bypass_permissions_available: bool,
+    /// Remote server-policy asks may be exempted in bypass mode. This never
+    /// exempts organization ceilings or explicit deny rules.
+    pub remote_mcp_server_policy_bypass_exempt: bool,
     /// Filesystem roots for per-tool file-path CONTENT matching (phase 3a).
     /// `None` preserves the phase-2 tool-wide behavior (content ignored,
     /// matched by exact tool name); production sets this via [`Self::with_roots`]
     /// so `Edit(src/**)` / `Read(./secrets/**)` match the input path.
     pub roots: Option<FsRoots>,
+    /// Physical names already reached by non-allow rooted patterns. Native
+    /// keeps these for the session, so retargeting a symlink cannot revoke a
+    /// restriction on its previous landing. Live overlays share this cache.
+    physical_permission_patterns: std::sync::Arc<Mutex<HashMap<(PathBuf, String), Vec<String>>>>,
     /// Allow rules stripped out on entry to [`PermissionMode::Auto`] because
     /// they would bypass the auto-mode classifier (`Bash(python:*)`, `Agent(*)`,
     /// `PowerShell(iex:*)`, …). Stashed here by
@@ -824,7 +831,9 @@ impl PermissionPolicy {
             restricted: false,
             auto_mode_disabled: false,
             bypass_permissions_available: false,
+            remote_mcp_server_policy_bypass_exempt: false,
             roots: None,
+            physical_permission_patterns: Default::default(),
             stripped_dangerous: Vec::new(),
             stripped_positions: Vec::new(),
             additional_working_dirs: AdditionalWorkingDirs::new(),
@@ -1460,9 +1469,11 @@ impl PermissionPolicy {
             true,
             &mut ShellDecisionOrigin::Preliminary,
             phase,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authorize_with_mode_inner(
         &self,
         tool_name: &str,
@@ -1471,6 +1482,7 @@ impl PermissionPolicy {
         attach_shell_reason_tree: bool,
         origin: &mut ShellDecisionOrigin,
         phase: PermissionCheckPhase,
+        tool_local_only: bool,
     ) -> PermissionResult {
         *origin = ShellDecisionOrigin::Preliminary;
         // SECURITY (Monitor→Bash): the oracle's Monitor `checkPermissions` is
@@ -1537,10 +1549,18 @@ impl PermissionPolicy {
                     result,
                     origin,
                     phase,
+                    tool_local_only,
                 )
             }
         };
-        let result = self.authorize_inner(tool_name, input, mode, &shell_analysis, origin);
+        let result = self.authorize_inner(
+            tool_name,
+            input,
+            mode,
+            &shell_analysis,
+            origin,
+            tool_local_only,
+        );
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
         // ALLOW for a shell command containing `&` is downgraded to a forced ask
@@ -1735,10 +1755,11 @@ impl PermissionPolicy {
                 .home
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned());
-            if crate::dangerous_removal::check_dangerous_removal(
+            if crate::dangerous_removal::check_dangerous_removal_with_working_dirs(
                 command,
                 &roots.cwd,
                 home.as_deref(),
+                &self.all_working_dirs(roots),
             )
             .is_some()
             {
@@ -1794,6 +1815,7 @@ impl PermissionPolicy {
                 .is_none()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_shell_subcommand_results(
         &self,
         tool_name: &str,
@@ -1803,6 +1825,7 @@ impl PermissionPolicy {
         result: PermissionResult,
         origin: ShellDecisionOrigin,
         phase: PermissionCheckPhase,
+        tool_local_only: bool,
     ) -> PermissionResult {
         if origin == ShellDecisionOrigin::WholeCommand || !matches!(tool_name, "Bash" | "Shell") {
             return result;
@@ -1855,6 +1878,7 @@ impl PermissionPolicy {
                 allow_nested_tree,
                 &mut child_origin,
                 phase,
+                tool_local_only,
             );
             if result_behavior(&child) != PermissionBehavior::Allow {
                 non_allow_count += 1;
@@ -2142,6 +2166,7 @@ impl PermissionPolicy {
         );
         policy.mode = mode;
         policy.denial_tracking = Mutex::new(DenialTrackingState::default());
+        policy.physical_permission_patterns = Default::default();
         policy
     }
 
@@ -2207,7 +2232,9 @@ impl PermissionPolicy {
             restricted: self.restricted,
             auto_mode_disabled: self.auto_mode_disabled,
             bypass_permissions_available: self.bypass_permissions_available,
+            remote_mcp_server_policy_bypass_exempt: self.remote_mcp_server_policy_bypass_exempt,
             roots: self.roots.clone(),
+            physical_permission_patterns: self.physical_permission_patterns.clone(),
             stripped_dangerous: self.stripped_dangerous.clone(),
             stripped_positions: self.stripped_positions.clone(),
             additional_working_dirs,
@@ -2239,7 +2266,7 @@ impl PermissionPolicy {
     // tipped it one line past the pedantic 100-line cap). Each layer is already
     // a thin call into a dedicated helper; further splitting the ordered walk
     // would obscure the 1:1 TS precedence it documents.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn authorize_inner(
         &self,
         tool_name: &str,
@@ -2247,6 +2274,7 @@ impl PermissionPolicy {
         mode: PermissionMode,
         shell_analysis: &ShellCommandAnalysis,
         origin: &mut ShellDecisionOrigin,
+        tool_local_only: bool,
     ) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
         #[cfg(feature = "bash-ast")]
@@ -2333,9 +2361,47 @@ impl PermissionPolicy {
             false,
             shell_ast_rule_candidates,
         ) {
-            if !self.shell_sandbox_auto_allows(tool_name, input) {
+            let remote_policy_bypass = self.remote_mcp_server_policy_bypass_exempt
+                && mode == PermissionMode::BypassPermissions
+                && rule.source == PermissionRuleSource::McpServerPolicy;
+            if !tool_local_only
+                && !remote_policy_bypass
+                && !self.shell_sandbox_auto_allows(tool_name, input)
+            {
                 *origin = ShellDecisionOrigin::WholeCommand;
-                return ask_with_rule(rule, tool_name);
+                // 2.1.318 `Ybn`: an ask rule still runs the tool's check.
+                // Its deny wins, and its richer ask keeps the rule separately.
+                // Whole-tool grants and bypass belong to the outer resolver
+                // and cannot erase a tool-local objection during this probe.
+                let mut local_origin = ShellDecisionOrigin::Preliminary;
+                let checked = self.authorize_with_mode_inner(
+                    tool_name,
+                    input,
+                    mode,
+                    true,
+                    &mut local_origin,
+                    PermissionCheckPhase::ToolCheck,
+                    true,
+                );
+                return match checked {
+                    denied @ PermissionResult::Deny { .. } => denied,
+                    PermissionResult::Ask {
+                        reason,
+                        prompt,
+                        pending_classifier_check,
+                        mut metadata,
+                    } if local_origin != ShellDecisionOrigin::ModeFallback => {
+                        metadata.permission_suggestions = None;
+                        metadata.matched_ask_rule = Some(rule.clone());
+                        PermissionResult::Ask {
+                            reason,
+                            prompt,
+                            pending_classifier_check,
+                            metadata,
+                        }
+                    }
+                    _ => ask_with_rule(rule, tool_name),
+                };
             }
         }
         // 1c'. `bashCommandClamp` (NEW in 2.1.238). The clamp denials are the
@@ -2442,12 +2508,13 @@ impl PermissionPolicy {
         // rule override a type-`other` guard ask (`nes`), and (3) preserves the
         // dangerous-removal SafetyCheck asks against BOTH. Guard DENYs pass
         // through unchanged.
-        let bypass = self.bypass_active(mode);
+        let bypass = !tool_local_only && self.bypass_active(mode);
+        let guard_sources: &[PermissionRuleSource] = if tool_local_only { &[] } else { &sources };
         #[cfg(feature = "bash-ast")]
         if let Some(ask) =
             Self::shell_dangerous_rm_variable_ask(tool_name, input, bash_ast.as_ref())
         {
-            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
+            return self.resolve_guard_ask(ask, bypass, mode, guard_sources, tool_name);
         }
         // 1f. CATASTROPHIC REMOVAL FORCED-ASK. This must run before every
         // allow-like shortcut, including sandbox auto-allow and exact allow:
@@ -2461,17 +2528,20 @@ impl PermissionPolicy {
                         .home
                         .as_deref()
                         .map(|p| p.to_string_lossy().into_owned());
-                    if let Some(danger) = crate::dangerous_removal::check_dangerous_removal(
-                        command,
-                        &roots.cwd,
-                        home.as_deref(),
-                    ) {
+                    if let Some(danger) =
+                        crate::dangerous_removal::check_dangerous_removal_with_working_dirs(
+                            command,
+                            &roots.cwd,
+                            home.as_deref(),
+                            &self.all_working_dirs(roots),
+                        )
+                    {
                         *origin = ShellDecisionOrigin::WholeCommand;
                         return self.resolve_guard_ask(
                             ask_dangerous_removal(tool_name, danger),
                             bypass,
                             mode,
-                            &sources,
+                            guard_sources,
                             tool_name,
                         );
                     }
@@ -2516,7 +2586,13 @@ impl PermissionPolicy {
             if tool_name == "PowerShell" {
                 if let Some(command) = shell_command::command_from_input(input) {
                     if let Some(result) = self.check_powershell_containment(command, roots, mode) {
-                        return self.resolve_guard_ask(result, bypass, mode, &sources, tool_name);
+                        return self.resolve_guard_ask(
+                            result,
+                            bypass,
+                            mode,
+                            guard_sources,
+                            tool_name,
+                        );
                     }
                 }
             } else if shell_command::is_shell_tool(tool_name) {
@@ -2550,7 +2626,7 @@ impl PermissionPolicy {
                                 ask_path_constraint(tool_name, ask),
                                 bypass,
                                 mode,
-                                &sources,
+                                guard_sources,
                                 tool_name,
                             );
                         }
@@ -2592,7 +2668,7 @@ impl PermissionPolicy {
                             ask_path_constraint(tool_name, ask),
                             bypass,
                             mode,
-                            &sources,
+                            guard_sources,
                             tool_name,
                         );
                     }
@@ -2627,7 +2703,7 @@ impl PermissionPolicy {
                             ask_path_constraint(tool_name, ask),
                             bypass,
                             mode,
-                            &sources,
+                            guard_sources,
                             tool_name,
                         );
                     }
@@ -2693,13 +2769,14 @@ impl PermissionPolicy {
             bash_ast.as_ref(),
         ) {
             *origin = ShellDecisionOrigin::WholeCommand;
-            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
+            return self.resolve_guard_ask(ask, bypass, mode, guard_sources, tool_name);
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
         //    so they take a dedicated path rather than the per-rule walk.
         if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
-            if let Some(rule) = self.shell_allow(tool_name, input, &sources, mode) {
+            if let Some(rule) = self.shell_allow(tool_name, input, &sources, mode, tool_local_only)
+            {
                 if rule.value.rule_content.is_none() {
                     *origin = ShellDecisionOrigin::WholeCommand;
                 }
@@ -2709,7 +2786,9 @@ impl PermissionPolicy {
             for src in &sources {
                 if let Some(rules) = self.allow_rules.get(src) {
                     if let Some(rule) = decide_in_source(rules, |r| {
-                        if self.rule_is_available_in_mode(r, mode) {
+                        if self.rule_is_available_in_mode(r, mode)
+                            && (!tool_local_only || r.value.rule_content.is_some())
+                        {
                             self.rule_match_kind(r, tool_name, input)
                         } else {
                             RulePatternMatch::NoMatch
@@ -2735,7 +2814,7 @@ impl PermissionPolicy {
         //     containment check; without roots the sed layer is skipped
         //     (consistent with the other shell guards).
         if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input, mode) {
-            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
+            return self.resolve_guard_ask(ask, bypass, mode, guard_sources, tool_name);
         }
         // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
         //     step 3, `filesystem.ts:1360-1375`). In `AcceptEdits` mode an EDITOR
@@ -2890,14 +2969,18 @@ impl PermissionPolicy {
         // byte-for-byte would REOPEN the plan bypass on a session whose
         // administrator disabled bypass mode. A strictly-narrowing divergence,
         // recorded rather than removed.
-        if mode == PermissionMode::Plan
+        if !tool_local_only
+            && mode == PermissionMode::Plan
             && self.bypass_permissions_available
             && self.interactive_session
             && !self.bypass_killswitch_active
         {
             return allow_with_mode(PermissionMode::Plan);
         }
-        if mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
+        if mode == PermissionMode::Plan
+            && (!tool_local_only || file_tool_kind(tool_name) == FileToolKind::Editor)
+            && !crate::mode_policy::is_plan_safe_tool(tool_name)
+        {
             // 206 splits the plan-mode ask message: a file-WRITE tool (Editor
             // kind) surfaces `Cannot write to ${path} while in plan mode.` (the
             // write-permission path, `o` = the resolved target), any other
@@ -2917,7 +3000,9 @@ impl PermissionPolicy {
         //    [`Self::authorize`], so read-only tools are not over-denied.
         *origin = ShellDecisionOrigin::ModeFallback;
         match mode {
-            PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
+            PermissionMode::BypassPermissions
+                if !tool_local_only && !self.bypass_killswitch_active =>
+            {
                 allow_with_mode(PermissionMode::BypassPermissions)
             }
             _ => ask_with_mode(mode, tool_name),
@@ -2937,9 +3022,8 @@ impl PermissionPolicy {
     /// re-stripping to avoid stacking the stash. (The mode-transition driver
     /// [`Self::set_mode`] guarantees a strip is always paired with a restore.)
     ///
-    /// This does NOT change [`Self::authorize`] behavior on its own: Auto mode's
-    /// classifier is unwired externally (Batch 6 stub), so stripping is
-    /// behavior-neutral until a future wiring batch consumes Auto mode.
+    /// This changes which rules can grant the call before the live gate asks
+    /// its classifier; the classifier itself remains a gate/host concern.
     pub fn strip_dangerous_for_auto(&mut self) {
         for (&source, rules) in &mut self.allow_rules {
             // Record each dangerous rule's ORIGINAL index within this bucket, then
@@ -3190,7 +3274,7 @@ impl PermissionPolicy {
         // The polarity is carried OUT of this function, not collapsed here: a
         // `!`-negated rule cancels an earlier match from the same settings
         // source, which only `decide_in_source` can see.
-        crate::filesystem::test_rule_pattern_units(
+        self.test_file_rule_pattern_units(
             &path_units,
             &pattern_units,
             rule.source,
@@ -3413,6 +3497,63 @@ impl PermissionPolicy {
         false
     }
 
+    /// Update Native's session-scoped `physicalTwinsByPattern` history.
+    pub(crate) fn historical_permission_patterns(&self, root: &Path, pattern: &str) -> Vec<String> {
+        let current = crate::filesystem::physical_permission_pattern(root, pattern);
+        let mut cache = self
+            .physical_permission_patterns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let twins = cache
+            .entry((root.to_path_buf(), pattern.to_owned()))
+            .or_default();
+        if let Some(current) = current {
+            if !twins.contains(&current) {
+                twins.push(current);
+            }
+        }
+        twins.clone()
+    }
+
+    fn test_file_rule_pattern_units(
+        &self,
+        path: &[u16],
+        pattern: &[u16],
+        source: PermissionRuleSource,
+        behavior: PermissionBehavior,
+        roots: &FsRoots,
+    ) -> RulePatternMatch {
+        let twins = if behavior == PermissionBehavior::Allow {
+            Vec::new()
+        } else if let Ok(pattern) = String::from_utf16(pattern) {
+            let (pattern, root) = crate::filesystem::pattern_with_root(&pattern, source, roots);
+            match (
+                crate::filesystem::prepare_permission_pattern(&pattern, behavior),
+                root,
+            ) {
+                (Some(pattern), Some(root)) => self.historical_permission_patterns(&root, &pattern),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let direct =
+            crate::filesystem::test_rule_pattern_units(path, pattern, source, behavior, roots);
+        if direct != RulePatternMatch::NoMatch {
+            return direct;
+        }
+        twins
+            .into_iter()
+            .find_map(|twin| {
+                let twin = format!("/{twin}").encode_utf16().collect::<Vec<_>>();
+                let matched = crate::filesystem::test_rule_pattern_units(
+                    path, &twin, source, behavior, roots,
+                );
+                (matched != RulePatternMatch::NoMatch).then_some(matched)
+            })
+            .unwrap_or(RulePatternMatch::NoMatch)
+    }
+
     /// Match Read-deny content rules against Native's ordered path spellings:
     /// the supplied lexical path first, then symlink hops and the final landing
     /// path. The path-form loop is outermost because Native completes the full
@@ -3453,7 +3594,7 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content_units() else {
                         return RulePatternMatch::NoMatch;
                     };
-                    crate::filesystem::test_rule_pattern_units(
+                    self.test_file_rule_pattern_units(
                         &raw_path_units,
                         &pattern,
                         rule.source,
@@ -3485,7 +3626,7 @@ impl PermissionPolicy {
                     let Some(spelling) = spelling.to_str() else {
                         return RulePatternMatch::NoMatch;
                     };
-                    crate::filesystem::test_rule_pattern_units(
+                    self.test_file_rule_pattern_units(
                         &spelling.encode_utf16().collect::<Vec<_>>(),
                         &pattern,
                         rule.source,
@@ -3549,12 +3690,14 @@ impl PermissionPolicy {
         input: &Utf16JsonProjection,
         sources: &[PermissionRuleSource],
         mode: PermissionMode,
+        tool_local_only: bool,
     ) -> Option<&PermissionRule> {
         // 1. Tool-wide allow → allow everything.
         for src in sources {
             if let Some(rules) = self.allow_rules.get(src) {
                 if let Some(rule) = rules.iter().find(|r| {
-                    self.rule_is_available_in_mode(r, mode)
+                    !tool_local_only
+                        && self.rule_is_available_in_mode(r, mode)
                         && r.value.tool_name == tool_name
                         && r.value.rule_content.is_none()
                 }) {

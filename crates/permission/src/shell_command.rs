@@ -267,6 +267,24 @@ pub(crate) fn is_safe_env_var(name: &str) -> bool {
     SAFE_ENV_VARS.contains(&name)
 }
 
+/// Native 2.1.318 `PO` with the default (not pre-accepted) value check. Safe
+/// environment names are insufficient when their values can redirect a
+/// command to a filesystem path or contain command-substitution output.
+pub(crate) fn is_safe_env_assignment(name: &str, value: &str) -> bool {
+    if !is_safe_env_var(name) || value.contains("__CMDSUB_OUTPUT__") {
+        return false;
+    }
+    static PATH_VALUE: OnceLock<Regex> = OnceLock::new();
+    let path_value = PATH_VALUE.get_or_init(|| {
+        Regex::new(r"^[.~]*[/\\]|[/\\][/\\]|:[/\\.]|(?:^|[/\\])\.\.(?:[/\\]|$)").unwrap()
+    });
+    let unquoted = value.replace(['\'', '"'], "");
+    let without_placeholders = unquoted
+        .replace("__CMDSUB_OUTPUT__", "")
+        .replace("__TRACKED_VAR__", "");
+    !path_value.is_match(&unquoted) && !path_value.is_match(&without_placeholders)
+}
+
 /// claude-code `stripSafeWrappers` (bashPermissions.ts:524-615). Two-phase
 /// fixed-point: Phase 1 strips leading SAFE_ENV_VARS assignments + comment
 /// lines; Phase 2 strips wrapper commands (`timeout` with GNU flags, `time`,
@@ -299,7 +317,7 @@ pub fn strip_safe_wrappers(command: &str) -> String {
         stripped = strip_comment_lines(&stripped);
         if let Some(c) = env_re.captures(&stripped) {
             let name = c.get(1).unwrap().as_str();
-            if SAFE_ENV_VARS.contains(&name) {
+            if is_safe_env_assignment(name, c.get(2).unwrap().as_str()) {
                 let end = c.get(0).unwrap().end();
                 stripped = stripped[end..].to_string();
             }

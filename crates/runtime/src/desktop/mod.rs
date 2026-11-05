@@ -4601,6 +4601,16 @@ async fn build_agent_mcp_tool_set(
             dtos.len()
         );
         for dto in &dtos {
+            let organization_ceiling = tool_mcp::mcp_tool::configured_organization_max_permission(
+                &entry_config,
+                &dto.tool_name,
+            );
+            // Match the shared MCP builder: an organization-blocked tool is
+            // absent from the agent's model catalog; local deny rules remain
+            // invocation-time decisions.
+            if organization_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Deny) {
+                continue;
+            }
             let tool = tool_mcp::MCPTool::new_for_tool(
                 mcp_tool_ctx.clone(),
                 dto.full_name.clone(),
@@ -4619,11 +4629,7 @@ async fn build_agent_mcp_tool_set(
             } else {
                 tool
             };
-            let tool = if let Some(ceiling) =
-                tool_mcp::mcp_tool::configured_organization_max_permission(
-                    &entry_config,
-                    &dto.tool_name,
-                ) {
+            let tool = if let Some(ceiling) = organization_ceiling {
                 tool.with_organization_max_permission(ceiling)
             } else {
                 tool

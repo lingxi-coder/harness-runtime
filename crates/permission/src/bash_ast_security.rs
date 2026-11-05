@@ -3314,9 +3314,17 @@ fn parse_for_security_internal(
     // TS `parseForSecurity`: `root === null => parse-unavailable`. Over-length /
     // unparseable → `parse_raw` returns `None` → `ParseUnavailable` (the caller
     // keeps the legacy battery), exactly like TS — NOT routed to `TooComplex`.
-    let tree = match crate::bash_tree_sitter::parse_raw(cmd) {
-        Some(t) => t,
-        None => return (ParseForSecurityResult::ParseUnavailable, None),
+    let tree = match crate::bash_tree_sitter::parse_raw_with_budget(cmd) {
+        Ok(Some(t)) => t,
+        Ok(None) => return (ParseForSecurityResult::ParseUnavailable, None),
+        Err(_) => {
+            return (
+                ParseForSecurityResult::TooComplex {
+                    reason: "Parser aborted (timeout, resource limit, or over-length)".to_owned(),
+                },
+                None,
+            )
+        }
     };
     // TS: `const trimmed = cmd.trim(); if (trimmed === '') return simple[]`.
     if cmd.trim().is_empty() {
@@ -3327,12 +3335,6 @@ fn parse_for_security_internal(
             None,
         );
     }
-    // DEFER (PARSE_ABORTED): TS fail-CLOSES (`TooComplex`, nodeType `PARSE_ABORT`,
-    // reason "Parser aborted (timeout or resource limit) — possible adversarial
-    // input") when the parse hits the node/time budget. tree-sitter-bash 0.25.1
-    // here has no budget (see `bash_tree_sitter::parse_raw`), so that branch is
-    // UNREACHABLE today; wire it only if a parse-timeout API is added — and use
-    // the real 2.1.195 binary string then, which is NEWER than the TS source.
     let parsed = walk_program(tree.root_node(), cmd.as_bytes());
     if matches!(
         &parsed,

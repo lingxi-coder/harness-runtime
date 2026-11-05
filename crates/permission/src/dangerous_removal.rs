@@ -21,7 +21,7 @@
 //! quote-aware token splitter for each subcommand, with `filterOutFlags`'
 //! POSIX `--` end-of-options handling (`pathValidation.ts:126-139`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Match TS `WINDOWS_DRIVE_ROOT_REGEX = /^[A-Za-z]:\/?$/` against a
 /// forward-slash-normalized path (e.g. `C:` or `C:/`).
@@ -428,13 +428,27 @@ pub fn check_dangerous_removal(
     cwd: &Path,
     home: Option<&str>,
 ) -> Option<DangerousRemoval> {
-    check_dangerous_removal_inner(command, cwd, home, 0)
+    check_dangerous_removal_with_working_dirs(command, cwd, home, &[])
+}
+
+/// Native 2.1.318 `$K` protects every session working directory when a removal
+/// target's trailing glob is stripped. Plain targets retain the narrower cwd
+/// check; an additional directory alone does not make a bare removal critical.
+#[must_use]
+pub fn check_dangerous_removal_with_working_dirs(
+    command: &str,
+    cwd: &Path,
+    home: Option<&str>,
+    working_dirs: &[PathBuf],
+) -> Option<DangerousRemoval> {
+    check_dangerous_removal_inner(command, cwd, home, working_dirs, 0)
 }
 
 fn check_dangerous_removal_inner(
     command: &str,
     cwd: &Path,
     home: Option<&str>,
+    working_dirs: &[PathBuf],
     depth: usize,
 ) -> Option<DangerousRemoval> {
     if depth > 8 {
@@ -442,7 +456,8 @@ fn check_dangerous_removal_inner(
     }
 
     for inner in active_command_substitutions(command) {
-        if let Some(hit) = check_dangerous_removal_inner(&inner, cwd, home, depth + 1) {
+        if let Some(hit) = check_dangerous_removal_inner(&inner, cwd, home, working_dirs, depth + 1)
+        {
             return Some(hit);
         }
     }
@@ -463,23 +478,8 @@ fn check_dangerous_removal_inner(
             // tilde-expanded target — the binary's `x0n` operates on `d` literal.
             let d = strip_surrounding_quotes(path);
             // The faithful per-target `x0n` branch evaluation (binary @199202560).
-            if let Some(hit) = evaluate_removal_target(cmd_name, d, rest, cwd, home) {
+            if let Some(hit) = evaluate_removal_target(cmd_name, d, rest, cwd, home, working_dirs) {
                 return Some(hit);
-            }
-            // ── LingXi `~` SAFETY SUPERSET (the ONE deliberate divergence) ──
-            // `x0n` does NOT expand `~`, so `rm -rf ~` resolves to `<cwd>/~` (a
-            // literal subdir) and is auto-allowed. A real shell expands `~` to
-            // `$HOME` and deletes it. We additionally run the critical predicate
-            // on the tilde-expanded form, so `rm -rf ~` (and any `~`-target that
-            // resolves to a dangerous path the x0n branches above did not already
-            // flag) still ASKS. This runs LAST so the x0n branches keep their
-            // exact messages for the cases they DO cover (e.g. `~/*` → branch 2).
-            let expanded = expand_tilde(d, home);
-            if expanded != d {
-                let abs = resolve_against_cwd(&expanded, cwd);
-                if is_dangerous_removal_path(&abs, home) {
-                    return Some(critical_removal(cmd_name, &abs));
-                }
             }
         }
     }
@@ -725,8 +725,11 @@ fn evaluate_removal_target(
     args: &[String],
     cwd: &Path,
     home: Option<&str>,
+    working_dirs: &[PathBuf],
 ) -> Option<DangerousRemoval> {
-    // p = isAbsolute(d) ? d : resolve(cwd, d)  (lexical join — see resolve_against_cwd).
+    // Native 2.1.318 `$K` expands `~` with `wp` before resolving the target.
+    let expanded = expand_tilde(d, home);
+    let d = expanded.as_str();
     let p = resolve_against_cwd(d, cwd);
     // m = p with trailing glob runs stripped iteratively + normalized
     // (TS `for(…) g = m.replace(/([\\/]\*+)+[\\/]*$/, "") || "/"`).
@@ -778,12 +781,51 @@ fn evaluate_removal_target(
     // ── Branch 3: critical system dir (Stt) / workspace (R0). ──
     // Gate: no globs stripped, OR the cwd-relative stripped path has no glob char.
     if !f || !has_glob_char(&a) {
-        // h = [m] (+ the symlink-resolved m in TS; LingXi has no symlink resolve).
-        if is_dangerous_removal_path(&m, home) {
-            return Some(critical_removal(cmd_name, &p));
+        let roots = crate::filesystem::FsRoots {
+            cwd: cwd.to_path_buf(),
+            home: home.map(Into::into),
+            lingxi_home: cwd.to_path_buf(),
+        };
+        let mut targets = vec![m.clone()];
+        // Removing the symlink itself is distinct from removing its contents.
+        // Native resolves only a base produced by stripping trailing globs.
+        if f {
+            if let Some(landing) =
+                crate::filesystem::permission_rule_path_forms(Path::new(&m), &roots).landing
+            {
+                let landing = landing.to_string_lossy().into_owned();
+                if !targets.contains(&landing) {
+                    targets.push(landing);
+                }
+            }
         }
-        if removal_hits_workspace(&m, cwd) {
-            return Some(workspace_removal(cmd_name, &p));
+        let mut workspaces = vec![cwd.to_path_buf()];
+        if f {
+            for working_dir in working_dirs {
+                if !workspaces.contains(working_dir) {
+                    workspaces.push(working_dir.clone());
+                }
+            }
+        }
+        for working_dir in workspaces.clone() {
+            if let Some(landing) =
+                crate::filesystem::permission_rule_path_forms(&working_dir, &roots).landing
+            {
+                if !workspaces.contains(&landing) {
+                    workspaces.push(landing);
+                }
+            }
+        }
+        for target in targets {
+            if is_dangerous_removal_path(&target, home) {
+                return Some(critical_removal(cmd_name, &p));
+            }
+            if workspaces
+                .iter()
+                .any(|cwd| removal_hits_workspace(&target, cwd))
+            {
+                return Some(workspace_removal(cmd_name, &p));
+            }
         }
     }
 
@@ -1486,9 +1528,9 @@ mod tests {
     // ── Faithful `x0n` branch coverage (binary @199202560) ──
 
     #[test]
-    fn tilde_superset_asks_for_bare_home_only() {
-        // LingXi SAFETY SUPERSET: `rm -rf ~` → `$HOME` → critical (x0n, which
-        // does NOT expand `~`, auto-allows it). A child of home is fine.
+    fn tilde_expansion_asks_for_home_before_evaluating_targets() {
+        // Native 2.1.318 expands `~` before its critical/workspace checks.
+        // A child of home that is outside this workspace is fine.
         let d = check_dangerous_removal("rm -rf ~", &cwd(), HOME).unwrap();
         assert_eq!(d.resolved_path, "/home/u");
         assert!(
@@ -1550,12 +1592,11 @@ mod tests {
     }
 
     #[test]
-    fn literal_tilde_glob_is_unresolvable_via_branch2() {
-        // `~/*` → branch 2 (`d.startsWith("~")`), NOT the critical superset.
+    fn tilde_glob_uses_expanded_home_critical_message() {
+        // `~/*` expands to the contents of home before the branch walk.
         let d = check_dangerous_removal("rm -rf ~/*", &cwd(), HOME).unwrap();
         assert!(
-            d.message
-                .contains("cannot be statically resolved to a directory"),
+            d.message.contains("critical system directory"),
             "{}",
             d.message
         );

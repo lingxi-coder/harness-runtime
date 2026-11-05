@@ -94,11 +94,161 @@
 //!   already-ported LOCAL denial-tracking breaker
 //!   ([`crate::denial_tracking::DenialTrackingState::is_circuit_broken`]); the
 //!   remote-config latch is inert-by-default.
-//! - **`ao(e)` model normalization** (inference-profile / `[1m]` stripping) is
-//!   approximated by treating the passed model id as already canonical; the exact
-//!   `===` / `.includes` checks below match on that canonical form.
+//! - Service-owned override maps, model knowledge and application-profile
+//!   metadata remain the routing caller's responsibility. The static 2.1.318
+//!   `et`/`Dy` identity fold is applied by [`model_supports_auto_mode`] itself,
+//!   so every boot and live caller also handles dated/cloud/context-wrapped IDs.
 
 use crate::mode::PermissionMode;
+use regex::Regex;
+use std::sync::LazyLock;
+
+// Qd/IOs shape recognition (2.1.318, native offsets 258141342/258142026).
+// Matching the complete trailer avoids mistaking a date for a minor version.
+static AUTO_MODEL_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^claude-([a-z]+)-([0-9]{1,2})(?:-([0-9]{1,2}))?",
+        r"((?:-fast|-latest)?(?:-v[0-9]{1,3}@[0-9]{8}|[-@][0-9]{8})?",
+        r"(?:-v[0-9]{1,3}(?::[0-9]{1,3})?)?)$"
+    ))
+    .expect("native model shape")
+});
+static AUTO_LEGACY_MODEL_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^claude-([0-9]{1,2})(?:-([0-9]{1,2}))?-([a-z]+)",
+        r"((?:-fast|-latest)?(?:-v[0-9]{1,3}@[0-9]{8}|[-@][0-9]{8})?",
+        r"(?:-v[0-9]{1,3}(?::[0-9]{1,3})?)?)$"
+    ))
+    .expect("native legacy model shape")
+});
+static AUTO_MODEL_DOT_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(claude-(?:[a-z]+-)?[0-9]{1,2})\.([0-9])").expect("native dotted model version")
+});
+static AUTO_MODEL_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-[0-9]{8}$").expect("native model date"));
+
+fn native_legacy_four_fallback(value: &str, family: &str) -> bool {
+    value.match_indices(family).any(|(offset, _)| {
+        let tail = value[offset + family.len()..].as_bytes();
+        !(tail.first() == Some(&b'-')
+            && tail.get(1).is_some_and(u8::is_ascii_digit)
+            && !tail.get(2).is_some_and(u8::is_ascii_digit))
+    })
+}
+
+/// Native static `et`/`Dy` identity fold used before the auto model gate.
+/// Resolved routing/overrides remain the caller's responsibility; arbitrary
+/// non-Claude model names retain Native's lowercase/date-only fallback.
+/// This covers canonical IDs, dated IDs, context markers, cloud transports,
+/// dotted version spellings and recognized legacy aliases such as Opus 4.
+#[must_use]
+pub fn canonical_auto_mode_model(model: &str) -> String {
+    let lower = model.to_lowercase();
+    let value = AUTO_MODEL_DOT_VERSION.replace_all(&lower, "$1-$2");
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(&value);
+    let trimmed = trimmed
+        .strip_suffix("[1m]")
+        .or_else(|| trimmed.strip_suffix("[2m]"))
+        .unwrap_or(trimmed);
+    let mut candidate = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if let Some(tail) = candidate.strip_prefix("anthropic.") {
+        candidate = tail;
+    } else if let Some((region, tail)) = candidate.split_once(".anthropic.") {
+        if ["us", "eu", "apac", "jp", "au", "us-gov", "global"].contains(&region) {
+            candidate = tail;
+        }
+    }
+    if !trimmed
+        .chars()
+        .any(lingxi_core::host::effort::javascript_whitespace)
+    {
+        let current = AUTO_MODEL_SHAPE.captures(candidate);
+        let legacy = AUTO_LEGACY_MODEL_SHAPE.captures(candidate);
+        if let Some((captures, version_first)) = current
+            .map(|c| (c, false))
+            .or_else(|| legacy.map(|c| (c, true)))
+        {
+            let (family, major, minor) = if version_first {
+                (
+                    &captures[3],
+                    &captures[1],
+                    captures.get(2).map(|m| m.as_str()),
+                )
+            } else {
+                (
+                    &captures[1],
+                    &captures[2],
+                    captures.get(3).map(|m| m.as_str()),
+                )
+            };
+            let major: u8 = major.parse().expect("bounded decimal major");
+            let minor = minor.map(|n| n.parse::<u8>().expect("bounded decimal minor"));
+            let normalized = if version_first {
+                format!(
+                    "claude-{major}{}{family}",
+                    minor.map_or_else(|| "-".into(), |n| format!("-{n}-"))
+                )
+            } else {
+                let minor = if major == 4 && matches!(family, "opus" | "sonnet") {
+                    Some(minor.unwrap_or(0))
+                } else {
+                    minor
+                };
+                format!(
+                    "claude-{family}-{major}{}",
+                    minor.map_or_else(String::new, |n| format!("-{n}"))
+                )
+            };
+            if lingxi_core::host::model_capabilities::is_known_model_id(&normalized)
+                || ["claude-3-opus", "claude-3-sonnet", "claude-3-haiku"]
+                    .contains(&normalized.as_str())
+            {
+                return normalized;
+            }
+            // Qd recognized an uncatalogued Claude family/version: Native KG
+            // preserves its base rather than guessing a nearby catalog entry.
+            let tail = captures.get(4).expect("trailer capture").start();
+            return candidate[..tail].to_owned();
+        }
+    }
+    // Native BG's fallback order matters when more than one family appears.
+    for family in [
+        "claude-fable-5-1",
+        "claude-fable-5",
+        "claude-mythos-5-1",
+        "claude-mythos-5",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-opus-4-1",
+        "claude-opus-4",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4",
+        "claude-haiku-5-5",
+        "claude-haiku-4-5",
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet",
+        "claude-3-5-haiku",
+        "claude-3-opus",
+        "claude-3-sonnet",
+        "claude-3-haiku",
+    ] {
+        if matches!(family, "claude-opus-4" | "claude-sonnet-4") {
+            if native_legacy_four_fallback(&value, family) {
+                return format!("{family}-0");
+            }
+        } else if value.contains(family) {
+            return family.to_owned();
+        }
+    }
+    AUTO_MODEL_DATE.replace(&value, "").into_owned()
+}
 
 /// Why auto mode is unavailable — 1:1 with claude-code `One()`'s four return
 /// tags. Precedence (highest first): [`Self::Settings`] → [`Self::CircuitBreaker`]
@@ -136,8 +286,8 @@ pub struct AutoGateInputs {
     /// remote-disable is a documented omission; only the local breaker feeds
     /// this.)
     pub circuit_broken: bool,
-    /// `wi()`: the active main-loop model id (already canonical — see the `ao`
-    /// omission note).
+    /// `wi()`: the active main-loop model id. Its static identity decorations
+    /// are normalized by the gate; callers supply their resolved route/override.
     pub model: String,
     /// `xn()`: the active provider (`"firstParty"` / `"anthropicAws"` / other).
     pub provider: String,
@@ -149,10 +299,14 @@ pub struct AutoGateInputs {
 ///   (`opus-4-0`/`4-1`/`4-5`, `sonnet-4-0`/`4-5`, `haiku-4-5`) on EVERY provider.
 /// - Additionally off, on any provider OTHER than `firstParty`/`anthropicAws`,
 ///   for `claude-opus-4-6`, `claude-sonnet-4-6`, and anything containing
-///   `haiku`.
+///   `haiku`, except for `claude-haiku-5-5` (2.1.318 `KP` at 261385150).
 /// - Otherwise on.
 #[must_use]
 pub fn model_supports_auto_mode(model: &str, provider: &str) -> bool {
+    // Boot and live mode callers can supply a dated/cloud/context-suffixed ID.
+    // Native KP always calls et before applying any exact canonical comparisons.
+    let canonical = canonical_auto_mode_model(model);
+    let model = canonical.as_str();
     // Shared exclusion list (all providers).
     if model.contains("claude-3-")
         || model == "claude-opus-4-0"
@@ -165,11 +319,13 @@ pub fn model_supports_auto_mode(model: &str, provider: &str) -> bool {
         return false;
     }
     // Non-1P (bedrock/vertex/gateway/…) additionally exclude the 4-6 pair and
-    // every haiku. The "counts as first-party" family is `XD` —
+    // every haiku except 5.5. The "counts as first-party" family is `UI` —
     // [`is_anthropic_managed_provider`] — NOT `anthropicAws` alone.
     if provider != "firstParty"
         && !is_anthropic_managed_provider(provider)
-        && (model == "claude-opus-4-6" || model == "claude-sonnet-4-6" || model.contains("haiku"))
+        && (model == "claude-opus-4-6"
+            || model == "claude-sonnet-4-6"
+            || (model.contains("haiku") && model != "claude-haiku-5-5"))
     {
         return false;
     }
@@ -372,6 +528,39 @@ mod tests {
             assert!(model_supports_auto_mode("claude-sonnet-5", provider));
             assert!(model_supports_auto_mode("claude-opus-4-7", provider));
             assert!(model_supports_auto_mode("claude-opus-4-8", provider));
+        }
+    }
+
+    #[test]
+    fn model_gate_matches_318_raw_and_canonical_model_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        for row in fixture["models"].as_array().unwrap() {
+            let model = row["model"].as_str().unwrap();
+            let provider = row["provider"].as_str().unwrap();
+            assert_eq!(
+                model_supports_auto_mode(model, provider),
+                row["expected"].as_bool().unwrap(),
+                "{model} on {provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_identity_matches_318_native_static_fold() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        for row in fixture["normalization"].as_array().unwrap() {
+            let input = row["input"].as_str().unwrap();
+            assert_eq!(
+                canonical_auto_mode_model(input),
+                row["expected"].as_str().unwrap(),
+                "{input}"
+            );
         }
     }
 

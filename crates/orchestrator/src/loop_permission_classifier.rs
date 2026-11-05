@@ -84,6 +84,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             service: self.service.clone(),
             model: classifier_model(&main_model, &available),
             profile,
+            main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&request.transcript),
             system: loop_llm::system_prompt(&settings["autoMode"], deny_rules),
             user_configuration,
         };
@@ -165,6 +166,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             service: self.service.clone(),
             model,
             profile,
+            main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&history),
             system: loop_llm::system_prompt(&settings["autoMode"], deny_rules),
             user_configuration,
         };
@@ -233,6 +235,9 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             service: self.service.clone(),
             model: classifier_model(&main_model, &available),
             profile,
+            // Only the child's rendered transcript is available here. Its
+            // real text is included in classifier_input_tokens below.
+            main_loop_tokens: 0,
             system: loop_llm::system_prompt(&settings["autoMode"], &[]),
             // A handoff review judges the subagent's work, not the user's
             // configuration; `EZe` passes no CLAUDE.md either.
@@ -677,11 +682,32 @@ struct ProviderTransport {
     profile: Option<String>,
     system: Utf16JsonProjection,
     user_configuration: Option<String>,
+    main_loop_tokens: u64,
 }
 #[async_trait::async_trait]
 impl Transport for ProviderTransport {
     fn model(&self) -> &str {
         &self.model
+    }
+    fn main_loop_tokens(&self) -> u64 {
+        self.main_loop_tokens
+    }
+    fn classifier_input_tokens(&self, blocks: &[Utf16JsonProjection]) -> u64 {
+        let mut chars = self
+            .system
+            .string_units("")
+            .map_or(0, |units| units.len() as u64);
+        chars += blocks
+            .iter()
+            .map(|block| block.string_units("").map_or(0, |units| units.len() as u64))
+            .sum::<u64>();
+        if let Some(configuration) = &self.user_configuration {
+            chars += configuration.encode_utf16().count() as u64;
+        }
+        if let Some(identity) = user_identity_context() {
+            chars += identity.encode_utf16().count() as u64;
+        }
+        chars.saturating_add(2) / 4
     }
     async fn query(&self, query: Query) -> Result<Reply, QueryError> {
         let system = user_identity_context()
@@ -733,6 +759,7 @@ impl Transport for ProviderTransport {
                 std::collections::HashMap::new(),
             )
             .map_err(classifier_query_error)?;
+        request.execution.classifier_attempt_timeout_ms = Some(query.attempt_timeout_ms);
         let len = query.blocks.len();
         let latest_history_checkpoint = len.checked_sub(4).filter(|index| *index > 0);
         let current_action_checkpoint = len.checked_sub(3);
@@ -799,14 +826,10 @@ impl Transport for ProviderTransport {
             // Responses has no stop parameter (the parser reads the first
             // <block> anyway), and the ChatGPT Codex backend only streams.
             request.input.stop_sequences.clear();
-            let stream = self
-                .service
-                .stream_request(request)
+            self.service
+                .execute_classifier_stream_request(request, query.max_retries)
                 .await
-                .map_err(classifier_query_error)?;
-            llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
-                .await
-                .map_err(|(_partial, error)| classifier_query_error(error))?
+                .map_err(classifier_query_error)?
         } else {
             self.service
                 .execute_classifier_request(request, query.max_retries)

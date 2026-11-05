@@ -1361,8 +1361,8 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
 }
 
 #[test]
-fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
-    let server = mcp::McpServerConfig {
+fn mcp_tool_policy_boot_rules_require_native_host_scope() {
+    let mut server = mcp::McpServerConfig {
         name: "remote.server".into(),
         spec: lingxi_core::host::McpTransportSpec::InProcess {
             registry_key: "remote.server".into(),
@@ -1382,7 +1382,23 @@ fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
         metadata: Default::default(),
     };
     let mut rules = Vec::new();
-    super::append_mcp_permission_rules(&mut rules, &[server], false);
+    super::append_mcp_permission_rules(&mut rules, &[server.clone()], false);
+    assert!(
+        rules.is_empty(),
+        "an in-process server does not seed native policies"
+    );
+    server.spec = lingxi_core::host::McpTransportSpec::SdkControl {
+        control_channel_id: "sdk-test".into(),
+    };
+    super::append_mcp_permission_rules(&mut rules, &[server.clone()], false);
+    assert_eq!(rules.len(), 1);
+    rules.clear();
+    super::append_mcp_permission_rules(&mut rules, &[server], true);
+    assert_eq!(
+        rules.len(),
+        1,
+        "managed-only settings cannot drop SDK policy"
+    );
     let policy = permission::PermissionPolicy::from_rules(
         permission::PermissionMode::BypassPermissions,
         rules,
@@ -1400,7 +1416,7 @@ fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
 }
 
 #[tokio::test]
-async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
+async fn agent_scoped_mcp_builder_filters_org_blocks_and_keeps_ask_metadata() {
     let agent_id = lingxi_core::types::AgentId::new();
     let config_json = serde_json::json!({
         "command": "unused-in-test",
@@ -1409,8 +1425,8 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
             {"name": "ask", "permissionPolicy": "always_ask"}
         ],
         "toolPermissions": {
-            "deny": "ask",
-            "ask": "allow"
+            "deny": "blocked",
+            "ask": "ask"
         }
     });
     let config = mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
@@ -1484,19 +1500,8 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
     ctx.mcp_registry = Some(registry.clone());
     let set =
         super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
-    assert_eq!(set.tools.len(), 3);
-
-    let deny = set
-        .tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__srv__deny")
-        .expect("agent-scoped deny tool is registered")
-        .check_permissions(
-            &generated_test_source(serde_json::json!({})),
-            &tool_api::test_support::fresh_ctx(),
-        )
-        .await;
-    assert!(matches!(deny, permission::PermissionResult::Deny { .. }));
+    assert_eq!(set.tools.len(), 2);
+    assert!(set.tools.iter().all(|tool| tool.name() != "mcp__srv__deny"));
 
     let ask = set
         .tools
@@ -7376,6 +7381,50 @@ fn perm_tier_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
     let cwd = tempfile::tempdir().expect("cwd tempdir");
     std::fs::create_dir_all(cwd.path().join(branding::DOT_DIR)).expect("mk .lingxi");
     (home, cwd)
+}
+
+#[tokio::test]
+async fn boot_agent_bypass_consent_uses_only_user_and_managed_settings() {
+    let consent_raw = r#"{"skipDangerousModePermissionPrompt":true}"#;
+    for source in ["user", "project", "local", "flag", "managed"] {
+        let (home, cwd) = perm_tier_dirs();
+        let managed = tempfile::tempdir().unwrap();
+        let target = match source {
+            "user" => Some(home.path().join("settings.json")),
+            "project" => Some(cwd.path().join(branding::DOT_DIR).join("settings.json")),
+            "local" => Some(
+                cwd.path()
+                    .join(branding::DOT_DIR)
+                    .join("settings.local.json"),
+            ),
+            "managed" => Some(managed.path().join("managed-settings.json")),
+            _ => None,
+        };
+        if let Some(path) = target {
+            std::fs::write(path, consent_raw).unwrap();
+        }
+        let flag = (source == "flag").then(|| {
+            serde_json::from_str::<lingxi_core::settings::SettingsJson>(consent_raw).unwrap()
+        });
+        let managed_snapshot =
+            super::settings_watch::read_managed_settings_snapshot(managed.path()).await;
+        for include_user in [true, false] {
+            let tiers = super::load_boot_permission_tiers_with_policy_snapshot(
+                home.path(),
+                cwd.path(),
+                (include_user, true),
+                flag.as_ref(),
+                (source == "flag").then_some(consent_raw),
+                &managed_snapshot,
+            )
+            .await;
+            assert_eq!(
+                tiers.persistent_bypass_consent,
+                source == "managed" || (source == "user" && include_user),
+                "{source}, include_user={include_user}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 //! `PermissionRule` — one allow/deny/ask entry, tagged with its source.
 //!
-//! Rules are evaluated in source-priority order: highest-priority source
-//! wins, deny rules beat allow rules at the same priority.
+//! The policy checks deny, ask, then allow buckets. Source priority chooses
+//! which matching rule is cited within a bucket.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
@@ -87,7 +87,9 @@ impl PermissionRuleValue {
                 return bare();
             }
             let tool_name = String::from_utf16(&units[..open]).ok()?;
-            if tool_name.is_empty() {
+            // Native 2.1.318 `LB` rejects parentheses in the tool-name slice,
+            // including escaped ones. Only rule content supports escaping.
+            if tool_name.is_empty() || tool_name.contains(['(', ')']) {
                 return bare();
             }
             let raw_content = &units[open + 1..close];
@@ -122,7 +124,8 @@ impl PermissionRuleValue {
     pub fn to_rule_projection(&self) -> Utf16JsonProjection {
         let mut units: Vec<u16> = self.tool_name.encode_utf16().collect();
         if let Some(content) = &self.rule_content {
-            if let Some(content_units) = content.string_units("") {
+            if let Some(content_units) = content.string_units("").filter(|units| !units.is_empty())
+            {
                 units.push(b'(' as u16);
                 units.extend(escape_rule_content_units(&content_units));
                 units.push(b')' as u16);
@@ -164,16 +167,13 @@ impl PermissionRuleValue {
     }
 }
 
-/// Map a legacy tool name to its canonical name — 1:1 with the 2.1.195 binary
-/// `LEGACY_TOOL_NAME_ALIASES` (`aDr`), excluding the removed Agent alias
-/// (`Brief` is present unconditionally in the binary; the prior "KAIROS-gated,
-/// omitted" note was based on stale TS). Applied on parse so rules/hooks resolve
-/// to the current name.
+/// Native 2.1.318 `td` public alias table (`l`, offset 257596349).
+/// Applied on parse so stored rules/hooks resolve to the current tool name.
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
     match name {
+        "Task" => "Agent",
         "KillShell" | "KillBash" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" | "AgentOutput" | "BashOutput" => "TaskOutput",
         "ListPeers" => "ListAgents",
         "Brief" => "SendUserMessage",
         "ListMcpResources" => "ListMcpResourcesTool",
@@ -378,16 +378,12 @@ impl PermissionRule {
 mod tests {
     use super::*;
 
-    // The remaining non-Agent tool aliases retain their existing semantics.
     #[test]
-    fn non_agent_legacy_tool_name_aliases_match_binary() {
+    fn legacy_tool_name_aliases_match_318_binary() {
         for (legacy, canonical) in [
+            ("Task", "Agent"),
             ("KillShell", "TaskStop"),
             ("KillBash", "TaskStop"),
-            ("AgentOutputTool", "TaskOutput"),
-            ("BashOutputTool", "TaskOutput"),
-            ("AgentOutput", "TaskOutput"),
-            ("BashOutput", "TaskOutput"),
             ("ListPeers", "ListAgents"),
             ("Brief", "SendUserMessage"),
             ("ListMcpResources", "ListMcpResourcesTool"),
@@ -403,6 +399,14 @@ mod tests {
         // Non-legacy names pass through unchanged.
         assert_eq!(normalize_legacy_tool_name("Bash"), "Bash");
         assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
+        for removed in [
+            "AgentOutputTool",
+            "BashOutputTool",
+            "AgentOutput",
+            "BashOutput",
+        ] {
+            assert_eq!(normalize_legacy_tool_name(removed), removed);
+        }
     }
 
     #[test]
@@ -578,11 +582,11 @@ mod tests {
 
     #[test]
     fn parse_normalizes_legacy_tool_names() {
-        assert_eq!(parse("Task").tool_name, "Task");
-        assert_eq!(parse("Task(general-purpose)").tool_name, "Task");
+        assert_eq!(parse("Task").tool_name, "Agent");
+        assert_eq!(parse("Task(general-purpose)").tool_name, "Agent");
         assert_eq!(parse("KillShell").tool_name, "TaskStop");
-        assert_eq!(parse("AgentOutputTool").tool_name, "TaskOutput");
-        assert_eq!(parse("BashOutputTool").tool_name, "TaskOutput");
+        assert_eq!(parse("AgentOutputTool").tool_name, "AgentOutputTool");
+        assert_eq!(parse("BashOutputTool").tool_name, "BashOutputTool");
     }
 
     #[test]

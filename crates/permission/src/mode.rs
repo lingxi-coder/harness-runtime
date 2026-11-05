@@ -1,9 +1,7 @@
 //! `PermissionMode` — top-level authorization mode that gates unmatched tool calls.
 //!
-//! Five modes are external (settable from `settings.json` and CLI flags) and
-//! one is internal-only (`Bubble`) and one is CLI-settable but still rejected
-//! from persistent settings until the settings schema grows auto-mode metadata
-//! (`Auto`).
+//! Six modes are external (settable from settings and CLI flags); `Bubble` is
+//! internal-only. Auto still passes the separate availability/consent gates.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +27,7 @@ pub enum PermissionMode {
     // Internal engine modes.
     /// Internal: bubble the decision to a parent agent.
     Bubble,
-    /// Classifier-driven auto-accept with denial-tracking fallback. CLI-settable;
-    /// persistent settings still reject it as non-external.
+    /// Classifier-driven auto-accept with denial-tracking fallback.
     Auto,
 }
 
@@ -38,11 +35,11 @@ impl PermissionMode {
     /// Returns true when this mode may appear in user-facing configuration.
     ///
     /// External modes are accepted by `settings.json` and CLI flag validation.
-    /// Internal modes (`Bubble`, `Auto`) are rejected as input but produced
-    /// by the engine at runtime.
+    /// Only `Bubble` is internal; Auto is accepted by the native 2.1.318 mode
+    /// list (`lU`, byte offset 258079779) and its settings schema.
     #[must_use]
     pub fn is_external(self) -> bool {
-        !matches!(self, Self::Bubble | Self::Auto)
+        self != Self::Bubble
     }
 
     /// The human-facing mode title shown in permission prompts, 1:1 with
@@ -141,6 +138,32 @@ mod tests {
     #[test]
     fn default_is_external() {
         assert!(PermissionMode::Default.is_external());
+    }
+
+    #[test]
+    fn auto_is_external_and_modes_match_the_318_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_modes_2_1_318.json"
+        ))
+        .unwrap();
+        assert!(PermissionMode::Auto.is_external());
+        for row in fixture["modeParsing"].as_array().unwrap() {
+            assert_eq!(
+                crate::permission_mode_from_cli_string(row["input"].as_str().unwrap()).wire_str(),
+                row["expected"].as_str().unwrap()
+            );
+        }
+        for row in fixture["cycle"].as_array().unwrap() {
+            assert_eq!(
+                next_permission_mode(
+                    crate::permission_mode_from_cli_string(row["mode"].as_str().unwrap()),
+                    row["bypass"].as_bool().unwrap(),
+                    row["auto"].as_bool().unwrap(),
+                )
+                .wire_str(),
+                row["expected"].as_str().unwrap()
+            );
+        }
     }
 
     #[test]

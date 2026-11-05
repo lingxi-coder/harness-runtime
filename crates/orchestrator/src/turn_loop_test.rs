@@ -2467,6 +2467,35 @@ mod read_file_state_tests {
     async fn mod_tool_check_projects_native_org_ask_ceiling_from_trusted_tool_context() {
         use permission::{PermissionPolicy, PolicyPermissionGate};
 
+        struct OrganizationAskRecordingPrompt {
+            saw_ctx: std::sync::Mutex<
+                Option<lingxi_core::host::permission_gate::PermissionCheckContext>,
+            >,
+        }
+
+        #[async_trait]
+        impl permission::PermissionGate for OrganizationAskRecordingPrompt {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            ) -> permission::PermissionDecision {
+                panic!("the organization ask must carry its prompt context")
+            }
+
+            async fn check_with_context(
+                &self,
+                _name: &str,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+                ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+            ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+                *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                    reason: "dialog declined".into(),
+                }
+            }
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("ceiling.js");
         std::fs::write(
@@ -2510,10 +2539,10 @@ mod read_file_state_tests {
             PermissionPolicy::from_rules(permission::PermissionMode::Default, Vec::new())
                 .with_roots(roots),
         );
-        let gate = Arc::new(PolicyPermissionGate::new(
-            policy,
-            Arc::new(DenyPermissionPrompt),
-        ));
+        let prompt = Arc::new(OrganizationAskRecordingPrompt {
+            saw_ctx: std::sync::Mutex::new(None),
+        });
+        let gate = Arc::new(PolicyPermissionGate::new(policy, prompt.clone()));
         let output = Arc::new(MockOutputStream::new());
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -2530,22 +2559,27 @@ mod read_file_state_tests {
             cwd,
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        // The server-pushed ask ceiling remains an Ask for a non-read-only
-        // connector while the session is in Plan mode.
-        orch.session().lock().await.plan_mode = true;
-        let uses = vec![(
-            ToolUseId::new(),
-            "McpConnector".into(),
-            source_fixture!({}),
-            None,
-        )];
-
-        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
-        let (content, is_error) = schema_gate_tool_result(&results[0]);
-        assert!(
-            is_error,
-            "organization ceiling remains prompt-gated: {content}"
-        );
+        // Both ordinary and Plan-mode organization asks need per-call
+        // approval. Neither may expose a persistent grant even when the
+        // tool's requiresUserInteraction metadata is false.
+        for plan_mode in [false, true] {
+            orch.session().lock().await.plan_mode = plan_mode;
+            let uses = vec![(
+                ToolUseId::new(),
+                "McpConnector".into(),
+                source_fixture!({}),
+                None,
+            )];
+            let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+            let (content, is_error) = schema_gate_tool_result(&results[0]);
+            assert!(
+                is_error,
+                "organization ceiling remains prompt-gated: {content}"
+            );
+            let captured = prompt.saw_ctx.lock().unwrap().clone().unwrap();
+            assert!(captured.suppress_always_allow_rule, "plan_mode={plan_mode}");
+            assert!(!captured.requires_user_interaction);
+        }
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         assert!(
             output.snapshot().await.iter().any(|event| matches!(

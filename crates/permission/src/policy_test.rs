@@ -2548,14 +2548,14 @@ mod tests {
             ),
             PermissionResult::Ask { .. }
         ));
-        // Removed Task rules do not grant or deny Agent permissions.
+        // Native Task rules normalize to the current Agent tool.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p2.authorize("Agent", &source_json!({ "subagent_type": "Explore" })),
-            PermissionResult::Ask { .. }
+            PermissionResult::Deny { .. }
         ));
     }
 
@@ -2595,13 +2595,18 @@ mod tests {
         let mut set = p.agent_deny_content_types();
         set.sort();
         assert_eq!(set, vec!["Explore".to_string(), "Plan".to_string()]);
-        // A removed Task rule cannot deny Agent catalog entries.
+        // Legacy Task rules deny the corresponding Agent catalog entry.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
-        assert_eq!(p2.agent_type_deny_source("Explore"), None);
-        assert!(p2.agent_deny_content_types().is_empty());
+        assert_eq!(
+            p2.agent_type_deny_source("Explore"),
+            Some(PermissionRuleSource::Settings(
+                lingxi_core::types::SettingsScope::Project
+            ))
+        );
+        assert_eq!(p2.agent_deny_content_types(), ["Explore"]);
     }
 
     // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────
@@ -2952,23 +2957,15 @@ mod tests {
 
     #[test]
     fn default_mode_read_only_sed_does_not_ask_from_sed_layer() {
-        // (d, safe) A read-only `sed -n p file` is Safe in every mode, so the sed
-        // layer does NOT ask. `sed` is NOT on the read-only base allowlist (1:1
-        // with TS `READONLY_COMMANDS`, which omits `sed`), so in Default mode it
-        // is neither sed-asked nor read-only-allowed → it falls through to the
-        // generic Default-mode ask (a PermissionMode reason, NOT the sed Other).
+        // Native 2.1.318's active pVt/CN read-only configuration includes sed.
+        // The exact command is replayed in read_only_318_oracle.mjs.
         let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
         match p.authorize("Bash", &bash("sed -n p file.txt")) {
-            PermissionResult::Ask { reason, .. } => assert!(
-                matches!(
-                    reason,
-                    PermissionDecisionReason::PermissionMode {
-                        mode: PermissionMode::Default
-                    }
-                ),
-                "a Safe sed must fall through to the mode ask, not the sed ask: {reason:?}"
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(reason, PermissionDecisionReason::Other { .. }),
+                "safe sed is read-only, not a mode grant: {reason:?}"
             ),
-            other => panic!("expected Default-mode Ask, got {other:?}"),
+            other => panic!("expected read-only Allow, got {other:?}"),
         }
         // In AcceptEdits mode the SAME safe sed IS auto-allowed (the AcceptEdits
         // bash auto-allow arm covers `sed` when its verdict is Safe).

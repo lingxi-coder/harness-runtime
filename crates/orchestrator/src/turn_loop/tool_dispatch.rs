@@ -1146,7 +1146,9 @@ async fn evaluate_normal_tool_check_core(
         tool_use_id: Some(tool_use_id.to_string()),
         tool_check_ceiling,
         requires_user_interaction,
-        suppress_always_allow_rule: requires_user_interaction || restricted_protected_mutation,
+        suppress_always_allow_rule: requires_user_interaction
+            || restricted_protected_mutation
+            || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
         hook_ask_floor: hook_ask,
         is_non_interactive_session: !orch.config.interactive_permissions,
         mode_override: plan_mode.then(|| "plan".to_string()),
@@ -1232,7 +1234,13 @@ async fn finish_normal_tool_check_core(
             .as_ref()
             .and_then(|evaluation| evaluation.ceiling),
         requires_user_interaction,
-        suppress_always_allow_rule: requires_user_interaction || restricted_protected_mutation,
+        suppress_always_allow_rule: requires_user_interaction
+            || restricted_protected_mutation
+            || core
+                .evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.ceiling)
+                == Some(lingxi_core::host::McpPermissionCeiling::Ask),
         hook_ask_floor: hook_ask,
         is_non_interactive_session: !orch.config.interactive_permissions,
         mode_override: plan_mode.then(|| "plan".to_string()),
@@ -5750,7 +5758,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 tool_check_ceiling,
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
-                    || restricted_protected_mutation,
+                    || restricted_protected_mutation
+                    || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 ..Default::default()
             };
             Some(
@@ -5877,7 +5886,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
-                    || restricted_protected_mutation,
+                    || restricted_protected_mutation
+                    || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 ..Default::default()
             };
             // The captured preflight is the rule/safety result for this direct
@@ -6122,7 +6132,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // interactive tool must not create a generic permission prompt
             // (AskUserQuestion owns its business UI).
             let suppress_always_allow_rule = (requires_user_interaction
-                || restricted_protected_mutation)
+                || restricted_protected_mutation
+                || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask))
                 && matches!(
                     resolution,
                     PermissionResolution::Ask | PermissionResolution::AskWithContext { .. }
@@ -6520,7 +6531,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             tool_use_id: Some(tool_use_id.to_string()),
                             requires_user_interaction,
                             suppress_always_allow_rule: requires_user_interaction
-                                || restricted_protected_mutation,
+                                || restricted_protected_mutation
+                                || tool_check_ceiling
+                                    == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                             decision_reason_type,
                             decision_reason,
                             is_non_interactive_session: !orch.config.interactive_permissions,

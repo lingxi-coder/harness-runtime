@@ -669,7 +669,7 @@ mod tests {
             AGENT_TOOL_NAME,
             &content("general-purpose")
         ));
-        assert!(!is_dangerous_task_permission("Task", &content("anything")));
+        assert!(is_dangerous_task_permission("Task", &content("anything")));
     }
 
     #[test]

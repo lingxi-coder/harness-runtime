@@ -1,0 +1,351 @@
+{
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "ranges": [
+    [
+      270519459,
+      270519860
+    ],
+    [
+      270520211,
+      270520337
+    ],
+    [
+      270522623,
+      270522982
+    ],
+    [
+      268463867,
+      268464023
+    ],
+    [
+      270433512,
+      270477628
+    ],
+    [
+      268465155,
+      268467278
+    ],
+    [
+      270478194,
+      270478276
+    ],
+    [
+      258073741,
+      258075470
+    ]
+  ],
+  "parseCases": [
+    {
+      "text": "<block>yes",
+      "block": true,
+      "reason": null
+    },
+    {
+      "text": "<block>no</block>",
+      "block": false,
+      "reason": null
+    },
+    {
+      "text": "<BLOCK>YES",
+      "block": true,
+      "reason": null
+    },
+    {
+      "text": "<block>yeſ",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<block>no中文",
+      "block": false,
+      "reason": null
+    },
+    {
+      "text": "<block>yes中文",
+      "block": true,
+      "reason": null
+    },
+    {
+      "text": "<block>yes_",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<block>yes0",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<thinking><block>yes</thinking><block>no",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<thinking>pending <block>no",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<block>no<block>no",
+      "block": false,
+      "reason": null
+    },
+    {
+      "text": "<block>yes<block>no",
+      "block": null,
+      "reason": null
+    },
+    {
+      "text": "<block>yes<reason>﻿reason﻿</reason>",
+      "block": true,
+      "reason": "reason"
+    },
+    {
+      "text": "<block>yes<reason>reason</reason>",
+      "block": true,
+      "reason": "reason"
+    }
+  ],
+  "fastCases": [
+    {
+      "text": "<block>no",
+      "stopReason": "end_turn",
+      "allow": true
+    },
+    {
+      "text": "<block>no",
+      "stopReason": "stop_sequence",
+      "allow": true
+    },
+    {
+      "text": "<block>no",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<block>no",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "<block>no</block>",
+      "stopReason": "end_turn",
+      "allow": true
+    },
+    {
+      "text": "<block>no</block>",
+      "stopReason": "stop_sequence",
+      "allow": true
+    },
+    {
+      "text": "<block>no</block>",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<block>no</block>",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": " ﻿<block>no﻿ ",
+      "stopReason": "end_turn",
+      "allow": true
+    },
+    {
+      "text": " ﻿<block>no﻿ ",
+      "stopReason": "stop_sequence",
+      "allow": true
+    },
+    {
+      "text": " ﻿<block>no﻿ ",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": " ﻿<block>no﻿ ",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "<BLOCK>NO",
+      "stopReason": "end_turn",
+      "allow": false
+    },
+    {
+      "text": "<BLOCK>NO",
+      "stopReason": "stop_sequence",
+      "allow": false
+    },
+    {
+      "text": "<BLOCK>NO",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<BLOCK>NO",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "<thinking>safe</thinking><block>no",
+      "stopReason": "end_turn",
+      "allow": false
+    },
+    {
+      "text": "<thinking>safe</thinking><block>no",
+      "stopReason": "stop_sequence",
+      "allow": false
+    },
+    {
+      "text": "<thinking>safe</thinking><block>no",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<thinking>safe</thinking><block>no",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "Looks safe <block>no",
+      "stopReason": "end_turn",
+      "allow": false
+    },
+    {
+      "text": "Looks safe <block>no",
+      "stopReason": "stop_sequence",
+      "allow": false
+    },
+    {
+      "text": "Looks safe <block>no",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "Looks safe <block>no",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "<block>no<reason>safe</reason>",
+      "stopReason": "end_turn",
+      "allow": false
+    },
+    {
+      "text": "<block>no<reason>safe</reason>",
+      "stopReason": "stop_sequence",
+      "allow": false
+    },
+    {
+      "text": "<block>no<reason>safe</reason>",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<block>no<reason>safe</reason>",
+      "stopReason": "refusal",
+      "allow": false
+    },
+    {
+      "text": "<block>no中文",
+      "stopReason": "end_turn",
+      "allow": false
+    },
+    {
+      "text": "<block>no中文",
+      "stopReason": "stop_sequence",
+      "allow": false
+    },
+    {
+      "text": "<block>no中文",
+      "stopReason": "max_tokens",
+      "allow": false
+    },
+    {
+      "text": "<block>no中文",
+      "stopReason": "refusal",
+      "allow": false
+    }
+  ],
+  "stageOneRefusals": [
+    {
+      "text": "<block>yes",
+      "block": true,
+      "refused": false
+    },
+    {
+      "text": "<block>no",
+      "block": null,
+      "refused": true
+    },
+    {
+      "text": "unparseable",
+      "block": null,
+      "refused": true
+    }
+  ],
+  "timeoutCases": [
+    {
+      "tokens": 0,
+      "timeoutMs": 60000
+    },
+    {
+      "tokens": 49999,
+      "timeoutMs": 60000
+    },
+    {
+      "tokens": 50000,
+      "timeoutMs": 60000
+    },
+    {
+      "tokens": 50001,
+      "timeoutMs": 70000
+    },
+    {
+      "tokens": 99999,
+      "timeoutMs": 70000
+    },
+    {
+      "tokens": 100000,
+      "timeoutMs": 70000
+    },
+    {
+      "tokens": 100001,
+      "timeoutMs": 80000
+    },
+    {
+      "tokens": 250000,
+      "timeoutMs": 100000
+    },
+    {
+      "tokens": 300000,
+      "timeoutMs": 110000
+    },
+    {
+      "tokens": 350000,
+      "timeoutMs": 120000
+    },
+    {
+      "tokens": 350001,
+      "timeoutMs": 120000
+    },
+    {
+      "tokens": 1000000,
+      "timeoutMs": 120000
+    }
+  ],
+  "framing": {
+    "nativeBytes": 45454,
+    "assetRange": [
+      315029580,
+      315061280
+    ],
+    "policyBytes": 96102,
+    "policySha256": "bfb494467ebd7003029b1d5da21f99a598a6238162d5b7933329abdf45625088",
+    "templateSha256": "56d3a7187ea1e84e2a00fa6195ecb494385152784ad3cf7e018d595e8b3ad7e1",
+    "systemSha256": "ef8f7cceb810c3803f387e6abe2818816114e891f7dbb477727447fc87bd3e8d"
+  },
+  "scope": "Pure XML parsers, non-severity fast-stage allow, and native public/default prompt including its decompressed shipped policy. Brand names are replaced and cross-session host context is absent for the local default host; no provider execution"
+}

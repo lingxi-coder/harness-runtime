@@ -1,0 +1,121 @@
+{
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "range": [
+    270619491,
+    270620181
+  ],
+  "cases": [
+    {
+      "name": "allow",
+      "toolResult": {
+        "behavior": "allow"
+      },
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "rule",
+        "matchedAskRule": false,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "passthrough",
+      "toolResult": {
+        "behavior": "passthrough"
+      },
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "rule",
+        "matchedAskRule": false,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "deny",
+      "toolResult": {
+        "behavior": "deny",
+        "decisionReason": {
+          "type": "other",
+          "reason": "clamp"
+        }
+      },
+      "expected": {
+        "behavior": "deny",
+        "reasonType": "other",
+        "matchedAskRule": false,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "safetyAsk",
+      "toolResult": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "safetyCheck",
+          "reason": "Dangerous rm operation",
+          "classifierApprovable": false
+        }
+      },
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "safetyCheck",
+        "matchedAskRule": true,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "pathAsk",
+      "toolResult": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "other",
+          "reason": "path"
+        },
+        "suggestions": [
+          {
+            "type": "addDirectories"
+          }
+        ]
+      },
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "other",
+        "matchedAskRule": true,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "ruleAsk",
+      "toolResult": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "source": "session",
+            "ruleBehavior": "ask",
+            "ruleValue": {
+              "toolName": "Bash"
+            }
+          }
+        }
+      },
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "rule",
+        "matchedAskRule": true,
+        "suggestions": false
+      }
+    },
+    {
+      "name": "crash",
+      "throws": true,
+      "expected": {
+        "behavior": "ask",
+        "reasonType": "rule",
+        "matchedAskRule": false,
+        "suggestions": false
+      }
+    }
+  ],
+  "scope": "Ybn ask-rule resolution with injected tool results; no live model, tool execution, or complete permission-walk claim"
+}

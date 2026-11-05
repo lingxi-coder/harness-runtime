@@ -164,6 +164,9 @@ pub(super) async fn dispatch_control_request(
                 init_fast_mode_disabled_reason,
             );
             let configs = sdk_configs.unwrap_or_default();
+            orchestrator
+                .apply_sdk_mcp_initialize_policies(&configs)
+                .await;
             let names = configs
                 .iter()
                 .map(|config| config.name.clone())

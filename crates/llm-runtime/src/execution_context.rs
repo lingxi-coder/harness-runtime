@@ -352,6 +352,9 @@ pub struct ExecutionContext {
     /// Classifier utility blocks keep their boundaries; cache TTL/scope still
     /// resolve against the selected request credential and current policy.
     pub classifier_system_blocks: bool,
+    /// Trusted classifier-owned timeout for each physical provider attempt.
+    /// Absent for ordinary requests; the caller owns its overall stage ceiling.
+    pub classifier_attempt_timeout_ms: Option<u64>,
     /// Host-admitted native server fallback policy, outside provider input.
     pub server_fallback:
         Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,

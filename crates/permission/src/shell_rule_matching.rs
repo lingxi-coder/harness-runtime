@@ -45,7 +45,7 @@ pub enum ShellRule {
 #[must_use]
 pub fn permission_rule_extract_prefix(rule: &str) -> Option<String> {
     let stripped = rule.strip_suffix(":*")?;
-    if stripped.is_empty() {
+    if stripped.is_empty() || stripped.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
         // `^(.+)` requires at least one char before `:*`.
         return None;
     }
@@ -129,7 +129,11 @@ pub fn match_wildcard_pattern_ex(
     case_insensitive: bool,
     normalize_whitespace: bool,
 ) -> bool {
-    let trimmed_raw = pattern.trim();
+    // Native 2.1.318 `d7` rejects NUL before inserting its private sentinels.
+    if pattern.contains('\0') {
+        return false;
+    }
+    let trimmed_raw = pattern.trim_matches(crate::source_input::is_js_trim_char);
     // TS `i` (pattern) and `s` (command) — collapse `[ \t]+`→" " only when the
     // whitespace-normalize flag is on. The pattern is trimmed first (TS `o`).
     let (trimmed_owned, command_owned);
@@ -241,6 +245,9 @@ pub fn match_wildcard_pattern_ex(
 /// alphabet is used, so paired and isolated surrogates remain distinct units.
 #[must_use]
 pub fn match_wildcard_pattern_utf16(pattern: &[u16], value: &[u16]) -> bool {
+    if pattern.contains(&0) {
+        return false;
+    }
     let pattern = crate::source_input::trim_js_units(pattern);
     let mut tokens = Vec::with_capacity(pattern.len());
     let mut wildcard_count = 0usize;

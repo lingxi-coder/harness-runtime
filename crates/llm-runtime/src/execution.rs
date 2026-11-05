@@ -622,6 +622,31 @@ pub(crate) fn first_byte_bound<'a, T: Send + 'a>(
     })
 }
 
+/// One classifier physical attempt includes both headers and the entire body.
+/// Unlike the idle watchdog this deadline never resets when data arrives.
+pub(crate) fn classifier_attempt_bound<'a, T: Send + 'a>(
+    deadline: Option<tokio::time::Instant>,
+    future: impl std::future::Future<Output = Result<T, LlmError>> + Send + 'a,
+) -> crate::BoxFuture<'a, Result<T, LlmError>> {
+    let future = Box::pin(future);
+    Box::pin(async move {
+        match deadline {
+            None => future.await,
+            Some(deadline) => {
+                let expired = || LlmError::TransportTimeout {
+                    message: "Classifier model request deadline exceeded".into(),
+                };
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(expired());
+                }
+                tokio::time::timeout_at(deadline, future)
+                    .await
+                    .map_err(|_| expired())?
+            }
+        }
+    })
+}
+
 /// Wait for provider progress rather than arbitrary partial network chunks.
 /// Never await again after new usage/inference has been decoded: the caller
 /// must retain that observation synchronously before reading further.

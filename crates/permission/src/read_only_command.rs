@@ -12,26 +12,24 @@
 //! can wire the read-only allow layer in TS order (after the allow walk + the
 //! sed/mode layers, before the generic ask fallthrough).
 //!
-//! # Faithful scope vs. documented divergence
-//! The TS read-only allowlist is enormous (~1500 lines of git/gh/docker/ripgrep
-//! per-subcommand flag configs + getopt-aware flag parsing). Porting that whole
-//! machine 1:1 is a separate effort; here we port the BASE [`READONLY_COMMANDS`]
-//! simple-command set + the simple-command regex SHAPE, PLUS the git slice of
-//! `GIT_READ_ONLY_COMMANDS` (the read-only subcommand allowlist + the
-//! branch/tag/reflog/remote positional-write guard callbacks; see
-//! [`git_subcommand_is_read_only`]). The gh/docker/ripgrep per-flag tables
-//! remain out of scope. TS
-//! `makeRegexForSafeCommand` anchors the base word, then allows a trailing run
-//! of characters that excludes the shell metacharacters (redirection, command
-//! substitution, pipe, brace/paren group, background, list, newline) — plus the
-//! hand-written read-only regexes for echo / pwd / whoami / ls / find / cd /
-//! grep / rg that the common case needs.
+//! # Native tables and verification boundary
+//! The 2.1.318 `pVt` command families and GitHub CLI tables
+//! are retained as inert data in `bundled/read_only_318_flags.json`. Their
+//! getopt walk (`lXe`) rejects unknown flags, validates flag values and short
+//! bundles, and runs the command's positional/format callback. In particular,
+//! ripgrep's executable `--pre` flag cannot inherit a read-only grant.
+//! `scripts/tests/read_only_318_oracle.mjs` verifies these 74 configurations
+//! and their finite replay cases against the hash-pinned native functions.
+//! The 22 GH configurations are inert in Native's current `c0o` dispatch;
+//! their presence in the artifact does not grant a read-only allowance.
 //!
-//! The crucial property is the SAFE DIRECTION: this only ever returns `true`
-//! for a command whose base word is on the allowlist and that carries no active
-//! shell operator, redirection, or substitution. Quoted operators remain
-//! literal arguments; malformed quoting fails closed. Anything else returns
-//! `false` and falls through to the normal ask path.
+//! Base commands and quote-aware operator/expansion rejection remain here;
+//! the surrounding Bash parser remains outside that finite table replay.
+//! Sed reuses the shared read-only expression validator; the oracle injects
+//! an accepted grammar preflight for its simple token fixtures. The native
+//! Anthropic-only `aki` search client has no local integration. Quoted operators remain literal
+//! arguments and malformed quoting fails closed. A `false` result continues
+//! through the ordinary permission checks rather than running the command.
 //!
 //! Per-subcommand splitting reuses [`crate::shell_command::split_command`] (the
 //! crate's `splitCommand_DEPRECATED` analogue), matching the TS
@@ -84,6 +82,7 @@ const READONLY_BASE_COMMANDS: &[&str] = &[
 /// without this it would be wrongly auto-allowed.
 const FIND_DANGEROUS_ACTIONS: &[&str] = &[
     "-delete",
+    "-rm",
     "-exec",
     "-execdir",
     "-ok",
@@ -105,26 +104,15 @@ const DOCKER_REMOTE_CONTROL_FLAGS: &[&str] = &[
     "--context",
     "--host",
     "-H",
-];
-
-const GH_READ_ONLY_COMMANDS: &[(&str, &str)] = &[
-    ("pr", "view"),
-    ("pr", "list"),
-    ("pr", "diff"),
-    ("pr", "checks"),
-    ("pr", "status"),
-    ("issue", "view"),
-    ("issue", "list"),
-    ("issue", "status"),
-    ("repo", "view"),
-    ("run", "list"),
-    ("run", "view"),
-    ("auth", "status"),
-    ("release", "list"),
-    ("release", "view"),
-    ("workflow", "list"),
-    ("workflow", "view"),
-    ("label", "list"),
+    "-c",
+    "-r",
+    "--config",
+    "--tlscacert",
+    "--tlscert",
+    "--tlskey",
+    "--remote",
+    "--module",
+    "--out",
 ];
 
 const READONLY_EXACT_COMMANDS: &[&str] = &[
@@ -237,9 +225,8 @@ fn contains_unquoted_expansion(command: &str) -> bool {
 
 /// Reject shell operators only when they are active in the shell grammar.
 /// Quoted separators are ordinary argument bytes, while an unmatched quote is
-/// never safe enough to auto-allow. Shell globs are deliberately allowed:
-/// expanding an argument list does not turn an allowlisted reader into a
-/// writer, and Claude's git/read-command fixtures include glob patterns.
+/// never safe enough to auto-allow. Unquoted globs have a separate command
+/// allowlist below: expansion can inject write/execute flags into other tools.
 fn contains_active_metachar(command: &str) -> bool {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
@@ -301,12 +288,93 @@ pub fn command_is_read_only(command: &str) -> bool {
     if subs.is_empty() {
         return false;
     }
-    subs.iter().all(|sub| is_read_only_subcommand(sub))
+    let has_glob = contains_unquoted_glob(command);
+    subs.iter()
+        .all(|sub| is_read_only_subcommand(sub, has_glob))
+}
+
+/// Native `x2e` distinguishes active globs from quoted/escaped literals.
+fn contains_unquoted_glob(command: &str) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut backtick = false;
+    let mut escaped = false;
+    let mut bracket = false;
+    let mut word_start = true;
+    let mut comment = false;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if comment {
+            if ch == '\n' {
+                comment = false;
+                word_start = true;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            word_start = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            } else {
+                escaped = true;
+            }
+            continue;
+        }
+        if backtick {
+            if ch == '`' {
+                backtick = false;
+                word_start = false;
+            }
+            continue;
+        }
+        if ch == '`' && !single {
+            backtick = true;
+            word_start = false;
+            continue;
+        }
+        if ch == '#' && word_start && !single && !double {
+            comment = true;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            word_start = false;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            word_start = false;
+            continue;
+        }
+        if single || double {
+            continue;
+        }
+        if matches!(
+            ch,
+            ' ' | '\t' | '\n' | '|' | '&' | ';' | '(' | ')' | '<' | '>'
+        ) {
+            bracket = false;
+            word_start = true;
+            continue;
+        }
+        word_start = false;
+        if matches!(ch, '*' | '?') || (ch == ']' && bracket) {
+            return true;
+        }
+        if ch == '[' {
+            bracket = true;
+        }
+    }
+    false
 }
 
 /// Is a SINGLE subcommand read-only? — the per-subcommand arm of TS
 /// `isCommandReadOnly` (`readOnlyValidation.ts:1678`), in its conservative core.
-fn is_read_only_subcommand(sub: &str) -> bool {
+fn is_read_only_subcommand(sub: &str, command_has_glob: bool) -> bool {
     // TS strips a trailing ` 2>&1` before matching (`isCommandReadOnly:1683`).
     let mut test = sub.trim();
     if let Some(stripped) = test.strip_suffix("2>&1") {
@@ -332,10 +400,70 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if READONLY_EXACT_COMMANDS.contains(&test) {
         return true;
     }
-    let mut words = test.split_whitespace();
+    let Some(tokens) = read_only_shell_words(test) else {
+        return false;
+    };
+    let mut words = tokens.iter().map(String::as_str);
     let Some(base) = words.next() else {
         return false;
     };
+    // Native `vat` checks this before getopt/table dispatch. A filename such
+    // as `--output=.env` must not turn `sort *` into an approved writer.
+    if contains_unquoted_glob(test)
+        || (command_has_glob
+            && tokens.iter().any(|word| {
+                word.contains(['*', '?'])
+                    || word
+                        .find('[')
+                        .is_some_and(|start| word[start..].contains(']'))
+            }))
+    {
+        return [
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "wc",
+            "stat",
+            "grep",
+            "egrep",
+            "fgrep",
+            "diff",
+            "du",
+            "df",
+            "echo",
+            "strings",
+            "hexdump",
+            "od",
+            "nl",
+            "cut",
+            "column",
+            "tr",
+            "tac",
+            "rev",
+            "cmp",
+            "basename",
+            "dirname",
+            "realpath",
+            "readlink",
+            "sha256sum",
+            "sha1sum",
+            "md5sum",
+            "cd",
+        ]
+        .contains(&base);
+    }
+    // Native table configurations have no regex exception for backticks,
+    // including when a shell quote makes the character literal.
+    if (matches!(base, "git" | "gh")
+        || (base == "docker"
+            && tokens
+                .get(1)
+                .is_some_and(|word| matches!(word.as_str(), "logs" | "inspect"))))
+        && test.contains('`')
+    {
+        return false;
+    }
     // `docker ps` / `docker images` — the only read-only `docker` forms
     // (`EXTERNAL_READONLY_COMMANDS`). A bare `docker` or any other subcommand is
     // NOT read-only.
@@ -354,23 +482,39 @@ fn is_read_only_subcommand(sub: &str) -> bool {
         return git_subcommand_is_read_only(&rest);
     }
     if base == "gh" {
-        let rest: Vec<&str> = words.collect();
-        return gh_is_read_only(&rest);
+        // The artifact retains a separate GH table, but Native c0o selects
+        // only pVt. GH is absent from that active read-only dispatch.
+        return false;
     }
     if base == "jq" {
         let rest: Vec<&str> = words.collect();
         return jq_is_read_only(&rest);
     }
+    if read_only_flag_configs().contains_key(base) {
+        if test.contains('`')
+            || (matches!(base, "rg" | "grep" | "egrep" | "fgrep") && test.contains(['\n', '\r']))
+        {
+            return false;
+        }
+        if base == "hostname" {
+            static HOSTNAME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            if !HOSTNAME
+                .get_or_init(|| {
+                    regex::Regex::new(r"^hostname(?:\s+(?:-[a-zA-Z]|--[a-zA-Z-]+))*\s*$")
+                        .expect("static hostname pattern")
+                })
+                .is_match(test)
+            {
+                return false;
+            }
+        }
+        let words = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+        return other_read_only_command(&words);
+    }
     // `echo` with metacharacter-free args is read-only (the TS echo regex; the
     // metachar guard above already rejected the dangerous `` ` ``/`$`/`<>` forms
     // the TS regex excludes).
     if base == "echo" {
-        return true;
-    }
-    // `grep` / `rg` (ripgrep) reading files: flags + paths only, no writes.
-    // (ripgrep has no write flag; `grep` likewise only reads. The metachar
-    // guard rejects the `>`/`|` forms.)
-    if matches!(base, "grep" | "egrep" | "fgrep" | "rg") {
         return true;
     }
     // `history` — bare or with a numeric argument only (TS
@@ -404,12 +548,668 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     READONLY_BASE_COMMANDS.contains(&base)
 }
 
+#[cfg(test)]
 fn gh_is_read_only(args: &[&str]) -> bool {
-    args.len() >= 2
-        && GH_READ_ONLY_COMMANDS.contains(&(args[0], args[1]))
-        && !args[2..]
+    let words = std::iter::once("gh")
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>();
+    let Some((name, count)) = validate_read_only_flags(&words) else {
+        return false;
+    };
+    name.starts_with("gh search ") || !gh_argument_is_dangerous(&words[count..])
+}
+
+fn other_read_only_command(words: &[&str]) -> bool {
+    let Some((name, count)) = validate_read_only_flags(words) else {
+        return false;
+    };
+    let args = &words[count..];
+    match name {
+        "sed" => {
+            // Read-only sed validation does not consult these roots: the
+            // shared validator's allow_file_writes=false branch only reads
+            // the command grammar and expression allowlist.
+            let command = "sed ".to_owned()
+                + &args
+                    .iter()
+                    .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            let roots = crate::filesystem::FsRoots {
+                cwd: "/".into(),
+                home: None,
+                lingxi_home: "/".into(),
+            };
+            crate::sed_validation::sed_constraint_verdict(&command, false, &roots, &[])
+                == crate::sed_validation::SedVerdict::Safe
+        }
+        "help" => !args
             .iter()
-            .any(|arg| matches!(*arg, "--web" | "-w" | "--show-token"))
+            .any(|arg| arg.contains(['~', '/', '\\']) || has_ambiguous_shell_value(arg)),
+        "hostname" => args.iter().all(|arg| {
+            arg.strip_prefix("--").is_some_and(|flag| {
+                !flag.is_empty() && flag.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+            }) || (arg.len() == 2
+                && arg.starts_with('-')
+                && arg.as_bytes()[1].is_ascii_alphabetic())
+        }),
+        "date" => {
+            let mut index = 0;
+            while index < args.len() {
+                let arg = args[index];
+                if arg.starts_with("--") && arg.contains('=') {
+                    index += 1;
+                } else if arg.starts_with('-') {
+                    index += if ["-d", "--date", "-r", "--reference", "--rfc-3339"].contains(&arg) {
+                        2
+                    } else {
+                        1
+                    };
+                } else {
+                    if !arg.starts_with('+') {
+                        return false;
+                    }
+                    index += 1;
+                }
+            }
+            true
+        }
+        "ps" => {
+            let has_environment_positional = args
+                .iter()
+                .any(|arg| !native_flag_spelling(arg) && arg.contains(['e', 'E']));
+            let has_environment_flag = args.iter().any(|arg| {
+                arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg[1..]
+                        .chars()
+                        .take_while(char::is_ascii_alphabetic)
+                        .any(|c| c == 'e')
+            });
+            let basic_flags_only = args.iter().all(|arg| {
+                *arg == "--forest"
+                    || arg.strip_prefix('-').is_some_and(|flag| {
+                        !flag.is_empty() && flag.chars().all(|c| "AacdeFfjlwHLTm".contains(c))
+                    })
+            });
+            let trees = args
+                .iter()
+                .map(|arg| {
+                    if *arg == "--forest" {
+                        1
+                    } else {
+                        arg.chars().filter(|c| "HLTm".contains(*c)).count()
+                    }
+                })
+                .sum::<usize>();
+            !has_environment_positional
+                && (!has_environment_flag || (basic_flags_only && trees <= 1))
+        }
+        "man" => man_arguments_are_read_only(args),
+        "lsof" => lsof_arguments_are_read_only(args),
+        "tput" => {
+            let blocked = [
+                "init", "reset", "rs1", "rs2", "rs3", "is1", "is2", "is3", "iprog", "if", "rf",
+                "clear", "flash", "mc0", "mc4", "mc5", "mc5i", "mc5p", "pfkey", "pfloc", "pfx",
+                "pfxl", "smcup", "rmcup",
+            ];
+            let mut index = 0;
+            let mut after_dash = false;
+            while index < args.len() {
+                let arg = args[index];
+                if arg == "--" {
+                    after_dash = true;
+                    index += 1;
+                } else if !after_dash && arg.starts_with('-') {
+                    if arg == "-S" || (!arg.starts_with("--") && arg.len() > 2 && arg.contains('S'))
+                    {
+                        return false;
+                    }
+                    index += if arg == "-T" { 2 } else { 1 };
+                } else {
+                    if blocked.contains(&arg) {
+                        return false;
+                    }
+                    index += 1;
+                }
+            }
+            true
+        }
+        "ss" => ss_arguments_are_read_only(args),
+        "test" => {
+            if args
+                .iter()
+                .any(|arg| ["-v", "-R", "-a", "-o"].contains(arg) || arg.contains('['))
+            {
+                return false;
+            }
+            for (index, arg) in args.iter().enumerate() {
+                if ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"].contains(arg) {
+                    for operand in [
+                        index.checked_sub(1).and_then(|i| args.get(i)),
+                        args.get(index + 1),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if !shell_test_integer(operand) {
+                            return false;
+                        }
+                    }
+                }
+                if *arg == "-t"
+                    && args
+                        .get(index + 1)
+                        .is_some_and(|arg| !shell_test_integer(arg))
+                {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+fn native_flag_spelling(arg: &str) -> bool {
+    arg.starts_with('-')
+        && arg.len() > 1
+        && arg.as_bytes()[1].is_ascii()
+        && (arg.as_bytes()[1].is_ascii_alphanumeric() || matches!(arg.as_bytes()[1], b'_' | b'-'))
+}
+
+fn shell_test_integer(arg: &str) -> bool {
+    static INTEGER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    INTEGER
+        .get_or_init(|| {
+            regex::Regex::new(r"^-?(0[xX][0-9a-fA-F]+|[0-9]+#[0-9a-zA-Z]+|[0-9]+)$")
+                .expect("static shell integer pattern")
+        })
+        .is_match(arg)
+}
+
+fn man_arguments_are_read_only(args: &[&str]) -> bool {
+    let sections = ["-S", "-s"];
+    let lookup_flags = ["-k", "-f", "--apropos", "--whatis"];
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if arg == "--" || arg == "-" || !arg.starts_with('-') {
+            break;
+        }
+        let section = if sections.contains(&arg) {
+            index += 1;
+            Some(*args.get(index).unwrap_or(&""))
+        } else if arg.starts_with("-S=") || arg.starts_with("-s=") {
+            Some(&arg[2..])
+        } else {
+            None
+        };
+        if section.is_some_and(|value| {
+            value.is_empty()
+                || !value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | ','))
+        }) {
+            return false;
+        }
+        index += 1;
+    }
+    let lookup_mode = args.iter().take_while(|arg| **arg != "--").any(|arg| {
+        if arg.starts_with("--") {
+            lookup_flags.contains(arg)
+        } else {
+            arg.starts_with('-') && arg[1..].contains(['k', 'f'])
+        }
+    });
+    let mut lookup_seen = false;
+    let mut after_dash = false;
+    index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if !after_dash && arg == "--" {
+            after_dash = true;
+            index += 1;
+            continue;
+        }
+        if !(after_dash || !arg.starts_with('-') || arg == "-") {
+            if lookup_flags.contains(&arg) {
+                lookup_seen = true;
+            } else if sections.contains(&arg) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        after_dash = true;
+        if has_ambiguous_shell_value(arg)
+            || (lookup_mode && arg.starts_with('-'))
+            || (!lookup_seen && arg.contains(['/', '\\', '~']))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn lsof_arguments_are_read_only(args: &[&str]) -> bool {
+    static ATTACHED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FLAG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let attached = ATTACHED.get_or_init(|| {
+        regex::Regex::new(r"^-[a-zA-Z]*i\S*@").expect("static lsof attached pattern")
+    });
+    let flag =
+        FLAG.get_or_init(|| regex::Regex::new(r"^-[a-zA-Z]*i$").expect("static lsof flag pattern"));
+    args.iter().enumerate().all(|(index, arg)| {
+        if arg.starts_with("+m") {
+            return false;
+        }
+        if attached.is_match(arg)
+            && arg.split_once('@').is_some_and(|(_, host)| {
+                host.split(':')
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .any(|c| c.is_ascii_alphabetic())
+            })
+        {
+            return false;
+        }
+        if flag.is_match(arg) {
+            let next = args.get(index + 1).copied().unwrap_or("");
+            if next.contains('~')
+                || next.split_once('@').is_some_and(|(_, host)| {
+                    host.split(':')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .any(|c| c.is_ascii_alphabetic())
+                })
+            {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+fn ss_arguments_are_read_only(args: &[&str]) -> bool {
+    let mut operands = Vec::new();
+    let mut after_dash = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if !after_dash && arg == "--" {
+            after_dash = true;
+            index += 1;
+            continue;
+        }
+        if !after_dash && arg.starts_with('-') {
+            if ["-f", "--family", "-A", "--query", "--socket"].contains(&arg) {
+                index += 1;
+            }
+        } else {
+            operands.push(arg);
+        }
+        index += 1;
+    }
+    if operands.iter().any(|arg| arg.contains('~')) {
+        return false;
+    }
+    let text = operands.join(" ");
+    let tokens = text
+        .split(|c: char| c.is_whitespace() || "()=!<>&|,".contains(c))
+        .filter(|part| !part.is_empty());
+    let mut skip = false;
+    for token in tokens {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if [
+            "dst",
+            "src",
+            "dport",
+            "sport",
+            "and",
+            "or",
+            "not",
+            "eq",
+            "ne",
+            "ge",
+            "le",
+            "gt",
+            "lt",
+            "autobound",
+            "state",
+            "exclude",
+            "dev",
+            "fwmark",
+            "cgroup",
+        ]
+        .contains(&token)
+        {
+            skip = [
+                "state", "exclude", "dport", "sport", "dev", "fwmark", "cgroup",
+            ]
+            .contains(&token);
+            continue;
+        }
+        if token
+            .chars()
+            .any(|c| c.is_ascii_alphabetic() && !"abcdefABCDEF".contains(c))
+            || (token.chars().any(|c| "abcdefABCDEF".contains(c))
+                && (token.contains('.') || !token.contains(':')))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(serde::Deserialize)]
+struct ReadOnlyFlagConfig {
+    #[serde(rename = "safeFlags")]
+    flags: std::collections::HashMap<String, String>,
+    #[serde(rename = "respectsDoubleDash", default)]
+    respects_double_dash: Option<bool>,
+}
+
+fn read_only_flag_configs() -> &'static std::collections::HashMap<String, ReadOnlyFlagConfig> {
+    static CONFIGS: std::sync::OnceLock<std::collections::HashMap<String, ReadOnlyFlagConfig>> =
+        std::sync::OnceLock::new();
+    CONFIGS.get_or_init(|| {
+        serde_json::from_str(include_str!("bundled/read_only_318_flags.json"))
+            .expect("the hash-pinned read-only flag table is valid")
+    })
+}
+
+/// Native `lXe` getopt walk, including numeric short-form arguments and
+/// no-argument short bundles. Unknown flags never inherit a command's grant.
+fn validate_read_only_flags(words: &[&str]) -> Option<(&'static str, usize)> {
+    if cfg!(target_os = "windows") && words.first() == Some(&"xargs") {
+        return None;
+    }
+    let (name, config) = read_only_flag_configs()
+        .iter()
+        .filter(|(name, _)| {
+            let prefix = name.split(' ').collect::<Vec<_>>();
+            words.starts_with(&prefix)
+        })
+        .max_by_key(|(name, _)| name.split(' ').count())?;
+    let count = name.split(' ').count();
+    if words[count..].iter().any(|word| {
+        word.contains('$') || (word.contains('{') && (word.contains(',') || word.contains("..")))
+    }) {
+        return None;
+    }
+    let command = *words.first()?;
+    if cfg!(target_os = "windows")
+        && command == "git"
+        && words[count..].iter().any(|word| {
+            has_ambiguous_shell_value(word)
+                || word.as_bytes().windows(3).any(|part| {
+                    part[0] == b':'
+                        && matches!(part[1], b'/' | b'\\')
+                        && matches!(part[2], b'/' | b'\\')
+                })
+        })
+    {
+        return None;
+    }
+    let mut index = count;
+    while index < words.len() {
+        let word = words[index];
+        if word.is_empty() {
+            index += 1;
+            continue;
+        }
+        if command == "xargs" && (!word.starts_with('-') || word == "--") {
+            let target = if word == "--" {
+                *words.get(index + 1)?
+            } else {
+                word
+            };
+            return [
+                "echo", "printf", "wc", "grep", "egrep", "fgrep", "head", "tail",
+            ]
+            .contains(&target)
+            .then_some((name.as_str(), count));
+        }
+        if word == "--" {
+            if config.respects_double_dash != Some(false) {
+                break;
+            }
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            let (flag, attached) = word
+                .split_once('=')
+                .map_or((word, None), |(a, b)| (a, Some(b)));
+            let Some(kind) = config.flags.get(flag).map(String::as_str) else {
+                if command == "git" && flag.strip_prefix('-').is_some_and(ascii_digits) {
+                    index += 1;
+                    continue;
+                }
+                if matches!(command, "rg" | "grep" | "egrep" | "fgrep")
+                    && flag.starts_with('-')
+                    && !flag.starts_with("--")
+                    && flag.len() > 2
+                    && flag.is_char_boundary(2)
+                {
+                    let (short, value) = flag.split_at(2);
+                    if ascii_digits(value)
+                        && config
+                            .flags
+                            .get(short)
+                            .is_some_and(|kind| matches!(kind.as_str(), "number" | "string"))
+                    {
+                        index += 1;
+                        continue;
+                    }
+                }
+                if flag.starts_with("--")
+                    || flag.len() <= 2
+                    || !flag[1..].chars().all(|short| {
+                        config
+                            .flags
+                            .get(&format!("-{short}"))
+                            .is_some_and(|kind| kind == "none")
+                    })
+                {
+                    return None;
+                }
+                index += 1;
+                continue;
+            };
+            if kind == "none" {
+                if attached.is_some() {
+                    return None;
+                }
+                index += 1;
+                continue;
+            }
+            let value = if let Some(value) = attached {
+                index += 1;
+                value
+            } else {
+                let value = *words.get(index + 1)?;
+                if value.starts_with('-')
+                    && value.len() > 1
+                    && value
+                        .as_bytes()
+                        .get(1)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                {
+                    return None;
+                }
+                index += 2;
+                value
+            };
+            if ambiguous_shell_value_starts(value)
+                || (kind == "string"
+                    && value.starts_with('-')
+                    && !(command == "git"
+                        && flag == "--sort"
+                        && value.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic)))
+                || !match kind {
+                    "number" => ascii_digits(value),
+                    "string" => true,
+                    "char" => value.encode_utf16().count() == 1,
+                    "{}" => value == "{}",
+                    "EOF" => value == "EOF",
+                    _ => false,
+                }
+            {
+                return None;
+            }
+        } else {
+            if has_ambiguous_shell_value(word) {
+                return None;
+            }
+            index += 1;
+        }
+    }
+    Some((name.as_str(), count))
+}
+
+fn ascii_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn has_ambiguous_shell_value(value: &str) -> bool {
+    ["__CMDSUB_OUTPUT__", "__TRACKED_VAR__", "__UNCERTAIN_VAR__"]
+        .iter()
+        .any(|marker| value.contains(marker))
+}
+
+fn ambiguous_shell_value_starts(value: &str) -> bool {
+    ["__CMDSUB_OUTPUT__", "__TRACKED_VAR__", "__UNCERTAIN_VAR__"]
+        .iter()
+        .any(|marker| value.starts_with(marker))
+}
+
+fn has_tilde_expansion(value: &str) -> bool {
+    value.starts_with('~')
+        || value.contains("=~")
+        || value.contains(":~")
+        || (value.contains('~') && value.contains('{'))
+}
+
+/// Native `je`: view/status commands permit owner/repo names, but not URLs,
+/// alternate identity syntax, or paths with two separators.
+#[cfg(test)]
+fn gh_argument_is_dangerous(args: &[&str]) -> bool {
+    args.iter().any(|arg| {
+        if arg.contains('~') {
+            return true;
+        }
+        let value = if arg.starts_with('-') {
+            let Some((_, value)) = arg.split_once('=') else {
+                return false;
+            };
+            value
+        } else {
+            arg
+        };
+        has_ambiguous_shell_value(value)
+            || value.contains("://")
+            || value.contains('@')
+            || value.chars().filter(|c| *c == '/').count() >= 2
+    })
+}
+
+/// Native `Ft` rejects Git formatting that can request signature verification
+/// or defer a format/ordering expression until execution.
+fn git_format_is_dangerous(args: &[&str]) -> bool {
+    static SIGNATURE_FORMAT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let signature_format = SIGNATURE_FORMAT.get_or_init(|| {
+        regex::Regex::new(r"%[-+ ]?G|%\(\*?signature").expect("static signature pattern")
+    });
+    args.iter().enumerate().any(|(index, arg)| {
+        if signature_format.is_match(arg) {
+            return true;
+        }
+        for flag in ["--format", "--pretty", "--sort", "--group"] {
+            let value = if *arg == flag {
+                args.get(index + 1).copied()
+            } else {
+                arg.strip_prefix(&format!("{flag}="))
+            };
+            if let Some(value) = value {
+                if has_tilde_expansion(value)
+                    || has_ambiguous_shell_value(value)
+                    || signature_format.is_match(value)
+                    || value.contains("signature")
+                    || (matches!(flag, "--format" | "--pretty")
+                        && !value.is_empty()
+                        && !value.contains('%')
+                        && !value.starts_with("format:")
+                        && !value.starts_with("tformat:")
+                        && ![
+                            "oneline", "short", "medium", "full", "fuller", "email", "raw",
+                        ]
+                        .contains(&value))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Shell-word projection for flag validation. Operators and expansions are
+/// rejected before this walk; quote delimiters are not part of an argument.
+fn read_only_shell_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut single = false;
+    let mut double = false;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !double => {
+                single = !single;
+                started = true;
+            }
+            '"' if !single => {
+                double = !double;
+                started = true;
+            }
+            '\\' if !single => {
+                let next = chars.next()?;
+                if double && !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                    word.push('\\');
+                }
+                if next != '\n' {
+                    word.push(next);
+                }
+                started = true;
+            }
+            '#' if !single && !double && !started => break,
+            ch if ch.is_whitespace() && !single && !double => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                started = true;
+            }
+        }
+    }
+    if single || double {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
 }
 
 fn jq_is_read_only(args: &[&str]) -> bool {
@@ -430,120 +1230,72 @@ fn docker_subcommand_is_read_only(rest: &[&str]) -> bool {
     let Some(&subcommand) = rest.first() else {
         return false;
     };
-    if !matches!(subcommand, "ps" | "images") {
+    if !matches!(subcommand, "ps" | "images" | "logs" | "inspect") {
         return false;
     }
-    !docker_has_remote_control_flag(&rest[1..])
+    if docker_has_remote_control_flag(rest)
+        || rest
+            .iter()
+            .any(|arg| has_ambiguous_shell_value(arg) || has_tilde_expansion(arg))
+    {
+        return false;
+    }
+    if matches!(subcommand, "ps" | "images") {
+        return true;
+    }
+    let words = std::iter::once("docker")
+        .chain(rest.iter().copied())
+        .collect::<Vec<_>>();
+    validate_read_only_flags(&words).is_some()
 }
 
 fn docker_has_remote_control_flag(args: &[&str]) -> bool {
-    for arg in args {
-        if *arg == "--" {
-            break;
-        }
-        if DOCKER_REMOTE_CONTROL_FLAGS.contains(arg) {
-            return true;
-        }
-        if let Some((flag, _)) = arg.split_once('=') {
-            if DOCKER_REMOTE_CONTROL_FLAGS.contains(&flag) {
-                return true;
-            }
-        }
-        if arg.starts_with("-H") && arg.len() > 2 {
-            return true;
-        }
-    }
-    false
+    args.iter().any(|arg| {
+        DOCKER_REMOTE_CONTROL_FLAGS.iter().any(|flag| {
+            *arg == *flag
+                || arg.starts_with(&format!("{flag}="))
+                || (flag.len() == 2 && arg.len() > 2 && arg.starts_with(flag))
+        }) || arg
+            .strip_prefix('-')
+            .filter(|rest| !rest.starts_with('-'))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_alphabetic)
+                    .collect::<String>()
+            })
+            .is_some_and(|bundle| {
+                bundle.len() >= 2 && bundle.chars().any(|flag| matches!(flag, 'H' | 'c' | 'r'))
+            })
+    })
 }
 
-/// Git flags that WRITE to disk regardless of subcommand — the file-output
-/// vector shared by the diff-generating read-only subcommands (`git diff` /
-/// `git log` / `git show` all accept `--output=<file>`). TS omits `--output`
-/// from every subcommand's `safeFlags` allowlist, so validation rejects it;
-/// this port keeps the SAFE-DIRECTION invariant with an explicit denylist
-/// instead of porting the full ~800-line per-flag `safeFlags` machine.
-const GIT_WRITE_FLAGS: &[&str] = &["--output", "--output-directory"];
-
-/// Is `rest` (the tokens after `git`) a read-only git invocation? — the port of
-/// the git slice of TS `GIT_READ_ONLY_COMMANDS`
-/// (`utils/shell/readOnlyCommandValidation.ts:107-923`).
-///
-/// This recognises the read-only git subcommand allowlist (the KEYS of
-/// `GIT_READ_ONLY_COMMANDS`) and applies the four positional-write guard
-/// callbacks (`git branch`/`git tag`/`git reflog`/`git remote`/`git remote
-/// show`). Longer multi-word forms (`git remote show`, `git stash list`, …) are
-/// matched before their one-word prefixes so e.g. `git remote show` wins over
-/// `git remote`.
-///
-/// # Conservative divergence (documented)
-/// The full TS machine additionally validates every flag against a
-/// per-subcommand `safeFlags` allowlist (~800 lines of getopt-aware parsing).
-/// This port does NOT reproduce that whole table; instead it relies on:
-/// * the caller's shell-metacharacter + expansion guards (already run before
-///   this fn), which reject redirection/substitution/`$`-bearing forms;
-/// * the positional-write callbacks below, which reject the branch/tag creation
-///   and reflog/remote write forms (every git write reachable from a read-only
-///   subcommand needs a positional arg the callback catches); and
-/// * the [`GIT_WRITE_FLAGS`] denylist for the one file-write flag (`--output`)
-///   reachable from an otherwise read-only subcommand.
-///
-/// The SAFE DIRECTION is preserved: a git write subcommand (`commit`/`push`/…)
-/// is simply absent from the allowlist → not read-only, and the callbacks +
-/// denylist reject the write forms of the allowlisted subcommands.
+/// Native 2.1.318 `r0n` table and its positional/format callbacks.
 fn git_subcommand_is_read_only(rest: &[&str]) -> bool {
-    let Some(&sub) = rest.first() else {
-        // Bare `git` is not read-only.
+    let words = std::iter::once("git")
+        .chain(rest.iter().copied())
+        .collect::<Vec<_>>();
+    let Some((name, count)) = validate_read_only_flags(&words) else {
         return false;
     };
-    // Reject the shared file-write flag regardless of subcommand (SAFE
-    // DIRECTION). TS achieves this by omitting `--output` from every
-    // `safeFlags` map.
-    if rest.iter().any(|a| {
-        let flag = a.split('=').next().unwrap_or(a);
-        GIT_WRITE_FLAGS.contains(&flag)
-    }) {
-        return false;
-    }
-    // Multi-word read-only prefixes — checked BEFORE the one-word forms so the
-    // longer, more specific key matches first (TS orders `git remote show`
-    // before `git remote`).
-    if rest.len() >= 2 {
-        match (rest[0], rest[1]) {
-            // `git remote show <name>` — callback: exactly one alphanumeric
-            // remote name (TS `git remote show` callback, lines 478-487). Args
-            // to the callback are the tokens after `show` (`rest[2..]`).
-            ("remote", "show") => return !git_remote_show_is_dangerous(&rest[2..]),
-            // `git stash list` / `git stash show` — read-only (bare `git stash`
-            // is NOT: it writes the stash).
-            ("stash", "list" | "show") => return true,
-            // `git config --get …` — read-only config read (bare `git config
-            // k v` writes).
-            ("config", "--get") => return true,
-            // `git worktree list` — read-only (bare `git worktree add` writes).
-            ("worktree", "list") => return true,
-            _ => {}
+    let args = &words[count..];
+    match name {
+        "git log" | "git show" | "git shortlog" | "git rev-list" | "git for-each-ref" => {
+            !git_format_is_dangerous(args)
         }
-    }
-    match sub {
-        // Pure read-only subcommands with no positional-write form.
-        "diff" | "log" | "show" | "shortlog" | "ls-remote" | "status" | "blame" | "ls-files"
-        | "merge-base" | "rev-parse" | "rev-list" | "describe" | "cat-file" | "for-each-ref"
-        | "grep" => true,
-        // `git reflog` — block the write subcommands `expire`/`delete`/`exists`
-        // (TS callback, lines 283-303).
-        "reflog" => !git_reflog_is_dangerous(&rest[1..]),
-        // `git remote` (bare / `-v`) — only `-v`/`--verbose`, no positional
-        // (TS callback, lines 495-501).
-        "remote" => !git_remote_is_dangerous(&rest[1..]),
-        // `git tag` — block tag creation via a positional arg without `-l`
-        // (TS callback, lines 739-805).
-        "tag" => !git_tag_is_dangerous(&rest[1..]),
-        // `git branch` — block branch creation/deletion/rename via a positional
-        // arg without `-l`/a filtering flag (TS callback, lines 851-921).
-        "branch" => !git_branch_is_dangerous(&rest[1..]),
-        // Everything else (`commit`/`push`/`add`/`checkout`/`stash`/`config`/
-        // `worktree`/…) is NOT read-only.
-        _ => false,
+        "git tag" => !git_format_is_dangerous(args) && !git_tag_is_dangerous(args),
+        "git branch" => !git_format_is_dangerous(args) && !git_branch_is_dangerous(args),
+        "git reflog" => !git_reflog_is_dangerous(args),
+        "git remote" => !git_remote_is_dangerous(args),
+        "git remote show" => !git_remote_show_is_dangerous(args),
+        // Native g0o permits only flags here: a repository/ref positional
+        // would contact a caller-selected remote rather than inspect metadata.
+        "git ls-remote" => {
+            !git_format_is_dangerous(args)
+                && !args
+                    .iter()
+                    .any(|arg| *arg == "--" || *arg == "-" || !arg.starts_with('-'))
+        }
+        _ => true,
     }
 }
 
@@ -733,6 +1485,126 @@ fn git_branch_is_dangerous(args: &[&str]) -> bool {
 }
 
 #[cfg(test)]
+mod latest_read_only_tests {
+    use super::*;
+
+    #[test]
+    fn glob_expansion_cannot_inject_flags_into_table_commands() {
+        use crate::{PermissionMode, PermissionPolicy, PermissionResult};
+        let policy =
+            PermissionPolicy::new(PermissionMode::Default).with_roots(crate::filesystem::FsRoots {
+                cwd: "/proj".into(),
+                home: None,
+                lingxi_home: "/proj/.lingxi".into(),
+            });
+        for command in [
+            "sort *",
+            "file ?",
+            "sed -n p [ab]",
+            "git log *",
+            "rg needle *",
+        ] {
+            assert!(!command_is_read_only(command), "{command}");
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"command": command}),
+            )
+            .unwrap();
+            assert!(
+                !matches!(
+                    policy.authorize("Bash", &input),
+                    PermissionResult::Allow { .. }
+                ),
+                "{command}"
+            );
+        }
+        for command in [
+            "cat *",
+            "sha256sum *.txt",
+            "sort '*'",
+            "sort \\*",
+            "sort \"*\"",
+            "sed -n p '[ab]'",
+        ] {
+            assert!(command_is_read_only(command), "{command}");
+        }
+        // Native also carries the whole command's glob marker to children.
+        assert!(!command_is_read_only("cat * | sort '*'"));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/read_only_2_1_318.json")).unwrap();
+        for case in fixture["publicGlobCases"].as_array().unwrap() {
+            let command = case["command"].as_str().unwrap();
+            assert_eq!(
+                command_is_read_only(command),
+                case["expected"].as_bool().unwrap(),
+                "Native vat: {command}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn read_only_flags_match_hash_pinned_318_native_getopt_and_callbacks() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/read_only_2_1_318.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let words = case["words"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|word| word.as_str().unwrap())
+                .collect::<Vec<_>>();
+            let expected = case["expected"].as_bool().unwrap();
+            let actual = match words[0] {
+                "git" => git_subcommand_is_read_only(&words[1..]),
+                "gh" => gh_is_read_only(&words[1..]),
+                "docker" => docker_subcommand_is_read_only(&words[1..]),
+                "rg" | "grep" | "egrep" | "fgrep" => validate_read_only_flags(&words).is_some(),
+                _ => other_read_only_command(&words),
+            };
+            assert_eq!(actual, expected, "native getopt/callbacks: {words:?}");
+            let quoted = words
+                .iter()
+                .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                command_is_read_only(&quoted),
+                case.get("quotedExpected")
+                    .or_else(|| case.get("readOnlyExpected"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(expected),
+                "public quoted shell path: {words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn executable_and_remote_flags_never_inherit_read_only_grants() {
+        for command in [
+            "rg --pre arbitrary-program pattern",
+            "rg --pre-glob '*.txt' pattern",
+            "git diff --ext-diff",
+            "git log --show-signature",
+            "gh pr view 42 --web=false",
+            "docker ps --config=alternate",
+            "docker ps -- --host=prod",
+            "gh pr view 42 --json title",
+            "gh search code symbol --json path,repository",
+        ] {
+            assert!(!command_is_read_only(command), "{command}");
+        }
+        for command in [
+            "docker logs --tail 10 app",
+            "docker inspect --format '{{.Name}}' app",
+            "rg -in -A5 'two words' '*.rs'",
+            "git log --format=%H -10",
+        ] {
+            assert!(command_is_read_only(command), "{command}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -782,11 +1654,10 @@ mod tests {
         assert!(!command_is_read_only(&over));
     }
 
-    // Binary `vho` read-only base set excludes `test`/`getconf`; the port
-    // previously over-allowed them.
+    // Native 2.1.318 has a dedicated guarded `test` table; getconf remains absent.
     #[test]
-    fn test_and_getconf_are_not_read_only() {
-        assert!(!command_is_read_only("test -f foo"));
+    fn test_uses_its_guarded_table_and_getconf_remains_unknown() {
+        assert!(command_is_read_only("test -f foo"));
         assert!(!command_is_read_only("getconf PAGE_SIZE"));
     }
 
@@ -819,8 +1690,8 @@ mod tests {
         assert!(command_is_read_only("echo 'a && b'"));
         assert!(command_is_read_only("find . -name '*.rs'"));
         assert!(command_is_read_only("jq -r .name data.json"));
-        assert!(command_is_read_only("gh pr view 42 --json title"));
-        assert!(command_is_read_only("gh issue list"));
+        assert!(!command_is_read_only("gh pr view 42 --json title"));
+        assert!(!command_is_read_only("gh issue list"));
     }
 
     #[test]
@@ -947,7 +1818,9 @@ mod test_quote_aware_expansion {
         // Single-quoted `$VAR` is literal in bash → read-only (TS allows; the
         // former quote-naive `$` membership test wrongly denied this).
         assert!(command_is_read_only("echo '$VAR'"));
-        assert!(command_is_read_only("grep '$x' file"));
+        // The native grep getopt path rejects dollar-bearing argument values,
+        // even when shell quoting makes them literal. Echo's regex permits it.
+        assert!(!command_is_read_only("grep '$x' file"));
     }
 
     #[test]
@@ -1031,10 +1904,12 @@ mod test_git_read_only {
     fn additional_read_only_subcommands() {
         assert!(command_is_read_only("git branch"));
         assert!(command_is_read_only("git branch -a"));
-        assert!(command_is_read_only("git branch --list feature/*"));
+        assert!(!command_is_read_only("git branch --list feature/*"));
+        assert!(command_is_read_only("git branch --list 'feature/*'"));
         assert!(command_is_read_only("git branch --merged"));
         assert!(command_is_read_only("git tag"));
-        assert!(command_is_read_only("git tag -l v1.*"));
+        assert!(!command_is_read_only("git tag -l v1.*"));
+        assert!(command_is_read_only("git tag -l 'v1.*'"));
         assert!(command_is_read_only("git reflog"));
         assert!(command_is_read_only("git reflog show"));
         assert!(command_is_read_only("git remote"));

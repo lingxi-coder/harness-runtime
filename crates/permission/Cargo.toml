@@ -53,7 +53,7 @@ tool-shell = { path = "../tools/shell" }
 tool-web = { path = "../tools/web" }
 tool-agent = { path = "../tools/agent" }
 tool-mcp = { path = "../tools/mcp" }
-tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros", "test-util"] }
 # WIZARD-06 apply-file secure-read integration tests (symlink / nlink / cap).
 tempfile = "3"
 

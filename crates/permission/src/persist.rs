@@ -961,18 +961,16 @@ mod tests {
     }
 
     #[test]
-    fn dedups_exact_without_removed_agent_alias() {
+    fn dedups_exact_and_legacy_task_alias() {
         // exact duplicate → no change.
         let raw = r#"{ "permissions": { "allow": ["Bash"] } }"#;
         let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
         assert!(apply_rule_to_settings_json(raw, &rule).unwrap().is_none());
 
-        // A distinct obsolete name does not prevent adding the current Agent rule.
+        // Native 2.1.318 normalizes Task to Agent before deduplication.
         let raw2 = r#"{ "permissions": { "allow": ["Task"] } }"#;
         let agent = allow_rule("Agent", PermissionUpdateDestination::LocalSettings).rule;
-        let out = apply_rule_to_settings_json(raw2, &agent).unwrap().unwrap();
-        let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["permissions"]["allow"], json!(["Task", "Agent"]));
+        assert!(apply_rule_to_settings_json(raw2, &agent).unwrap().is_none());
     }
 
     #[test]
@@ -1015,12 +1013,14 @@ mod tests {
     }
 
     #[test]
-    fn remove_does_not_match_removed_agent_alias() {
+    fn remove_matches_legacy_task_alias() {
         let raw = r#"{ "permissions": { "allow": ["Task", "Read"] } }"#;
         let agent = allow_rule("Agent", PermissionUpdateDestination::LocalSettings).rule;
-        assert!(remove_rule_from_settings_json(raw, &agent)
+        let removed = remove_rule_from_settings_json(raw, &agent)
             .unwrap()
-            .is_none());
+            .unwrap();
+        let value: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(value["permissions"]["allow"], json!(["Read"]));
     }
 
     #[test]

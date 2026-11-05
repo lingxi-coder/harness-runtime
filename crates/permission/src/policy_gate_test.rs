@@ -5244,6 +5244,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
                 update_destination: Some(crate::result::PermissionUpdateDestination::UserSettings),
                 metadata: PermissionMetadata {
                     matched_rules: vec!["Read".into()],
+                    matched_ask_rule: None,
                     permission_suggestions: Some(
                         Utf16JsonProjection::parse(r#"[{"type":"addRules","opaque":"\ud800"}]"#)
                             .unwrap(),
@@ -5280,6 +5281,11 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
                 }),
                 metadata: PermissionMetadata {
                     matched_rules: vec!["Bash(rm:*)".into()],
+                    matched_ask_rule: Some(PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Bash"),
+                        behavior: PermissionBehavior::Ask,
+                        source: PermissionRuleSource::Session,
+                    }),
                     permission_suggestions: Some(json!([{"type":"setMode","mode":"auto"}])),
                     blocked_path: Some("/workspace/build".into()),
                 },
@@ -5549,6 +5555,89 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
                 .check_path(std::path::Path::new("/extra/file"))
                 .held_outside,
             Match::Match
+        );
+    }
+}
+
+#[cfg(test)]
+mod latest_ask_provenance {
+    use super::*;
+
+    struct UnusedPrompt;
+    #[async_trait]
+    impl PermissionGate for UnusedPrompt {
+        async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
+            panic!("rule preflight must not consult the prompt")
+        }
+    }
+
+    fn ask(reason: PermissionDecisionReason) -> PermissionResult {
+        PermissionResult::Ask {
+            reason,
+            prompt: crate::result::PermissionPrompt {
+                title: "Allow Bash?".into(),
+                message: "tool-local objection".into(),
+                options: vec![],
+            },
+            pending_classifier_check: None,
+            metadata: PermissionMetadata {
+                matched_ask_rule: Some(PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Bash"),
+                    behavior: PermissionBehavior::Ask,
+                    source: PermissionRuleSource::Session,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn matched_rule_ask_has_decided_coordinate_rank_even_with_a_mode_reason() {
+        let result = ask(PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::Plan,
+        });
+        assert_eq!(PolicyPermissionGate::coordinate_rank(&result), 3);
+    }
+
+    #[test]
+    fn hook_preflight_mod_verdict_keeps_substituted_ask_rule() {
+        let result = ask(PermissionDecisionReason::Other {
+            reason: "path".into(),
+        });
+        let evaluation = hook_allow_preflight_tool_check_evaluation(
+            "Bash",
+            &result,
+            PermissionMode::Default,
+            &PermissionCheckContext::default(),
+        );
+        assert_eq!(evaluation.verdict.decision, ModToolCheckDecision::Ask);
+        assert_eq!(evaluation.verdict.rule.unwrap().string_at(""), Some("Bash"));
+    }
+
+    #[test]
+    fn a_hook_allow_cannot_erase_an_explicit_ask_with_a_tool_local_reason() {
+        let policy = PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            vec![PermissionRule {
+                value: PermissionRuleValue::from_rule_string("Bash"),
+                behavior: PermissionBehavior::Ask,
+                source: PermissionRuleSource::Session,
+            }],
+        )
+        .with_roots(crate::FsRoots {
+            cwd: "/workspace/project".into(),
+            home: Some("/home/test".into()),
+            lingxi_home: "/home/test/.lingxi".into(),
+        });
+        let gate = PolicyPermissionGate::new(Arc::new(policy), Arc::new(UnusedPrompt));
+        let input = Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command":"cat /etc/passwd"}),
+        )
+        .unwrap();
+        let (_, verdict) =
+            gate.rule_or_safety_verdict("Bash", &input, &FoldedPermissionContext::default());
+        assert!(
+            matches!(verdict, Some(PermissionResult::Ask { metadata, .. }) if metadata.matched_ask_rule.is_some())
         );
     }
 }

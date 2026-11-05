@@ -1194,6 +1194,8 @@ struct StreamState {
     /// disables it (`LINGXI_ENABLE_STREAM_WATCHDOG=0`). The deadline resets on
     /// every received event because a fresh timeout wraps each frame fetch.
     idle_timeout: Option<Duration>,
+    /// Absolute classifier deadline shared by headers and every body read.
+    classifier_attempt_deadline: Option<tokio::time::Instant>,
     /// Last so the conversation lease returns only after frames release the socket.
     side_ws_lease: Option<ConversationLease>,
 }
@@ -2615,6 +2617,62 @@ impl ApiService {
         );
         control.max_retries = max_retries;
         self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY)
+            .await
+    }
+
+    /// Classifier streams are accumulated privately, so a failed body may be
+    /// replayed without exposing partial output. Headers and bodies share one
+    /// retry ledger; reopening a stream never replenishes the query's budget.
+    pub async fn execute_classifier_stream_request(
+        &self,
+        mut request: LlmRequest,
+        max_retries: u32,
+    ) -> Result<HistoryResponse, LlmError> {
+        request.execution.isolated_query = true;
+        request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        let sub = self.effective_subscriber();
+        let mut control = resolve_retry_control_with_settings(
+            &request.input.model,
+            None,
+            sub.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        control.max_retries = max_retries;
+        let scope = ModelCallRetryScope::default().with_private_output();
+        let mut state = RetryState {
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
+            rate_limit_terminal: rate_limit_cannot_clear(
+                request.profile.as_deref(),
+                &request.input.model,
+            ),
+            ..RetryState::default()
+        };
+        let control = scope.configure(&control, &mut state);
+        let thinking_budget = reasoning_budget(request.input.thinking.as_ref());
+        scope
+            .run(async {
+                loop {
+                    // The stream driver has already exhausted or declined
+                    // header retries, including x-should-retry:false. Only a
+                    // body failure needs the classifier's outer replay loop.
+                    let stream = Box::pin(self.stream_request(request.clone())).await?;
+                    let error = match crate::stream_accumulator::accumulate_stream_salvaging(stream)
+                        .await
+                    {
+                        Ok(response) => return Ok(response),
+                        Err((_, error)) => error,
+                    };
+                    match scope.next_step(&mut state, &control, &error, thinking_budget, None) {
+                        DriveStep::RetryAfter(delay) => {
+                            self.report_and_sleep_retry(&error, delay, &state, &control)
+                                .await;
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            })
             .await
     }
 
@@ -8315,7 +8373,10 @@ impl ApiService {
         let mut context_1m_ordinary_retry_pending = false;
         let timeout = match policy {
             NonStreamDrivePolicy::Standard => {
-                Some(crate::model::request_timeout::non_stream_timeout()?)
+                Some(match req.execution.classifier_attempt_timeout_ms {
+                    Some(milliseconds) => std::time::Duration::from_millis(milliseconds),
+                    None => crate::model::request_timeout::non_stream_timeout()?,
+                })
             }
             NonStreamDrivePolicy::ModelValidation => None,
         };
@@ -10518,11 +10579,22 @@ impl ApiService {
 
             let provider = &prepared.route.resolved_route.provider_id;
             let body_bytes = prepared.provider_request.wire_body_bytes()?.len();
-            let first_byte_timeout = self.stream_first_byte_timeout_override.or_else(|| {
-                crate::model::stream_watchdog::resolve_stream_first_byte_timeout(
-                    provider, body_bytes,
-                )
-            });
+            let classifier_timeout = req
+                .execution
+                .classifier_attempt_timeout_ms
+                .map(Duration::from_millis);
+            let first_byte_timeout = if classifier_timeout.is_some() {
+                // The absolute classifier deadline below owns both phases.
+                None
+            } else {
+                self.stream_first_byte_timeout_override.or_else(|| {
+                    crate::model::stream_watchdog::resolve_stream_first_byte_timeout(
+                        provider, body_bytes,
+                    )
+                })
+            };
+            let mut classifier_attempt_deadline =
+                classifier_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
 
             let mut attempt = crate::model_attempt::WireAttempt::new(None);
             let admission = req.execution.request_dispatch_admission.clone();
@@ -10539,25 +10611,29 @@ impl ApiService {
             let opened = async {
                 let responses_ws_session = conversation_lease.as_mut().expect("conversation lease").session();
                 let preparing = tokio::time::Instant::now();
-                let prepared = crate::execution::first_byte_bound(
+                let prepared = crate::execution::classifier_attempt_bound(classifier_attempt_deadline, crate::execution::first_byte_bound(
                     first_byte_timeout,
                     request_client
                         .prepare_shared_stream(prepared, responses_ws_session),
-                )
+                ))
                 .await?;
                 let remaining =
                     first_byte_timeout.map(|timeout| timeout.saturating_sub(preparing.elapsed()));
                 self.validate_scope_output(&prepared)?;
                 // Budget/queue admission is host work, outside the network
                 // watchdog. Its wait must not masquerade as a provider timeout.
+                let admission_started = tokio::time::Instant::now();
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
+                if let Some(deadline) = classifier_attempt_deadline.as_mut() {
+                    *deadline += admission_started.elapsed();
+                }
                 safety.inherit_if_missing(attempt.model_safety_observer());
                 let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
                 let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
                     beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
                 });
                 let thinking_recovery_scope = prepared.thinking_recovery_scope.clone();
-                crate::execution::first_byte_bound(remaining, async {
+                crate::execution::classifier_attempt_bound(classifier_attempt_deadline, crate::execution::first_byte_bound(remaining, async {
                     if req.execution.computer_submission.is_some()
                         && admission
                             .as_ref()
@@ -10611,7 +10687,7 @@ impl ApiService {
                             Ok(())
                         })
                         .await
-                })
+                }))
                 .await
             }
             .await;
@@ -10792,22 +10868,57 @@ impl ApiService {
                             .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
                         let collect =
                             async { streaming.collect().await.map_err(crate::upstream::error) };
-                        let result = match timeout {
-                            Some(timeout) => tokio::time::timeout(timeout, collect)
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(LlmError::TransportTimeout {
-                                        message: "Timed out reading provider error response".into(),
-                                    })
-                                }),
-                            None => collect.await,
-                        };
+                        let result = crate::execution::classifier_attempt_bound(
+                            classifier_attempt_deadline,
+                            async {
+                                match timeout {
+                                    Some(timeout) => tokio::time::timeout(timeout, collect)
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            Err(LlmError::TransportTimeout {
+                                                message:
+                                                    "Timed out reading provider error response"
+                                                        .into(),
+                                            })
+                                        }),
+                                    None => collect.await,
+                                }
+                            },
+                        )
+                        .await;
                         let collected = match result {
                             Ok(collected) => collected,
                             Err(error) => {
                                 self.observe_native_thinking_resumption_refusal(&error);
                                 safety.error(&error);
                                 attempt.finish().await?;
+                                // A classifier has not received a stream yet;
+                                // its outer accumulator cannot retry this body
+                                // failure. Spend the same ledger here while
+                                // preserving the server's retry-decline hint.
+                                if classifier_timeout.is_some()
+                                    && allow_replay
+                                    && !crate::model::retry_scope::http_retry_decline_is_terminal(
+                                        response_status,
+                                        response_headers
+                                            .get("x-should-retry")
+                                            .is_some_and(|value| value == "false"),
+                                        false,
+                                        crate::model::retry::retry_watchdog_from_env(),
+                                    )
+                                {
+                                    if let DriveStep::RetryAfter(delay) = retry_scope.next_step(
+                                        &mut state,
+                                        &ctl,
+                                        &error,
+                                        thinking_budget,
+                                        self.settings_backoff_ms,
+                                    ) {
+                                        self.report_and_sleep_retry(&error, delay, &state, &ctl)
+                                            .await;
+                                        continue;
+                                    }
+                                }
                                 return Err(error);
                             }
                         };
@@ -11361,29 +11472,35 @@ impl ApiService {
                     if (dispatch_attempt.value.is_some() || account_coordinator.is_some())
                         && allow_replay
                     {
-                        let first = match stream_idle_timeout {
-                            Some(t) => {
-                                // Wall clock across the same wait the monotonic
-                                // timeout bounds: monotonic time stops while the
-                                // machine is suspended, so the excess IS the sleep.
-                                let wall = std::time::SystemTime::now();
-                                match tokio::time::timeout(
-                                    t,
-                                    crate::execution::next_batch(&mut frames),
-                                )
-                                .await
-                                {
-                                    Ok(r) => r,
-                                    Err(_elapsed) => {
-                                        Err(crate::model::stream_watchdog::watchdog_abort_error(
+                        let first = crate::execution::classifier_attempt_bound(
+                            classifier_attempt_deadline,
+                            async {
+                                match stream_idle_timeout {
+                                    Some(t) => {
+                                        // Wall clock across the same wait the monotonic
+                                        // timeout bounds: monotonic time stops while the
+                                        // machine is suspended, so the excess IS the sleep.
+                                        let wall = std::time::SystemTime::now();
+                                        match tokio::time::timeout(
                                             t,
-                                            wall.elapsed().unwrap_or(t),
-                                        ))
+                                            crate::execution::next_batch(&mut frames),
+                                        )
+                                        .await
+                                        {
+                                            Ok(r) => r,
+                                            Err(_elapsed) => Err(
+                                                crate::model::stream_watchdog::watchdog_abort_error(
+                                                    t,
+                                                    wall.elapsed().unwrap_or(t),
+                                                ),
+                                            ),
+                                        }
                                     }
+                                    None => crate::execution::next_batch(&mut frames).await,
                                 }
-                            }
-                            None => crate::execution::next_batch(&mut frames).await,
-                        };
+                            },
+                        )
+                        .await;
                         if let Ok(Some(batch)) = &first {
                             if let Some((mut usage, completeness)) =
                                 crate::upstream::usage(&batch.usage, &batch.inference)
@@ -11474,6 +11591,22 @@ impl ApiService {
                                 // Unknown execution/settlement never authorizes
                                 // the dispatch-header repair on pooled calls.
                                 attempt.finish().await?;
+                                if classifier_timeout.is_some() {
+                                    // This private side query has not exposed
+                                    // the primed body event to a caller. Its
+                                    // retry budget still owns this failure.
+                                    if let DriveStep::RetryAfter(delay) = retry_scope.next_step(
+                                        &mut state,
+                                        &ctl,
+                                        first_err,
+                                        thinking_budget,
+                                        self.settings_backoff_ms,
+                                    ) {
+                                        self.report_and_sleep_retry(first_err, delay, &state, &ctl)
+                                            .await;
+                                        continue;
+                                    }
+                                }
                                 return Err(first_err.clone());
                             }
                             // Native x2 body classification requires a connection cause;
@@ -11564,6 +11697,7 @@ impl ApiService {
                         request_id: stream_request_id,
                         started: stream_started,
                         idle_timeout: stream_idle_timeout,
+                        classifier_attempt_deadline,
                         side_ws_lease: conversation_lease.take(),
                     };
 
@@ -11666,7 +11800,7 @@ impl ApiService {
                                     && s.seed.as_ref().is_some_and(|seed| matches!(seed, Ok(Some(batch)) if batch.usage.usage.is_some()));
                                 let frame = match s.seed.take() {
                                     Some(seeded) => seeded,
-                                    None => match s.idle_timeout {
+                                    None => crate::execution::classifier_attempt_bound(s.classifier_attempt_deadline, async { match s.idle_timeout {
                                         Some(timeout) => tokio::time::timeout(
                                             timeout,
                                             crate::execution::next_batch(&mut s.frames),
@@ -11678,7 +11812,7 @@ impl ApiService {
                                             ))
                                         }),
                                         None => crate::execution::next_batch(&mut s.frames).await,
-                                    },
+                                    }}).await,
                                 };
                                 match frame {
                                     Ok(Some(frame)) => {

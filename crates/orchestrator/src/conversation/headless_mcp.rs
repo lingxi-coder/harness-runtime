@@ -100,20 +100,27 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Apply restrictions before the initialize reply, independently of I/O.
+    pub async fn apply_sdk_mcp_initialize_policies(&self, configs: &[mcp::McpServerConfig]) {
+        if let Some(registry) = &self.mcp_registry {
+            mcp::tool_policy::apply_sdk_initialize_policies(registry, configs, self.perms.as_ref())
+                .await;
+        }
+    }
+
     /// Register SDK-hosted servers after the initialize reply has been queued.
     /// The registry publishes their ordinary catalog and connection events.
     pub async fn connect_sdk_mcp_servers(&self, configs: Vec<mcp::McpServerConfig>) {
         let Some(registry) = &self.mcp_registry else {
             return;
         };
+        self.apply_sdk_mcp_initialize_policies(&configs).await;
         for config in configs {
-            if registry.get_config(&config.name).await.is_some() {
-                continue;
-            }
             // A failure is recorded by the same registry as every platform
             // connection. It cannot retroactively alter the initialize reply.
-            let _ = registry.connect(config).await;
+            let _ = registry.register_sdk_initialize(config).await;
         }
+        mcp::tool_policy::synchronize_permission_policies(registry, self.perms.as_ref()).await;
     }
 
     /// SDK status uses the same current registry catalog, including tools

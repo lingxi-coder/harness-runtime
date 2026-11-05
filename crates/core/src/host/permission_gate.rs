@@ -984,6 +984,7 @@ pub enum PermissionToolCheckRuleSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PermissionToolCheckMetadata {
     pub matched_rules: Vec<Utf16JsonProjection>,
+    pub matched_ask_rule: Option<PermissionToolCheckRule>,
     pub permission_suggestions: Option<Utf16JsonProjection>,
     pub blocked_path: Option<String>,
 }
@@ -1393,6 +1394,13 @@ pub trait PermissionGate: Send + Sync {
     /// gate overrides this so normal and orphaned permission responses update
     /// the same live context.
     fn apply_permission_updates(&self, _updates: &[Utf16JsonProjection]) {}
+
+    /// Atomically replace the host-owned MCP server-policy rule bucket.
+    ///
+    /// Registry lifecycle owners use a complete current catalog snapshot;
+    /// ordinary approval responses cannot target this source. Other rule
+    /// sources must remain untouched, including session/user grants.
+    fn replace_mcp_server_policy_rules(&self, _rules: Vec<PermissionToolCheckRule>) {}
 
     /// Persist permission updates through the transport that owns the settings
     /// roots. This is separate from live application because an outer policy

@@ -1,0 +1,314 @@
+{
+  "removalsWithWorkingDirs": [
+    {
+      "target": "/other/deep/*",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "workingDirs": [
+        "/other/deep"
+      ],
+      "expected": {
+        "behavior": "ask",
+        "message": "Dangerous rm operation detected: '/other/deep/*'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules.",
+        "reason": "on working directory or its ancestor: /other/deep/*"
+      }
+    },
+    {
+      "target": "/other/deep/sub/*",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "workingDirs": [
+        "/other/deep"
+      ],
+      "expected": {
+        "behavior": "passthrough",
+        "message": "No dangerous removals detected for rm command"
+      }
+    },
+    {
+      "target": "/other/deep",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "workingDirs": [
+        "/other/deep"
+      ],
+      "expected": {
+        "behavior": "passthrough",
+        "message": "No dangerous removals detected for rm command"
+      }
+    }
+  ],
+  "envPrefix": [
+    {
+      "command": "LANG=C cat safe.txt",
+      "expected": false
+    },
+    {
+      "command": "LANG=/tmp/locale cat safe.txt",
+      "expected": true
+    },
+    {
+      "command": "LANG=./locale cat safe.txt",
+      "expected": true
+    },
+    {
+      "command": "LANG=../locale cat safe.txt",
+      "expected": true
+    },
+    {
+      "command": "LANG=folder cat safe.txt",
+      "expected": false
+    },
+    {
+      "command": "LANG=__TRACKED_VAR__/locale cat safe.txt",
+      "expected": true
+    },
+    {
+      "command": "LANG=__CMDSUB_OUTPUT__ cat safe.txt",
+      "expected": true
+    },
+    {
+      "command": "SECRET=1 cat safe.txt",
+      "expected": true
+    }
+  ],
+  "wrappers": [
+    {
+      "command": "LANG=C cat safe.txt",
+      "expected": "cat safe.txt"
+    },
+    {
+      "command": "LANG=/tmp/locale cat safe.txt",
+      "expected": "LANG=/tmp/locale cat safe.txt"
+    },
+    {
+      "command": "LANG=./locale cat safe.txt",
+      "expected": "LANG=./locale cat safe.txt"
+    },
+    {
+      "command": "LANG=../locale cat safe.txt",
+      "expected": "LANG=../locale cat safe.txt"
+    },
+    {
+      "command": "LANG=folder cat safe.txt",
+      "expected": "cat safe.txt"
+    },
+    {
+      "command": "LANG=__TRACKED_VAR__/locale cat safe.txt",
+      "expected": "LANG=__TRACKED_VAR__/locale cat safe.txt"
+    },
+    {
+      "command": "LANG=__CMDSUB_OUTPUT__ cat safe.txt",
+      "expected": "LANG=__CMDSUB_OUTPUT__ cat safe.txt"
+    },
+    {
+      "command": "SECRET=1 cat safe.txt",
+      "expected": "SECRET=1 cat safe.txt"
+    }
+  ],
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "ranges": [
+    {
+      "start": 263861561,
+      "end": 263862202,
+      "sha256": "48912beccb8479c43f6ae6adeac82ea141f07ade237cda43fcbeecb1bbb1e39f"
+    },
+    {
+      "start": 263431799,
+      "end": 263493368,
+      "sha256": "c2832e1561a47d3d6d6f81d45351d2e5a8b4f864d34a54951ef56ea602cecffe"
+    },
+    {
+      "start": 257653749,
+      "end": 257653914,
+      "sha256": "2ebc97e03fb9a22327209f2705730dc13e487206eea7634b8bfc4bdddb224271"
+    },
+    {
+      "start": 268589958,
+      "end": 268594171,
+      "sha256": "7ec8097f71c163508048b910167ef13fe157fae07f806feafe2212d63a9f0621"
+    },
+    {
+      "start": 268686248,
+      "end": 268687131,
+      "sha256": "78746788c453780a3339c524b2ed8bce47895a27043df43867aa8fe792673cb2"
+    },
+    {
+      "start": 268689711,
+      "end": 268690045,
+      "sha256": "e1750db400984f6ced3cc2d520dcb450c9c889aabcda40ebb614c4a23cd575c0"
+    },
+    {
+      "start": 268687305,
+      "end": 268688782,
+      "sha256": "d0dced0de30a540b7700ef579753845d15e7747fb9043d01d8e3a226ba2253d8"
+    }
+  ],
+  "windowsPatterns": [
+    {
+      "input": "file.txt:stream",
+      "platform": "windows",
+      "expected": true
+    },
+    {
+      "input": "file.txt:stream",
+      "platform": "wsl",
+      "expected": true
+    },
+    {
+      "input": "file.txt:stream",
+      "platform": "linux",
+      "expected": false
+    },
+    {
+      "input": "file.txt:stream",
+      "platform": "macos",
+      "expected": false
+    },
+    {
+      "input": "中:stream",
+      "platform": "windows",
+      "expected": false
+    },
+    {
+      "input": "中:stream",
+      "platform": "wsl",
+      "expected": false
+    },
+    {
+      "input": "中:stream",
+      "platform": "linux",
+      "expected": false
+    },
+    {
+      "input": "中:stream",
+      "platform": "macos",
+      "expected": false
+    },
+    {
+      "input": "😀:stream",
+      "platform": "windows",
+      "expected": true
+    },
+    {
+      "input": "😀:stream",
+      "platform": "wsl",
+      "expected": true
+    },
+    {
+      "input": "😀:stream",
+      "platform": "linux",
+      "expected": false
+    },
+    {
+      "input": "😀:stream",
+      "platform": "macos",
+      "expected": false
+    },
+    {
+      "input": "\\??\\C:\\file",
+      "platform": "windows",
+      "expected": true
+    },
+    {
+      "input": "\\??\\C:\\file",
+      "platform": "wsl",
+      "expected": true
+    },
+    {
+      "input": "\\??\\C:\\file",
+      "platform": "linux",
+      "expected": true
+    },
+    {
+      "input": "\\??\\C:\\file",
+      "platform": "macos",
+      "expected": true
+    },
+    {
+      "input": "safe.txt",
+      "platform": "windows",
+      "expected": false
+    },
+    {
+      "input": "safe.txt",
+      "platform": "wsl",
+      "expected": false
+    },
+    {
+      "input": "safe.txt",
+      "platform": "linux",
+      "expected": false
+    },
+    {
+      "input": "safe.txt",
+      "platform": "macos",
+      "expected": false
+    }
+  ],
+  "parserProbe": {
+    "zeroBudgetAborts": true,
+    "normalParses": true,
+    "limits": {
+      "milliseconds": 50,
+      "nodes": 50000,
+      "bytes": 67108864
+    },
+    "scope": "Native hand-written parser with feature predicates fixed off and a deterministic clock; explicit zero-ms budget is a controlled timeout probe."
+  },
+  "removals": [
+    {
+      "target": "~",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "expected": {
+        "behavior": "ask",
+        "message": "Dangerous rm operation detected: '/home/user'\n\nThis command would remove a critical system directory. This requires explicit approval and cannot be auto-allowed by permission rules.",
+        "reason": "on critical path: /home/user"
+      }
+    },
+    {
+      "target": "~/project",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "expected": {
+        "behavior": "ask",
+        "message": "Dangerous rm operation detected: '/home/user/project'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules.",
+        "reason": "on working directory or its ancestor: /home/user/project"
+      }
+    },
+    {
+      "target": "~/project/*",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "expected": {
+        "behavior": "ask",
+        "message": "Dangerous rm operation detected: '/home/user/project/*'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules.",
+        "reason": "on working directory or its ancestor: /home/user/project/*"
+      }
+    },
+    {
+      "target": "~/build/*",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "expected": {
+        "behavior": "passthrough",
+        "message": "No dangerous removals detected for rm command"
+      }
+    },
+    {
+      "target": "~/build",
+      "cwd": "/home/user/project",
+      "home": "/home/user",
+      "expected": {
+        "behavior": "passthrough",
+        "message": "No dangerous removals detected for rm command"
+      }
+    }
+  ],
+  "limitations": [
+    "Windows patterns isolate the platform/NT namespace branches; UNC trust predicates are fixed false.",
+    "Removal probes inject a POSIX path/critical-directory/filesystem provider with no symlinks or additional working directories and no mounted-drive rule. The artifact's tilde-expansion and removal branch order are executed; executable dispatch and shell expansion are not run."
+  ]
+}

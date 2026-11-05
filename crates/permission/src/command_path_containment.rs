@@ -43,10 +43,9 @@
 //!   the split-command path the rest of the crate uses
 //!   ([`crate::shell_command::split_command`]) — matching the non-AST TS path,
 //!   the conservative (more-asks) direction.
-//! - **Lexical containment**, reusing [`crate::filesystem`]'s `expand_path` +
-//!   `path_in_allowed_working_path` — the same already-accepted no-`realpath`
-//!   divergence as the rest of the crate (the D7 symlink case is an accepted
-//!   crate-wide divergence and is intentionally not modeled).
+//! - Containment reuses [`crate::filesystem::path_in_allowed_working_path`],
+//!   which checks lexical and discovered symlink-resolved spellings. The old
+//!   lexical-only divergence no longer applies to this shared helper.
 //! - **No `git ls-remote` validator.** The v2.1.183 binary's `COMMAND_VALIDATOR`
 //!   gained a `cd` arm (count positional args, `n <= 1`) and the read-only
 //!   command battery a `git ls-remote` arm; the TS oracle this port follows has
@@ -880,17 +879,15 @@ fn read_block_unanalyzable_ask(reason: &str) -> PathConstraintAsk {
 /// `NAME+=`, allows `+` inside a bare value, and admits an EMPTY value (`*`, not
 /// `+`), so `LANG= cat f` advances here but not there. Kept separate deliberately.
 ///
-/// DIVERGENCE: the `t` branch (`node.envVars`) is not wired — this seam has no
-/// AST node, so the port always takes the oracle's string fallback. That is the
-/// same shape the oracle uses whenever the AST is unavailable, and it is only
-/// ever more conservative for a compound command (it inspects the leading
-/// prefix of the whole string rather than each node).
+/// This seam uses the string fallback and is applied separately to every
+/// split subcommand. Native's AST branch also carries resolved env values;
+/// differing argv/value projections remain a separate parser-alignment concern.
 fn env_prefix_outside_safe_list(command: &str) -> bool {
     static NAME_RE: OnceLock<Regex> = OnceLock::new();
     static ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
     let name_re = NAME_RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=").unwrap());
     let assign_re = ASSIGN_RE.get_or_init(|| {
-        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+"#)
+        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*\+?=("[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+"#)
             .unwrap()
     });
     let mut rest = command;
@@ -901,9 +898,13 @@ fn env_prefix_outside_safe_list(command: &str) -> bool {
         if !crate::shell_command::is_safe_env_var(&name) {
             return true;
         }
-        let Some(m) = assign_re.find(rest) else {
+        let Some(assignment) = assign_re.captures(rest) else {
             return true;
         };
+        if !crate::shell_command::is_safe_env_assignment(&name, &assignment[1]) {
+            return true;
+        }
+        let m = assignment.get(0).expect("captured complete assignment");
         rest = &rest[m.end()..];
     }
 }
@@ -935,8 +936,9 @@ fn env_command_assignment_outside_safe_list(tokens: &[String]) -> bool {
         return false;
     }
     tokens[1..].iter().any(|t| {
-        re.captures(t)
-            .is_some_and(|c| !crate::shell_command::is_safe_env_var(&c[1]))
+        re.captures(t).is_some_and(|c| {
+            !crate::shell_command::is_safe_env_assignment(&c[1], &t[c.get(0).unwrap().end()..])
+        })
     })
 }
 
@@ -1703,7 +1705,7 @@ pub fn check_command_path_containment(
     // for both checks at once. The port is therefore more conservative than the
     // binary here: it asks where a sandboxed run would have passed through.
     if read_block_dirs.is_some() {
-        if env_prefix_outside_safe_list(command) {
+        if subs.iter().any(|sub| env_prefix_outside_safe_list(sub)) {
             return Some(read_block_unanalyzable_ask(
                 "an environment variable prefix outside the safe list cannot be checked \
                  against the read block",
@@ -1838,6 +1840,21 @@ mod tests {
     }
 
     // ── D1: read commands out-of-cwd → ask ─────────────────────────────────
+
+    #[test]
+    fn env_prefix_value_checks_match_official_318() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/permission_guards_2_1_318.json"
+        ))
+        .unwrap();
+        for case in fixture["envPrefix"].as_array().unwrap() {
+            assert_eq!(
+                env_prefix_outside_safe_list(case["command"].as_str().unwrap()),
+                case["expected"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
 
     #[test]
     fn cat_out_of_cwd_asks() {
