@@ -33,6 +33,14 @@ pub struct PreparedStdio {
     pub plane: Arc<StdioControlPlane>,
 }
 
+/// Whether the running session has attempted to bind and flush its queue journal.
+pub(super) enum FailedStartupJournal {
+    /// Assembly finished, but the journal has not yet been bound.
+    Unbound(Option<Arc<session::jsonl::JsonlWriter>>),
+    /// Binding or flushing already failed; do not repeat an uncertain write.
+    AlreadyFailed,
+}
+
 impl PreparedStdio {
     pub async fn start(
         input: Input,
@@ -138,9 +146,7 @@ impl PreparedStdio {
         }
     }
 
-    /// Startup failure cleanup; running sessions transfer these handles to
-    /// their existing joined lifecycle instead of starting a new scope.
-    pub async fn shutdown(&mut self, reason: &str) -> Result<(), InputError> {
+    async fn stop_and_join(&mut self, reason: &str) -> Result<(), InputError> {
         self.reader.stop();
         self.plane.shutdown(reason).await;
         self.stop.cancel();
@@ -155,11 +161,64 @@ impl PreparedStdio {
         }
         outcome
     }
+
+    fn discard_queued(&self) -> Result<(), InputError> {
+        let mut outcome = Ok(());
+        for uuid in self.queue_lifecycle.queued.drain_for_discard() {
+            let delivery = self
+                .queue_lifecycle
+                .emit(&uuid, super::queued_commands::LIFECYCLE_DISCARDED);
+            outcome = outcome.and(delivery);
+        }
+        outcome
+    }
+
+    /// Startup failure cleanup before a session writer exists.
+    ///
+    /// Stop intake before retiring every accepted UUID. There is no session
+    /// writer to bind here; the caller finishes the outbound writer afterwards.
+    pub async fn shutdown(&mut self, reason: &str) -> Result<(), InputError> {
+        let outcome = self.stop_and_join(reason).await;
+        let discarded = self.discard_queued();
+        outcome.and(discarded)
+    }
+
+    /// Clean up a failed stream startup after the session has been assembled.
+    ///
+    /// Preserve accepted enqueue records before reporting discarded UUIDs. If
+    /// the initial journal write already failed, retain its original error and
+    /// buffered operations without silently retrying an uncertain write.
+    pub(super) async fn shutdown_after_assembly_failure(
+        &mut self,
+        reason: &str,
+        journal: FailedStartupJournal,
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.stop_and_join(reason).await {
+            errors.push(error.to_string());
+        }
+        if let FailedStartupJournal::Unbound(writer) = journal {
+            match self.queue_lifecycle.bind_journal(writer) {
+                Ok(()) => {
+                    if let Err(error) = self.queue_lifecycle.flush_journal().await {
+                        errors.push(format!("Failed to flush queued input journal: {error}"));
+                    }
+                }
+                Err(error) => errors.push(format!("Failed to bind queued input journal: {error}")),
+            }
+        }
+        if let Err(error) = self.discard_queued() {
+            errors.push(error.to_string());
+        }
+        errors
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::headless::stream_json::OutboundMsg;
+    use crate::headless::stream_json_input::spawn_stdin_router_from_reader;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::json;
     use tokio::io::AsyncWriteExt;
@@ -303,5 +362,254 @@ mod tests {
         assert_eq!(*prepared.reader_status.borrow(), StdinReaderStatus::Stopped);
         assert!(prepared.auxiliary_tasks.is_empty());
         stream.finish().await.unwrap();
+    }
+
+    const FIRST_UUID: &str = "00000000-0000-4000-8000-000000000101";
+    const SECOND_UUID: &str = "00000000-0000-4000-8000-000000000102";
+
+    async fn next_lifecycle(rx: &mut mpsc::UnboundedReceiver<OutboundMsg>) -> (String, String) {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("lifecycle frame is delivered")
+            .expect("lifecycle channel remains open");
+        let OutboundMsg::Line(line) = message else {
+            panic!("expected a lifecycle line");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "command_lifecycle");
+        (
+            frame["command_uuid"].as_str().unwrap().to_owned(),
+            frame["state"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    async fn prepare_queued(
+        session_id: &str,
+    ) -> (
+        PreparedStdio,
+        tokio::io::DuplexStream,
+        Arc<StreamJsonStream>,
+        mpsc::UnboundedReceiver<OutboundMsg>,
+    ) {
+        let (mut peer, input) = tokio::io::duplex(8192);
+        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+            tokio::io::sink(),
+        )));
+        let plane = StdioControlPlane::new(stream.outbound_tx());
+        let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
+        let lifecycle = Arc::new(QueueLifecycle::new(
+            Arc::new(lifecycle_tx),
+            session_id.into(),
+        ));
+        let channels = spawn_stdin_router_from_reader(
+            input,
+            Output::new(tokio::io::sink()),
+            false,
+            session_id.into(),
+            stream.outbound_tx(),
+            lifecycle.clone(),
+        );
+        let prepared =
+            PreparedStdio::from_channels(channels, lifecycle, plane, CancellationToken::new())
+                .await;
+        let input = format!(
+            concat!(
+                "{{\"type\":\"user\",\"uuid\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"\\ud800\"}}}}\n",
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"without uuid\"}}}}\n",
+                "{{\"type\":\"user\",\"uuid\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"last\"}}}}\n"
+            ),
+            FIRST_UUID, SECOND_UUID
+        );
+        peer.write_all(input.as_bytes()).await.unwrap();
+        assert_eq!(
+            next_lifecycle(&mut lifecycle_rx).await,
+            (FIRST_UUID.into(), "queued".into())
+        );
+        assert_eq!(
+            next_lifecycle(&mut lifecycle_rx).await,
+            (SECOND_UUID.into(), "queued".into())
+        );
+        (prepared, peer, stream, lifecycle_rx)
+    }
+
+    async fn assert_discarded(rx: &mut mpsc::UnboundedReceiver<OutboundMsg>) {
+        assert_eq!(
+            next_lifecycle(rx).await,
+            (FIRST_UUID.into(), "discarded".into())
+        );
+        assert_eq!(
+            next_lifecycle(rx).await,
+            (SECOND_UUID.into(), "discarded".into())
+        );
+        assert!(rx.try_recv().is_err(), "each UUID has only one terminal");
+    }
+
+    #[tokio::test]
+    async fn assembled_startup_failure_joins_and_journals_before_discarding() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let path = root.path().join(format!("{session_id}.jsonl"));
+        let writer = Arc::new(session::jsonl::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        ));
+        writer
+            .initialize_fixed_session_mode(
+                &session_id,
+                lingxi_core::host::session_context::ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let (mut prepared, _open_peer, stream, mut lifecycle_rx) =
+            prepare_queued(&session_id).await;
+        let status = prepared.reader_status.clone();
+        let helpers = prepared
+            .auxiliary_tasks
+            .iter()
+            .map(tokio::task::JoinHandle::abort_handle)
+            .collect::<Vec<_>>();
+        let (_, pending) = prepared
+            .plane
+            .send_request(
+                Utf16JsonProjection::from_serde_value(&json!({"subtype":"can_use_tool"})).unwrap(),
+                None,
+            )
+            .await;
+
+        let task_writer = writer.clone();
+        let cleanup = tokio::spawn(async move {
+            prepared
+                .shutdown_after_assembly_failure(
+                    "init failed",
+                    FailedStartupJournal::Unbound(Some(task_writer)),
+                )
+                .await
+        });
+        assert_eq!(
+            next_lifecycle(&mut lifecycle_rx).await,
+            (FIRST_UUID.into(), "discarded".into())
+        );
+        // The first terminal is observable only after all accepted enqueues
+        // have reached their session journal.
+        let raw = std::fs::read_to_string(path).unwrap();
+        let rows = raw
+            .lines()
+            .map(|line| Utf16JsonProjection::parse(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].string_at("/type"), Some("fixed-session-mode"));
+        for row in &rows[1..] {
+            assert_eq!(row.string_at("/type"), Some("queue-operation"));
+            assert_eq!(row.string_at("/operation"), Some("enqueue"));
+            assert_eq!(row.string_at("/sessionId"), Some(session_id.as_str()));
+        }
+        assert_eq!(rows[1].string_units("/content"), Some(vec![0xd800]));
+        assert_eq!(rows[2].string_at("/content"), Some("without uuid"));
+        assert_eq!(rows[3].string_at("/content"), Some("last"));
+        assert_eq!(
+            next_lifecycle(&mut lifecycle_rx).await,
+            (SECOND_UUID.into(), "discarded".into())
+        );
+        assert!(lifecycle_rx.try_recv().is_err());
+        let errors = cleanup.await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(*status.borrow(), StdinReaderStatus::Stopped);
+        assert!(helpers.iter().all(tokio::task::AbortHandle::is_finished));
+        assert!(pending.await.unwrap().is_err());
+        stream.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preassembly_startup_failure_discards_accepted_uuids() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (mut prepared, _open_peer, stream, mut lifecycle_rx) =
+            prepare_queued(&session_id).await;
+        prepared.shutdown("build failed").await.unwrap();
+        assert_eq!(*prepared.reader_status.borrow(), StdinReaderStatus::Stopped);
+        assert!(prepared.auxiliary_tasks.is_empty());
+        assert_discarded(&mut lifecycle_rx).await;
+        stream.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_journal_is_reported_and_keeps_accepted_operations() {
+        for already_failed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let blocker = root.path().join("blocked");
+            std::fs::write(&blocker, b"not a directory").unwrap();
+            let path = blocker.join(format!("{session_id}.jsonl"));
+            let writer = Arc::new(session::jsonl::JsonlWriter::new(
+                path.clone(),
+                Arc::new(platform_posix::fs::PosixFileSystem::new(
+                    root.path().to_path_buf(),
+                )),
+            ));
+            let (mut prepared, _open_peer, stream, mut lifecycle_rx) =
+                prepare_queued(&session_id).await;
+            let repair_target = || {
+                std::fs::remove_file(&blocker).unwrap();
+                std::fs::create_dir(&blocker).unwrap();
+            };
+            let journal = if already_failed {
+                prepared
+                    .queue_lifecycle
+                    .bind_journal(Some(writer.clone()))
+                    .unwrap();
+                assert!(prepared.queue_lifecycle.flush_journal().await.is_err());
+                // Make a second write possible: cleanup still must not retry it.
+                repair_target();
+                writer
+                    .initialize_fixed_session_mode(
+                        &session_id,
+                        lingxi_core::host::session_context::ConversationMode::Code,
+                        0,
+                    )
+                    .await
+                    .unwrap();
+                FailedStartupJournal::AlreadyFailed
+            } else {
+                FailedStartupJournal::Unbound(Some(writer.clone()))
+            };
+            let errors = prepared
+                .shutdown_after_assembly_failure("init failed", journal)
+                .await;
+            if already_failed {
+                assert!(errors.is_empty(), "{errors:?}");
+                assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+            } else {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                assert!(errors[0].contains("Failed to flush queued input journal"));
+                repair_target();
+                writer
+                    .initialize_fixed_session_mode(
+                        &session_id,
+                        lingxi_core::host::session_context::ConversationMode::Code,
+                        0,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(*prepared.reader_status.borrow(), StdinReaderStatus::Stopped);
+            assert!(prepared.auxiliary_tasks.is_empty());
+            assert_discarded(&mut lifecycle_rx).await;
+
+            // After a known pre-write failure, an explicit owner can flush the
+            // retained operations without losing their order.
+            prepared.queue_lifecycle.flush_journal().await.unwrap();
+            let raw = std::fs::read_to_string(path).unwrap();
+            let rows = raw
+                .lines()
+                .map(|line| Utf16JsonProjection::parse(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[1].string_units("/content"), Some(vec![0xd800]));
+            assert_eq!(rows[2].string_at("/content"), Some("without uuid"));
+            assert_eq!(rows[3].string_at("/content"), Some("last"));
+            stream.finish().await.unwrap();
+        }
     }
 }

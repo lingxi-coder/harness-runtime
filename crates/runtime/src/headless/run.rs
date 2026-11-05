@@ -1155,6 +1155,28 @@ pub async fn run_stream_json_input_loop(
     .await
 }
 
+async fn fail_prepared_stream_startup(
+    runtime: &Runtime,
+    stream: &StreamJsonStream,
+    prepared: &mut super::stdio::PreparedStdio,
+    message: String,
+    journal: super::stdio::FailedStartupJournal,
+) -> i32 {
+    runtime.record_execution_error(&message);
+    let cleanup_errors = prepared
+        .shutdown_after_assembly_failure("Session ended", journal)
+        .await;
+    let _ = runtime.output.write_line(&message).await;
+    for error in cleanup_errors {
+        runtime.record_execution_error(&error);
+        let _ = runtime.output.write_line(&error).await;
+    }
+    // The caller closes the writer, but accepted UUID terminals must reach its
+    // FIFO boundary before the run loop returns.
+    let _ = stream.flush().await;
+    exit_codes::RUNTIME_ERROR
+}
+
 async fn run_stream_json_input_loop_inner(
     argv: &Argv,
     runtime: &Runtime,
@@ -1162,7 +1184,7 @@ async fn run_stream_json_input_loop_inner(
     permission_mode: permission::PermissionMode,
     control_plane: Arc<StdioControlPlane>,
     auxiliary_tasks: Arc<PrintAuxTaskGroup>,
-    prepared_stdio: super::stdio::PreparedStdio,
+    mut prepared_stdio: super::stdio::PreparedStdio,
 ) -> i32 {
     control_plane.set_auxiliary_tasks(Arc::downgrade(&auxiliary_tasks));
     // Collect the real session_id and model from the orchestrator after build.
@@ -1200,9 +1222,16 @@ async fn run_stream_json_input_loop_inner(
             Ok(projections) => projections,
             Err(error) => {
                 let message = format!("Error: Failed to load command visibility settings: {error}");
-                runtime.record_execution_error(&message);
-                let _ = runtime.output.write_line(&message).await;
-                return exit_codes::RUNTIME_ERROR;
+                return fail_prepared_stream_startup(
+                    runtime,
+                    &stream,
+                    &mut prepared_stdio,
+                    message,
+                    super::stdio::FailedStartupJournal::Unbound(
+                        runtime.orchestrator.session_transcript_writer(),
+                    ),
+                )
+                .await;
             }
         };
 
@@ -1283,6 +1312,23 @@ async fn run_stream_json_input_loop_inner(
     // The owned async reader remains cancellable and is joined on cleanup.
     // Data-plane intake is shared with the driver's post-tool fold; controls
     // retain their independent resolver/dispatcher lanes.
+    let journal_ready = match prepared_stdio
+        .queue_lifecycle
+        .bind_journal(runtime.orchestrator.session_transcript_writer())
+    {
+        Ok(()) => prepared_stdio.queue_lifecycle.flush_journal().await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = journal_ready {
+        return fail_prepared_stream_startup(
+            runtime,
+            &stream,
+            &mut prepared_stdio,
+            format!("Failed to initialize queued input journal: {error}"),
+            super::stdio::FailedStartupJournal::AlreadyFailed,
+        )
+        .await;
+    }
     let super::stdio::PreparedStdio {
         input_rx,
         input_pending,
@@ -1297,20 +1343,6 @@ async fn run_stream_json_input_loop_inner(
     } = prepared_stdio;
     for task in prepared_tasks {
         auxiliary_tasks.push(task);
-    }
-    let journal_ready =
-        match queue_lifecycle.bind_journal(runtime.orchestrator.session_transcript_writer()) {
-            Ok(()) => queue_lifecycle.flush_journal().await,
-            Err(error) => Err(error),
-        };
-    if let Err(error) = journal_ready {
-        reader.stop();
-        let _ = reader.join().await;
-        transport_stop.cancel();
-        control_plane.shutdown("Session ended").await;
-        auxiliary_tasks.abort_and_join().await;
-        let _ = runtime.output.write_line(&error).await;
-        return exit_codes::RUNTIME_ERROR;
     }
     let input_rx = Arc::new(super::queued_commands::SdkInputQueue::new(
         input_rx,

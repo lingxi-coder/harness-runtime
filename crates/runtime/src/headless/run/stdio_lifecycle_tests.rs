@@ -5,6 +5,148 @@ use crate::headless::stream_json_input::spawn_stdin_router_from_reader;
 use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
+async fn visibility_failure_joins_prepared_stdio_and_retires_accepted_input() {
+    let root = tempfile::tempdir().unwrap();
+    let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+        tokio::io::sink(),
+    )));
+    let runtime = fixture_runtime(stream.clone(), root.path()).await;
+    let writer = runtime.orchestrator.session_transcript_writer().unwrap();
+    let transcript_path = writer.active_path();
+    let session_id = runtime
+        .orchestrator
+        .session()
+        .lock()
+        .await
+        .session_id
+        .to_string();
+    let plane = StdioControlPlane::new(stream.outbound_tx());
+    let (mut peer, input) = tokio::io::duplex(1024);
+    let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+    let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
+        Arc::new(lifecycle_tx),
+        session_id.clone(),
+    ));
+    let channels = spawn_stdin_router_from_reader(
+        input,
+        Output::new(tokio::io::sink()),
+        false,
+        session_id,
+        stream.outbound_tx(),
+        lifecycle.clone(),
+    );
+    let status = channels.status.clone();
+    let prepared = super::super::stdio::PreparedStdio::from_channels(
+        channels,
+        lifecycle,
+        plane.clone(),
+        runtime.shutdown.child_token(),
+    )
+    .await;
+    let helpers = prepared
+        .auxiliary_tasks
+        .iter()
+        .map(tokio::task::JoinHandle::abort_handle)
+        .collect::<Vec<_>>();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    peer.write_all(
+        format!(
+            "{{\"type\":\"user\",\"uuid\":{uuid:?},\"message\":{{\"role\":\"user\",\"content\":\"accepted before init failure\"}}}}\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::headless::stream_json::OutboundMsg::Line(queued) = queued else {
+        panic!("expected queued lifecycle line");
+    };
+    let queued: serde_json::Value = serde_json::from_str(&queued).unwrap();
+    assert_eq!(queued["command_uuid"], uuid);
+    assert_eq!(queued["state"], "queued");
+
+    // Both source files are valid JSON; the later object cannot merge into an
+    // array's fractional length. Install them only after runtime assembly, so
+    // the actual live visibility lookup exercises the early-return path.
+    let user_settings = root.path().join("home/settings.json");
+    let project_settings = root
+        .path()
+        .join("project")
+        .join(branding::DOT_DIR)
+        .join("settings.json");
+    std::fs::create_dir_all(user_settings.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+    std::fs::write(&user_settings, r#"{"policyHelpers":{"x":[]}}"#).unwrap();
+    std::fs::write(
+        &project_settings,
+        r#"{"policyHelpers":{"x":{"length":1.5}}}"#,
+    )
+    .unwrap();
+    assert!(runtime.command_visibility_snapshot().is_err());
+
+    let tasks = Arc::new(PrintAuxTaskGroup::default());
+    let code = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        run_stream_json_input_loop_inner(
+            &Argv::default(),
+            &runtime,
+            stream.clone(),
+            permission::PermissionMode::Default,
+            plane.clone(),
+            tasks.clone(),
+            prepared,
+        ),
+    )
+    .await
+    .expect("failed initialization closes its owned input");
+    assert_eq!(code, exit_codes::RUNTIME_ERROR);
+    assert_eq!(*status.borrow(), StdinReaderStatus::Stopped);
+    assert!(helpers.iter().all(tokio::task::AbortHandle::is_finished));
+    assert!(!plane.is_busy().await);
+    let discarded = lifecycle_rx
+        .try_recv()
+        .expect("accepted UUID has a terminal");
+    let crate::headless::stream_json::OutboundMsg::Line(discarded) = discarded else {
+        panic!("expected discarded lifecycle line");
+    };
+    let discarded: serde_json::Value = serde_json::from_str(&discarded).unwrap();
+    assert_eq!(discarded["command_uuid"], uuid);
+    assert_eq!(discarded["state"], "discarded");
+    assert!(lifecycle_rx.try_recv().is_err());
+    let transcript = std::fs::read_to_string(transcript_path).unwrap();
+    let enqueues = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["type"] == "queue-operation")
+        .collect::<Vec<_>>();
+    assert_eq!(enqueues.len(), 1);
+    assert_eq!(enqueues[0]["operation"], "enqueue");
+    assert_eq!(enqueues[0]["content"], "accepted before init failure");
+    assert!(runtime
+        .execution_errors
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|error| error.contains("Failed to load command visibility settings")));
+
+    std::fs::remove_file(user_settings).unwrap();
+    std::fs::remove_file(project_settings).unwrap();
+    tasks.abort_and_join().await;
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
+    stream.finish().await.unwrap();
+    drop(peer);
+}
+
+#[tokio::test]
 async fn end_session_returns_while_its_input_pipe_remains_open() {
     let root = tempfile::tempdir().unwrap();
     let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
