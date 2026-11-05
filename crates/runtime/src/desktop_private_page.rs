@@ -42,8 +42,8 @@ impl DesktopPrivatePageHost {
         let source = params
             .to_json_string()
             .map_err(|_| "invalid private page request".to_string())?;
-        let request: Request =
-            serde_json::from_str(&source).map_err(|_| "invalid private page request".to_string())?;
+        let request: Request = serde_json::from_str(&source)
+            .map_err(|_| "invalid private page request".to_string())?;
         let Request::Serve { id, revision } = request;
         let response = match document_for(&self.store, &id, revision).await {
             Some(body) => json!({
@@ -87,8 +87,9 @@ mod tests {
     #[tokio::test]
     async fn serve_wraps_the_fragment_and_misses_an_unknown_revision() {
         let home = tempfile::tempdir().unwrap();
-        let fs: Arc<dyn lingxi_core::host::FileSystem> =
-            Arc::new(platform_posix::PosixFileSystem::new(home.path().to_path_buf()));
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::PosixFileSystem::new(home.path().to_path_buf()),
+        );
         let host = DesktopPrivatePageHost::for_config_home(fs, home.path());
         let published = host
             .store

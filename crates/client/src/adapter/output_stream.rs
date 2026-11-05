@@ -2764,11 +2764,9 @@ mod visualization_stream_tests {
                 },
             ]
         );
-        assert!(
-            !live
-                .iter()
-                .any(|event| matches!(event, ClientEvent::VisualizationBlock { .. }))
-        );
+        assert!(!live
+            .iter()
+            .any(|event| matches!(event, ClientEvent::VisualizationBlock { .. })));
         assert_eq!(
             completed_blocks(&events),
             vec![

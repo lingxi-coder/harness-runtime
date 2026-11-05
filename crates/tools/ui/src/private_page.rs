@@ -345,7 +345,9 @@ impl Tool for PageTool {
         normalize_title(title).map_err(|error| ValidationError(error.to_string().into()))?;
         if let Some(id) = input.string_at("/id") {
             if PageId::parse(id).is_none() {
-                return Err(ValidationError(format!("\"{id}\" is not a page id.").into()));
+                return Err(ValidationError(
+                    format!("\"{id}\" is not a page id.").into(),
+                ));
             }
         }
         Ok(())

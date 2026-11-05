@@ -50,7 +50,14 @@ fn is_external(value: &str) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     [
-        "http:", "https:", "ws:", "wss:", "ftp:", "file:", "javascript:", "//",
+        "http:",
+        "https:",
+        "ws:",
+        "wss:",
+        "ftp:",
+        "file:",
+        "javascript:",
+        "//",
     ]
     .iter()
     .any(|scheme| lower.starts_with(scheme))
@@ -165,7 +172,12 @@ pub fn check_fragment(fragment: &str) -> FragmentReport {
             ));
         }
     }
-    for api in ["localStorage", "sessionStorage", "indexedDB", "document.cookie"] {
+    for api in [
+        "localStorage",
+        "sessionStorage",
+        "indexedDB",
+        "document.cookie",
+    ] {
         if fragment.contains(api) {
             report.warnings.push(format!(
                 "{api} throws inside the sandbox; keep state in the page itself."

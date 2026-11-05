@@ -279,9 +279,7 @@ mod tests {
             let prompt = desktop_builtin_skill_prompt(name, &request.into()).unwrap();
             assert!(prompt.string_at("").unwrap().ends_with(request));
             let text = body.string_at("").unwrap();
-            assert!(text.contains(
-                "Publish a private page on this computer with the `Page` tool"
-            ));
+            assert!(text.contains("Publish a private page on this computer with the `Page` tool"));
             assert!(text.contains("There is no public URL."));
             assert!(text.contains(
                 "If `Page` is not among the tools, say this host cannot open a private page."
