@@ -529,13 +529,25 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
             .contains("right before the `commit`"),
         "the cleared session must retain its false decision"
     );
+    let resumed_session_id = lingxi_core::types::SessionId::new();
+    let fixed_mode =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type": "fixed-session-mode",
+            "sessionId": resumed_session_id.as_uuid(),
+            "sessionMode": "code",
+            "instructionEpoch": 0,
+        }))
+        .expect("valid fixed session mode metadata");
     lingxi_core::host::OrchestratorHandle::resume_session(
         &orchestrator,
-        lingxi_core::types::SessionId::new(),
+        resumed_session_id,
         Vec::new(),
         None,
         None,
-        lingxi_core::host::ResumeRuntimeSnapshot::default(),
+        lingxi_core::host::ResumeRuntimeSnapshot {
+            transcript_metadata: Some(vec![fixed_mode]),
+            ..Default::default()
+        },
     )
     .await
     .expect("hot resume another root session with the same tool registry");

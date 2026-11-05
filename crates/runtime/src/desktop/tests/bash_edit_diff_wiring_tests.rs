@@ -119,27 +119,29 @@ fn an_unconfigured_install_is_off_even_in_auto_mode() {
 /// with the call site deleted — the resolver would simply never run, and
 /// the whole feature would be dead code with a green suite. No runtime test
 /// can observe this without standing up the desktop stack, so the gate
-/// reads this file's own source. Needles are assembled at runtime so they
-/// cannot match the comment that explains them.
+/// checks the production assembly and resolver source directly.
 #[test]
 fn build_fills_the_bash_edit_diff_context_field_from_the_resolver() {
-    const SRC: &str = concat!(
-        include_str!("../mod.rs"),
-        "\n",
-        include_str!("../assembly.rs")
-    );
-    let production = SRC
-        .split_once("\n#[cfg(test)]\nmod tests")
-        .map_or(SRC, |(prod, _)| prod);
-    let field = "bash_edit_dif".to_string() + "f: resolve_bash_edit_diff(";
-    assert_eq!(
-        production.matches(&field).count(),
-        1,
-        "BuiltinToolContext must be built with `{field}…)`, or CLI-5 never runs"
+    let assembly = include_str!("../assembly.rs");
+    let context = assembly
+        .split_once("let tool_ctx = BuiltinToolContext {")
+        .expect("desktop assembly must build the builtin tool context")
+        .1;
+    let field = context
+        .split_once("bash_edit_diff:")
+        .expect("builtin context must set bash_edit_diff")
+        .1
+        .split_once("agent_name_registry:")
+        .expect("builtin context must have the following field")
+        .0;
+    let compact: String = field.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(
+        compact.starts_with("ifcfg.team_invocation.is_some(){None}else{resolve_bash_edit_diff("),
+        "teammates must get no diff, while the root context calls the resolver"
     );
     let tier_call = "load_trusted_tier_bash_edit_dif".to_string() + "f(cfg,";
     assert_eq!(
-        production.matches(&tier_call).count(),
+        include_str!("../mod.rs").matches(&tier_call).count(),
         1,
         "the gate must read the TIER separately (`{tier_call}…`); the merged \
          value alone lets a project settings file enable the feature"
