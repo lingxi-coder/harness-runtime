@@ -563,9 +563,10 @@ mod tests {
     async fn checked_owner_ledger_preserves_identity_through_guest_mapping() {
         let (inner, fs) = fs_with(vec![workspace_mount()]);
         let root = Path::new("/home/lingxi/lingxi/abc");
-        let relative = Path::new(branding::DOT_DIR).join("owners.jsonl");
+        let relative_path = format!("{}/owners.jsonl", branding::DOT_DIR);
+        let relative = Path::new(&relative_path);
         let snapshot = fs
-            .read_file_rooted_single_link_checked(root, &relative)
+            .read_file_rooted_single_link_checked(root, relative)
             .await
             .unwrap();
         assert_eq!(
@@ -575,7 +576,7 @@ mod tests {
                 format!("/host/workspace/abc/{}/owners.jsonl", branding::DOT_DIR)
             )
         );
-        fs.append_or_sync_file_rooted_durable_checked(root, &relative, &snapshot, Some("next\n"))
+        fs.append_or_sync_file_rooted_durable_checked(root, relative, &snapshot, Some("next\n"))
             .await
             .unwrap();
         assert_eq!(
@@ -592,7 +593,7 @@ mod tests {
         assert!(matches!(
             fs.append_or_sync_file_rooted_durable_checked(
                 root,
-                &relative,
+                relative,
                 &snapshot,
                 Some("next\n")
             )
