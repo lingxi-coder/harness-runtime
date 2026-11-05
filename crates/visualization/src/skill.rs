@@ -1,6 +1,9 @@
-//! The `visualize` skill text. One Markdown source serves every host; the
-//! host's shell tool name is substituted when it has one, and the optional
-//! validation step disappears when it does not.
+//! Skill text for inline visualizations.
+//!
+//! `visualize` is the workflow. One Markdown source serves every host; the
+//! host's shell tool name is substituted when it has one, and that optional
+//! validation step disappears when it does not. This skill does not register
+//! another page or app workflow.
 
 const SKILL: &str = include_str!("../assets/skill/SKILL.md");
 const SHELL_TOOL: &str = "{{SHELL_TOOL}}";
@@ -98,5 +101,18 @@ mod tests {
             assert!(!markdown.contains("```!"));
             assert!(!markdown.contains("!`"));
         }
+    }
+
+    #[test]
+    fn workflow_stays_on_the_inline_widget() {
+        let workflow = skill_markdown(None);
+        assert!(workflow.contains("Visualization"));
+        assert!(workflow.contains("action"));
+        assert!(!workflow.contains("artifact-design"));
+        assert!(!workflow.contains("plan-artifact"));
+        assert!(!workflow.contains("Artifact"));
+        assert!(!workflow.contains("LocalApp"));
+        assert!(!workflow.contains("local-app"));
+        assert!(!workflow.contains("`Page`"));
     }
 }

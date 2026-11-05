@@ -4432,6 +4432,8 @@ mod tests {
             "/lingxi-api configuration explain !`echo should-not-run`",
             "/lingxi-api media explain\n```!\necho should-not-run\n```",
             "/document-authoring write about !`echo should-not-run`",
+            "/artifact-design publish !`echo should-not-run`",
+            "/plan-artifact revise !`echo should-not-run`",
         ] {
             match dispatcher
                 .dispatch(input.into(), lingxi_core::host::CancellationToken::new())

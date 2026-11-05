@@ -209,8 +209,8 @@ fn fixture_root() -> PathBuf {
 }
 
 // User-directed product customization: the captured Native fixture stays
-// immutable, while LingXi replaces its Claude SDK prompt and adds document
-// authoring to the end of the shared bundled prompt group.
+// immutable, while LingXi replaces its Claude SDK prompt and adds the
+// document skill plus the hosted-page skills after plugin-authoring.
 fn product_command_names(native: &[&str]) -> Vec<String> {
     let mut names = native
         .iter()
@@ -229,6 +229,8 @@ fn product_command_names(native: &[&str]) -> Vec<String> {
         .unwrap()
         + 1;
     names.insert(index, "document-authoring".into());
+    names.insert(index + 1, "artifact-design".into());
+    names.insert(index + 2, "plan-artifact".into());
     names
 }
 
@@ -1216,8 +1218,8 @@ async fn native_295_commands_fixture_replay_body() {
             );
             assert_eq!(
                 current_catalog.available_command_count,
-                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + 1,
-                "the ordinary headless pool adds only the product document skill"
+                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + 3,
+                "the ordinary headless pool adds the document skill and the two hosted-page skills"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1280,10 +1282,10 @@ async fn native_295_commands_fixture_replay_body() {
                     .replacen("claude-api", "lingxi-api", 1)
                     .replacen(
                         "/plugin-authoring",
-                        "/plugin-authoring, /document-authoring",
+                        "/plugin-authoring, /document-authoring, /artifact-design, /plan-artifact",
                         1
                     ),
-                "unknown-command reminder adds only the product API name and document skill"
+                "unknown-command reminder adds the product API name, document skill, and hosted-page skills"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");

@@ -1,6 +1,6 @@
 //! Message and transcript conversion.
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
-use crate::protocol::message::{VisualizationContextDto, VisualizationRefDto};
+use crate::protocol::message::{PageRefDto, VisualizationContextDto, VisualizationRefDto};
 use crate::protocol::text::ClientTextDto;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
 
@@ -182,11 +182,13 @@ pub fn lower_conversation_message_with(
     }
 }
 
-/// Expand inline-visualization reference lines inside assistant text blocks.
+/// Expand inline-visualization and private-page reference lines inside assistant text blocks.
 ///
 /// Each text block is split by the same [`visualization::ReferenceSplitter`]
 /// the live stream uses, so a resumed message reproduces exactly the
-/// `Text` / `Visualization` sequence its live `MessageComplete` carried.
+/// `Text` / `Visualization` / `Page` sequence its live `MessageComplete` carried.
+/// The function name stays `project_visualizations` because the live stream and
+/// the resume path already call it for both reference kinds.
 pub fn project_visualizations(
     blocks: impl IntoIterator<Item = MessageBlockDto>,
 ) -> Vec<MessageBlockDto> {
@@ -226,6 +228,20 @@ pub fn project_visualizations(
                 visualization::SplitEvent::Discarded => {
                     discard_reference_source_line(&mut source_units);
                 }
+                visualization::SplitEvent::PagePending => {}
+                visualization::SplitEvent::PageReady(reference) => {
+                    discard_reference_source_line(&mut source_units);
+                    projected.push(MessageBlockDto::Page {
+                        reference: Some(page_ref_dto(&reference)),
+                    });
+                }
+                visualization::SplitEvent::PageUnavailable => {
+                    discard_reference_source_line(&mut source_units);
+                    projected.push(MessageBlockDto::Page { reference: None });
+                }
+                visualization::SplitEvent::PageDiscarded => {
+                    discard_reference_source_line(&mut source_units);
+                }
             }
         }
         if !source_units.is_empty() {
@@ -252,6 +268,15 @@ fn discard_reference_source_line(source_units: &mut std::collections::VecDeque<u
 #[must_use]
 pub fn visualization_ref_dto(reference: &visualization::VisualizationRef) -> VisualizationRefDto {
     VisualizationRefDto {
+        id: reference.id.as_str().to_string(),
+        revision: reference.revision,
+    }
+}
+
+/// Lower a private-page reference to its DTO.
+#[must_use]
+pub fn page_ref_dto(reference: &visualization::PageRef) -> PageRefDto {
+    PageRefDto {
         id: reference.id.as_str().to_string(),
         revision: reference.revision,
     }

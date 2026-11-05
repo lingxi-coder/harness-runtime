@@ -473,6 +473,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cfg.session_skill_allowlist = Some(Vec::new());
         cfg.workspace_trusted = false;
         cfg.inline_visualization = false;
+        cfg.private_pages = false;
         cfg.idle_compaction_enabled = false;
         cfg.projects_session_startup_url = None;
         cfg.vision_delegation_enabled = false;

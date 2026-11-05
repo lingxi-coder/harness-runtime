@@ -26,7 +26,7 @@ Skip it for short factual answers, plain code, or anything a sentence or a Markd
 <!-- end-if-shell -->
 3. Fix whatever the tool reports and publish again. It rejects external URLs, document shell tags, submitting forms and fragments over 2 MiB, and warns about APIs that fail in the sandbox.
 4. Write the reference line the tool returns **on its own line** in your reply, exactly as returned, outside any code block or quote. Add your explanation before or after it. Without that line the widget only appears behind the tool call.
-5. To change a published widget, publish again with the same `id`. Every publish is a new immutable revision; earlier messages keep showing the revision they referenced.
+5. To change a published widget, publish again with the same `id`. Every publish is a new immutable revision; earlier messages keep showing the revision they referenced. If you do not have the id, call `Visualization` with `action` set to `list` and no other fields. The list contains only this conversation.
 
 ## The sandbox
 

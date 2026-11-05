@@ -2143,6 +2143,7 @@ dependencies = [
  "platform-posix-minimal",
  "platform-windows",
  "plugin",
+ "private-page",
  "provider-config",
  "rooted-fs",
  "sandbox",
@@ -4914,6 +4915,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "private-page"
+version = "0.1.0"
+dependencies = [
+ "branding",
+ "core",
+ "platform-posix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7194,6 +7210,7 @@ dependencies = [
  "mobile-linux-api",
  "once_cell",
  "permission",
+ "private-page",
  "rand 0.9.4",
  "serde",
  "serde_json",
@@ -7752,6 +7769,7 @@ dependencies = [
  "branding",
  "core",
  "platform-posix",
+ "private-page",
  "proptest",
  "serde",
  "serde_json",

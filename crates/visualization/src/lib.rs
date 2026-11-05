@@ -27,6 +27,7 @@ pub mod skill;
 pub mod splitter;
 pub mod store;
 
+pub use private_page::PageRef;
 pub use reference::{VisualizationId, VisualizationRef, REFERENCE_PREFIX};
 pub use service::{HostResponse, MountRequest, MountStateWrite, MountTicket, VisualizationService};
 pub use splitter::{project_text, ReferenceSplitter, Segment, SplitEvent};

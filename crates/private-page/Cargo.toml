@@ -1,0 +1,24 @@
+[package]
+name = "private-page"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Private pages stored on this computer: reference grammar, offline document shell, and the config-home store."
+
+[dependencies]
+core = { path = "../core" }
+branding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+platform-posix = { path = "../platforms/posix" }
+
+[lints]
+workspace = true

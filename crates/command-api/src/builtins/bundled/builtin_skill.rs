@@ -18,7 +18,10 @@ impl DesktopBuiltinSkillPromptFn {
 
 impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
     fn skip_shell_expansion(&self) -> bool {
-        matches!(self.name, "lingxi-api" | "document-authoring")
+        matches!(
+            self.name,
+            "lingxi-api" | "document-authoring" | "artifact-design" | "plan-artifact"
+        )
     }
 
     fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
@@ -45,6 +48,14 @@ mod tests {
             (
                 "plugin-authoring",
                 ".lingxi-plugin/\n    plugin.json".to_owned(),
+            ),
+            (
+                "artifact-design",
+                "Publish a private page on this computer with the `Page` tool".to_owned(),
+            ),
+            (
+                "plan-artifact",
+                "Approval of an implementation plan still uses `ExitPlanMode`".to_owned(),
             ),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());

@@ -185,4 +185,7 @@
 /// provider accounts, and removes the mutable-mode notification. Native
 /// bindings must be regenerated together with the host.
 /// Version 32.1 adds host-private Side Chat checkpoints and non-executing restore.
+/// `PageBlock` is appended after every existing ClientEvent variant. Existing
+/// native ordinals are unchanged, so this additive event keeps 32.1.0 and
+/// updates the contract index only.
 pub const CLIENT_PROTOCOL_VERSION: &str = "32.1.0";

@@ -58,6 +58,13 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
 
     register_skill(&mut registry, &names(&["Visualization"]), "Shell");
     assert!(!body(&registry).unwrap().contains("file_path"));
+    assert!(registry.resolve(&"artifact-design".into()).is_none());
+    assert!(registry.resolve(&"plan-artifact".into()).is_none());
+    register_skill(&mut registry, &names(&["Read"]), "Bash");
+    assert!(registry
+        .resolve(&visualization::skill::SKILL_NAME.into())
+        .is_none());
+    register_skill(&mut registry, &names(&["Visualization"]), "Bash");
     assert_eq!(
         registry
             .list_all()

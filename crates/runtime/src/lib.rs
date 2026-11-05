@@ -65,6 +65,12 @@ pub mod local_apps;
 #[cfg(feature = "desktop")]
 pub mod desktop_visualization;
 
+#[cfg(feature = "desktop")]
+pub mod private_page;
+
+#[cfg(feature = "desktop")]
+pub mod desktop_private_page;
+
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod parked_agent_restore;
 

@@ -56,6 +56,8 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill_generator_skill(reg);
     register_plugin_authoring_skill(reg);
     register_document_authoring_skill(reg);
+    register_artifact_design_skill(reg);
+    register_plan_artifact_skill(reg);
 
     // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
@@ -114,8 +116,26 @@ fn register_lingxi_api_skill(reg: &mut CommandRegistry) {
 
 /// Document authoring through the actual file/service capabilities of the host.
 fn register_document_authoring_skill(reg: &mut CommandRegistry) {
-    let skill = skill::desktop_builtin_skill("document-authoring")
-        .expect("builtin document authoring skill");
+    register_desktop_prompt_skill(reg, "document-authoring", "[document request]");
+}
+
+/// Hosted-page design. Publishing uses `Page` only when that tool is registered.
+fn register_artifact_design_skill(reg: &mut CommandRegistry) {
+    register_desktop_prompt_skill(reg, "artifact-design", "[page request]");
+}
+
+/// A plan shown as a hosted page. Approval stays on `ExitPlanMode`.
+fn register_plan_artifact_skill(reg: &mut CommandRegistry) {
+    register_desktop_prompt_skill(reg, "plan-artifact", "[plan]");
+}
+
+fn register_desktop_prompt_skill(
+    reg: &mut CommandRegistry,
+    name: &'static str,
+    argument_hint: &str,
+) {
+    let skill = skill::desktop_builtin_skill(name)
+        .unwrap_or_else(|| panic!("{name} is registered as a builtin Skill"));
     reg.register_command(SlashCommand {
         name: skill.name.into(),
         description: skill.description,
@@ -128,12 +148,12 @@ fn register_document_authoring_skill(reg: &mut CommandRegistry) {
                 ..CommandFrontmatter::default()
             },
             prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
-                "document-authoring",
+                name,
             ))),
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(true),
-        argument_hint: Some("[document request]".into()),
+        argument_hint: Some(argument_hint.into()),
         has_user_specified_description: true,
         ..SlashCommand::default()
     });
@@ -666,6 +686,7 @@ mod tests {
         got.sort();
 
         let want = vec![
+            "artifact-design".to_string(),
             "batch".to_string(),
             "code-review".to_string(),
             "commit".to_string(),
@@ -683,6 +704,7 @@ mod tests {
             "keybindings-help".to_string(),
             "lingxi-api".to_string(),
             "loop".to_string(),
+            "plan-artifact".to_string(),
             "plugin-authoring".to_string(),
             "run".to_string(),
             "run-skill-generator".to_string(),

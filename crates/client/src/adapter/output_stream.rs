@@ -284,6 +284,38 @@ impl MessageBuffer {
                         reference: None,
                     });
                 }
+                visualization::SplitEvent::PagePending => {
+                    out.push(ClientEvent::PageBlock {
+                        status: crate::protocol::message::PageBlockStatusDto::Pending,
+                        reference: None,
+                    });
+                }
+                visualization::SplitEvent::PageReady(reference) => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    let reference = crate::adapter::lowering::page_ref_dto(&reference);
+                    self.append(MessageBlockDto::Page {
+                        reference: Some(reference.clone()),
+                    });
+                    out.push(ClientEvent::PageBlock {
+                        status: crate::protocol::message::PageBlockStatusDto::Ready,
+                        reference: Some(reference),
+                    });
+                }
+                visualization::SplitEvent::PageUnavailable => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    self.append(MessageBlockDto::Page { reference: None });
+                    out.push(ClientEvent::PageBlock {
+                        status: crate::protocol::message::PageBlockStatusDto::Unavailable,
+                        reference: None,
+                    });
+                }
+                visualization::SplitEvent::PageDiscarded => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    out.push(ClientEvent::PageBlock {
+                        status: crate::protocol::message::PageBlockStatusDto::Discarded,
+                        reference: None,
+                    });
+                }
             }
         }
         out
@@ -2570,7 +2602,9 @@ mod tests {
 mod visualization_stream_tests {
     use super::*;
     use crate::adapter::test_support::MockSink;
-    use crate::protocol::message::{VisualizationBlockStatusDto, VisualizationRefDto};
+    use crate::protocol::message::{
+        PageBlockStatusDto, PageRefDto, VisualizationBlockStatusDto, VisualizationRefDto,
+    };
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
     const LINE: &str = "::lingxi-visualization{id=\"chart\" rev=\"2\"}";
@@ -2694,6 +2728,59 @@ mod visualization_stream_tests {
             replayed(&text),
             "live and resumed block sequences agree"
         );
+    }
+
+    #[tokio::test]
+    async fn a_private_page_line_is_a_page_slot_not_a_visualization() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let line = "::lingxi-page{id=\"notes\" rev=\"1\"}";
+        let text = format!("See\n{line}\n");
+        stream.emit_text(&projection(&text)).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let events = sink.events().await;
+        let live: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event, ClientEvent::MessageComplete { .. }))
+            .cloned()
+            .collect();
+        let page = PageRefDto {
+            id: "notes".into(),
+            revision: 1,
+        };
+        assert_eq!(
+            live,
+            vec![
+                ClientEvent::TextDelta {
+                    text: "See\n".into()
+                },
+                ClientEvent::PageBlock {
+                    status: PageBlockStatusDto::Pending,
+                    reference: None
+                },
+                ClientEvent::PageBlock {
+                    status: PageBlockStatusDto::Ready,
+                    reference: Some(page.clone())
+                },
+            ]
+        );
+        assert!(
+            !live
+                .iter()
+                .any(|event| matches!(event, ClientEvent::VisualizationBlock { .. }))
+        );
+        assert_eq!(
+            completed_blocks(&events),
+            vec![
+                MessageBlockDto::Text {
+                    text: "See\n".into()
+                },
+                MessageBlockDto::Page {
+                    reference: Some(page)
+                },
+            ]
+        );
+        assert_eq!(completed_blocks(&events), replayed(&text));
     }
 
     #[tokio::test]

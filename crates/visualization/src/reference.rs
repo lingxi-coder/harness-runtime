@@ -76,12 +76,18 @@ impl VisualizationRef {
 /// What a complete reference-shaped line resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectiveLine {
-    /// A well-formed reference.
+    /// A well-formed visualization reference.
     Ready(VisualizationRef),
-    /// Starts with the prefix and ends in `}` but does not parse.
+    /// Starts with the visualization prefix and ends in `}` but does not parse.
     Unavailable,
-    /// Starts with the prefix but never closed; hidden.
+    /// Starts with the visualization prefix but never closed; hidden.
     Discarded,
+    /// A well-formed private-page reference.
+    Page(private_page::PageRef),
+    /// Starts with the page prefix and ends in `}` but does not parse.
+    PageUnavailable,
+    /// Starts with the page prefix but never closed; hidden.
+    PageDiscarded,
 }
 
 /// Parse a trimmed directive such as `::lingxi-visualization{id="a" rev="1"}`.
@@ -133,15 +139,34 @@ pub fn classify_line(line: &str) -> Option<DirectiveLine> {
         return None;
     }
     let rest = &line[leading..];
+    let trimmed = rest.trim_end();
+    if trimmed.starts_with(private_page::REFERENCE_PREFIX) {
+        return Some(match private_page::parse_directive(trimmed) {
+            Some(reference) => DirectiveLine::Page(reference),
+            None if trimmed.ends_with('}') => DirectiveLine::PageUnavailable,
+            None => DirectiveLine::PageDiscarded,
+        });
+    }
     if !rest.starts_with(REFERENCE_PREFIX) {
         return None;
     }
-    let trimmed = rest.trim_end();
     Some(match parse_directive(trimmed) {
         Some(reference) => DirectiveLine::Ready(reference),
         None if trimmed.ends_with('}') => DirectiveLine::Unavailable,
         None => DirectiveLine::Discarded,
     })
+}
+
+fn could_match_prefix(rest: &str) -> bool {
+    [REFERENCE_PREFIX, private_page::REFERENCE_PREFIX]
+        .into_iter()
+        .any(|prefix| {
+            if rest.len() <= prefix.len() {
+                prefix.starts_with(rest)
+            } else {
+                rest.starts_with(prefix)
+            }
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,21 +253,17 @@ impl LineClassifier {
         if leading > MAX_INDENT {
             return false;
         }
-        let rest = &partial[leading..];
-        if rest.len() <= REFERENCE_PREFIX.len() {
-            REFERENCE_PREFIX.starts_with(rest)
-        } else {
-            rest.starts_with(REFERENCE_PREFIX)
-        }
+        could_match_prefix(&partial[leading..])
     }
 
-    /// Whether `partial` already carries the complete prefix.
+    /// Whether `partial` already carries a complete visualization or page prefix.
     #[must_use]
     pub fn has_full_prefix(&self, partial: &str) -> bool {
-        self.could_be_reference(partial)
-            && partial
-                .trim_start_matches(' ')
-                .starts_with(REFERENCE_PREFIX)
+        if !self.could_be_reference(partial) {
+            return false;
+        }
+        let rest = partial.trim_start_matches(' ');
+        rest.starts_with(REFERENCE_PREFIX) || rest.starts_with(private_page::REFERENCE_PREFIX)
     }
 }
 

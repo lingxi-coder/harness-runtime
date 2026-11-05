@@ -2,7 +2,7 @@
 //!
 //! Hosts opt in with their `inline_visualization` config flag once their
 //! WebView host can render widgets; CLI and headless leave it off, so neither
-//! the `Visualization` tool nor the `visualize` skill exists there.
+//! the `Visualization` tool nor the `visualize` skill exist there.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -109,7 +109,7 @@ impl BundledPromptFn for VisualizePrompt {
     }
 }
 
-/// (Re)register `/visualize` when the host offers the `Visualization` tool.
+/// (Re)register `visualize` when the host offers the `Visualization` tool.
 /// `shell_tool` names the host's shell tool for the optional check step.
 pub fn register_skill(
     registry: &mut CommandRegistry,
@@ -127,10 +127,17 @@ pub fn register_skill(
         .iter()
         .any(|name| name == shell_tool)
         .then_some(shell_tool);
-    let markdown = visualization::skill::skill_markdown(shell);
-    let skill_root = PathBuf::from(SKILL_LOADED_FROM).join(visualization::skill::SKILL_NAME);
+    register_prompt_skill(
+        registry,
+        &visualization::skill::skill_markdown(shell),
+        visualization::skill::SKILL_NAME,
+    );
+}
+
+fn register_prompt_skill(registry: &mut CommandRegistry, markdown: &str, name: &str) {
+    let skill_root = PathBuf::from(SKILL_LOADED_FROM).join(name);
     let parsed = command_api::parse_skill_command_markdown(
-        &markdown,
+        markdown,
         skill_root.join("SKILL.md"),
         skill_root,
         CommandSource::Bundled,
@@ -142,7 +149,7 @@ pub fn register_skill(
         ..
     } = command.kind
     else {
-        unreachable!("the visualize skill is a Markdown prompt")
+        unreachable!("visualization skills are Markdown prompts")
     };
     command.kind = SlashCommandKind::Bundled {
         frontmatter,

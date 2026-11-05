@@ -588,6 +588,7 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.idle_compaction_enabled = false;
     config.inline_visualization = false;
     config.local_apps = false;
+    config.private_pages = false;
     config.audio = None;
     config.media_service = None;
     config.media_conversation_attachment = None;

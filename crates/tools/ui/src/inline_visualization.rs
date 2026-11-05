@@ -40,6 +40,8 @@ const PROMPT: &str = r#"Publish a self-contained HTML fragment as an inline visu
 
 Load the `visualize` skill first unless you already have it in context: it covers when a widget is worth it, the sandbox rules, the theme variables and controls, and the `lingxi` global state API.
 
+To list visualizations already published in this conversation, call this tool with `action` set to `list` and no other fields. Pass one of those ids to publish its next revision.
+
 - Pass the fragment in `html`, or pass `file_path` for a fragment you wrote to an `.html` file (for example to check it with a shell first). Give exactly one.
 - The fragment has no `<!doctype>`, `<html>`, `<head>` or `<body>`, loads nothing from the network, and is at most 2 MiB. `d3`, `lucide` and Floating UI tooltips are already loaded.
 - `title` names the widget (at most 80 characters).
@@ -52,11 +54,16 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
         "type": "object",
         "additionalProperties": false,
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["publish", "list"],
+                "description": "Omit or pass publish to store a fragment. Pass list, alone, to enumerate visualizations already published in this conversation."
+            },
             "title": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_TITLE_CHARS,
-                "description": "Short title for the widget, shown above it and to assistive technology."
+                "description": "Short title for the widget, shown above it and to assistive technology. Required to publish."
             },
             "html": {
                 "type": "string",
@@ -72,22 +79,44 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
                 "description": "Id of a visualization you already published in this conversation; publishes its next revision."
             }
         },
-        "required": ["title"]
+        "required": []
     }))
     .expect("Visualization input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     Utf16JsonProjection::from_serde_value(&json!({
-        "type": "object",
-        "properties": {
-            "id": { "type": "string" },
-            "revision": { "type": "integer" },
-            "title": { "type": "string" },
-            "reference": { "type": "string" },
-            "warnings": { "type": "array", "items": { "type": "string" } }
-        },
-        "required": ["id", "revision", "title", "reference"]
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "revision": { "type": "integer" },
+                    "title": { "type": "string" },
+                    "reference": { "type": "string" },
+                    "warnings": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id", "revision", "title", "reference"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "visualizations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "revision": { "type": "integer" },
+                                "title": { "type": "string" }
+                            },
+                            "required": ["id", "revision", "title"]
+                        }
+                    }
+                },
+                "required": ["visualizations"]
+            }
+        ]
     }))
     .expect("Visualization output schema is valid JSON")
 });
@@ -154,6 +183,52 @@ impl VisualizationTool {
     /// The root session that owns what this call publishes.
     async fn owner(&self, ctx: &ToolUseContext) -> Option<uuid::Uuid> {
         root_session(&self.ctx, ctx).await
+    }
+
+    /// Latest revision of every visualization in this conversation.
+    async fn list_published(&self, ctx: &ToolUseContext) -> Result<ToolCallResult, ToolError> {
+        let Some(root_session) = self.owner(ctx).await else {
+            return Err(ToolError::Internal(
+                "this session has no id to store visualizations under".into(),
+            ));
+        };
+        let items = self
+            .store
+            .list(root_session)
+            .await
+            .map_err(|error| match error {
+                StoreError::Io(message) => ToolError::Io(message.into()),
+                other => ToolError::InvalidInput(other.to_string().into()),
+            })?;
+        let rows = items
+            .iter()
+            .filter_map(|item| {
+                let latest = item.revisions.last()?;
+                Some(json!({
+                    "id": item.id.as_str(),
+                    "revision": latest.revision,
+                    "title": latest.title,
+                }))
+            })
+            .collect::<Vec<_>>();
+        let model_content = if rows.is_empty() {
+            "This conversation has no visualizations.".to_string()
+        } else {
+            let mut text =
+                String::from("Visualizations in this conversation, latest revision of each:");
+            for row in &rows {
+                text.push_str(&format!(
+                    "\n- {} revision {}: {}",
+                    row["id"].as_str().unwrap_or(""),
+                    row["revision"],
+                    row["title"].as_str().unwrap_or("")
+                ));
+            }
+            text
+        };
+        let data = Utf16JsonProjection::from_serde_value(&json!({ "visualizations": rows }))
+            .expect("Visualization list is valid JSON");
+        Ok(ToolCallResult::from_data(data).with_model_text(&model_content))
     }
 }
 
@@ -226,6 +301,20 @@ impl Tool for VisualizationTool {
         input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        let action = input.string_at("/action").unwrap_or("publish");
+        if action == "list" {
+            if input.string_at("/html").is_some()
+                || Self::file_path(input).is_some()
+                || input.string_at("/id").is_some()
+                || input.string_at("/title").is_some()
+            {
+                return Err(ValidationError("list takes no other fields.".into()));
+            }
+            return Ok(());
+        }
+        if action != "publish" {
+            return Err(ValidationError("action must be publish or list.".into()));
+        }
         let html = input.string_at("/html");
         let file_path = Self::file_path(input);
         match (html, file_path) {
@@ -307,6 +396,27 @@ impl Tool for VisualizationTool {
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ToolError> {
         let invalid = || ToolError::InvalidInput("Visualization returned invalid output".into());
+        if output.get_property("visualizations").is_some() {
+            let Some(count) = output.array_len("/visualizations") else {
+                return Err(invalid());
+            };
+            for index in 0..count {
+                let base = format!("/visualizations/{index}");
+                let revision = output.number_at(&format!("{base}/revision"));
+                if output.string_at(&format!("{base}/id")).is_none()
+                    || output.string_at(&format!("{base}/title")).is_none()
+                    || revision
+                        .is_none_or(|revision| !revision.is_finite() || revision.fract() != 0.0)
+                {
+                    return Err(invalid());
+                }
+            }
+            let listed = output
+                .subprojection("/visualizations")
+                .map_err(|_| invalid())?;
+            return Utf16JsonProjection::object(vec![("visualizations".to_owned(), listed)])
+                .map_err(|_| invalid());
+        }
         let mut fields = Vec::with_capacity(5);
         for key in ["id", "revision", "title", "reference"] {
             let pointer = format!("/{key}");
@@ -346,8 +456,12 @@ impl Tool for VisualizationTool {
         Utf16JsonProjection::object(fields).map_err(|_| invalid())
     }
 
-    fn get_activity_description(&self, _input: &Utf16JsonProjection) -> Option<String> {
-        Some("Publishing visualization".to_string())
+    fn get_activity_description(&self, input: &Utf16JsonProjection) -> Option<String> {
+        if input.string_at("/action") == Some("list") {
+            Some("Listing visualizations".to_string())
+        } else {
+            Some("Publishing visualization".to_string())
+        }
     }
 
     async fn call(
@@ -356,6 +470,9 @@ impl Tool for VisualizationTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        if input.string_at("/action") == Some("list") {
+            return self.list_published(&ctx).await;
+        }
         let title = input.string_at("/title").unwrap_or_default();
         let fragment = match (input.string_at("/html"), Self::file_path(&input)) {
             (Some(html), None) => html.to_string(),
@@ -556,6 +673,8 @@ mod tests {
             json!({"title": "t", "file_path": "/a.svg"}),
             json!({"title": " ", "html": "<p>x</p>"}),
             json!({"title": "t", "html": "<p>x</p>", "id": "../x"}),
+            json!({"action": "share"}),
+            json!({"action": "list", "title": "t"}),
         ] {
             let input = source_input(value);
             assert!(
@@ -655,5 +774,74 @@ mod tests {
         assert_ne!(TOOL_NAME, crate::artifact::ARTIFACT_TOOL_NAME);
         assert!(DESCRIPTION.contains("Nothing is uploaded"));
         assert!(!PROMPT.contains("claude.ai"));
+        assert!(!PROMPT.contains("artifact-design"));
+        assert!(!PROMPT.contains("plan-artifact"));
+        assert!(PROMPT.contains("`visualize`"));
+        assert!(PROMPT.contains("`list`"));
+    }
+
+    #[tokio::test]
+    async fn list_returns_only_this_conversations_latest_revisions() {
+        let home = tempfile::tempdir().unwrap();
+        let tool = tool(home.path());
+        let session = lingxi_core::types::SessionId::new();
+        let empty = tool
+            .call(
+                source_input(json!({"action": "list"})),
+                call_ctx(session),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.data.array_len("/visualizations"), Some(0));
+        assert!(empty
+            .model_content
+            .as_ref()
+            .and_then(|content| content.string_at(""))
+            .unwrap()
+            .contains("no visualizations"));
+        let published = tool
+            .call(
+                source_input(json!({"title": "Growth", "html": "<div id=\"widget\">x</div>"})),
+                call_ctx(session),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let id = published.data.string_at("/id").unwrap();
+        tool.call(
+            source_input(
+                json!({"title": "Growth v2", "html": "<div id=\"widget\">y</div>", "id": id}),
+            ),
+            call_ctx(session),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let listed = tool
+            .call(
+                source_input(json!({"action": "list"})),
+                call_ctx(session),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.data.array_len("/visualizations"), Some(1));
+        assert_eq!(listed.data.string_at("/visualizations/0/id"), Some(id));
+        assert_eq!(
+            listed.data.number_at("/visualizations/0/revision"),
+            Some(2.0)
+        );
+        let other = tool
+            .call(
+                source_input(json!({"action": "list"})),
+                call_ctx(lingxi_core::types::SessionId::new()),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other.data.array_len("/visualizations"), Some(0));
+        let parsed = tool.parse_output(&listed.data).await.unwrap();
+        assert_eq!(parsed.array_len("/visualizations"), Some(1));
     }
 }

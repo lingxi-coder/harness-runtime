@@ -341,7 +341,7 @@ pub struct DesktopConfig {
     pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
     /// The attached client renders inline visualizations (Electron through
     /// bridge-server). Registers the `Visualization` tool and the `visualize`
-    /// skill; CLI and headless hosts leave it off.
+    /// skill. CLI and headless hosts leave them off.
     pub inline_visualization: bool,
     /// Native query-agent identity for model-visible settings deltas. Ordinary
     /// Desktop, CLI, and Headless sessions use `Main`; the CLI sets
@@ -352,6 +352,10 @@ pub struct DesktopConfig {
     /// an Apps page). Registers the `LocalApp` tool and the `local-app`
     /// skill; CLI and headless hosts leave it off.
     pub local_apps: bool,
+    /// The attached client opens a private page on this computer. Registers
+    /// the `Page` tool. CLI and headless hosts leave it off. This is not an
+    /// inline visualization.
+    pub private_pages: bool,
     /// How long a parked permission prompt waits for the attached client before
     /// it resolves `Deny` (fail-closed). `None` keeps
     /// [`client::adapter::DEFAULT_PERMISSION_TIMEOUT`] (300 s). A remote viewer
@@ -1035,6 +1039,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
             .field("local_apps", &self.local_apps)
+            .field("private_pages", &self.private_pages)
             .field("permission_timeout", &self.permission_timeout)
             .field(
                 "ask_user_question_timeout_override",
@@ -1244,6 +1249,7 @@ impl Default for DesktopConfig {
             inline_visualization: false,
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             local_apps: false,
+            private_pages: false,
             permission_timeout: None,
             ask_user_question_timeout_override: None,
             api_base: "https://api.anthropic.com".to_string(),

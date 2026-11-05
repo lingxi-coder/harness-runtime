@@ -17,14 +17,22 @@ use crate::reference::{DirectiveLine, LineClassifier, VisualizationRef};
 pub enum SplitEvent {
     /// Narration text, verbatim.
     Text(String),
-    /// A reference line has started; its outcome follows.
+    /// A visualization reference line has started; its outcome follows.
     Pending,
-    /// The line resolved to this reference.
+    /// The line resolved to this visualization.
     Ready(VisualizationRef),
-    /// The line looked like a reference but did not parse.
+    /// The line looked like a visualization reference but did not parse.
     Unavailable,
-    /// The line started like a reference but never completed; drop the placeholder.
+    /// The line started like a visualization reference but never completed.
     Discarded,
+    /// A private-page reference line has started.
+    PagePending,
+    /// The line resolved to this private page.
+    PageReady(private_page::PageRef),
+    /// The line looked like a page reference but did not parse.
+    PageUnavailable,
+    /// The line started like a page reference but never completed.
+    PageDiscarded,
 }
 
 /// A replayed or completed block segment.
@@ -34,6 +42,8 @@ pub enum Segment {
     Text(String),
     /// A visualization slot; `None` renders as "unavailable".
     Visualization(Option<VisualizationRef>),
+    /// A private-page slot; `None` renders as "unavailable".
+    Page(Option<private_page::PageRef>),
 }
 
 /// Incremental splitter for ONE assistant text block.
@@ -46,6 +56,8 @@ pub struct ReferenceSplitter {
     /// been released.
     released: bool,
     pending_announced: bool,
+    /// The announced placeholder is a private page, not a visualization.
+    pending_page: bool,
 }
 
 impl ReferenceSplitter {
@@ -78,8 +90,17 @@ impl ReferenceSplitter {
                 text.push_str(&self.line);
             } else if !self.pending_announced && self.classifier.has_full_prefix(&self.line) {
                 flush(&mut text, &mut events);
-                events.push(SplitEvent::Pending);
+                let page = self
+                    .line
+                    .trim_start_matches(' ')
+                    .starts_with(private_page::REFERENCE_PREFIX);
+                events.push(if page {
+                    SplitEvent::PagePending
+                } else {
+                    SplitEvent::Pending
+                });
                 self.pending_announced = true;
+                self.pending_page = page;
             }
             if newline {
                 self.end_line(&mut text, &mut events, true);
@@ -107,9 +128,14 @@ impl ReferenceSplitter {
     /// announced so the client can remove it.
     pub fn abort(&mut self) -> Vec<SplitEvent> {
         let announced = self.pending_announced && !self.released;
+        let page = self.pending_page;
         *self = Self::default();
         if announced {
-            vec![SplitEvent::Discarded]
+            vec![if page {
+                SplitEvent::PageDiscarded
+            } else {
+                SplitEvent::Discarded
+            }]
         } else {
             Vec::new()
         }
@@ -138,6 +164,20 @@ impl ReferenceSplitter {
                         events.push(SplitEvent::Discarded);
                     }
                 }
+                Some(DirectiveLine::Page(reference)) => {
+                    flush(text, events);
+                    events.push(SplitEvent::PageReady(reference));
+                }
+                Some(DirectiveLine::PageUnavailable) => {
+                    flush(text, events);
+                    events.push(SplitEvent::PageUnavailable);
+                }
+                Some(DirectiveLine::PageDiscarded) => {
+                    flush(text, events);
+                    if self.pending_announced {
+                        events.push(SplitEvent::PageDiscarded);
+                    }
+                }
                 None => {
                     text.push_str(&line);
                     if newline {
@@ -148,6 +188,7 @@ impl ReferenceSplitter {
         }
         self.released = false;
         self.pending_announced = false;
+        self.pending_page = false;
     }
 }
 
@@ -160,7 +201,9 @@ fn flush(text: &mut String, events: &mut Vec<SplitEvent>) {
 /// Settled segments of one complete text block, adjacent text merged.
 #[must_use]
 pub fn project_text(text: &str) -> Vec<Segment> {
-    if !text.contains(crate::reference::REFERENCE_PREFIX) {
+    if !text.contains(crate::reference::REFERENCE_PREFIX)
+        && !text.contains(private_page::REFERENCE_PREFIX)
+    {
         return if text.is_empty() {
             Vec::new()
         } else {
@@ -188,7 +231,12 @@ pub fn settle(events: impl IntoIterator<Item = SplitEvent>) -> Vec<Segment> {
             }
             SplitEvent::Ready(reference) => segments.push(Segment::Visualization(Some(reference))),
             SplitEvent::Unavailable => segments.push(Segment::Visualization(None)),
-            SplitEvent::Pending | SplitEvent::Discarded => {}
+            SplitEvent::PageReady(reference) => segments.push(Segment::Page(Some(reference))),
+            SplitEvent::PageUnavailable => segments.push(Segment::Page(None)),
+            SplitEvent::Pending
+            | SplitEvent::Discarded
+            | SplitEvent::PagePending
+            | SplitEvent::PageDiscarded => {}
         }
     }
     segments
@@ -279,6 +327,28 @@ mod tests {
         assert_eq!(
             project_text("::lingxi-visualization{id=\"chart\" rev=\"two\"}"),
             vec![Segment::Visualization(None)]
+        );
+    }
+
+    #[test]
+    fn a_private_page_line_is_not_a_visualization() {
+        let events = live(&["See\n::lingxi-page{id=\"notes\" rev=\"1\"}\n"]);
+        assert_eq!(
+            events,
+            vec![
+                SplitEvent::Text("See\n".into()),
+                SplitEvent::PagePending,
+                SplitEvent::PageReady(private_page::PageRef {
+                    id: private_page::PageId::parse("notes").unwrap(),
+                    revision: 1,
+                }),
+            ]
+        );
+        assert_eq!(
+            project_text("```\n::lingxi-page{id=\"notes\" rev=\"1\"}\n```\n"),
+            vec![Segment::Text(
+                "```\n::lingxi-page{id=\"notes\" rev=\"1\"}\n```\n".into()
+            )]
         );
     }
 
@@ -376,7 +446,7 @@ mod tests {
             // Narration bytes are never lost or invented outside reference lines.
             let rebuilt: String = settled.iter().map(|segment| match segment {
                 Segment::Text(text) => text.clone(),
-                Segment::Visualization(_) => String::new(),
+                Segment::Visualization(_) | Segment::Page(_) => String::new(),
             }).collect();
             prop_assert!(rebuilt.len() <= text.len());
         }

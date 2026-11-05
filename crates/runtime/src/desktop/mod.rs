@@ -1678,8 +1678,9 @@ pub fn register_desktop_tools(
     // backend) AND `allow_cobalt_plinth` AND first-party auth AND subscription
     // tier — so with no Statsig backend the tool registers DISABLED (invisible
     // to the model), byte-identical to the shipped binary on a host without the
-    // `cobalt_plinth` gate. The publish/list claude.ai pipeline + the
-    // `artifact-design`/`artifact-capabilities` bundled skills are Stage-2.
+    // `cobalt_plinth` gate. The publish/list claude.ai pipeline and
+    // `artifact-capabilities` remain Stage-2. `artifact-design` and
+    // `plan-artifact` are separate skills and do not enable this tool.
     reg.register_builtin(Arc::new(tool_ui::ArtifactTool::new(ctx.clone())));
     // SKILLEXEC.2: when a `SkillLoader` is supplied (real sessions wire the
     // `CommandRegistry`-backed loader), register the `Skill` tool with it so a

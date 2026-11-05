@@ -117,6 +117,12 @@ mod tests {
     fn body_names_the_tool_and_has_no_embedded_shell_syntax() {
         for markdown in [skill_markdown(Some("Shell")), skill_markdown(None)] {
             assert!(markdown.contains(&format!("`{}`", crate::TOOL_NAME)));
+            assert!(markdown.contains("https://v-<version id>.lingxios.net/<entry path>"));
+            assert!(!markdown.contains("Visualization"));
+            assert!(!markdown.contains("visualize"));
+            assert!(!markdown.contains("artifact-design"));
+            assert!(!markdown.contains("plan-artifact"));
+            assert!(!markdown.contains("`Page`"));
             assert!(!markdown.contains("```!"));
             assert!(!markdown.contains("!`"));
         }

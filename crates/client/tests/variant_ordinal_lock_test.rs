@@ -211,6 +211,7 @@ const EVENT_ORDINALS: &[&str] = &[
     "SessionHandoffPrepared",
     "SessionHandoffFailed",
     "SideChatCheckpoint",
+    "PageBlock",
 ];
 
 fn variants_in_declaration_order(src: &str, enum_name: &str) -> Vec<String> {

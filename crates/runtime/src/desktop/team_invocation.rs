@@ -389,6 +389,7 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     scoped.session_skill_allowlist = Some(Vec::new());
     scoped.disable_slash_commands = true;
     scoped.inline_visualization = false;
+    scoped.private_pages = false;
     scoped.exclude_dynamic_system_prompt_sections = true;
     scoped.insights_policy_gate = Some(false);
     scoped.team_onboarding_policy_gate = Some(false);

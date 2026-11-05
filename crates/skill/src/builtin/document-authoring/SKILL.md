@@ -50,8 +50,9 @@ returned identity and read-back/version facilities when supported. Distinguish
 saved content, generated exports and sharing status. Return a reachable file
 reference or the real service link, with the important verification limits.
 
-Creating a document does not by itself authorize public Artifact publication,
-changing sharing permissions, uploading to another service or sending messages.
-Use those actions only when the user's request includes them. A Visualization
-or Local App is appropriate when the user requests an interactive result;
-ordinary documents do not require either host capability.
+Creating a document does not change sharing permissions, upload the file to
+another service, or send messages. Do those only when the request includes them.
+An interactive chart, mockup, or inline widget uses the `Visualization` tool when that
+tool is registered, and it stays in this conversation. A Local App is a separate
+host capability, used only when its tool is registered and the user wants an app.
+Ordinary documents need neither.

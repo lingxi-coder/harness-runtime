@@ -9,6 +9,7 @@ build = "build.rs"
 
 [dependencies]
 core = { path = "../core" }
+private-page = { path = "../private-page" }
 branding.workspace = true
 serde.workspace = true
 serde_json.workspace = true

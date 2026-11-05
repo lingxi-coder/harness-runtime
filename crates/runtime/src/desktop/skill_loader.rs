@@ -500,6 +500,8 @@ mod tests {
         for (name, args) in [
             ("lingxi-api", "bots"),
             ("document-authoring", "Write a report"),
+            ("artifact-design", "Publish the notes"),
+            ("plan-artifact", "Publish the plan"),
         ] {
             let guide = loader.load(&name.into()).await.unwrap().unwrap();
             assert_eq!(guide.command_type, SkillCommandType::Prompt);

@@ -309,6 +309,16 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/page_block.json",
+            ClientEvent::PageBlock {
+                status: client::protocol::message::PageBlockStatusDto::Ready,
+                reference: Some(client::protocol::message::PageRefDto {
+                    id: "notes".into(),
+                    revision: 1,
+                }),
+            },
+        ),
+        (
             "event/task_lifecycle.json",
             ClientEvent::TaskLifecycle {
                 event_json: r#"{"type":"system","subtype":"task_started","task_id":"b12345678","description":"background job","task_type":"local_bash"}"#.to_string(),

@@ -81,6 +81,7 @@ desktop = [
     "dep:tool-cron",
     "dep:tool-ui",
     "dep:visualization",
+    "dep:private-page",
     "dep:local-app",
     "dep:tool-skill",
     "dep:tool-agent",
@@ -269,6 +270,7 @@ tool-skill = { path = "../tools/skill", optional = true }
 tool-task = { path = "../tools/task", optional = true }
 tool-ui = { path = "../tools/ui", optional = true }
 visualization = { path = "../visualization", optional = true }
+private-page = { path = "../private-page", optional = true }
 local-app = { path = "../local-app", optional = true }
 tool-web = { path = "../tools/web", optional = true }
 tool-workflow = { path = "../tools/workflow", optional = true }

@@ -514,6 +514,9 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::VisualizationBlock.reference",
         "Option<VisualizationRefDto>",
     );
+    put("ClientEvent::PageBlock", "page_block");
+    put("ClientEvent::PageBlock.status", "PageBlockStatusDto");
+    put("ClientEvent::PageBlock.reference", "Option<PageRefDto>");
 
     put("ClientEvent::TextDelta", "text_delta");
     put("ClientEvent::TextDelta.text", "ClientTextDto");
@@ -1524,6 +1527,12 @@ fn current_contract_index() -> ContractIndex {
     put("VisualizationContextDto.title", "String");
     put("VisualizationRefDto.id", "String");
     put("VisualizationRefDto.revision", "u32");
+    put("PageRefDto.id", "String");
+    put("PageRefDto.revision", "u32");
+    put("PageBlockStatusDto::Pending", "pending");
+    put("PageBlockStatusDto::Ready", "ready");
+    put("PageBlockStatusDto::Unavailable", "unavailable");
+    put("PageBlockStatusDto::Discarded", "discarded");
     put("VisualizationBlockStatusDto::Pending", "pending");
     put("VisualizationBlockStatusDto::Ready", "ready");
     put("VisualizationBlockStatusDto::Unavailable", "unavailable");
@@ -1565,6 +1574,8 @@ fn current_contract_index() -> ContractIndex {
         "MessageBlockDto::Visualization.reference",
         "Option<VisualizationRefDto>",
     );
+    put("MessageBlockDto::Page", "page");
+    put("MessageBlockDto::Page.reference", "Option<PageRefDto>");
 
     put("ClientEvent::PlanUpdated", "plan_updated");
     put("ClientEvent::PlanUpdated.tasks", "Vec<PlanTaskDto>");

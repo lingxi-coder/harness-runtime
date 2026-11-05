@@ -83,6 +83,31 @@ pub enum VisualizationBlockStatusDto {
     Discarded,
 }
 
+/// One published revision of a private page on this computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PageRefDto {
+    /// Page id, stable across revisions.
+    pub id: String,
+    /// 1-based revision number.
+    pub revision: u32,
+}
+
+/// Progress of a private-page slot in the live assistant stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum PageBlockStatusDto {
+    /// A reference line has started; reserve space.
+    Pending,
+    /// The reference resolved; render it.
+    Ready,
+    /// The line looked like a reference but did not parse.
+    Unavailable,
+    /// The line never completed; remove the placeholder.
+    Discarded,
+}
+
 /// Durable `/loop` fire metadata, rendered without matching user-facing text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -189,6 +214,13 @@ pub enum MessageBlockDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<VisualizationRefDto>,
     },
+    /// A private page an assistant placed with a reference line. `None`
+    /// renders as unavailable. Appended to preserve UniFFI variant ordinals.
+    Page {
+        /// The revision to open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<PageRefDto>,
+    },
 }
 
 /// Externally tagged carrier used only to deserialize one raw block envelope.
@@ -228,6 +260,10 @@ enum MessageBlockDtoWire {
     Visualization {
         #[serde(default)]
         reference: Option<VisualizationRefDto>,
+    },
+    Page {
+        #[serde(default)]
+        reference: Option<PageRefDto>,
     },
 }
 
@@ -277,6 +313,7 @@ impl From<MessageBlockDtoWire> for MessageBlockDto {
                 display,
             },
             MessageBlockDtoWire::Visualization { reference } => Self::Visualization { reference },
+            MessageBlockDtoWire::Page { reference } => Self::Page { reference },
         }
     }
 }

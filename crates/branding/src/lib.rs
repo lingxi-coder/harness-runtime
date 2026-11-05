@@ -371,6 +371,15 @@ pub const MANAGED_DIR_UNIX: &str = "/etc/lingxi";
 /// `::lingxi-visualization{id="<id>" rev="<n>"}`.
 pub const VISUALIZATION_REFERENCE_PREFIX: &str = "::lingxi-visualization{";
 
+/// Start of the line-anchored directive an assistant writes to place a
+/// private page that stays on this computer:
+/// `::lingxi-page{id="<id>" rev="<n>"}`.
+pub const PRIVATE_PAGE_REFERENCE_PREFIX: &str = "::lingxi-page{";
+
+/// Directory under the config home that holds private pages
+/// (`<config-home>/pages/`).
+pub const PRIVATE_PAGES_DIR: &str = "pages";
+
 /// Directory under the config home that holds the inline-visualization stores
 /// (`<config-home>/visualizations/<root-session-uuid>/`).
 pub const VISUALIZATIONS_DIR: &str = "visualizations";
@@ -450,6 +459,8 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     MANAGED_DIR_WINDOWS,
     MANAGED_DIR_UNIX,
     VISUALIZATION_REFERENCE_PREFIX,
+    PRIVATE_PAGE_REFERENCE_PREFIX,
+    PRIVATE_PAGES_DIR,
     VISUALIZATIONS_DIR,
     LOCAL_APPS_DIR,
 ];

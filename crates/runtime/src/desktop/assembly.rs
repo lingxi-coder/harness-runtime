@@ -5300,6 +5300,7 @@ pub async fn build_with_credential_stack(
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
     let visualization_tool_ctx = cfg.inline_visualization.then(|| tool_ctx.clone());
+    let page_tool_ctx = cfg.private_pages.then(|| tool_ctx.clone());
     let sandbox_host_facts_provider = {
         let tool_ctx = tool_ctx.clone();
         let platform = current_platform.map(|platform| platform.as_str().to_owned());
@@ -5484,6 +5485,10 @@ pub async fn build_with_credential_stack(
     if let Some(ctx) = visualization_tool_ctx {
         let store = crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
         crate::inline_visualization::register_tool(&mut tools_inner, ctx, store);
+    }
+    if let Some(ctx) = page_tool_ctx {
+        let store = crate::private_page::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
+        crate::private_page::register_tool(&mut tools_inner, ctx, store);
     }
     if let Some(ctx) = local_app_tool_ctx {
         let visualizations = cfg

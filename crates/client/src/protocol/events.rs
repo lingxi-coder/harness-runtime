@@ -842,6 +842,13 @@ define_client_event! {
     },
     /// Host-private recovery state. Clients must not render or log this payload.
     SideChatCheckpoint { side_id: String, checkpoint_json: String, events_json: Vec<String> },
+    /// Private page slot in the live assistant text. Appended to preserve
+    /// existing UniFFI variant ordinals. The page stays on this computer.
+    PageBlock {
+        status: crate::protocol::message::PageBlockStatusDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<crate::protocol::message::PageRefDto>,
+    },
 
 }
 
@@ -882,6 +889,9 @@ impl From<ClientEventWire> for ClientEvent {
                 checkpoint_json,
                 events_json,
             },
+            ClientEventWire::PageBlock { status, reference } => {
+                Self::PageBlock { status, reference }
+            }
 
             ClientEventWire::FusionCatalog { catalog_json } => Self::FusionCatalog { catalog_json },
             ClientEventWire::FusionStrategyResolved {

@@ -20,7 +20,7 @@ This skill owns authoring, publication and app lifecycle. For LingXi product cap
 
 ## Workflow
 
-1. Build when the user has made a clear request or approved a plan. Ask only for missing decisions that change the result. A one-off chart or explanation can use an inline visualization; an application belongs in the Apps library.
+1. Build when the user has made a clear request or approved a plan. Ask only for missing decisions that change the result. An application belongs in the Apps library.
 2. Use the source Project and Code Session selected by the native Create/Modify flow. Keep app source in that Project; do not move it because the conversation cwd changes or use an unrelated active Project. Mobile source paths come from the current brand's Linux user; obtain them from the host. The host binds the trusted Project/Session pair. If a saved source is missing, use native Restore Source or the permitted Remix/copy flow rather than silently binding another Project. Never invent or send private source-session, transport, permission, grant or approval fields.
 3. A simple static app can be one complete HTML document with inline CSS/JavaScript, published as `LocalApp({"name":"…","summary":"…","html":"…"})`. The host constructs its schema-2 package. For multiple files, frameworks, services or native Agent/device capabilities, create a project containing `lingxi-app.json` and publish with `bundle_path`. If no source Project was selected, use the native flow's distinct `.apps` authoring directory.
 <!-- if-shell -->
@@ -307,6 +307,12 @@ standalone browser rendering are not real-provider or physical-device evidence.
 - Implement only the current host contract; do not add old API decoders or old Agent-data migrations. A changed business filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase current user records or bypass a migration refusal.
 - Use localStorage/IndexedDB for browser records, validate loaded data, report failed saves, and provide export/import for important records. Installation, publication and execution are different lifecycle steps.
 - Publishing to the public market is a separate native review action. Export only declared package files, excluding credentials, transcripts, grants, browser stores, databases and private files. Market installation copies code, not author permissions; a permitted customization creates a separate app and preserves upstream attribution.
+
+## Server page
+
+A static page is published to the LingXi server from a static Local App. Its entry file is a complete HTML document and includes a doctype, `html`, `head`, or `body` tag. Publish that package into this device's Apps library with `LocalApp`, with no install, build, or process. The signed-in user then reviews the declared source files and publishes the package from the desktop market action. Publication into the Apps library does not upload.
+
+When that release is published and the listing is available, the market returns a preview address `https://v-<version id>.lingxios.net/<entry path>`. Report the address the market returns. An unknown version is unavailable. An entry of type `server`, or a package that declares install, build, or processes, is distributed as source. The server does not run it.
 
 ## Interface and verification
 

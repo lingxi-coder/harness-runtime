@@ -21,6 +21,17 @@ pub(crate) struct BundledResource {
 /// Desktop builtin skill templates.
 pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
     BundledSkill {
+        name: "artifact-design",
+        raw: include_str!("artifact-design/SKILL.md"),
+        triggers: &[
+            "/artifact-design",
+            "publish an artifact",
+            "hosted web page",
+            "发布成网页",
+        ],
+        references: &[],
+    },
+    BundledSkill {
         name: "document-authoring",
         raw: include_str!("document-authoring/SKILL.md"),
         triggers: &[
@@ -36,6 +47,17 @@ pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
         name: "lingxi-api",
         raw: include_str!("lingxi-api/SKILL.md"),
         triggers: &["lingxi-api", "lingxi", branding::PRODUCT_NAME_ZH],
+        references: &[],
+    },
+    BundledSkill {
+        name: "plan-artifact",
+        raw: include_str!("plan-artifact/SKILL.md"),
+        triggers: &[
+            "/plan-artifact",
+            "plan as an artifact",
+            "publish the plan as a page",
+            "把计划发布成页面",
+        ],
         references: &[],
     },
     BundledSkill {
