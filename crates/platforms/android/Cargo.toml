@@ -18,6 +18,7 @@ http-client = { path = "../../http-client" }
 async-trait.workspace = true
 
 [dev-dependencies]
+branding.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile = "3"
 
