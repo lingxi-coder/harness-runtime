@@ -28,8 +28,91 @@
 use crate::filesystem::{pattern_with_root, prepare_permission_pattern, FsRoots};
 use crate::policy::PermissionPolicy;
 use indexmap::IndexMap;
+use lingxi_core::host::permission_gate::{
+    ReadPathPolicyCheck, ReadPathPolicyFacts, ReadPathPolicyMatch, ReadPathPolicySnapshot,
+};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+/// A search walks canonical paths. Capture reverse mappings to the policy's
+/// lexical roots once, so aliases such as /var -> /private/var cannot hide a
+/// candidate from a relative Read deny or change midway through the walk.
+pub fn read_deny_search_snapshot(
+    policy: Arc<PermissionPolicy>,
+    fallback_cwd: Option<&Path>,
+) -> Arc<dyn ReadPathPolicySnapshot> {
+    let policy = if policy.roots.is_none() {
+        if let Some(cwd) = fallback_cwd {
+            Arc::new(
+                policy
+                    .clone_with_live_state(
+                        policy.allow_rules.clone(),
+                        policy.deny_rules.clone(),
+                        policy.ask_rules.clone(),
+                        policy.additional_working_dirs.clone(),
+                    )
+                    .with_roots(FsRoots {
+                        cwd: cwd.into(),
+                        home: None,
+                        lingxi_home: cwd.into(),
+                    }),
+            )
+        } else {
+            policy
+        }
+    } else {
+        policy
+    };
+    let mut aliases = Vec::new();
+    if let Some(roots) = policy.roots.as_ref() {
+        for root in [
+            Some(&roots.cwd),
+            roots.home.as_ref(),
+            Some(&roots.lingxi_home),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Ok(physical) = std::fs::canonicalize(root) {
+                if physical != *root && !aliases.contains(&(physical.clone(), root.clone())) {
+                    aliases.push((physical, root.clone()));
+                }
+            }
+        }
+    }
+    Arc::new(ReadDenySearchSnapshot { policy, aliases })
+}
+
+struct ReadDenySearchSnapshot {
+    policy: Arc<PermissionPolicy>,
+    aliases: Vec<(PathBuf, PathBuf)>,
+}
+
+impl ReadPathPolicySnapshot for ReadDenySearchSnapshot {
+    fn facts(&self) -> ReadPathPolicyFacts {
+        self.policy.facts()
+    }
+    fn check_path(&self, path: &Path) -> ReadPathPolicyCheck {
+        self.policy.check_path(path)
+    }
+    fn denied_search_path(&self, path: &Path) -> ReadPathPolicyMatch {
+        let mut result = self.policy.denied_search_path(path);
+        if result == ReadPathPolicyMatch::Match {
+            return result;
+        }
+        for (physical, lexical) in &self.aliases {
+            if let Ok(relative) = path.strip_prefix(physical) {
+                match self.policy.denied_search_path(&lexical.join(relative)) {
+                    ReadPathPolicyMatch::Match => return ReadPathPolicyMatch::Match,
+                    ReadPathPolicyMatch::Unavailable => result = ReadPathPolicyMatch::Unavailable,
+                    ReadPathPolicyMatch::NoMatch => {}
+                }
+            }
+        }
+        result
+    }
+}
 
 /// Resolve every active `Read`-`deny` rule in `policy` to a ripgrep `--glob`
 /// exclude string (WITHOUT the leading `!`), rebased onto `cwd`.

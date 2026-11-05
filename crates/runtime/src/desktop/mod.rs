@@ -4635,7 +4635,9 @@ async fn build_agent_mcp_tool_set(
                 tool
             };
             let tool = match &bound_key {
-                Some(key) => tool.with_bound_server_key(key.clone()),
+                Some(key) => tool
+                    .with_bound_server_key(key.clone())
+                    .with_scoped_server_policy(&entry_config),
                 None => tool,
             };
             let tool = tool.with_mcp_role(

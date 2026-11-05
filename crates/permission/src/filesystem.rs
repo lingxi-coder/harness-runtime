@@ -1576,31 +1576,62 @@ fn native_ignore_case_fold_glob(
         let mut members = Vec::<(u32, u32)>::new();
         let mut mapped_ranges = Vec::new();
         let mut raw_ranges = Vec::new();
-        let mut index = at + 1;
+        // Native node-ignore turns a class with an odd trailing backslash
+        // into `[]` (a never-matching class), rather than a set of literals.
+        let empty_class = chars[at + 1..end]
+            .iter()
+            .rev()
+            .take_while(|ch| **ch == '\\')
+            .count()
+            % 2
+            == 1;
+        // Parse atoms before ranges: a control escape such as \ca is one
+        // endpoint in [\ca-z], rather than a standalone member followed by
+        // a literal hyphen. Escaped hyphens never act as range separators.
+        let atom = |ch: char, separator| {
+            let mapped = (0xf0000..=0xfff7f).contains(&(ch as u32));
+            let unit = if mapped {
+                ch as u32 - 0xf0000 + 0x80
+            } else {
+                ch as u32
+            };
+            (unit, mapped, separator)
+        };
+        let mut atoms = Vec::new();
+        let mut index = if empty_class { end } else { at + 1 };
         while index < end {
             if chars[index] == '\\' && index + 1 < end {
-                let folded = native_ignore_case_fold_char(chars[index + 1]) as u32;
-                members.push((folded, folded));
-                index += 2;
-                continue;
-            }
-            if index + 2 < end && chars[index + 1] == '-' {
-                let decode = |ch: char| {
-                    if (0xf0000..=0xfff7f).contains(&(ch as u32)) {
-                        ch as u32 - 0xf0000 + 0x80
+                if chars[index + 1] == 'c' {
+                    if let Some(operand) = chars.get(index + 2).copied().filter(|operand| {
+                        index + 2 < end && (operand.is_ascii_alphanumeric() || *operand == '_')
+                    }) {
+                        atoms.push(((operand as u32) & 31, false, false));
+                        index += 3;
                     } else {
-                        ch as u32
+                        // Legacy non-Unicode RegExp keeps both characters
+                        // when a control escape lacks an ASCII word operand.
+                        atoms.push(atom('\\', false));
+                        atoms.push(atom('c', false));
+                        index += 2;
                     }
-                };
-                let start = decode(chars[index]);
-                let finish = decode(chars[index + 2]);
-                // Native rejects the whole invalid class; dropping only an
-                // empty range would turn `[a--c]` into an allow for `c`.
+                } else {
+                    atoms.push(atom(chars[index + 1], false));
+                    index += 2;
+                }
+            } else {
+                atoms.push(atom(chars[index], chars[index] == '-'));
+                index += 1;
+            }
+        }
+        let mut index = 0;
+        while index < atoms.len() {
+            if index + 2 < atoms.len() && atoms[index + 1].2 {
+                let (start, mapped_start, _) = atoms[index];
+                let (finish, mapped_finish, _) = atoms[index + 2];
                 if start > finish {
                     return Err(SourceGlobBuildError::Invalid);
                 }
-                let ranges = if chars[index] as u32 >= 0xf0000 || chars[index + 2] as u32 >= 0xf0000
-                {
+                let ranges = if mapped_start || mapped_finish {
                     &mut mapped_ranges
                 } else {
                     &mut raw_ranges
@@ -1610,14 +1641,8 @@ fn native_ignore_case_fold_glob(
                 }
                 index += 3;
             } else {
-                let ch = if chars[index] == '\\' && index + 1 < end {
-                    index += 1;
-                    chars[index]
-                } else {
-                    chars[index]
-                };
-                let folded = native_ignore_case_fold_char(ch) as u32;
-                members.push((folded, folded));
+                let (unit, mapped, _) = atoms[index];
+                append_folded_bmp_ranges(&mut members, unit, unit, mapped);
                 index += 1;
             }
         }
@@ -1628,7 +1653,7 @@ fn native_ignore_case_fold_glob(
                 append_folded_bmp_ranges(&mut members, start, end, mapped);
             }
         }
-        if members.is_empty() {
+        if members.is_empty() && !empty_class {
             return Err(SourceGlobBuildError::Invalid);
         }
         while char::from_u32(marker_code).is_none_or(|marker| pattern.contains(marker)) {
@@ -1637,7 +1662,11 @@ fn native_ignore_case_fold_glob(
         let marker = char::from_u32(marker_code).ok_or(SourceGlobBuildError::Invalid)?;
         marker_code += 1;
         out.push(marker);
-        let class = compact_source_glob_class(members);
+        let class = if empty_class {
+            "[a&&b]".to_owned()
+        } else {
+            compact_source_glob_class(members)
+        };
         class_bytes = class_bytes.saturating_add(class.len());
         if class_bytes > MAX_SOURCE_GLOB_REGEX_BYTES {
             return Err(SourceGlobBuildError::BudgetExceeded);

@@ -3,6 +3,56 @@
 //! Used by every M4 file-touching tool. Pure functional; no I/O.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub(crate) struct ReadDenyPolicy {
+    snapshot: Arc<dyn lingxi_core::host::permission_gate::ReadPathPolicySnapshot>,
+    requested_root: PathBuf,
+    approved_root: PathBuf,
+}
+
+/// Keep exact Read checks alongside coarse glob exclusions. Both the walk's
+/// canonical path and the caller's lexical spelling must pass the snapshot.
+pub(crate) fn search_read_deny_policy(
+    ctx: &tool_api::BuiltinToolContext,
+    requested_root: &Path,
+    approved_root: &Path,
+) -> Option<ReadDenyPolicy> {
+    let snapshot = match ctx.permission_gate.as_ref() {
+        Some(gate) if gate.read_deny_exclude_globs(approved_root).is_some() => {
+            gate.read_path_policy_snapshot()
+        }
+        _ => permission::read_deny_globs::read_deny_search_snapshot(
+            ctx.permission_policy.clone(),
+            Some(approved_root),
+        ),
+    };
+    snapshot
+        .facts()
+        .read_deny_rules_active
+        .then_some(ReadDenyPolicy {
+            snapshot,
+            requested_root: requested_root.into(),
+            approved_root: approved_root.into(),
+        })
+}
+
+pub(crate) fn search_path_is_read_denied(policy: &Option<ReadDenyPolicy>, path: &Path) -> bool {
+    use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+    policy.as_ref().is_some_and(|policy| {
+        policy.snapshot.denied_search_path(path) != ReadPathPolicyMatch::NoMatch
+            || (policy.requested_root != policy.approved_root
+                && path
+                    .strip_prefix(&policy.approved_root)
+                    .ok()
+                    .is_some_and(|relative| {
+                        policy
+                            .snapshot
+                            .denied_search_path(&policy.requested_root.join(relative))
+                            != ReadPathPolicyMatch::NoMatch
+                    }))
+    })
+}
 
 /// Search preparation failures that must be surfaced before a walk can expose
 /// any result.  The search tools first resolve their root and install their

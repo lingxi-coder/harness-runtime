@@ -67,7 +67,8 @@ use tool_api::BuiltinToolContext;
 
 use crate::shared::{
     open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
-    SearchResolutionError, SearchResolutionSnapshot,
+    search_path_is_read_denied, search_read_deny_policy, ReadDenyPolicy, SearchResolutionError,
+    SearchResolutionSnapshot,
 };
 
 /// Tool name byte-lock.
@@ -761,6 +762,7 @@ static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 struct GrepWalkArgs {
     canon_base: PathBuf,
     search_resolution: SearchResolutionSnapshot,
+    read_deny_policy: Option<ReadDenyPolicy>,
     overrides: ignore::overrides::Override,
     types_filter: Option<ignore::types::Types>,
     matcher: RegexMatcher,
@@ -788,6 +790,7 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
     let GrepWalkArgs {
         canon_base,
         search_resolution,
+        read_deny_policy,
         overrides,
         types_filter,
         matcher,
@@ -831,6 +834,10 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
             continue;
         }
         let path = entry.path();
+
+        if search_path_is_read_denied(&read_deny_policy, path) {
+            continue;
+        }
 
         search_resolution.verify()?;
         // The walker's regular-file classification is pathname based. Pin the
@@ -1284,6 +1291,7 @@ impl Tool for GrepTool {
         // (`/`-anchored) entry → `!P`; a bare relative entry → `!**/P` (match at
         // any depth). In `OverrideBuilder`, a `!`-prefixed pattern is an ignore.
         let deny_globs = self.ctx.effective_read_deny_exclude_globs(&canon_base);
+        let read_deny_policy = search_read_deny_policy(&self.ctx, &base, &canon_base);
         let search_resolution = SearchResolutionSnapshot::capture(&base, &canon_base, &deny_globs);
         for p in &deny_globs {
             let neg = if p.starts_with('/') {
@@ -1387,6 +1395,7 @@ impl Tool for GrepTool {
             grep_walk(GrepWalkArgs {
                 canon_base,
                 search_resolution,
+                read_deny_policy,
                 overrides,
                 types_filter,
                 matcher,
@@ -1624,6 +1633,159 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    #[tokio::test]
+    async fn read_denies_filter_search_candidates_with_native_case_folding() {
+        use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        for (pattern, filename, denied) in [
+            ("Secret", "secret", true),
+            ("σ", "ς", true),
+            ("K", "K", false),
+            ("s", "ſ", false),
+            ("Secret/**", "secret/nested.txt", true),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join(filename);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "DENIED_SEARCH_MARKER\n").unwrap();
+            let policy = Arc::new(
+                permission::PermissionPolicy::from_rules(
+                    permission::PermissionMode::Default,
+                    [PermissionRule {
+                        value: PermissionRuleValue::from_rule_string(&format!("Read({pattern})")),
+                        behavior: PermissionBehavior::Deny,
+                        source: PermissionRuleSource::Session,
+                    }],
+                )
+                .with_roots(permission::FsRoots {
+                    cwd: dir.path().into(),
+                    home: None,
+                    lingxi_home: dir.path().join(".lingxi"),
+                }),
+            );
+            let gate = Arc::new(permission::PolicyPermissionGate::new(
+                policy.clone(),
+                Arc::new(permission::DenyOnAskGate),
+            ));
+            let read_input = crate::generated_result(&json!({"file_path":file}));
+            assert_eq!(
+                matches!(
+                    policy.authorize("Read", &read_input),
+                    permission::PermissionResult::Deny { .. }
+                ),
+                denied
+            );
+            let mut ctx = tool_api::test_support::ctx_for_file_tools(
+                make_dummy_fs(),
+                Arc::new(AnalyticsBus::new()),
+                vec![dir.path().into()],
+            );
+            ctx.permission_policy = policy;
+            ctx.permission_gate = Some(gate.clone());
+            let grep_input = crate::generated_result(
+                &json!({"pattern":"DENIED_SEARCH_MARKER","output_mode":"content"}),
+            );
+            assert_eq!(
+                gate.check("Grep", &grep_input).await,
+                PermissionDecision::Allow
+            );
+            let grep = GrepTool::new(ctx.clone())
+                .call(grep_input, fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            assert_eq!(
+                grep.data
+                    .string_at("/content")
+                    .unwrap()
+                    .contains("DENIED_SEARCH_MARKER"),
+                !denied,
+                "{pattern} {filename}"
+            );
+            let glob = crate::glob::GlobTool::new(ctx)
+                .call(
+                    crate::generated_result(&json!({"pattern":"**/*"})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                glob.data.to_json_string().unwrap().contains(filename),
+                !denied,
+                "{pattern} {filename}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_denies_follow_the_requested_symlink_search_root() {
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        let dir = TempDir::new().unwrap();
+        let physical = dir.path().join("physical");
+        let alias = dir.path().join("restricted");
+        std::fs::create_dir(&physical).unwrap();
+        std::fs::write(physical.join("secret"), "DENIED_SEARCH_MARKER\n").unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let policy = Arc::new(
+            permission::PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                [PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Read(Restricted/*)"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )
+            .with_roots(permission::FsRoots {
+                cwd: dir.path().into(),
+                home: None,
+                lingxi_home: dir.path().join(".lingxi"),
+            }),
+        );
+        assert!(matches!(
+            policy.authorize(
+                "Read",
+                &crate::generated_result(&json!({"file_path":alias.join("secret")}))
+            ),
+            permission::PermissionResult::Deny { .. }
+        ));
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            policy.clone(),
+            Arc::new(permission::DenyOnAskGate),
+        ));
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![dir.path().into()],
+        );
+        ctx.permission_policy = policy;
+        ctx.permission_gate = Some(gate);
+        let grep = GrepTool::new(ctx.clone())
+            .call(
+                crate::generated_result(
+                    &json!({"path":alias,"pattern":"DENIED_SEARCH_MARKER","output_mode":"content"}),
+                ),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(grep.data.string_at("/content"), Some(""));
+        let glob = crate::glob::GlobTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"path":alias,"pattern":"**/*"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(glob.data.number_at("/numFiles"), Some(0.0));
+    }
 
     fn mapped_display(data: &Utf16JsonProjection) -> Option<String> {
         map_grep_result_text(data).and_then(|text| text.string_at("").map(str::to_owned))

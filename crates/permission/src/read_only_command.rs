@@ -1191,7 +1191,9 @@ fn read_only_shell_words(command: &str) -> Option<Vec<String>> {
                 started = true;
             }
             '#' if !single && !double && !started => break,
-            ch if ch.is_whitespace() && !single && !double => {
+            // Bash only separates words on ASCII blanks/newlines. Unicode
+            // whitespace (and VT/FF/CR) remains part of the executable name.
+            ' ' | '\t' | '\n' if !single && !double => {
                 if started {
                     words.push(std::mem::take(&mut word));
                     started = false;
@@ -1487,6 +1489,42 @@ fn git_branch_is_dangerous(args: &[&str]) -> bool {
 #[cfg(test)]
 mod latest_read_only_tests {
     use super::*;
+
+    #[test]
+    fn non_shell_whitespace_cannot_split_an_executable_name() {
+        use crate::{PermissionMode, PermissionPolicy, PermissionResult};
+        let policy =
+            PermissionPolicy::new(PermissionMode::Default).with_roots(crate::filesystem::FsRoots {
+                cwd: "/proj".into(),
+                home: None,
+                lingxi_home: "/proj/.lingxi".into(),
+            });
+        for separator in ['\u{85}', '\u{a0}', '\u{2003}', '\u{b}', '\u{c}', '\r'] {
+            for prefix in ["sort", "'cat'", "\"sort\""] {
+                let command = format!("{prefix}{separator}/payload");
+                assert!(!command_is_read_only(&command), "{command:?}");
+                let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"command":command}),
+                )
+                .unwrap();
+                assert!(
+                    !matches!(
+                        policy.authorize("Bash", &input),
+                        PermissionResult::Allow { .. }
+                    ),
+                    "{command:?}"
+                );
+            }
+        }
+        for command in [
+            "sort input",
+            "sort\tinput",
+            "sort 'two words'",
+            "sort\\\n input",
+        ] {
+            assert!(command_is_read_only(command), "{command:?}");
+        }
+    }
 
     #[test]
     fn glob_expansion_cannot_inject_flags_into_table_commands() {

@@ -1534,6 +1534,125 @@ async fn agent_scoped_mcp_builder_filters_org_blocks_and_keeps_ask_metadata() {
     ));
 }
 
+#[tokio::test]
+async fn agent_scoped_sdk_builder_preserves_private_server_policies() {
+    let agent_id = lingxi_core::types::AgentId::new();
+    let config_json = serde_json::json!({
+        "type": "sdk", "name": "sdk-host",
+        "tools": [
+            {"name": "deny", "permissionPolicy": "always_deny"},
+            {"name": "ask", "permissionPolicy": "always_ask"}
+        ]
+    });
+    let config = mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
+        .expect("agent MCP config parses");
+    let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
+    let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
+        server_name: "srv".into(),
+        tool_name: tool_name.into(),
+        description: tool_name.into(),
+        input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"type": "object"}),
+        )
+        .unwrap(),
+        output_schema: None,
+        annotations: None,
+        icons: Vec::new(),
+        meta: None,
+        full_name: format!("mcp__srv__{tool_name}"),
+        search_hint: None,
+        always_load: None,
+        requires_user_interaction,
+    };
+    let connection_id = lingxi_core::types::McpConnectionId::new();
+    let registry = Arc::new(mcp::McpRegistry::new(Arc::new(
+        platform_posix::PosixMcpTransport::new(),
+    )));
+    registry.connections.write().await.insert(
+        table_key,
+        mcp::McpConnectionState::Connected {
+            config,
+            connection_id,
+            capabilities: lingxi_core::host::ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                logging: false,
+                directory_read: false,
+                experimental: generated_test_source(serde_json::json!({})),
+                extensions: generated_test_source(serde_json::json!({})),
+            },
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            tools: vec![
+                dto("deny", false),
+                dto("ask", false),
+                dto("interactive", true),
+            ],
+            resources: vec![],
+            resource_templates: vec![],
+            prompts: vec![],
+            connected_at: std::time::SystemTime::now(),
+        },
+    );
+    let mut def = agent::parse_agent_from_json(
+        "tester",
+        &serde_json::json!({"description": "d", "prompt": "p"}),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
+    )
+    .expect("agent definition parses");
+    let mut server = serde_json::Map::new();
+    server.insert("srv".into(), config_json);
+    def.mcp_servers = vec![agent::AgentMcpServerSpec::Record(server)];
+
+    let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![std::path::PathBuf::from("/tmp")],
+    );
+    ctx.mcp_registry = Some(registry.clone());
+    let set =
+        super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
+    assert_eq!(set.tools.len(), 3);
+    let mut call = tool_api::test_support::fresh_ctx();
+    call.trusted_effective_permission_mode = Some("bypassPermissions".into());
+    let denied = set
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "mcp__srv__deny")
+        .unwrap()
+        .check_permissions(&generated_test_source(serde_json::json!({})), &call)
+        .await;
+    assert!(matches!(denied, permission::PermissionResult::Deny { .. }));
+    call.trusted_effective_permission_mode = Some("default".into());
+
+    let ask = set
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "mcp__srv__ask")
+        .expect("agent-scoped ask tool is registered")
+        .check_permissions(&generated_test_source(serde_json::json!({})), &call)
+        .await;
+    assert!(matches!(ask, permission::PermissionResult::Ask { .. }));
+
+    let interactive = set
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "mcp__srv__interactive")
+        .expect("agent-scoped interactive tool is registered")
+        .check_permissions(&generated_test_source(serde_json::json!({})), &call)
+        .await;
+    assert!(matches!(
+        interactive,
+        permission::PermissionResult::Ask {
+            reason: permission::PermissionDecisionReason::PermissionPromptTool { ref tool_name },
+            ..
+        } if tool_name == "mcp__srv__interactive"
+    ));
+}
+
 /// A [`client::adapter::PermissionRequestSink`] that records the requests the
 /// gate emits, so a test can prove a turn's `check()` actually reached the
 /// adapter gate (and not the always-allow `NoOpPermissionGate`).

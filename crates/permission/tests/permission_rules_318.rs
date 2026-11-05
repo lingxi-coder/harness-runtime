@@ -122,6 +122,68 @@ fn invalid_character_ranges_do_not_grant_file_access() {
     }
 }
 
+#[test]
+fn escaped_classes_preserve_allow_scope_and_deny_precedence() {
+    use permission::rule::PermissionRule;
+    use permission::{PermissionMode, PermissionPolicy, PermissionResult};
+    let roots = FsRoots {
+        cwd: "/proj".into(),
+        home: None,
+        lingxi_home: "/proj/.lingxi".into(),
+    };
+    let empty_allow = PermissionPolicy::from_rules(
+        PermissionMode::Default,
+        [PermissionRule {
+            value: PermissionRuleValue::from_rule_string(r"Edit([^a\])"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Session,
+        }],
+    )
+    .with_roots(roots.clone());
+    let edit = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &json!({"file_path":"/proj/a","old_string":"old","new_string":"new"}),
+    )
+    .unwrap();
+    assert!(!matches!(
+        empty_allow.authorize("Edit", &edit),
+        PermissionResult::Allow { .. }
+    ));
+    for (pattern, filename) in [(r"[\c]", "\\"), (r"[\ca-z]", "b"), (r"[\c0-z]", "b")] {
+        for behavior in [PermissionBehavior::Deny, PermissionBehavior::Ask] {
+            let policy = PermissionPolicy::from_rules(
+                PermissionMode::BypassPermissions,
+                [
+                    PermissionRule {
+                        value: PermissionRuleValue::from_rule_string(&format!("Read({pattern})")),
+                        behavior,
+                        source: PermissionRuleSource::Session,
+                    },
+                    PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Read"),
+                        behavior: PermissionBehavior::Allow,
+                        source: PermissionRuleSource::Session,
+                    },
+                ],
+            )
+            .with_roots(roots.clone());
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":format!("/proj/{filename}")}),
+            )
+            .unwrap();
+            let result = policy.authorize("Read", &input);
+            match behavior {
+                PermissionBehavior::Deny => {
+                    assert!(matches!(result, PermissionResult::Deny { .. }), "{pattern}")
+                }
+                PermissionBehavior::Ask => {
+                    assert!(matches!(result, PermissionResult::Ask { .. }), "{pattern}")
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn rooted_restrictions_follow_symlinks_and_remember_previous_landings() {

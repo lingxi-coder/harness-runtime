@@ -144,6 +144,66 @@
       "pattern": "[z-ab]",
       "input": "b",
       "expected": true
+    },
+    {
+      "pattern": "[^a\\]",
+      "input": "a",
+      "expected": false
+    },
+    {
+      "pattern": "[^a\\]",
+      "input": "[^a\\]",
+      "expected": false
+    },
+    {
+      "pattern": "[\\c]",
+      "input": "\\",
+      "expected": true
+    },
+    {
+      "pattern": "[\\c]",
+      "input": "c",
+      "expected": true
+    },
+    {
+      "pattern": "[\\c]",
+      "input": "C",
+      "expected": true
+    },
+    {
+      "pattern": "[\\ca]",
+      "input": "\u0001",
+      "expected": true
+    },
+    {
+      "pattern": "[\\c0]",
+      "input": "\u0010",
+      "expected": true
+    },
+    {
+      "pattern": "[\\ca-z]",
+      "input": "b",
+      "expected": true
+    },
+    {
+      "pattern": "[\\c0-z]",
+      "input": "b",
+      "expected": true
+    },
+    {
+      "pattern": "[\\c_-z]",
+      "input": "b",
+      "expected": true
+    },
+    {
+      "pattern": "[a\\-z]",
+      "input": "b",
+      "expected": false
+    },
+    {
+      "pattern": "[a\\-z]",
+      "input": "-",
+      "expected": true
     }
   ],
   "version": "2.1.318",

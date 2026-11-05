@@ -3145,7 +3145,10 @@ impl PermissionGate for PolicyPermissionGate {
     fn read_path_policy_snapshot(
         &self,
     ) -> std::sync::Arc<dyn core_permission::ReadPathPolicySnapshot> {
-        std::sync::Arc::new(self.live_policy())
+        crate::read_deny_globs::read_deny_search_snapshot(
+            std::sync::Arc::new(self.live_policy()),
+            None,
+        )
     }
 
     fn check_noninteractive_with_allow_rules(

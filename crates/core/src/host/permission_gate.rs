@@ -664,6 +664,11 @@ pub struct ReadPathPolicyCheck {
 pub trait ReadPathPolicySnapshot: Send + Sync {
     fn facts(&self) -> ReadPathPolicyFacts;
     fn check_path(&self, path: &Path) -> ReadPathPolicyCheck;
+    /// Search candidates have not been expanded into the changed-file path
+    /// Set. Rule-owning snapshots must check every direct-Read path spelling.
+    fn denied_search_path(&self, path: &Path) -> ReadPathPolicyMatch {
+        self.check_path(path).denied_by_read_rule
+    }
 }
 
 /// Explicit inactive facts for a permission transport with no policy layer.

@@ -868,6 +868,9 @@ pub struct MCPTool {
     /// excludes ordinary `permission_policy` rules; this separate provenance
     /// feeds the Mod `tool.check` `ceiling` field without changing enforcement.
     organization_max_permission: Option<McpToolMaxPermission>,
+    /// SDK restrictions for an agent-owned connection. This policy lives on
+    /// that child's tool instance, never in the shared session rule bucket.
+    scoped_server_policy: Option<permission::PermissionPolicy>,
     /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
     /// entry. `None` (every existing construction site) preserves today's
     /// behaviour exactly: the server is derived from `full_name`'s parsed
@@ -923,6 +926,7 @@ impl MCPTool {
             requires_user_interaction: false,
             effective_max_permission: None,
             organization_max_permission: None,
+            scoped_server_policy: None,
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
@@ -970,6 +974,7 @@ impl MCPTool {
             requires_user_interaction,
             effective_max_permission: effective_max_permission.map(max_permission_from_ceiling),
             organization_max_permission: None,
+            scoped_server_policy: None,
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
@@ -1013,6 +1018,58 @@ impl MCPTool {
     #[must_use]
     pub fn with_effective_max_permission(mut self, ceiling: McpToolMaxPermission) -> Self {
         self.effective_max_permission = Some(ceiling);
+        self
+    }
+
+    /// Install eligible ask/deny declarations only on this agent-owned tool.
+    /// Reused session tools continue to use the shared live policy bucket.
+    #[must_use]
+    pub fn with_scoped_server_policy(mut self, config: &mcp::McpServerConfig) -> Self {
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        let Some(full_name) = self.full_name.as_ref() else {
+            return self;
+        };
+        let mut behavior = None;
+        for tool in mcp::tool_policy::startup_permission_policies(config) {
+            let name = format!(
+                "mcp__{}__{}",
+                lingxi_core::types::normalize_name_for_mcp(&config.name),
+                lingxi_core::types::normalize_name_for_mcp(&tool.name)
+            );
+            if &name != full_name {
+                continue;
+            }
+            match tool.permission_policy {
+                Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny) => {
+                    behavior = Some(PermissionBehavior::Deny)
+                }
+                Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk)
+                    if behavior.is_none() =>
+                {
+                    behavior = Some(PermissionBehavior::Ask)
+                }
+                _ => {}
+            }
+        }
+        self.scoped_server_policy = behavior.map(|behavior| {
+            let mut policy = permission::PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                [PermissionRule {
+                    value: PermissionRuleValue {
+                        tool_name: full_name.clone(),
+                        rule_content: None,
+                        original_rule: None,
+                    },
+                    behavior,
+                    source: PermissionRuleSource::McpServerPolicy,
+                }],
+            );
+            policy.remote_mcp_server_policy_bypass_exempt =
+                mcp::tool_policy::remote_server_policy_bypass_exempt();
+            policy
+        });
         self
     }
 
@@ -1810,7 +1867,7 @@ impl Tool for MCPTool {
     ///
     /// The dispatch layer evaluates this tool check after explicit deny rules
     /// and protects its MCP ask over a pre-existing allow rule or bypass mode.
-    async fn check_permissions(&self, input: &UJP, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &UJP, ctx: &ToolUseContext) -> PermissionResult {
         if self.full_name.is_none() {
             let Some(full_name) = source_string_at(input, "/full_name") else {
                 return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
@@ -1841,7 +1898,7 @@ impl Tool for MCPTool {
         // this path, so capability authorization stays permissive until a
         // real host signal is available; treating absence as false would deny
         // every ordinary MCP tool.
-        let result = permission::clamp_mcp_permission_result(
+        let mut result = permission::clamp_mcp_permission_result(
             allow_mcp("MCP server tool dispatch"),
             self.name(),
             self.effective_max_permission,
@@ -1849,6 +1906,26 @@ impl Tool for MCPTool {
             self.requires_user_interaction,
             true,
         );
+        if let Some(policy) = &self.scoped_server_policy {
+            let mode = ctx
+                .trusted_effective_permission_mode
+                .clone()
+                .or_else(|| {
+                    self.ctx
+                        .permission_gate
+                        .as_ref()
+                        .and_then(|gate| gate.permission_mode())
+                })
+                .map(|mode| permission::permission_mode_from_cli_string(&mode))
+                .unwrap_or(self.ctx.permission_mode);
+            let scoped = policy.authorize_with_mode(self.name(), input, mode);
+            if matches!(scoped, PermissionResult::Deny { .. })
+                || (matches!(scoped, PermissionResult::Ask { .. })
+                    && !matches!(result, PermissionResult::Deny { .. }))
+            {
+                result = scoped;
+            }
+        }
         if self.organization_max_permission == Some(McpToolMaxPermission::Ask) {
             native_organization_ask_result(result)
         } else {
@@ -4423,6 +4500,105 @@ mod tests {
             Some(McpPermissionCeiling::Ask),
             "Native effectiveMaxPermission is sourced from organization caps"
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_sdk_policies_tighten_only_the_child_tool() {
+        use lingxi_core::host::{McpConfiguredToolPolicyDto, McpToolPermissionPolicy};
+        let mut config = super::resource_tool_gating_tests::config("srv");
+        config.spec = McpTransportSpec::SdkControl {
+            control_channel_id: "host".into(),
+        };
+        config.scope = mcp::ConfigScope::Agent;
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec!["/tmp".into()],
+        );
+        ctx.permission_mode = permission::PermissionMode::BypassPermissions;
+        let input = source_fixture(&json!({}));
+        for policy in [
+            McpToolPermissionPolicy::AlwaysDeny,
+            McpToolPermissionPolicy::AlwaysAsk,
+            McpToolPermissionPolicy::AlwaysAllow,
+        ] {
+            config.tools = vec![McpConfiguredToolPolicyDto {
+                name: "write".into(),
+                permission_policy: Some(policy),
+                org_max_permission: None,
+            }];
+            let make = || {
+                MCPTool::new_for_tool(
+                    ctx.clone(),
+                    "mcp__srv__write".into(),
+                    "write".into(),
+                    source_fixture(&json!({"type":"object"})),
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
+                )
+            };
+            let mut child = make()
+                .with_bound_server_key("agent-scoped".into())
+                .with_scoped_server_policy(&config);
+            let mut call = tool_api::test_support::fresh_ctx();
+            // Child mode takes precedence over the parent's bypass mode.
+            call.trusted_effective_permission_mode = Some("default".into());
+            let result = child.check_permissions(&input, &call).await;
+            match policy {
+                McpToolPermissionPolicy::AlwaysDeny => {
+                    assert!(matches!(result, PermissionResult::Deny { .. }))
+                }
+                McpToolPermissionPolicy::AlwaysAsk => assert!(matches!(
+                    result,
+                    PermissionResult::Ask {
+                        reason: PermissionDecisionReason::MatchedRule { .. },
+                        ..
+                    }
+                )),
+                McpToolPermissionPolicy::AlwaysAllow => {
+                    assert!(child.scoped_server_policy.is_none())
+                }
+            }
+            assert!(
+                matches!(
+                    make().check_permissions(&input, &call).await,
+                    PermissionResult::Allow { .. }
+                ),
+                "child rules must not leak to a shared tool"
+            );
+            if policy == McpToolPermissionPolicy::AlwaysDeny {
+                call.trusted_effective_permission_mode = Some("bypassPermissions".into());
+                assert!(matches!(
+                    child.check_permissions(&input, &call).await,
+                    PermissionResult::Deny { .. }
+                ));
+            }
+            if policy == McpToolPermissionPolicy::AlwaysAsk {
+                call.trusted_effective_permission_mode = Some("bypassPermissions".into());
+                child
+                    .scoped_server_policy
+                    .as_mut()
+                    .unwrap()
+                    .remote_mcp_server_policy_bypass_exempt = true;
+                assert!(matches!(
+                    child.check_permissions(&input, &call).await,
+                    PermissionResult::Allow { .. }
+                ));
+                call.trusted_effective_permission_mode = Some("default".into());
+                let org = child.with_organization_max_permission(McpPermissionCeiling::Ask);
+                let result = org.check_permissions(&input, &call).await;
+                assert!(
+                    matches!(result, PermissionResult::Ask { ref prompt, .. } if prompt.message.string_at("") == Some("Your organization requires approval for this tool"))
+                );
+                assert_eq!(
+                    org.tool_check_permission_ceiling(&input).await,
+                    Some(McpPermissionCeiling::Ask)
+                );
+            }
+        }
     }
 
     #[tokio::test]

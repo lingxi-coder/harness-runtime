@@ -59,7 +59,8 @@ use tool_api::BuiltinToolContext;
 use crate::grep::{is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG};
 use crate::shared::{
     open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
-    SearchResolutionError, SearchResolutionSnapshot,
+    search_path_is_read_denied, search_read_deny_policy, ReadDenyPolicy, SearchResolutionError,
+    SearchResolutionSnapshot,
 };
 
 /// Tool name byte-lock.
@@ -530,6 +531,7 @@ impl Tool for GlobTool {
         // under `sub/config/secret.txt`). Grep already did the split
         // (`grep.rs`); Glob now matches it.
         let deny_globs = self.ctx.effective_read_deny_exclude_globs(&canon_base);
+        let read_deny_policy = search_read_deny_policy(&self.ctx, &base, &canon_base);
         let search_resolution = SearchResolutionSnapshot::capture(&base, &canon_base, &deny_globs);
         for p in &deny_globs {
             let neg = if p.starts_with('/') {
@@ -593,6 +595,7 @@ impl Tool for GlobTool {
                 hidden,
                 deadline,
                 search_resolution,
+                read_deny_policy,
             )
         })
         .await
@@ -687,6 +690,7 @@ fn glob_walk(
     hidden: bool,
     deadline: Instant,
     search_resolution: SearchResolutionSnapshot,
+    read_deny_policy: Option<ReadDenyPolicy>,
 ) -> Result<(Vec<(PathBuf, SystemTime)>, bool), SearchResolutionError> {
     search_resolution.verify()?;
     let mut wb = WalkBuilder::new(&canon_base);
@@ -720,6 +724,9 @@ fn glob_walk(
             continue;
         }
         let path = entry.path();
+        if search_path_is_read_denied(&read_deny_policy, path) {
+            continue;
+        }
         // Pin metadata to a rooted no-follow handle after the walker's regular
         // classification. This closes the leaf/ancestor swap window that a
         // second pathname metadata lookup would leave open.

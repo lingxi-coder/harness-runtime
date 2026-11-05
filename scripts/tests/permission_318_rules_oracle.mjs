@@ -50,6 +50,11 @@ const fileMatches=[
  ["{src,lib}/a.txt", "src/a.txt"], ["{src,lib}/a.txt", "{src,lib}/a.txt"], ["src/[A-\u0080].txt", "src/A.txt"], ["src/[A-\u0080].txt", "src/\u0080.txt"], ["src/[A-\u0080].txt", "src/\u0081.txt"], ["src/[!A-\u0080].txt", "src/\u0080.txt"], ["src/[!A-\u0080].txt", "src/\u0081.txt"], ["[Z-a]", "A"], ["[Z-a]", "z"], ["[!a]", "b"], ["[!a]", "a"], ["[^a]", "b"], ["[σ-τ]", "ς"], ["Secret", "secret"], ["Secret", "SECRET/data"], ["σ", "ς"], ["K", "K"], ["s", "ſ"], ["I", "ı"],
  ["#secret", "#secret"], ["a\\", "a\\"], ["\uFEFF.env", ".env"], ["a[", "a["], ["[z-a]", "z"],
  ["[a--c]", "c"], ["[a--c]", "[a--c]"], ["[z-a]", "[z-a]"], ["[z-ab]", "[z-ab]"], ["[z-ab]", "b"],
+ [String.raw`[^a\]`, "a"], [String.raw`[^a\]`, String.raw`[^a\]`],
+ [String.raw`[\c]`, "\\"], [String.raw`[\c]`, "c"], [String.raw`[\c]`, "C"],
+ [String.raw`[\ca]`, "\u0001"], [String.raw`[\c0]`, "\u0010"],
+ [String.raw`[\ca-z]`, "b"], [String.raw`[\c0-z]`, "b"], [String.raw`[\c_-z]`, "b"],
+ [String.raw`[a\-z]`, "b"], [String.raw`[a\-z]`, "-"],
 ].map(([pattern,input])=>{const prepared=api.preprocess(pattern,false);return {pattern,input,expected:prepared!==null&&api.ignore().add(prepared).test(input).ignored}});
 const result={fileMatches,version:"2.1.318",sha256,ranges,scope:"Pure rule parser/public aliases, wildcard, gitignore validation and cwd rebasing; eval/REPL feature gate fixed off, POSIX path implementation. No live permission UI/model/network execution.",parses,serializations,wildcards:wildcardInputs,prefixes,rebases,preprocess};
 const fixture=fileURLToPath(new URL('../../crates/permission/tests/fixtures/permission_rules_2_1_318.json',import.meta.url));

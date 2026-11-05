@@ -754,6 +754,39 @@ impl lingxi_core::host::permission_gate::ReadPathPolicySnapshot for PermissionPo
     fn check_path(&self, path: &Path) -> lingxi_core::host::permission_gate::ReadPathPolicyCheck {
         self.read_path_policy_check(path)
     }
+
+    fn denied_search_path(
+        &self,
+        path: &Path,
+    ) -> lingxi_core::host::permission_gate::ReadPathPolicyMatch {
+        use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+        let Some(path) = path.to_str() else {
+            return ReadPathPolicyMatch::Unavailable;
+        };
+        let empty = Utf16JsonProjection::parse("{}").expect("generated empty Read input");
+        let input = crate::source_input::with_generated_string_field(&empty, "file_path", path)
+            .expect("generated Read path");
+        if self
+            .first_match(
+                &self.deny_rules,
+                &SOURCES_BY_PRIORITY,
+                "Read",
+                &input,
+                false,
+                &[],
+            )
+            .is_some()
+            || self
+                .first_read_deny_match(&SOURCES_BY_PRIORITY, "Read", &input)
+                .is_some()
+        {
+            ReadPathPolicyMatch::Match
+        } else if self.roots.is_none() && self.native_read_deny_rules_active() {
+            ReadPathPolicyMatch::Unavailable
+        } else {
+            ReadPathPolicyMatch::NoMatch
+        }
+    }
 }
 
 /// One session directory that remains readable under the read block.
