@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Use when explaining, configuring, troubleshooting, or integrating LingXi (灵犀) CLI, sessions, settings, MCP, skills, hooks, subagents, models, or host APIs. App building uses local-app; ordinary coding uses its own tools.
+description: Explain, configure, troubleshoot, or integrate LingXi CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
 ---
 
 # LingXi API guide
