@@ -4036,12 +4036,11 @@ async fn stale_provider_completion_cannot_finish_new_local_input() {
         .await
         .unwrap();
     let second = loop {
-        match output_rx.recv().await.unwrap() {
-            RealtimeAgentOutput::AgentResponseStarted { turn_id } => {
-                assert_ne!(turn_id, first);
-                break turn_id;
-            }
-            _ => {}
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            output_rx.recv().await.unwrap()
+        {
+            assert_ne!(turn_id, first);
+            break turn_id;
         }
     };
     for kind in ["start-continuation", "done", "ready"] {

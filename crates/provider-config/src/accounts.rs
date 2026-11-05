@@ -293,7 +293,9 @@ mod tests {
         let b = account("test");
         r.add(a.clone(), 0).unwrap();
         r.add(b.clone(), 1).unwrap();
-        assert!(r.reorder("openai", &[a.account_id.clone()], 2).is_err());
+        assert!(r
+            .reorder("openai", std::slice::from_ref(&a.account_id), 2)
+            .is_err());
         assert!(r
             .reorder("openai", &[a.account_id.clone(), a.account_id.clone()], 2)
             .is_err());

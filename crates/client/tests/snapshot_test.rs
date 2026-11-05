@@ -49,8 +49,8 @@ use client::protocol::audio::{
 };
 use client::protocol::commands::{
     ClientCommand, HookAdminCommandDto, ImageRefDto, ListingKindDto, McpAdminCommandDto,
-    PermissionBehaviorDto, PluginAdminCommandDto, PromptModeDto, ProviderCredentialSecretDto,
-    SkillAdminCommandDto, UiSurfaceDto, WritableScopeDto,
+    PermissionBehaviorDto, PluginAdminCommandDto, PromptModeDto, SkillAdminCommandDto,
+    UiSurfaceDto, WritableScopeDto,
 };
 use client::protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -88,7 +88,6 @@ use client::protocol::tool_display::{
     ToolVerbDto,
 };
 use serde::Serialize;
-use std::collections::HashMap;
 
 /// Directory holding the checked-in goldens.
 fn snapshots_dir() -> PathBuf {

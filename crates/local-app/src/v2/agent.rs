@@ -1432,11 +1432,7 @@ impl AgentStore {
                     barrier.wait();
                     barrier.wait();
                 }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "injected failure after ledger rename",
-                )
-                .into());
+                return Err(std::io::Error::other("injected failure after ledger rename").into());
             }
             fs::File::open(
                 self.path

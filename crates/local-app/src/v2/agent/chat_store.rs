@@ -2572,7 +2572,7 @@ mod tests {
         drop(store);
         let chats = root.path().join("chats");
         let original_mode = fs::metadata(&chats).unwrap().permissions().mode();
-        fs::set_permissions(&chats, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&chats, fs::Permissions::from_mode(0o0)).unwrap();
         let directory_denied = fs::read_dir(&chats).is_err();
         let preflight = ChatStore::preflight_existing_index(root.path());
         fs::set_permissions(&chats, fs::Permissions::from_mode(original_mode)).unwrap();

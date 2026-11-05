@@ -4693,10 +4693,7 @@ mod tests {
             let transcript = open_read_file_pinned(&root, Path::new("owners.jsonl"), None);
             tx.send(result.is_err() && transcript.is_err()).unwrap();
         });
-        assert_eq!(
-            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
-            true
-        );
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
     }
 
     #[test]

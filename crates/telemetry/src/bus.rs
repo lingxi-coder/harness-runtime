@@ -175,7 +175,6 @@ mod tests {
     /// `DISABLE_TELEMETRY` is process-global; serialize the gate cases. No other
     /// test in this crate's unit-test binary drives the bus (the sink tests call
     /// sinks directly), so the window where the var is set is confined here.
-
     fn clear() {
         for v in [
             "DISABLE_TELEMETRY",
