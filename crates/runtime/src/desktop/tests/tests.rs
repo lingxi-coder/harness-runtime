@@ -965,7 +965,10 @@ fn desktop_config_debug_redacts_secret_bearing_fields() {
 
     let debug = format!("{cfg:?}");
     assert!(!debug.contains(SECRET_CANARY), "secret leaked: {debug}");
-    assert!(debug.contains("<redacted>"));
+    assert!(debug.contains("api_base: \"<configured>\""));
+    assert!(debug.contains("system_prompt_override_configured: true"));
+    assert!(debug.contains("append_system_prompt_configured: true"));
+    assert!(debug.contains("cli_agents_json_configured: true"));
     assert!(debug.contains("provider_profile_count: Some(1)"));
     assert!(debug.contains("routing_configured: true"));
 }
