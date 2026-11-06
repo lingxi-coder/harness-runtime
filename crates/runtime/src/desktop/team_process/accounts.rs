@@ -22,6 +22,93 @@ impl TeamAccountEnvelope {
         );
         serde_json::from_slice(bytes.expose_secret()).map_err(|_| TeamProcessError::Protocol)
     }
+    /// Trusted parent verifies the live owner registry, then materializes only
+    /// the selected account pool under the private Bot×Chat home. The worker
+    /// never receives the owner's registry path or unrelated account metadata.
+    pub(crate) fn for_worker(&self, home: &std::path::Path) -> Result<Self, TeamProcessError> {
+        self.validate()?;
+        if home.canonicalize()? != home {
+            return Err(TeamProcessError::Model);
+        }
+        let mut private = self.clone_private()?;
+        let names = private
+            .provider_account_profiles
+            .iter()
+            .map(|p| p.profile_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        private
+            .provider_accounts
+            .accounts
+            .retain(|a| names.contains(a.execution_binding_id.as_str()));
+        let ids = private
+            .provider_accounts
+            .accounts
+            .iter()
+            .map(|a| a.account_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let providers = private
+            .provider_accounts
+            .accounts
+            .iter()
+            .map(|a| a.provider_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        private
+            .provider_accounts
+            .provider_policies
+            .retain(|id, _| providers.contains(id));
+        private
+            .provider_accounts
+            .health
+            .retain(|a| ids.contains(&a.account_id));
+        private
+            .provider_accounts
+            .model_entitlements
+            .retain(|a| ids.contains(&a.account_id));
+        private
+            .provider_accounts
+            .scoped_health
+            .retain(|a| ids.contains(&a.account_id));
+        private
+            .provider_accounts
+            .model_availability
+            .retain(|a| names.contains(a.execution_binding_id.as_str()));
+        for row in &mut private.provider_accounts.model_availability {
+            row.eligible_account_ids.retain(|id| ids.contains(id));
+            row.confirmed_account_ids.retain(|id| ids.contains(id));
+            row.unverified_account_ids.retain(|id| ids.contains(id));
+            row.forbidden_account_ids.retain(|id| ids.contains(id));
+        }
+        private.provider_account_home = home.to_owned();
+        let scope = &private.provider_accounts.store_scope;
+        let _lock = lingxi_core::host::rooted_fs::lock_exclusive(
+            home,
+            &PathBuf::from(format!("provider-accounts/{scope}.lock")),
+            0o700,
+            0o600,
+        )
+        .map_err(|_| TeamProcessError::Model)?;
+        lingxi_core::host::rooted_fs::atomic_write(
+            home,
+            &PathBuf::from(format!("provider-accounts/{scope}.json")),
+            &serde_json::to_vec(&private.provider_accounts).map_err(|_| TeamProcessError::Model)?,
+            Default::default(),
+        )
+        .map_err(|_| TeamProcessError::Model)?;
+        for account in &private.provider_accounts.accounts {
+            if let Some(record) = private
+                .provider_account_credentials
+                .get(&account.account_id)
+            {
+                provider_config::write_account_credential_version_locked(
+                    home,
+                    account,
+                    record.credential_revision,
+                )
+                .map_err(|_| TeamProcessError::Model)?;
+            }
+        }
+        Ok(private)
+    }
     pub(crate) fn validate(&self) -> Result<(), TeamProcessError> {
         if !self.provider_account_home.is_absolute() {
             return Err(TeamProcessError::Model);
@@ -506,5 +593,32 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn worker_envelope_excludes_owner_registry_and_unselected_account_metadata() {
+        let (_source, mut envelope) = fixture();
+        let mut foreign = envelope.provider_accounts.accounts[0].clone();
+        foreign.account_id = uuid::Uuid::new_v4().to_string();
+        foreign.provider_id = "private-provider".into();
+        foreign.execution_binding_id = "private-binding".into();
+        foreign.display_name = "UNSELECTED_OWNER_METADATA".into();
+        foreign.credential_ref.secret_ref = format!("acct.{}", foreign.account_id);
+        envelope.provider_accounts.accounts.push(foreign);
+        std::fs::write(
+            envelope
+                .provider_account_home
+                .join("provider-accounts/fixture_team.json"),
+            serde_json::to_vec(&envelope.provider_accounts).unwrap(),
+        )
+        .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let home = target.path().canonicalize().unwrap();
+        let private = envelope.for_worker(&home).unwrap();
+        assert_eq!(private.provider_account_home, home);
+        assert_eq!(private.provider_accounts.accounts.len(), 1);
+        private.validate().unwrap();
+        let wire = serde_json::to_string(&private).unwrap();
+        assert!(!wire.contains("UNSELECTED_OWNER_METADATA"));
+        assert!(!wire.contains(envelope.provider_account_home.to_str().unwrap()));
     }
 }

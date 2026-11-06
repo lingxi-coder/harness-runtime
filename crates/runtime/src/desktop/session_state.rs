@@ -41,6 +41,8 @@ pub use crate::branch_recovery::capture_branch_recovery;
 pub use resume::capture_resume_cost;
 mod storage_recovery;
 mod tool_execution;
+pub mod team_chat;
+pub use team_chat::{BotChatScope, BotChatCursor, ChatAuthor, ChatSourceMessage, ChatInputBatch, ChatInputAck};
 use attempts::AttemptProjection;
 use lingxi_core::host::{
     DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
@@ -50,6 +52,7 @@ use tool_execution::ToolProjection;
 
 #[derive(Debug, Clone, Default)]
 struct CoordinatorProjection {
+    team_chat: BotChatCursor,
     tools: ToolProjection,
     latest: Option<(CostState, u64)>,
     fusion_terminals: std::collections::HashMap<String, DurableFusionTerminalRecord>,
@@ -70,6 +73,7 @@ struct CachedCostResult {
 }
 
 struct HydratedCostLedger {
+    team_chat: BotChatCursor,
     tools: ToolProjection,
     attempts: AttemptProjection,
     hydration: CostHydration,
@@ -83,6 +87,7 @@ struct HydratedCostLedger {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionProjectionSnapshot {
+    team_chat: BotChatCursor,
     tool_executions: Vec<ToolExecutionRecord>,
     native_receipts: Vec<NativeReceiptRecord>,
     /// Independent cost projection; its revision is not the journal revision.
@@ -95,6 +100,7 @@ struct SessionProjectionSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionEvent {
+    ChatInput(ChatInputBatch),
     ToolExecution(ToolExecutionRecord),
     NativeReceipt(NativeReceiptRecord),
     AttemptIntent(AttemptIntent),
@@ -109,6 +115,7 @@ enum SessionEvent {
 
 fn encode_session_event(event: &SessionEvent) -> Result<serde_json::Value, CostPersistError> {
     let (tag, payload) = match event {
+        SessionEvent::ChatInput(record) => ("ChatInput", serde_json::to_value(record)),
         SessionEvent::ToolExecution(record) => ("ToolExecution", serde_json::to_value(record)),
         SessionEvent::NativeReceipt(record) => ("NativeReceipt", serde_json::to_value(record)),
         SessionEvent::AttemptIntent(intent) => ("AttemptIntent", serde_json::to_value(intent)),
@@ -129,6 +136,7 @@ fn encode_session_event(event: &SessionEvent) -> Result<serde_json::Value, CostP
 
 fn encode_projection_snapshot(snapshot: &SessionProjectionSnapshot) -> serde_json::Value {
     serde_json::json!({
+        "team_chat": snapshot.team_chat,
         "cost": snapshot.cost,
         "tool_executions": snapshot.tool_executions,
         "native_receipts": snapshot.native_receipts,
@@ -149,6 +157,7 @@ fn decode_projection_snapshot(
     let cost = fields
         .remove("cost")
         .ok_or_else(|| CostPersistError::Storage("session snapshot has no cost state".into()))?;
+    let team_chat = fields.remove("team_chat").ok_or_else(|| CostPersistError::Storage("session snapshot has no Chat cursor".into()))?;
     let terminals = fields.remove("fusion_terminals").ok_or_else(|| {
         CostPersistError::Storage("session snapshot has no Fusion terminal projection".into())
     })?;
@@ -167,6 +176,7 @@ fn decode_projection_snapshot(
         ));
     }
     Ok(SessionProjectionSnapshot {
+        team_chat: serde_json::from_value(team_chat).map_err(|e| CostPersistError::Storage(e.to_string()))?,
         tool_executions: serde_json::from_value(tools)
             .map_err(|e| CostPersistError::Storage(e.to_string()))?,
         native_receipts: serde_json::from_value(receipts)
@@ -181,6 +191,10 @@ fn decode_projection_snapshot(
 }
 
 enum SessionMutation {
+    ChatInput {
+        batch: ChatInputBatch,
+        ack: tokio::sync::oneshot::Sender<Result<ChatInputAck, CostPersistError>>,
+    },
     ToolJournal {
         event: SessionEvent,
         ack: tokio::sync::oneshot::Sender<Result<ToolJournalAck, ToolJournalError>>,
@@ -919,7 +933,7 @@ impl SessionStateCoordinator {
         }
         let state_relative = PathBuf::from("session-state").join(session_id.as_uuid().to_string());
         let journal = DurableJournal::open_under(lingxi_home.as_ref(), &state_relative)
-            .map_err(map_journal_error)?;
+            .map_err(map_journal_error)?.with_max_record_bytes(128 * 1024 * 1024);
         let (queue_tx, queue_rx) = mpsc::channel(COST_QUEUE_CAPACITY);
         let (close_tx, _close_rx) = watch::channel(false);
         Ok(Arc::new(Self {
@@ -1190,6 +1204,16 @@ impl SessionStateCoordinator {
                                 "session state persistence worker failed: {join_error}"
                             );
                         }
+                    }
+                    SessionMutation::ChatInput { batch, ack } => {
+                        let worker = state.clone();
+                        let result = tokio::task::spawn_blocking(move || worker.persist_chat_input(batch)).await
+                            .map_err(|error| CostPersistError::Storage(format!("Chat input persistence worker failed: {error}")))
+                            .and_then(|result| result);
+                        if let Err(error @ (CostPersistError::Storage(_) | CostPersistError::Frozen(_))) = &result {
+                            state.durability_gate.freeze(error.to_string());
+                        }
+                        let _ = ack.send(result);
                     }
                     SessionMutation::FusionTerminal {
                         event_id,
@@ -1939,6 +1963,7 @@ impl CoordinatorState {
             |(state, _)| state.clone(),
         );
         SessionProjectionSnapshot {
+            team_chat: projection.team_chat.clone(),
             tool_executions: projection.tools.executions.values().cloned().collect(),
             native_receipts: projection.tools.receipts.values().cloned().collect(),
             cost: CostStateVector::from(&cost),
@@ -2070,6 +2095,7 @@ impl CoordinatorState {
             projection.fusion_outbox = hydrated.fusion_outbox;
             projection.fusion_acks = hydrated.fusion_acks;
             projection.tools = hydrated.tools;
+            projection.team_chat = hydrated.team_chat;
         }
         drop(results);
         // Only startup recovery can manufacture Unknown, never a provider
@@ -2210,6 +2236,7 @@ fn hydrate_from_journal_with_mode(
     let mut fusion_acks = std::collections::HashMap::new();
     let mut attempts = AttemptProjection::new(session_id);
     let mut tools = ToolProjection::default();
+    let mut team_chat = BotChatCursor::default();
     let mut fold_error = None;
     let mut visitor = |entry| {
         // Keep validating the physical WAL after a cost semantic error so
@@ -2226,6 +2253,7 @@ fn hydrate_from_journal_with_mode(
                 &mut fusion_acks,
                 &mut attempts,
                 &mut tools,
+                &mut team_chat,
             ) {
                 fold_error = Some(error);
             }
@@ -2244,6 +2272,7 @@ fn hydrate_from_journal_with_mode(
     if !replay.journal_present {
         return match journal.read_snapshot::<serde_json::Value>() {
             Ok(None) => Ok(HydratedCostLedger {
+                team_chat,
                 tools,
                 attempts,
                 hydration: CostHydration {
@@ -2269,6 +2298,7 @@ fn hydrate_from_journal_with_mode(
     // prefix-mismatched derivative snapshot is rebuilt without weakening the
     // successful replay result.
     let snapshot = SessionProjectionSnapshot {
+        team_chat: team_chat.clone(),
         tool_executions: tools.executions.values().cloned().collect(),
         native_receipts: tools.receipts.values().cloned().collect(),
         cost: CostStateVector::from(&latest),
@@ -2288,6 +2318,7 @@ fn hydrate_from_journal_with_mode(
         }
     };
     Ok(HydratedCostLedger {
+        team_chat,
         tools,
         attempts,
         hydration: CostHydration {
@@ -2316,6 +2347,8 @@ fn decode_session_event(value: serde_json::Value) -> Result<SessionEvent, CostPe
     }
     let (tag, payload) = envelope.into_iter().next().expect("one tag was validated");
     match tag.as_str() {
+        "ChatInput" => serde_json::from_value(payload).map(SessionEvent::ChatInput)
+            .map_err(|error| CostPersistError::Storage(error.to_string())),
         "ToolExecution" => serde_json::from_value(payload)
             .map(SessionEvent::ToolExecution)
             .map_err(|e| CostPersistError::Storage(e.to_string())),
@@ -2354,10 +2387,12 @@ fn fold_session_entry(
     fusion_acks: &mut std::collections::HashMap<String, CostPersistAck>,
     attempts: &mut AttemptProjection,
     tools: &mut ToolProjection,
+    team_chat: &mut BotChatCursor,
 ) -> Result<(), CostPersistError> {
     let event = decode_session_event(entry.event.clone())
         .map_err(|error| CostPersistError::Storage(error.to_string()))?;
     match event {
+        SessionEvent::ChatInput(batch) => team_chat::fold_chat_input(team_chat, batch, session_id, &entry.event_id),
         event @ (SessionEvent::ToolExecution(_) | SessionEvent::NativeReceipt(_)) => tools
             .fold(&event, session_id, &entry.event_id)
             .map_err(|e| CostPersistError::Storage(e.0)),

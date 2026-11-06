@@ -8538,6 +8538,9 @@ impl ApiService {
                     });
                 }
                 prepared.before_computer_submit().await?;
+                if let Some(quota) = &self.scope_output_quota {
+                    quota.authorize_dispatch().await?;
+                }
                 let mut api_attempt_reservation = None;
                 let received = conversation_lease
                     .session()
@@ -10643,6 +10646,9 @@ impl ApiService {
                         return Err(LlmError::InvalidRequest {
                             message: "host rejected request dispatch admission".into(),
                         });
+                    }
+                    if let Some(quota) = &self.scope_output_quota {
+                        quota.authorize_dispatch().await?;
                     }
                     request_client
                         .open_shared_stream(prepared, responses_ws_session, &mut || {

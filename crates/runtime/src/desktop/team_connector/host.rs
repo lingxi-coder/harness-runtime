@@ -1,108 +1,147 @@
-//! Private product-main bridge. No public listener, owner tool authority from a
-//! member, or human-answer message exists on this channel.
-use super::{
-    Error, TeamBotSnapshot, TeamBotTarget, TeamConnector, TeamConnectorAccount,
-    TeamConnectorCredential, TeamConnectorStatus, TeamOwnerApproval,
+//! Strict anonymous-pipe bridge from trusted Desktop main into the isolated worker.
+use crate::desktop::team_invocation::{BotChatScope, TeamInvocationLimits};
+use crate::desktop::team_process::{
+    self, TeamAccountEnvelope, TeamChatReadRequest, TeamChatReadResult, TeamDataRef,
+    TeamKnowledgeDocument, TeamModelRoute, TeamProcessBroker, TeamProcessDeadline,
+    TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
+    TeamProviderAccountRefresh,
 };
-use crate::desktop::team_invocation::TeamInvocationLimits;
-use crate::desktop::team_process::{TeamOwnerPermission, TeamProcessModel};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-
-const MAX_LINE: usize = 256 * 1024;
+const MAX_LINE: usize = 4 * 1024 * 1024;
+type Error = TeamProcessError;
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Start {
     version: u32,
     #[serde(rename = "type")]
     kind: String,
-    mode: String,
-    owner_uid: String,
-    account_epoch: u64,
-    endpoint: String,
-    journal_root: PathBuf,
-    runtime_root: PathBuf,
+    storage_root: PathBuf,
     worker_executable: PathBuf,
-    target: TeamBotTarget,
-    snapshot: Option<Snapshot>,
-    #[serde(default)]
-    credentials: Option<crate::desktop::team_process::TeamAccountEnvelope>,
+    scope: BotChatScope,
+    task_id: Option<String>,
+    invocation_id: Option<uuid::Uuid>,
+    instructions: Option<String>,
+    input_batch_ref: Option<TeamDataRef>,
+    knowledge: Option<Vec<TeamKnowledgeDocument>>,
+    deadline_at: Option<u64>,
+    model: Option<Model>,
+    credentials: Option<TeamAccountEnvelope>,
+    limits: Option<Limits>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Snapshot {
-    instructions: String,
+struct Model {
     model_id: String,
     model_provider: String,
     model_protocol: lingxi_llm_client::protocol::ProtocolFamily,
     model_profile: lingxi_llm_client::protocol::ProviderProfile,
     model_endpoint: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Limits {
     max_turns: u32,
-    max_input_bytes: u32,
+    context_window_tokens: u32,
     output_tokens_per_request: u32,
     physical_dispatches: u32,
 }
-impl Snapshot {
-    fn into_snapshot(
-        self,
-        credentials: Option<crate::desktop::team_process::TeamAccountEnvelope>,
-    ) -> Result<TeamBotSnapshot, Error> {
-        let nonzero = |n| NonZeroU32::new(n).ok_or(Error::Configuration);
-        Ok(TeamBotSnapshot {
-            instructions: self.instructions,
-            model: {
-                let route = crate::desktop::team_process::TeamModelRoute {
-                    model_provider: self.model_provider,
-                    model_protocol: self.model_protocol,
-                    model_id: self.model_id,
-                    model_endpoint: self.model_endpoint,
-                    credential_id: crate::desktop::team_process::model::PRIVATE_CREDENTIAL.into(),
-                    model_profile: self.model_profile,
-                };
-                TeamProcessModel::selected_account_pool(
-                    route,
-                    credentials.ok_or(Error::Configuration)?,
-                )
-                .map_err(|_| Error::Configuration)?
-            },
+impl Start {
+    fn validate(&self) -> Result<(), Error> {
+        if self.version != 3
+            || !matches!(
+                self.kind.as_str(),
+                "inspect_scope" | "inspect_result" | "run"
+            )
+        {
+            return Err(Error::Protocol);
+        }
+        self.scope.session_id().map_err(|_| Error::Protocol)?;
+        private_dir(&self.storage_root)?;
+        let any = self.invocation_id.is_some()
+            || self.instructions.is_some()
+            || self.input_batch_ref.is_some()
+            || self.knowledge.is_some()
+            || self.deadline_at.is_some()
+            || self.model.is_some()
+            || self.credentials.is_some()
+            || self.limits.is_some();
+        let all = self.task_id.is_some()
+            && self.invocation_id.is_some()
+            && self.instructions.is_some()
+            && self.input_batch_ref.is_some()
+            && self.knowledge.is_some()
+            && self.deadline_at.is_some()
+            && self.model.is_some()
+            && self.credentials.is_some()
+            && self.limits.is_some();
+        if self.kind == "inspect_scope" && (any || self.task_id.is_some())
+            || self.kind == "inspect_result" && (any || self.task_id.is_none())
+            || self.kind == "run" && !all
+        {
+            return Err(Error::Protocol);
+        }
+        Ok(())
+    }
+    fn request(self) -> Result<TeamProcessRequest, Error> {
+        let model = self.model.ok_or(Error::Protocol)?;
+        let limits = self.limits.ok_or(Error::Protocol)?;
+        let nonzero = |n| NonZeroU32::new(n).ok_or(Error::Protocol);
+        Ok(TeamProcessRequest {
+            scope: self.scope,
+            task_id: self.task_id.ok_or(Error::Protocol)?,
+            invocation_id: self.invocation_id.ok_or(Error::Protocol)?,
+            instructions: self.instructions.ok_or(Error::Protocol)?,
+            input_batch_ref: self.input_batch_ref.ok_or(Error::Protocol)?,
+            knowledge: self.knowledge.ok_or(Error::Protocol)?,
             limits: TeamInvocationLimits {
-                max_turns: nonzero(self.max_turns)?,
-                max_input_bytes: nonzero(self.max_input_bytes)?,
-                output_tokens_per_request: nonzero(self.output_tokens_per_request)?,
-                physical_dispatches: nonzero(self.physical_dispatches)?,
+                max_turns: nonzero(limits.max_turns)?,
+                context_window_tokens: nonzero(limits.context_window_tokens)?,
+                output_tokens_per_request: nonzero(limits.output_tokens_per_request)?,
+                physical_dispatches: nonzero(limits.physical_dispatches)?,
             },
+            model: TeamProcessModel::selected_account_pool(
+                TeamModelRoute {
+                    model_provider: model.model_provider,
+                    model_protocol: model.model_protocol,
+                    model_id: model.model_id,
+                    model_endpoint: model.model_endpoint,
+                    model_profile: model.model_profile,
+                    credential_id: team_process::model::PRIVATE_CREDENTIAL.into(),
+                },
+                self.credentials.ok_or(Error::Protocol)?,
+            )?,
+            deadline: TeamProcessDeadline::from_backend_unix_millis(
+                self.deadline_at.ok_or(Error::Protocol)?,
+            )?,
         })
     }
 }
-
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
     ProviderAccountsUpdated {
         version: u32,
         id: String,
-        credentials: crate::desktop::team_process::TeamAccountEnvelope,
+        credentials: TeamAccountEnvelope,
     },
-    Credential {
+    ChatRead {
         version: u32,
         id: String,
-        owner_uid: String,
-        account_epoch: u64,
-        id_token: String,
+        reference: TeamDataRef,
     },
-    Permission {
+    Authorized {
         version: u32,
         id: String,
-        allow: bool,
     },
 }
 impl Response {
@@ -111,8 +150,8 @@ impl Response {
             Self::ProviderAccountsUpdated { version, id, .. } => {
                 (*version, id, "provider_account_refresh")
             }
-            Self::Credential { version, id, .. } => (*version, id, "credential"),
-            Self::Permission { version, id, .. } => (*version, id, "permission"),
+            Self::ChatRead { version, id, .. } => (*version, id, "read_chat"),
+            Self::Authorized { version, id } => (*version, id, "authorize"),
         }
     }
 }
@@ -121,8 +160,7 @@ struct Pending {
     sender: oneshot::Sender<Response>,
 }
 struct Bridge {
-    owner: String,
-    epoch: u64,
+    root: PathBuf,
     cancel: CancellationToken,
     counter: AtomicU64,
     pending: Mutex<HashMap<String, Pending>>,
@@ -135,9 +173,9 @@ impl Bridge {
             return Err(Error::Protocol);
         }
         bytes.push(b'\n');
-        let mut output = self.writer.lock().map_err(|_| Error::Protocol)?;
-        output.write_all(&bytes)?;
-        output.flush()?;
+        let mut out = self.writer.lock().map_err(|_| Error::Protocol)?;
+        out.write_all(&bytes)?;
+        out.flush()?;
         Ok(())
     }
     async fn request(
@@ -147,19 +185,17 @@ impl Bridge {
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
         if self.cancel.is_cancelled() || cancel.is_cancelled() {
-            return Err(Error::Account);
+            return Err(Error::Cancelled);
         }
-        let (tx, rx) = oneshot::channel();
-        // Sequence assignment and write share one lock: concurrent credential
-        // refresh and owner prompts cannot invert the stream's monotonic IDs.
+        let (sender, receiver) = oneshot::channel();
         let id = {
-            let mut output = self.writer.lock().map_err(|_| Error::Protocol)?;
-            let sequence = self
+            let mut out = self.writer.lock().map_err(|_| Error::Protocol)?;
+            let number = self
                 .counter
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .map_err(|_| Error::Protocol)?;
-            let id = format!("{kind}-{sequence}");
-            value["version"] = json!(1);
+            let id = format!("{kind}-{number}");
+            value["version"] = json!(3);
             value["type"] = json!(kind);
             value["id"] = json!(id);
             let mut bytes = serde_json::to_vec(&value).map_err(|_| Error::Protocol)?;
@@ -171,22 +207,13 @@ impl Bridge {
             if pending.len() >= 8 {
                 return Err(Error::Protocol);
             }
-            pending.insert(id.clone(), Pending { kind, sender: tx });
+            pending.insert(id.clone(), Pending { kind, sender });
             drop(pending);
-            if let Err(error) = output.write_all(&bytes).and_then(|_| output.flush()) {
-                self.pending
-                    .lock()
-                    .map_err(|_| Error::Protocol)?
-                    .remove(&id);
-                return Err(error.into());
-            }
+            out.write_all(&bytes)?;
+            out.flush()?;
             id
         };
-        let result = tokio::select! {biased;
-            _=self.cancel.cancelled()=>Err(Error::Account),
-            _=cancel.cancelled()=>Err(Error::Cancelled),
-            result=rx=>result.map_err(|_|Error::Protocol),
-        };
+        let result = tokio::select! {biased;_=self.cancel.cancelled()=>Err(Error::Cancelled),_=cancel.cancelled()=>Err(Error::Cancelled),value=receiver=>value.map_err(|_|Error::Protocol)};
         self.pending
             .lock()
             .map_err(|_| Error::Protocol)?
@@ -195,7 +222,7 @@ impl Bridge {
     }
     fn accept(&self, response: Response) -> Result<(), Error> {
         let (version, id, kind) = response.correlation();
-        if version != 1 {
+        if version != 3 {
             return Err(Error::Protocol);
         }
         let pending = self
@@ -211,57 +238,53 @@ impl Bridge {
     }
 }
 #[async_trait]
-impl TeamConnectorAccount for Bridge {
-    fn is_current(&self, owner: &str, epoch: u64) -> bool {
-        owner == self.owner && epoch == self.epoch && !self.cancel.is_cancelled()
-    }
-    async fn credential(&self) -> Result<TeamConnectorCredential, Error> {
-        match self.request("credential", json!({}), &self.cancel).await? {
-            Response::Credential {
-                owner_uid,
-                account_epoch,
-                id_token,
-                ..
-            } => Ok(TeamConnectorCredential {
-                owner_uid,
-                epoch: account_epoch,
-                id_token,
-            }),
+impl TeamProcessBroker for Bridge {
+    async fn authorize(&self, cancel: CancellationToken) -> Result<(), Error> {
+        match self.request("authorize", json!({}), &cancel).await? {
+            Response::Authorized { .. } => Ok(()),
             _ => Err(Error::Protocol),
         }
     }
-}
-#[async_trait]
-impl TeamOwnerApproval for Bridge {
     async fn refresh_provider_account(
         &self,
-        request: crate::desktop::team_process::TeamProviderAccountRefresh,
+        request: TeamProviderAccountRefresh,
         cancel: CancellationToken,
-    ) -> Result<crate::desktop::team_process::TeamAccountEnvelope, Error> {
-        match self.request("provider_account_refresh",json!({"account_id":request.account_id,"identity_generation":request.identity_generation,"credential_revision":request.credential_revision}),&cancel).await? {Response::ProviderAccountsUpdated{credentials,..}=>{Ok(credentials)},_=>Err(Error::Protocol)}
+    ) -> Result<TeamAccountEnvelope, Error> {
+        match self.request("provider_account_refresh",json!({"account_id":request.account_id,"identity_generation":request.identity_generation,"credential_revision":request.credential_revision}),&cancel).await?{Response::ProviderAccountsUpdated{credentials,..}=>Ok(credentials),_=>Err(Error::Protocol)}
     }
-    async fn approve(
+    async fn read_chat(
         &self,
-        request: TeamOwnerPermission,
+        request: TeamChatReadRequest,
         cancel: CancellationToken,
-    ) -> Result<bool, Error> {
-        if request.tool_name != "Bash" {
-            return Ok(false);
-        }
+    ) -> Result<TeamChatReadResult, Error> {
+        request.validate()?;
         match self
-            .request(
-                "permission",
-                json!({"tool_name":request.tool_name,"input":request.input}),
-                &cancel,
-            )
+            .request("read_chat", json!({"query":request.query}), &cancel)
             .await?
         {
-            Response::Permission { allow, .. } => Ok(allow),
+            Response::ChatRead { reference, .. } => {
+                let result: TeamChatReadResult = reference.read(&self.root)?;
+                result.validate(&request.query)?;
+                Ok(result)
+            }
             _ => Err(Error::Protocol),
         }
     }
 }
-
+fn private_dir(path: &Path) -> Result<(), Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || path.canonicalize()? != path {
+        return Err(Error::Environment);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != nix::unistd::geteuid().as_raw() {
+            return Err(Error::Environment);
+        }
+    }
+    Ok(())
+}
 fn line<R: BufRead>(input: &mut R) -> Result<Option<Vec<u8>>, Error> {
     let mut bytes = Vec::new();
     let count = std::io::Read::take(input, (MAX_LINE + 2) as u64).read_until(b'\n', &mut bytes)?;
@@ -277,13 +300,12 @@ fn line<R: BufRead>(input: &mut R) -> Result<Option<Vec<u8>>, Error> {
     }
     Ok(Some(bytes))
 }
-
 fn entry() -> Result<(), Error> {
     if std::env::args_os().len() != 1
         || std::io::stdin().is_terminal()
         || std::io::stdout().is_terminal()
     {
-        return Err(Error::Configuration);
+        return Err(Error::Environment);
     }
     let keys = [
         "HOME",
@@ -298,9 +320,26 @@ fn entry() -> Result<(), Error> {
     if std::env::vars_os().count() != keys.len()
         || std::env::vars_os().any(|(k, _)| !keys.iter().any(|n| k == *n))
     {
-        return Err(Error::Configuration);
+        return Err(Error::Environment);
     }
-    // Fresh single-threaded entry: no inherited owner sockets/handles survive.
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Environment)?);
+    let tmp = PathBuf::from(std::env::var_os("TMPDIR").ok_or(Error::Environment)?);
+    private_dir(&home)?;
+    private_dir(&tmp)?;
+    if std::env::var_os(branding::CONFIG_DIR_ENV) != Some(home.clone().into_os_string())
+        || std::env::var_os("CFFIXED_USER_HOME") != Some(home.into_os_string())
+        || std::env::var("PATH").ok().as_deref() != Some("/usr/bin:/bin:/usr/sbin:/sbin")
+        || std::env::var("LANG").ok().as_deref() != Some("C")
+        || std::env::var("LC_ALL").ok().as_deref() != Some("C")
+        || std::env::var("__CF_USER_TEXT_ENCODING").ok()
+            != Some(format!(
+                "0x{:X}:0x8000100:0x0",
+                nix::unistd::geteuid().as_raw()
+            ))
+    {
+        return Err(Error::Environment);
+    }
+    // Single-threaded preflight closes every inherited descriptor other than the private pipe.
     let mut fds = Vec::new();
     for item in std::fs::read_dir("/dev/fd")? {
         if let Some(fd) = item?
@@ -315,41 +354,15 @@ fn entry() -> Result<(), Error> {
     for fd in fds {
         match nix::unistd::close(fd) {
             Ok(()) | Err(nix::errno::Errno::EBADF) => (),
-            Err(_) => return Err(Error::Configuration),
+            Err(_) => return Err(Error::Environment),
         }
     }
     let mut reader = std::io::BufReader::new(std::io::stdin());
     let boot: Start = serde_json::from_slice(&line(&mut reader)?.ok_or(Error::Protocol)?)
         .map_err(|_| Error::Protocol)?;
-    if boot.version != 1
-        || boot.kind != "start"
-        || !matches!(boot.mode.as_str(), "run" | "retry_result")
-        || boot.owner_uid != boot.target.owner_uid
-        || boot.account_epoch > super::MAX_SAFE_INTEGER
-    {
-        return Err(Error::Configuration);
-    }
-    boot.target.validate()?;
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Configuration)?);
-    let tmp = PathBuf::from(std::env::var_os("TMPDIR").ok_or(Error::Configuration)?);
-    super::journal::private_dir(&home)?;
-    super::journal::private_dir(&tmp)?;
-    if std::env::var_os(branding::CONFIG_DIR_ENV) != Some(home.clone().into_os_string())
-        || std::env::var_os("CFFIXED_USER_HOME") != Some(home.clone().into_os_string())
-        || std::env::var("PATH").ok().as_deref() != Some("/usr/bin:/bin:/usr/sbin:/sbin")
-        || std::env::var("LANG").ok().as_deref() != Some("C")
-        || std::env::var("LC_ALL").ok().as_deref() != Some("C")
-        || std::env::var("__CF_USER_TEXT_ENCODING").ok()
-            != Some(format!(
-                "0x{:X}:0x8000100:0x0",
-                nix::unistd::geteuid().as_raw()
-            ))
-    {
-        return Err(Error::Configuration);
-    }
+    boot.validate()?;
     let bridge = Arc::new(Bridge {
-        owner: boot.owner_uid.clone(),
-        epoch: boot.account_epoch,
+        root: boot.storage_root.clone(),
         cancel: CancellationToken::new(),
         counter: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
@@ -357,12 +370,11 @@ fn entry() -> Result<(), Error> {
     });
     let port = bridge.clone();
     std::thread::Builder::new()
-        .name("team-host-parent".into())
+        .name("shared-bot-parent".into())
         .spawn(move || {
             let mut operation = || -> Result<(), Error> {
                 while let Some(bytes) = line(&mut reader)? {
-                    let response = serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)?;
-                    port.accept(response)?;
+                    port.accept(serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)?)?;
                 }
                 Ok(())
             };
@@ -377,6 +389,27 @@ fn entry() -> Result<(), Error> {
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
+        if boot.kind == "inspect_scope" {
+            let cursor = team_process::inspect_scope(&boot.storage_root, &boot.scope)?;
+            return bridge
+                .emit(json!({"version":3,"type":"result","status":"inspected","cursor":cursor}));
+        }
+        if boot.kind == "inspect_result" {
+            let result = team_process::recover_result(
+                &boot.storage_root,
+                &boot.scope,
+                boot.task_id.as_deref().ok_or(Error::Protocol)?,
+            )?;
+            return match result {
+                Some(result) => bridge.emit(result_value(result)),
+                None => {
+                    let cursor = team_process::inspect_scope(&boot.storage_root, &boot.scope)?;
+                    bridge.emit(
+                        json!({"version":3,"type":"result","status":"not_found","cursor":cursor}),
+                    )
+                }
+            };
+        }
         let stop = bridge.cancel.clone();
         let watcher = tokio::spawn(async move {
             if let Ok(mut signal) =
@@ -386,75 +419,116 @@ fn entry() -> Result<(), Error> {
                 stop.cancel();
             }
         });
-        let connector = TeamConnector::new(
-            &boot.endpoint,
-            bridge.clone(),
-            boot.owner_uid,
-            boot.account_epoch,
-            bridge.cancel.clone(),
-            boot.journal_root,
-            boot.runtime_root,
-            boot.worker_executable,
-        )?
-        .with_owner_approval(bridge.clone());
-        let result = if boot.mode == "retry_result" {
-            connector
-                .observe_saved(boot.target, bridge.cancel.child_token())
-                .await
-        } else {
-            let snapshot = boot
-                .snapshot
-                .map(|snapshot| snapshot.into_snapshot(boot.credentials))
-                .transpose()?;
-            connector
-                .run_optional(boot.target, snapshot, bridge.cancel.child_token())
-                .await
-        };
+        let root = boot.storage_root.clone();
+        let worker = boot.worker_executable.clone();
+        let request = boot.request()?;
+        let task_id = request.task_id.clone();
+        bridge.authorize(bridge.cancel.child_token()).await?;
+        let result = TeamProcessStart::prepare(&root, request)?
+            .run_with_broker(&worker, bridge.cancel.child_token(), bridge.clone())
+            .await;
         watcher.abort();
-        result
+        let value = result_value(result?);
+        save_result(&root, &task_id, &value)?;
+        bridge.emit(value)
     });
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    match result {
-        Ok(status) => {
-            let mut value = match status {
-                TeamConnectorStatus::Unstarted => json!({"status":"unstarted"}),
-                TeamConnectorStatus::Busy => json!({"status":"busy"}),
-                TeamConnectorStatus::RecoveryRequired => json!({"status":"recovery_required"}),
-                TeamConnectorStatus::Settled { state, reply_id } => {
-                    let mut v = json!({"status":"settled","state":state});
-                    if let Some(id) = reply_id {
-                        v["reply_id"] = json!(id);
-                    }
-                    v
-                }
-            };
-            value["version"] = json!(1);
-            value["type"] = json!("result");
-            bridge.emit(value)
+    result
+}
+fn result_value(result: team_process::TeamProcessResult) -> Value {
+    let mut value = json!({"version":3,"type":"result","status":if result.outcome==TeamProcessOutcome::Completed{"completed"}else{"failed"},
+        "text":result.text,"cursor":result.cursor,"finishedAt":result.finished_at,"dispatchedRequests":result.dispatched_requests,"deniedTools":result.denied_tools,"usage":result.usage});
+    if let Some(document) = result.document {
+        value["document"] = json!(document);
+    }
+    value
+}
+fn save_result(root: &Path, task_id: &str, value: &Value) -> Result<(), Error> {
+    if !(8..=64).contains(&task_id.len())
+        || !task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(Error::Protocol);
+    }
+    let directory = root.join("results");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&directory) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(e.into()),
         }
+    }
+    private_dir(&directory)?;
+    let path = directory.join(format!("{task_id}.json"));
+    let bytes = serde_json::to_vec(value).map_err(|_| Error::Protocol)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::File::open(&directory)?.sync_all()?;
+    Ok(())
+}
+pub fn host_main() -> i32 {
+    match entry() {
+        Ok(()) => 0,
         Err(error) => {
             let code = match error {
-                Error::Account => "ACCOUNT_CHANGED".to_owned(),
-                Error::ModelUnavailable => "MODEL_UNAVAILABLE".into(),
-                Error::ResultPending => "RESULT_PENDING".into(),
-                Error::Http(status) => format!("HTTP_{status}"),
-                Error::Busy => "BUSY".into(),
-                Error::Cancelled => "CANCELLED".into(),
-                Error::Transport => "SERVICE_UNAVAILABLE".into(),
-                Error::Protocol => "PROTOCOL".into(),
-                Error::Storage | Error::Io(_) => "STORAGE".into(),
-                Error::Configuration => "CONFIGURATION".into(),
+                Error::Cancelled => "CANCELLED",
+                Error::Model => "MODEL_UNAVAILABLE",
+                Error::Deadline => "TASK_EXPIRED",
+                Error::AlreadyAttempted => "TASK_INTERRUPTED",
+                Error::Environment => "ENVIRONMENT",
+                Error::Worker => "WORKER",
+                Error::Capacity => "CHAT_CONTEXT_CAPACITY",
+                Error::ResourceLimit => "CHAT_RESOURCE_LIMIT",
+                Error::Profile(_) => "PROFILE",
+                Error::Executable => "EXECUTABLE",
+                Error::Io(_) => "STORAGE",
+                Error::Protocol => "PROTOCOL",
             };
-            bridge.emit(json!({"version":1,"type":"error","code":code}))?;
-            Err(Error::Cancelled)
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                json!({"version":3,"type":"error","code":code})
+            );
+            70
         }
     }
 }
 
-/// Entry of the dedicated host executable, never called in an existing app.
-pub fn host_main() -> i32 {
-    match entry() {
-        Ok(()) => 0,
-        Err(_) => 70,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn retired_protocol_is_not_decoded() {
+        assert!(serde_json::from_value::<Start>(
+            json!({"version":1,"type":"start","mode":"run","target":{}})
+        )
+        .is_err());
+    }
+    #[test]
+    fn stale_response_versions_are_rejected() {
+        let response: Response =
+            serde_json::from_value(json!({"version":1,"type":"authorized","id":"authorize-1"}))
+                .unwrap();
+        let bridge = Bridge {
+            root: PathBuf::new(),
+            cancel: CancellationToken::new(),
+            counter: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            writer: Mutex::new(std::io::stdout()),
+        };
+        assert!(bridge.accept(response).is_err());
     }
 }

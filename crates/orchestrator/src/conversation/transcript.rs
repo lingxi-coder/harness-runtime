@@ -6991,3 +6991,45 @@ mod rich_append_projection_tests {
             .contains("added before the result"));
     }
 }
+
+impl ConversationOrchestrator {
+    /// Project a host-journaled source row using the existing append-once writer.
+    /// A reset is the ordinary compact boundary chain mechanism, with no summary:
+    /// all retained source rows follow it verbatim. No model call occurs here.
+    pub async fn project_external_source_row(
+        &self,
+        mut row: session::JsonlMessage,
+        message: Option<lingxi_core::types::ConversationMessage>,
+        reset: bool,
+    ) -> Result<(), String> {
+        let _turn = self.turn_gate.lock().await;
+        let writer = self
+            .transcript
+            .jsonl_writer
+            .as_ref()
+            .ok_or("durable transcript unavailable")?;
+        let session_id = self.session.lock().await.session_id;
+        if row.session_id != session_id.as_uuid().to_string() {
+            return Err("source session mismatch".into());
+        }
+        // Null is the existing writer's derived-parent placeholder. It resolves
+        // the current tip only for a new row; retries retain their original parent.
+        row.parent_uuid = None;
+        let (outcome, tip) = writer
+            .append_pending_prompt_message_once(&row)
+            .await
+            .map_err(|e| e.to_string())?;
+        *self.transcript.last_jsonl_uuid.lock().await = tip;
+        if outcome == session::jsonl::TranscriptAppendOutcome::Appended {
+            let mut state = self.session.lock().await;
+            if reset {
+                state.history.clear();
+                state.compacted_user_turns = 0;
+            }
+            if let Some(message) = message {
+                state.history.push(message);
+            }
+        }
+        Ok(())
+    }
+}

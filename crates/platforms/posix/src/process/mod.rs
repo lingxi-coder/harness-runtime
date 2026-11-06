@@ -1,8 +1,7 @@
 //! Desktop process execution and shell lifetime support.
 //!
 //! [`runner`] implements `ProcessRunner`; [`kill_tree`] signals owned process
-//! groups, and [`wrap`] supplies shell environment/cwd tracking. Private Team
-//! shells use [`team_guardian`] so cleanup survives model worker death.
+//! groups, and [`wrap`] supplies shell environment/cwd tracking.
 //! [`spawn_unsafe`] contains the audited spawning and process-observation FFI.
 
 pub mod active_children;
@@ -11,7 +10,6 @@ pub mod kill_tree;
 pub mod runner;
 pub mod spawn_unsafe;
 pub mod supervisor;
-pub mod team_guardian;
 mod watchdog;
 pub mod wrap;
 

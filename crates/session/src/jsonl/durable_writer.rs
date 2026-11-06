@@ -965,13 +965,11 @@ impl DurableTranscriptWriter {
         // only after the UUID duplicate check, while the same transaction is
         // held, so a retry can keep the original parent even after later
         // messages were appended.
-        let exact_boundary = payload.string_at("/type") == Some("system")
-            && payload.string_at("/subtype") == Some("compact_boundary")
-            && payload
-                .at_pointer("/compactMetadata/nativeExactPreserved")
-                .and_then(|value| value.as_bool())
-                == Some(true);
-        let needs_parent = !exact_boundary
+        // Every compact boundary explicitly resets the physical parent chain,
+        // including host-journaled source invalidation without a model summary.
+        let resets_parent_chain = payload.string_at("/type") == Some("system")
+            && payload.string_at("/subtype") == Some("compact_boundary");
+        let needs_parent = !resets_parent_chain
             && payload
                 .at_pointer("/parentUuid")
                 .is_none_or(|parent| parent.is_null());
@@ -1015,7 +1013,7 @@ impl DurableTranscriptWriter {
                 Some(transcript_identity),
             )?,
         };
-        let exact_previous_len = if exact_boundary {
+        let exact_previous_len = if resets_parent_chain {
             Some(
                 file.metadata()
                     .map_err(|error| FsError::Io(error.to_string()))?
@@ -2892,6 +2890,48 @@ mod tests {
                 TranscriptAppendOutcome::Appended
             );
         }
+    }
+
+    #[test]
+    fn ordinary_compact_boundary_resets_parent_once_without_native_preservation_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let path = Path::new("transcript.jsonl");
+        let rows = [
+            (
+                "before",
+                json!({"uuid":"before","type":"user","parentUuid":null}),
+            ),
+            (
+                "reset",
+                json!({"uuid":"reset","type":"system","subtype":"compact_boundary","parentUuid":null,"compactMetadata":{"trigger":"manual","preTokens":0}}),
+            ),
+            (
+                "after",
+                json!({"uuid":"after","type":"user","parentUuid":null}),
+            ),
+        ];
+        for (id, row) in &rows {
+            writer
+                .append_json_once(path, id, source_payload(row.clone()))
+                .unwrap();
+        }
+        for (id, row) in &rows {
+            assert_eq!(
+                writer
+                    .append_json_once(path, id, source_payload(row.clone()))
+                    .unwrap(),
+                TranscriptAppendOutcome::AlreadyPresent
+            );
+        }
+        let persisted = std::fs::read_to_string(dir.path().join(path))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted[1]["parentUuid"], Value::Null);
+        assert_eq!(persisted[2]["parentUuid"], "reset");
     }
 
     #[test]

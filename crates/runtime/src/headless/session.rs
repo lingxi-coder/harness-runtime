@@ -638,7 +638,7 @@ pub async fn build_prepared(
     Ok(runtime)
 }
 
-async fn mount_prepared(
+pub(crate) async fn mount_prepared(
     runtime: &DesktopRuntime,
     config: &DesktopConfig,
     prepared: Option<PreparedSession>,

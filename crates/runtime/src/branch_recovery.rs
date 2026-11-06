@@ -43,7 +43,7 @@ pub async fn capture_branch_recovery(
         let _lease = lease;
         let relative = std::path::PathBuf::from("session-state").join(source_id.to_string());
         let journal = session::jsonl::DurableJournal::open_under(&home, &relative)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?.with_max_record_bytes(128 * 1024 * 1024);
         let mut projection = ToolProjection::default();
         let mut failure = None;
         let replay = journal

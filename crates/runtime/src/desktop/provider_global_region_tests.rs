@@ -158,22 +158,18 @@ fn invalid_non_file_or_oversized_host_settings_fail_closed() {
 #[cfg(target_os = "macos")]
 #[test]
 fn team_uses_admitted_region_without_reading_host_or_project_settings() {
-    use super::team_invocation::{
-        TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
-    };
+    use super::team_invocation::{BotChatScope, TeamInvocationLimits, TeamInvocationProfile};
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let profile = TeamInvocationProfile::prepare(
         &root.path().canonicalize().unwrap(),
-        TeamInvocationIdentity {
-            owner_uid: "owner".into(),
-            bot_key: "bot".into(),
-            team_id: "team".into(),
+        BotChatScope {
+            shared_bot_id: "sharedbot_01".into(),
+            team_id: "team_0001".into(),
             conversation_id: "conversation".into(),
-            origin_human_uid: "human".into(),
-            membership_generation: 1,
+            session_epoch: 1,
         },
         uuid::Uuid::new_v4(),
         "Team instructions".into(),

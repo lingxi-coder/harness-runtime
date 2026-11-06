@@ -1,21 +1,28 @@
-//! One clean-environment process per trusted Team start. Default launches deny
-//! all tools. A separately authenticated trusted host may install the narrow
-//! owner/original-human broker; no backend permit decoder or public IPC lives here.
+//! One clean-environment process per trusted Team task. M1 exposes only the
+//! current Chat and published knowledge through a revocable host broker. The
+//! canonical Bot×Chat session survives completed rounds and process restarts.
 
 pub(crate) mod accounts;
+mod chat_session;
+mod data;
 mod interaction;
+pub(crate) mod read_tools;
+use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, ChatInputBatch};
+pub use chat_session::{inspect_scope, recover_result};
+pub use data::TeamDataRef;
+pub use read_tools::{
+    TeamChatQuery, TeamChatReadRequest, TeamChatReadResult, TeamKnowledgeDocument,
+};
 pub(super) mod model;
 pub use accounts::TeamAccountEnvelope;
 pub use model::TeamModelRoute;
 mod protocol;
 mod worker;
 
-use super::team_invocation::{
-    TeamInvocationError, TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
-};
+use super::team_invocation::{TeamInvocationError, TeamInvocationLimits, TeamInvocationProfile};
 use protocol::Bootstrap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
@@ -37,7 +44,7 @@ impl TeamProcessDeadline {
         self.instant
     }
 
-    /// Call when receiving the authenticated `startBot execute:true` response.
+    /// Call when receiving the authenticated `startTask execute:true` response.
     /// Clock skew that places its deadline outside (now, now + 5 min] refuses.
     pub fn from_backend_unix_millis(unix_ms: u64) -> Result<Self, TeamProcessError> {
         let instant = Instant::now();
@@ -86,10 +93,12 @@ impl std::fmt::Debug for TeamProcessModel {
 /// This does not authenticate a permit. The product must validate/consume its
 /// backend permit before preparing this request and use stable invocation IDs.
 pub struct TeamProcessRequest {
-    pub identity: TeamInvocationIdentity,
+    pub scope: BotChatScope,
     pub invocation_id: uuid::Uuid,
     pub instructions: String,
-    pub input: String,
+    pub task_id: String,
+    pub input_batch_ref: TeamDataRef,
+    pub knowledge: Vec<TeamKnowledgeDocument>,
     pub limits: TeamInvocationLimits,
     pub model: TeamProcessModel,
     pub deadline: TeamProcessDeadline,
@@ -131,36 +140,19 @@ pub enum TeamProcessError {
     Protocol,
     #[error("Team worker environment is not the dedicated clean environment")]
     Environment,
+    #[error("complete private data object exceeds its 64 MiB transport resource ceiling")]
+    ResourceLimit,
+    #[error("complete Chat input exceeds the selected model context capacity")]
+    Capacity,
     #[error("Team worker failed; execution must not be replayed")]
     Worker,
     #[error("Team worker process or storage operation failed")]
     Io(#[from] std::io::Error),
 }
 
-/// A permission forwarded exclusively to the authenticated Bot owner. This
-/// admits only a single Bash call with its original, unedited JSON input.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TeamOwnerPermission {
-    pub id: String,
-    pub tool_name: String,
-    pub input: serde_json::Value,
-}
-
-/// Questions forwarded exclusively to the original human. Answer map keys are
-/// the exact question texts; `text` adds bounded headers/options for display.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TeamHumanQuestion {
-    pub id: String,
-    pub questions: Vec<String>,
-    pub text: String,
-}
-
-/// Trusted host boundary. Implementations must authenticate the owner/original
-/// human and recheck membership, account epoch, revocation and the shared lease
-/// after every wait. A generic TUI, renderer or remote-control resolver cannot
-/// implement this authority. Futures are supervised inline and never detached.
+/// Trusted host boundary. Recheck current membership, published grants, source
+/// watermark, account epoch and task lease before every provider dispatch/read.
+/// Futures are supervised inline and never detached.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TeamProviderAccountRefresh {
@@ -172,6 +164,7 @@ pub struct TeamProviderAccountRefresh {
 
 #[async_trait::async_trait]
 pub trait TeamProcessBroker: Send + Sync {
+    async fn authorize(&self, cancel: CancellationToken) -> Result<(), TeamProcessError>;
     async fn refresh_provider_account(
         &self,
         _request: TeamProviderAccountRefresh,
@@ -179,16 +172,11 @@ pub trait TeamProcessBroker: Send + Sync {
     ) -> Result<TeamAccountEnvelope, TeamProcessError> {
         Err(TeamProcessError::Model)
     }
-    async fn approve(
+    async fn read_chat(
         &self,
-        request: TeamOwnerPermission,
+        request: TeamChatReadRequest,
         cancel: CancellationToken,
-    ) -> Result<bool, TeamProcessError>;
-    async fn ask(
-        &self,
-        request: TeamHumanQuestion,
-        cancel: CancellationToken,
-    ) -> Result<Option<BTreeMap<String, String>>, TeamProcessError>;
+    ) -> Result<TeamChatReadResult, TeamProcessError>;
 }
 
 /// Worker outcomes carry no provider error bodies or arbitrary diagnostic text.
@@ -201,7 +189,7 @@ pub enum TeamProcessOutcome {
     OutputLimit,
 }
 
-/// Bounded terminal text for the trusted host to settle through `finishBot`.
+/// Bounded terminal text for the trusted host to settle through `completeTask`.
 /// Transport failure/timeout is ambiguous and never yields a completed result.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,24 +199,67 @@ pub struct TeamProcessResult {
     pub text: String,
     pub dispatched_requests: u32,
     pub denied_tools: u32,
+    pub finished_at: u64,
+    pub cursor: BotChatCursor,
+    pub document: Option<TeamDocumentResult>,
+    pub usage: TeamUsage,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TeamUsage {
+    Missing,
+    Partial {
+        #[serde(rename = "inputTokens")]
+        input_tokens: u64,
+        #[serde(rename = "outputTokens")]
+        output_tokens: u64,
+        #[serde(rename = "costMicros", skip_serializing_if = "Option::is_none")]
+        cost_micros: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        currency: Option<String>,
+    },
+}
+impl TeamUsage {
+    pub(super) fn from_snapshots(
+        before: &lingxi_core::host::CostSnapshot,
+        after: &lingxi_core::host::CostSnapshot,
+    ) -> Self {
+        let input = after.input_tokens.saturating_sub(before.input_tokens);
+        let output = after.output_tokens.saturating_sub(before.output_tokens);
+        if after.api_calls <= before.api_calls || (input == 0 && output == 0) {
+            return Self::Missing;
+        }
+        let priced = !after.unknown_models && after.total_nano_usd >= before.total_nano_usd;
+        Self::Partial {
+            input_tokens: input,
+            output_tokens: output,
+            cost_micros: priced.then(|| (after.total_nano_usd - before.total_nano_usd) / 1000),
+            currency: priced.then(|| "USD".into()),
+        }
+    }
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TeamDocumentResult {
+    pub operation_id: String,
+    pub delivery_id: String,
+    pub title: String,
+    pub markdown: String,
+    pub sha256: String,
+}
 struct DenyInteractions;
 #[async_trait::async_trait]
 impl TeamProcessBroker for DenyInteractions {
-    async fn approve(
-        &self,
-        _: TeamOwnerPermission,
-        _: CancellationToken,
-    ) -> Result<bool, TeamProcessError> {
-        Ok(false)
+    async fn authorize(&self, _: CancellationToken) -> Result<(), TeamProcessError> {
+        Err(TeamProcessError::Protocol)
     }
-    async fn ask(
+    async fn read_chat(
         &self,
-        _: TeamHumanQuestion,
+        _: TeamChatReadRequest,
         _: CancellationToken,
-    ) -> Result<Option<BTreeMap<String, String>>, TeamProcessError> {
-        Ok(None)
+    ) -> Result<TeamChatReadResult, TeamProcessError> {
+        Err(TeamProcessError::Protocol)
     }
 }
 
@@ -240,28 +271,34 @@ impl TeamProcessStart {
         request.deadline.check()?;
         let profile = TeamInvocationProfile::prepare(
             storage_root,
-            request.identity,
+            request.scope,
             request.invocation_id,
             request.instructions.clone(),
             request.limits,
         )?
         .with_selected_model(request.model.clone());
-        profile.validate_input(&request.input)?;
-        let identity = profile.identity();
+        let batch: ChatInputBatch = request.input_batch_ref.read(storage_root)?;
+        batch
+            .validate(profile.session_id())
+            .map_err(|_| TeamProcessError::Protocol)?;
+        if !protocol::valid_id(&request.task_id) {
+            return Err(TeamProcessError::Protocol);
+        }
+        read_tools::validate_knowledge(&request.knowledge)?;
         let bootstrap = Bootstrap {
-            version: 2,
+            version: 3,
             storage_root: storage_root.to_owned(),
-            owner_uid: identity.owner_uid.clone(),
-            bot_key: identity.bot_key.clone(),
-            team_id: identity.team_id.clone(),
-            conversation_id: identity.conversation_id.clone(),
-            origin_human_uid: identity.origin_human_uid.clone(),
-            membership_generation: identity.membership_generation,
+            scope: profile.scope().clone(),
             invocation_id: request.invocation_id,
+            task_id: request.task_id,
             instructions: request.instructions,
-            input: request.input,
+            input_batch_ref: request.input_batch_ref,
+            knowledge_ref: TeamDataRef::write(
+                &profile.scope_root().join("tmp"),
+                &request.knowledge,
+            )?,
             max_turns: request.limits.max_turns.get(),
-            max_input_bytes: request.limits.max_input_bytes.get(),
+            context_window_tokens: request.limits.context_window_tokens.get(),
             output_tokens_per_request: request.limits.output_tokens_per_request.get(),
             physical_dispatches: request.limits.physical_dispatches.get(),
             deadline_unix_ms: request.deadline.unix_ms,
@@ -270,7 +307,10 @@ impl TeamProcessStart {
             model_profile: request.model.route.model_profile.clone(),
             model_id: request.model.model_id,
             endpoint: request.model.endpoint,
-            credentials: request.model.credentials.clone_private()?,
+            credentials: request
+                .model
+                .credentials
+                .for_worker(&profile.scope_root().join("home"))?,
         };
         Ok(Self {
             profile,
@@ -281,7 +321,7 @@ impl TeamProcessStart {
 
     /// Run the dedicated binary with no inherited environment/stdio or CLI
     /// options. Cancellation/drop/deadline kill the worker process group.
-    /// Without a host broker, tools are denied and human questions remain unanswered.
+    /// Without a host authorization broker, execution fails closed.
     pub async fn run(
         self,
         worker_executable: &Path,
@@ -290,9 +330,8 @@ impl TeamProcessStart {
         self.run_inner(worker_executable, cancel, None).await
     }
 
-    /// Stream narrow owner approvals and original-human questions over the
-    /// private worker pipe. `true` authorizes AllowOnce only; no policy mutation,
-    /// edited tool input, command dispatch or credential refresh route exists.
+    /// Run with the authenticated host broker for dispatch authorization,
+    /// current-Chat history and the existing selected-account refresh flow.
     pub async fn run_with_broker(
         self,
         worker_executable: &Path,
@@ -314,7 +353,10 @@ impl TeamProcessStart {
             return Err(TeamProcessError::Cancelled);
         }
         check_executable(worker_executable)?;
-        self.profile.validate_input(&self.bootstrap.input)?;
+        let _: ChatInputBatch = self
+            .bootstrap
+            .input_batch_ref
+            .read(&self.bootstrap.storage_root)?;
         let mut cfg = super::DesktopConfig::default();
         cfg.default_model = format!(
             "{}/{}",
@@ -355,11 +397,18 @@ impl TeamProcessStart {
         let exchange = async {
             input.write_all(&frame).await?;
             // Keep the pipe open as a parent-liveness lease. Worker EOF cancels
-            // its entire build/run/drain. Version two admits only correlated
-            // permission/question responses after this single bootstrap.
+            // its entire build/run/drain. Major 3 admits only correlated
+            // authorization, history and credential responses after this single bootstrap.
             input.flush().await?;
             let broker = broker.unwrap_or_else(|| Arc::new(DenyInteractions));
-            let result = broker_exchange(&mut output, &mut input, broker, broker_cancel).await?;
+            let result = broker_exchange(
+                &mut output,
+                &mut input,
+                broker,
+                broker_cancel,
+                &self.profile.scope_root().join("tmp"),
+            )
+            .await?;
             let status = child.wait().await?;
             guard.0 = None; // reaped: never signal a potentially reused PID
             if !status.success() {
@@ -404,43 +453,46 @@ async fn broker_exchange(
     input: &mut (impl tokio::io::AsyncWrite + Unpin),
     broker: Arc<dyn TeamProcessBroker>,
     cancel: CancellationToken,
+    data_root: &Path,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
     let mut seen = BTreeSet::new();
     // Serialized interactions make a second request, result or any byte while
     // awaiting the broker an invalid out-of-order frame. Read one byte here so
-    // a partial malicious frame cannot hide behind a successful approval.
+    // a partial malicious frame cannot hide behind a successful authorization.
     loop {
         let request: WorkerFrame = protocol::read_frame(output).await?;
         let mut unexpected = [0u8; 1];
         let response = match request {
-            WorkerFrame::OwnerPermission { request } => {
-                protocol::validate_permission(&request)?;
+            WorkerFrame::Failed { code } => {
+                return Err(match code {
+                    protocol::WorkerFailure::Capacity => TeamProcessError::Capacity,
+                    protocol::WorkerFailure::ResourceLimit => TeamProcessError::ResourceLimit,
+                    protocol::WorkerFailure::Protocol => TeamProcessError::Protocol,
+                    protocol::WorkerFailure::Model => TeamProcessError::Model,
+                    _ => TeamProcessError::Worker,
+                })
+            }
+            WorkerFrame::Authorize { id } => {
+                if !protocol::valid_id(&id) || !seen.insert(id.clone()) {
+                    return Err(TeamProcessError::Protocol);
+                }
+                tokio::select! {biased;_=output.read(&mut unexpected)=>return Err(TeamProcessError::Protocol),result=broker.authorize(cancel.child_token())=>result?};
+                ParentFrame::Authorized { id }
+            }
+
+            WorkerFrame::ReadChat { request } => {
+                request.validate()?;
                 if !seen.insert(request.id.clone()) {
                     return Err(TeamProcessError::Protocol);
                 }
                 let id = request.id.clone();
-                let allow_once = tokio::select! {
-                    biased;
-                    _ = output.read(&mut unexpected) => return Err(TeamProcessError::Protocol),
-                    result = broker.approve(request, cancel.child_token()) => result?,
-                };
-                ParentFrame::OwnerPermission { id, allow_once }
-            }
-            WorkerFrame::HumanQuestion { request } => {
-                protocol::validate_question(&request)?;
-                if !seen.insert(request.id.clone()) {
-                    return Err(TeamProcessError::Protocol);
-                }
-                let answers = tokio::select! {
-                    biased;
-                    _ = output.read(&mut unexpected) => return Err(TeamProcessError::Protocol),
-                    result = broker.ask(request.clone(), cancel.child_token()) => result?,
-                };
-                protocol::validate_answers(&request, &answers)?;
-                ParentFrame::HumanQuestion {
-                    id: request.id,
-                    answers,
+                broker.authorize(cancel.child_token()).await?;
+                let result = tokio::select! {biased;_=output.read(&mut unexpected)=>return Err(TeamProcessError::Protocol),result=broker.read_chat(request.clone(),cancel.child_token())=>result?};
+                result.validate(&request.query)?;
+                ParentFrame::ChatRead {
+                    id,
+                    data: TeamDataRef::write(data_root, &result)?,
                 }
             }
             WorkerFrame::ProviderAccountRefresh { request } => {
@@ -452,10 +504,18 @@ async fn broker_exchange(
                 }
                 let id = request.id.clone();
                 let credentials = tokio::select! {biased;_ = output.read(&mut unexpected)=>return Err(TeamProcessError::Protocol),result=broker.refresh_provider_account(request,cancel.child_token())=>result?};
-                ParentFrame::ProviderAccountsUpdated { id, credentials }
+                ParentFrame::ProviderAccountsUpdated {
+                    id,
+                    credentials: credentials.for_worker(
+                        &data_root
+                            .parent()
+                            .ok_or(TeamProcessError::Protocol)?
+                            .join("home"),
+                    )?,
+                }
             }
             WorkerFrame::Result { result } => {
-                protocol::validate_result(&result, 2)?;
+                protocol::validate_result(&result)?;
                 // A terminal result is accepted only after clean stdout EOF.
                 if output.read(&mut unexpected).await? != 0 {
                     return Err(TeamProcessError::Protocol);
@@ -562,11 +622,22 @@ impl Drop for WorkerGroupGuard {
 pub fn worker_main() -> i32 {
     match worker::main() {
         Ok(()) => 0,
-        Err(TeamProcessError::Environment) => 78,
-        Err(TeamProcessError::Profile(_)) => 77,
-        Err(TeamProcessError::Protocol) => 65,
-        Err(TeamProcessError::Deadline | TeamProcessError::Cancelled) => 75,
-        Err(TeamProcessError::Io(_)) => 74,
-        Err(_) => 70,
+        Err(error) => {
+            let (code, status) = match error {
+                TeamProcessError::Capacity => (protocol::WorkerFailure::Capacity, 65),
+                TeamProcessError::ResourceLimit => (protocol::WorkerFailure::ResourceLimit, 65),
+                TeamProcessError::Environment => (protocol::WorkerFailure::Environment, 78),
+                TeamProcessError::Profile(_) => (protocol::WorkerFailure::Profile, 77),
+                TeamProcessError::Protocol => (protocol::WorkerFailure::Protocol, 65),
+                TeamProcessError::Model => (protocol::WorkerFailure::Model, 70),
+                TeamProcessError::Io(_) => (protocol::WorkerFailure::Storage, 74),
+                _ => (protocol::WorkerFailure::Worker, 70),
+            };
+            if let Ok(frame) = protocol::encode(&protocol::WorkerFrame::Failed { code }) {
+                let _ = std::io::stdout().write_all(&frame);
+                let _ = std::io::stdout().flush();
+            }
+            status
+        }
     }
 }

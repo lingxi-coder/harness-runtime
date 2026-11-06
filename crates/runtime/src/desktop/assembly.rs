@@ -5623,6 +5623,9 @@ pub async fn build_with_credential_stack(
         }
         tools_inner.register_builtin(workflow_tool.clone());
     }
+    if let Some(read_tools) = cfg.team_invocation.as_ref().and_then(|p| p.read_tools.as_ref()) {
+        super::team_process::read_tools::register(&mut tools_inner, read_tools.clone());
+    }
     let registered_mcp_tools =
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
     for (conn_id, mcp_tools) in registered_mcp_tools {
@@ -6425,9 +6428,7 @@ pub async fn build_with_credential_stack(
     //
     // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = if cfg.team_invocation.is_some() {
-        (true, true)
-    } else if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
+    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         (false, false)
     } else {
         resolve_memory_feature_gates(
@@ -6438,27 +6439,10 @@ pub async fn build_with_credential_stack(
             is_env_truthy("LINGXI_SESSION_MEMORY"),
         )
     };
-    let orch_builder = if cfg.team_invocation.is_some() {
-        orch_builder.with_memory_prefetch(
-            orchestrator::prompt::memory_block::build_memdir_prefetch_at(
-                side_query_client.clone(),
-                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-                &cfg.lingxi_home,
-                &cfg.cwd,
-            ),
-        )
-    } else {
-        match (memory_prefetch_on, dirs::home_dir()) {
-            (true, Some(home)) => {
-                orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
-                    side_query_client.clone(),
-                    Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-                    &home,
-                    &cfg.cwd,
-                ))
-            }
-            _ => orch_builder,
-        }
+    let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
+        (true, Some(home)) => orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
+            side_query_client.clone(), Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>, &home, &cfg.cwd)),
+        _ => orch_builder,
     };
 
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
@@ -6525,35 +6509,11 @@ pub async fn build_with_credential_stack(
     // scan re-loads next session. The current 10k/5k/3 config defaults apply.
     // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
-    let orch_builder = if cfg.team_invocation.is_some() {
-        orch_builder.with_session_memory(
-            orchestrator::prompt::memory_block::build_session_memory_handle_at(
-                side_query_client.clone(),
-                default_model_id.clone(),
-                memory::session_memory::SessionMemoryConfig {
-                    enabled: true,
-                    ..Default::default()
-                },
-                cfg.lingxi_home.clone(),
-                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-            ),
-        )
-    } else {
-        match (session_memory_on, dirs::home_dir()) {
-            (true, Some(home)) => {
-                orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
-                    side_query_client.clone(),
-                    default_model_id.clone(),
-                    memory::session_memory::SessionMemoryConfig {
-                        enabled: true,
-                        ..Default::default()
-                    },
-                    &home,
-                    Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-                ))
-            }
-            _ => orch_builder,
-        }
+    let orch_builder = match (session_memory_on, dirs::home_dir()) {
+        (true, Some(home)) => orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
+            side_query_client.clone(), default_model_id.clone(), memory::session_memory::SessionMemoryConfig {enabled:true,..Default::default()},
+            &home, Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>)),
+        _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch_builder = if cfg.team_invocation.is_some() {

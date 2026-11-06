@@ -3743,6 +3743,12 @@ impl ConversationOrchestrator {
         .await;
     }
 
+    /// Protect a fully admitted external batch until this turn ends. Hosts may
+    /// compact consumed history before this fence, never the unconsumed batch.
+    pub fn protect_external_input_from_compaction(&self) {
+        self.compaction_runtime.external_input_protected.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub(crate) async fn maybe_compact_before_call(&self, side_cancel: Option<&CancellationToken>) {
         self.maybe_compact_before_call_with_options(side_cancel, None, false, None)
             .await;
@@ -3771,6 +3777,7 @@ impl ConversationOrchestrator {
         force_idle: bool,
         api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) {
+        if self.compaction_runtime.external_input_protected.load(std::sync::atomic::Ordering::Acquire) {return;}
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
             // No compactor wired — strict no-op (history untouched).
             return;
@@ -4444,6 +4451,7 @@ impl ConversationOrchestrator {
         trigger: &str,
         custom_instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> PreCompactHookOutcome {
+        if self.compaction_runtime.external_input_protected.load(std::sync::atomic::Ordering::Acquire) {return PreCompactHookOutcome{blocked_by:Some("Current external input must remain complete".into()),additional_instructions:None};}
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks

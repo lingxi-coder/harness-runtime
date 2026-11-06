@@ -1491,6 +1491,7 @@ mod prompt_runtime_tests {
 
 /// State shared by manual/reactive compaction and token accounting.
 pub(crate) struct CompactionRuntime {
+    pub(crate) external_input_protected: std::sync::atomic::AtomicBool,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
@@ -1577,6 +1578,7 @@ impl CompactionRuntime {
     pub(crate) fn new() -> Self {
         Self {
             compaction: None,
+            external_input_protected: std::sync::atomic::AtomicBool::new(false),
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64::new(0),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),

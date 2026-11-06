@@ -6,6 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::execution_context::ApiAttemptReservation;
 use crate::{ApiAttemptsLeft, LlmError, PreparedLlmCall, ProtocolFamily};
 
+/// Host authority rechecked immediately before each physical provider dispatch.
+pub type ScopeDispatchAuthorization = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Limits generation requests to `dispatches * max_output_tokens_per_request`.
 ///
 /// This is an output-token ceiling, not an input-token or monetary budget. All
@@ -13,20 +20,57 @@ use crate::{ApiAttemptsLeft, LlmError, PreparedLlmCall, ProtocolFamily};
 /// request is never refunded, even when its result or usage is unknown. The
 /// provider must honor its wire limit; unsupported routes fail before dispatch.
 /// This capability is intentionally not serializable or workspace configurable.
-#[derive(Debug)]
 pub struct ScopeOutputQuota {
     max_output_tokens_per_request: NonZeroU32,
     attempts: ApiAttemptsLeft,
     revoked: AtomicBool,
+    authorization: std::sync::OnceLock<ScopeDispatchAuthorization>,
 }
 
+impl std::fmt::Debug for ScopeOutputQuota {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopeOutputQuota")
+            .field("remaining_dispatches", &self.remaining_dispatches())
+            .field("revoked", &self.is_revoked())
+            .finish_non_exhaustive()
+    }
+}
 impl ScopeOutputQuota {
+    /// Install a single host authority before publishing this invocation.
+    pub fn set_dispatch_authorization(
+        &self,
+        authorization: ScopeDispatchAuthorization,
+    ) -> Result<(), LlmError> {
+        self.authorization
+            .set(authorization)
+            .map_err(|_| LlmError::InvalidRequest {
+                message: "scope dispatch authorization already installed".into(),
+            })
+    }
+    pub(crate) async fn authorize_dispatch(&self) -> Result<(), LlmError> {
+        if self.is_revoked() {
+            return Err(LlmError::InvalidRequest {
+                message: "scope was revoked".into(),
+            });
+        }
+        if let Some(authorize) = self.authorization.get() {
+            authorize().await?;
+        }
+        if self.is_revoked() {
+            return Err(LlmError::InvalidRequest {
+                message: "scope was revoked".into(),
+            });
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn new(max_output_tokens_per_request: NonZeroU32, dispatches: NonZeroU32) -> Self {
         Self {
             max_output_tokens_per_request,
             attempts: ApiAttemptsLeft::new(dispatches.get()),
             revoked: AtomicBool::new(false),
+            authorization: std::sync::OnceLock::new(),
         }
     }
 
@@ -176,5 +220,36 @@ mod tests {
         quota.revoke();
         quota.revoke();
         assert!(quota.is_revoked());
+    }
+    #[tokio::test]
+    async fn denied_dispatch_authorization_spends_no_attempt_and_rechecks_every_call() {
+        let quota = quota(2);
+        let allowed = Arc::new(AtomicBool::new(true));
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = allowed.clone();
+        let calls = count.clone();
+        quota
+            .set_dispatch_authorization(Arc::new(move || {
+                let allowed = gate.clone();
+                let count = calls.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if allowed.load(Ordering::Acquire) {
+                        Ok(())
+                    } else {
+                        Err(LlmError::InvalidRequest {
+                            message: "revoked".into(),
+                        })
+                    }
+                })
+            }))
+            .unwrap();
+        quota.authorize_dispatch().await.unwrap();
+        allowed.store(false, Ordering::Release);
+        assert!(quota.authorize_dispatch().await.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(quota.remaining_dispatches(), 2);
+        quota.revoke();
+        assert!(quota.authorize_dispatch().await.is_err());
     }
 }

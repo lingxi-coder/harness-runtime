@@ -7,7 +7,7 @@ use crate::api::{LifecycleService, RunInput, SessionService};
 use crate::desktop::team_invocation::TeamInvocationProfile;
 use crate::desktop::DesktopConfig;
 use client::adapter::PermissionRequestSink;
-use client::protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
+use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
 use lingxi_core::host::{CostSnapshot, OutputStream, TurnOutcome};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use lingxi_core::types::{ConversationMessage, ToolUseId};
@@ -44,20 +44,27 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     close_inherited_descriptors()?;
     let bootstrap = read_bootstrap()?;
     let deadline = TeamProcessDeadline::from_backend_unix_millis(bootstrap.deadline_unix_ms)?;
-    let model = bootstrap.model()?;
-    let limits = bootstrap.limits()?;
-    if bootstrap.version != 2 {
+    if bootstrap.version != 3 {
         return Err(TeamProcessError::Protocol);
     }
+    let model = bootstrap.model()?;
+    let limits = bootstrap.limits()?;
+    let batch: crate::desktop::session_state::team_chat::ChatInputBatch =
+        bootstrap.input_batch_ref.read(&bootstrap.storage_root)?;
     let mut profile = TeamInvocationProfile::prepare(
         &bootstrap.storage_root,
-        bootstrap.identity(),
+        bootstrap.scope,
         bootstrap.invocation_id,
         bootstrap.instructions,
         limits,
     )?
     .with_selected_model(model.clone());
-    profile.validate_input(&bootstrap.input)?;
+    batch
+        .validate(profile.session_id())
+        .map_err(|_| TeamProcessError::Protocol)?;
+    let knowledge: Vec<super::TeamKnowledgeDocument> =
+        bootstrap.knowledge_ref.read(&bootstrap.storage_root)?;
+    super::read_tools::validate_knowledge(&knowledge)?;
     for (key, value) in environment(profile.scope_root()) {
         if std::env::var_os(key).as_ref() != Some(&value) {
             return Err(TeamProcessError::Environment);
@@ -67,39 +74,50 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         return Err(TeamProcessError::Environment);
     }
     let cancel = CancellationToken::new();
-    if bootstrap.version == 2 {
-        // Only this fresh, validated broker-enabled worker can route private
-        // Bash through a crash-safe per-command helper. Its lease closes even
-        // after abrupt worker death; the helper receives no model credential.
-        #[cfg(unix)]
-        platform_posix::process::team_guardian::enable_team_guardian(
-            std::env::current_exe()?,
-            profile.scope_root().to_owned(),
-            bootstrap.deadline_unix_ms,
-            cancel.clone(),
-        )
-        .map_err(|_| TeamProcessError::Worker)?;
-        #[cfg(not(unix))]
-        return Err(TeamProcessError::Environment);
-    }
-    let bridge = ChildInteraction::start(cancel.clone())?;
-    let (sender, questions) = tokio::sync::mpsc::channel(4);
-    profile = profile.with_original_human_question_sender(sender);
-    let (interaction, questions) = (Some(bridge), Some(questions));
+    let bridge = ChildInteraction::start(
+        cancel.clone(),
+        bootstrap.storage_root.clone(),
+        batch.to_seq_inclusive,
+    )?;
+    let authorize = bridge.clone();
+    profile
+        .output_quota()
+        .set_dispatch_authorization(Arc::new(move || {
+            let bridge = authorize.clone();
+            Box::pin(async move {
+                bridge
+                    .authorize()
+                    .await
+                    .map_err(|_| llm_runtime::LlmError::InvalidRequest {
+                        message: "Shared Bot execution authorization changed".into(),
+                    })
+            })
+        }))
+        .map_err(|_| TeamProcessError::Protocol)?;
+    profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
+        bridge: bridge.clone(),
+        knowledge,
+    }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
     profile.apply_to(&mut cfg)?;
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK_SIZE * 2)
         .enable_all()
         .build()?;
+    // The process main stack is fixed by the OS. Poll the deep desktop/model
+    // future on an explicitly sized runtime thread; block_on only awaits its
+    // small join/deadline future. The parent still owns the hard process lease.
+    let task_profile = profile.clone();
+    let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials).await});
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(deadline.instant.into()) => Err(TeamProcessError::Deadline),
-            _ = cancel.cancelled() => Err(TeamProcessError::Cancelled),
-            result = run(cfg, &profile, bootstrap.input, limits.physical_dispatches.get(), cancel.child_token(), interaction, questions,bootstrap.credentials) => result,
+            _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
+            _=cancel.cancelled()=>{task.abort();Err(TeamProcessError::Cancelled)},
+            result=&mut task=>result.map_err(|_|TeamProcessError::Worker)?,
         }
     });
     // Runtime tasks (including an in-flight model request) cannot outlive this
@@ -171,17 +189,35 @@ impl PermissionRequestSink for PermissionSink {
 }
 
 async fn run(
-    cfg: DesktopConfig,
+    mut cfg: DesktopConfig,
     profile: &TeamInvocationProfile,
-    input: String,
+    batch: crate::desktop::session_state::team_chat::ChatInputBatch,
+    task_id: String,
     dispatch_limit: u32,
     cancel: CancellationToken,
-    interaction: Option<Arc<ChildInteraction>>,
-    questions: Option<
-        tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange>,
-    >,
+    interaction: Arc<ChildInteraction>,
     envelope: super::TeamAccountEnvelope,
 ) -> Result<TeamProcessResult, TeamProcessError> {
+    interaction.authorize().await?;
+    let path = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        &profile.session_id().as_uuid().to_string(),
+    );
+    let start = if path.exists() {
+        crate::headless::session::SessionStart::Resume {
+            session_id: profile.session_id().as_uuid(),
+            resume_session_at: None,
+            resume_drops_turn: None,
+            fork: false,
+        }
+    } else {
+        crate::headless::session::SessionStart::New
+    };
+    let prepared = crate::headless::session::prepare(&mut cfg, &start, false)
+        .await
+        .map_err(|_| TeamProcessError::Worker)?;
+    let mounted_cfg = cfg.clone();
     let output = Arc::new(BoundedOutput {
         received_bytes: AtomicUsize::new(0),
         failed: AtomicBool::new(false),
@@ -190,10 +226,7 @@ async fn run(
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
     let rt = {
-        let interaction = interaction
-            .as_ref()
-            .ok_or(TeamProcessError::Protocol)?
-            .clone();
+        let interaction = interaction.clone();
         let mut shared = crate::desktop::build_shared_credential_stack_for_config(&cfg)
             .await
             .map_err(|_| TeamProcessError::Worker)?;
@@ -220,6 +253,13 @@ async fn run(
         .await
         .map_err(|_| TeamProcessError::Worker)?
     };
+    if crate::headless::session::mount_prepared(&rt, &mounted_cfg, prepared)
+        .await
+        .is_err()
+    {
+        let _ = rt.shutdown().await;
+        return Err(TeamProcessError::Worker);
+    }
     let gate = rt
         .permission_gate
         .as_ref()
@@ -227,65 +267,25 @@ async fn run(
         .clone();
     let denied = Arc::new(AtomicU32::new(0));
     let count = denied.clone();
-    let permission_bridge = interaction.clone();
-    let permission_cancel = cancel.clone();
     let pump = AbortOnDrop(tokio::spawn(async move {
-        while let Some(request) = tokio::select! {
-            biased;
-            _ = permission_cancel.cancelled() => None,
-            request = rx.recv() => request,
-        } {
-            let approved = if let Some(bridge) = &permission_bridge {
-                match request.kind {
-                    PermissionKindDto::ToolUseConfirm {
-                        tool_name,
-                        tool_input_json,
-                        ..
-                    } if tool_name == "Bash" => match serde_json::from_str(&tool_input_json) {
-                        Ok(input) => bridge.approve(tool_name, input).await,
-                        Err(_) => Err(TeamProcessError::Protocol),
-                    },
-                    _ => Ok(false),
-                }
-            } else {
-                Ok(false)
-            };
-            let allow = match approved {
-                Ok(allow) if !permission_cancel.is_cancelled() => allow,
-                _ => {
-                    permission_cancel.cancel();
-                    break;
-                }
-            };
-            let response = if allow {
-                PermissionResponseDto::AllowOnce
-            } else {
-                PermissionResponseDto::Deny
-            };
-            if !gate.resolve(request.request_id, response, "").await {
-                permission_cancel.cancel();
-                break;
-            }
-            if !allow {
-                count.fetch_add(1, Ordering::Relaxed);
-            }
+        while let Some(request) = rx.recv().await {
+            count.fetch_add(1, Ordering::Relaxed);
+            let _ = gate
+                .resolve(request.request_id, PermissionResponseDto::Deny, "")
+                .await;
         }
     }));
-    let question_pump = match (interaction, questions) {
-        (Some(bridge), Some(mut questions)) => Some(AbortOnDrop(tokio::spawn(async move {
-            while let Some(question) = tokio::select! {
-                biased;
-                _ = bridge.cancel.cancelled() => None,
-                question = questions.recv() => question,
-            } {
-                if bridge.ask(question).await.is_err() {
-                    bridge.cancel.cancel();
-                    break;
-                }
-            }
-        }))),
-        _ => None,
-    };
+    if let Err(error) = super::chat_session::repair_projection(&rt).await {
+        let _ = rt.shutdown().await;
+        return Err(error);
+    }
+    let usage_before = rt.cost().await;
+    let current_message_id = batch.current_message_id.clone();
+    if let Err(error) = super::chat_session::admit(&rt, profile, batch, cancel.clone()).await {
+        let _ = rt.shutdown().await;
+        return Err(error);
+    }
+    let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
     let outcome = rt
         .run(
             RunInput {
@@ -297,7 +297,7 @@ async fn run(
         .await;
     let metrics = rt.orchestrator.completed_turn_metrics();
     // The sink also sees rejected attempts and error presentation. A Bot
-    // reply uses only the last accepted assistant in this fresh session.
+    // reply uses the final accepted assistant of this task in the restored session.
     let text = rt
         .transcript()
         .await
@@ -308,14 +308,14 @@ async fn run(
             _ => None,
         })
         .unwrap_or_default();
-    let drain = rt.shutdown().await;
-    drop(pump);
-    drop(question_pump);
+    let cursor = rt.session_state.bot_chat_cursor();
+    let finished_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| TeamProcessError::Deadline)?
+        .as_millis() as u64;
     if cancel.is_cancelled() && !output.overflow.load(Ordering::Acquire) {
+        let _ = rt.shutdown().await;
         return Err(TeamProcessError::Cancelled);
-    }
-    if !drain.complete {
-        return Err(TeamProcessError::Worker);
     }
     let (outcome, text) = if output.overflow.load(Ordering::Acquire) {
         (TeamProcessOutcome::OutputLimit, String::new())
@@ -345,13 +345,34 @@ async fn run(
         }
         (outcome, text)
     };
-    Ok(TeamProcessResult {
-        version: 1,
+    let usage_after = rt.cost().await;
+    let result = TeamProcessResult {
+        version: 3,
         outcome,
-        text,
+        document: if outcome == TeamProcessOutcome::Completed {
+            Some(super::chat_session::document(&task_id, &text))
+        } else {
+            None
+        },
+        text: if text.len() <= 8192 {
+            text
+        } else {
+            "Result saved as a shared document.".into()
+        },
+        finished_at,
+        cursor,
+        usage: super::TeamUsage::from_snapshots(&usage_before, &usage_after),
         dispatched_requests: dispatch_limit - profile.output_quota().remaining_dispatches(),
         denied_tools: denied.load(Ordering::Relaxed),
-    })
+    };
+    let saved = super::chat_session::record_result(&rt, &task_id, &result).await;
+    let drain = rt.shutdown().await;
+    drop(pump);
+    saved?;
+    if !drain.complete {
+        return Err(TeamProcessError::Worker);
+    }
+    Ok(result)
 }
 
 // Dropping a run future also drops its callbacks; no detached broker wait

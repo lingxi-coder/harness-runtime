@@ -11,59 +11,14 @@ use std::sync::Arc;
 use tool_api::isolated_shell::IsolatedShellPolicy;
 use tool_api::{SessionToolGrantLease, SessionToolPolicy};
 
-/// Private memory principal, established by the authenticated trigger. Human
-/// UID is essential: membership generations are counters local to each UID.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TeamInvocationIdentity {
-    pub owner_uid: String,
-    pub bot_key: String,
-    pub team_id: String,
-    pub conversation_id: String,
-    pub origin_human_uid: String,
-    pub membership_generation: u64,
-}
-
-impl TeamInvocationIdentity {
-    fn scope_key(&self) -> Result<String, TeamInvocationError> {
-        let parts = [
-            &self.owner_uid,
-            &self.bot_key,
-            &self.team_id,
-            &self.conversation_id,
-        ];
-        if self.membership_generation == 0
-            || parts
-                .iter()
-                .any(|s| s.is_empty() || s.len() > 512 || s.chars().any(char::is_control))
-            || self.origin_human_uid.is_empty()
-            || self.origin_human_uid.encode_utf16().count() > 128
-            || self
-                .origin_human_uid
-                .chars()
-                .any(|c| c == '/' || c <= '\u{1f}' || c == '\u{7f}')
-        {
-            return Err(TeamInvocationError::Identity);
-        }
-        let mut digest = Sha256::new();
-        digest.update(b"lingxi-team-scope-v1\0");
-        for part in parts
-            .into_iter()
-            .chain(std::iter::once(&self.origin_human_uid))
-        {
-            digest.update((part.len() as u64).to_be_bytes());
-            digest.update(part.as_bytes());
-        }
-        digest.update(self.membership_generation.to_be_bytes());
-        Ok(format!("{:x}", digest.finalize()))
-    }
-}
+pub use super::session_state::team_chat::BotChatScope;
 
 /// Finite host ceilings. Input validation must precede the product host's run
 /// call; duration and reliable process termination remain host responsibilities.
 #[derive(Clone, Copy, Debug)]
 pub struct TeamInvocationLimits {
     pub max_turns: NonZeroU32,
-    pub max_input_bytes: NonZeroU32,
+    pub context_window_tokens: NonZeroU32,
     pub output_tokens_per_request: NonZeroU32,
     pub physical_dispatches: NonZeroU32,
 }
@@ -71,7 +26,7 @@ impl Default for TeamInvocationLimits {
     fn default() -> Self {
         Self {
             max_turns: NonZeroU32::new(12).unwrap(),
-            max_input_bytes: NonZeroU32::new(32_768).unwrap(),
+            context_window_tokens: NonZeroU32::new(128_000).unwrap(),
             output_tokens_per_request: NonZeroU32::new(4_096).unwrap(),
             physical_dispatches: NonZeroU32::new(24).unwrap(),
         }
@@ -82,7 +37,7 @@ impl Default for TeamInvocationLimits {
 /// same tool lease and generation quota; enforcing the config never resets them.
 #[derive(Clone)]
 pub struct TeamInvocationProfile {
-    identity: TeamInvocationIdentity,
+    scope: BotChatScope,
     scope_root: PathBuf,
     invocation_id: uuid::Uuid,
     inputs_path: PathBuf,
@@ -93,8 +48,7 @@ pub struct TeamInvocationProfile {
     quota: Arc<llm_runtime::ScopeOutputQuota>,
     policy_cache: super::settings_watch::ManagedPolicySnapshotCache,
     selected_model: Option<Arc<super::team_process::TeamProcessModel>>,
-    question_sender:
-        Option<tokio::sync::mpsc::Sender<tool_api::ask_user_question::AskUserQuestionExchange>>,
+    pub(crate) read_tools: Option<Arc<super::team_process::read_tools::TeamReadTools>>,
 }
 
 impl std::fmt::Debug for TeamInvocationProfile {
@@ -117,8 +71,6 @@ pub enum TeamInvocationError {
     Model,
     #[error("Team and Local App profiles cannot be combined")]
     MixedProfile,
-    #[error("Team input is empty, contains NUL, or exceeds its UTF-8 byte limit")]
-    Input,
     #[error("Team persona/skills must be bounded immutable text")]
     Instructions,
     #[error("Team invocation has been revoked")]
@@ -145,7 +97,7 @@ impl TeamInvocationProfile {
     /// a one-shot authenticated start permit, never for ambiguous restart replay.
     pub fn prepare(
         storage_root: &Path,
-        identity: TeamInvocationIdentity,
+        scope: BotChatScope,
         invocation_id: uuid::Uuid,
         instructions: String,
         limits: TeamInvocationLimits,
@@ -161,10 +113,14 @@ impl TeamInvocationProfile {
         {
             return Err(TeamInvocationError::Storage);
         }
-        let key = identity.scope_key()?;
+        let key = scope
+            .session_id()
+            .map_err(|_| TeamInvocationError::Identity)?
+            .as_uuid()
+            .to_string();
         if invocation_id.is_nil()
             || limits.max_turns.get() > 20
-            || limits.max_input_bytes.get() > 32_768
+            || !(8_192..=2_000_000).contains(&limits.context_window_tokens.get())
             || limits.output_tokens_per_request.get() > 4_096
             || limits.physical_dispatches.get() > 32
         {
@@ -181,7 +137,6 @@ impl TeamInvocationProfile {
         for name in ["home", "workspace", "tmp", "shell-home", "inputs"] {
             private_child(&scope_root, name)?;
         }
-        private_child(&scope_root.join("home"), "transcripts")?;
         private_child(
             &private_child(&scope_root.join("home"), "tool-output")?,
             &invocation_id.to_string(),
@@ -191,7 +146,7 @@ impl TeamInvocationProfile {
         write_immutable(&inputs_path, instructions.as_bytes())?;
         let shell = Arc::new(IsolatedShellPolicy::new(&scope_root));
         let lease = SessionToolGrantLease::new(SessionToolPolicy {
-            builtin_tools: HashSet::from(["Bash".into(), "AskUserQuestion".into()]),
+            builtin_tools: HashSet::from(["TeamChatHistory".into(), "TeamKnowledge".into()]),
             mcp_tools: HashSet::new(),
         });
         let quota = Arc::new(llm_runtime::ScopeOutputQuota::new(
@@ -199,7 +154,7 @@ impl TeamInvocationProfile {
             limits.physical_dispatches,
         ));
         Ok(Self {
-            identity,
+            scope,
             scope_root,
             invocation_id,
             inputs_path,
@@ -210,13 +165,13 @@ impl TeamInvocationProfile {
             quota,
             policy_cache: Default::default(),
             selected_model: None,
-            question_sender: None,
+            read_tools: None,
         })
     }
 
     #[must_use]
-    pub fn identity(&self) -> &TeamInvocationIdentity {
-        &self.identity
+    pub fn scope(&self) -> &BotChatScope {
+        &self.scope
     }
     #[must_use]
     pub fn scope_root(&self) -> &Path {
@@ -255,16 +210,11 @@ impl TeamInvocationProfile {
         self.selected_model.as_deref()
     }
 
-    /// Install a dedicated broker that authenticates answers against this
-    /// profile's original human UID and membership generation. The host must
-    /// build that broker; an owner/TUI/RC sender is not a valid substitute.
-    /// Without an explicit sender, AskUserQuestion fails closed.
-    #[must_use]
-    pub fn with_original_human_question_sender(
+    pub(crate) fn with_read_tools(
         mut self,
-        sender: tokio::sync::mpsc::Sender<tool_api::ask_user_question::AskUserQuestionExchange>,
+        tools: Arc<super::team_process::read_tools::TeamReadTools>,
     ) -> Self {
-        self.question_sender = Some(sender);
+        self.read_tools = Some(tools);
         self
     }
 
@@ -275,18 +225,11 @@ impl TeamInvocationProfile {
         self.quota.revoke();
     }
 
-    /// The host checks the fully composed human input before submitting it.
-    pub fn validate_input(&self, text: &str) -> Result<(), TeamInvocationError> {
-        if self.lease.is_revoked() || self.quota.is_revoked() {
-            return Err(TeamInvocationError::Revoked);
-        }
-        if text.trim().is_empty()
-            || text.contains('\0')
-            || text.len() > self.limits.max_input_bytes.get() as usize
-        {
-            return Err(TeamInvocationError::Input);
-        }
-        Ok(())
+    pub fn session_id(&self) -> lingxi_core::types::SessionId {
+        self.scope.session_id().expect("validated scope")
+    }
+    pub fn context_window_tokens(&self) -> u32 {
+        self.limits.context_window_tokens.get()
     }
 
     fn check_storage(&self) -> Result<(), TeamInvocationError> {
@@ -297,7 +240,6 @@ impl TeamInvocationProfile {
             "tmp",
             "shell-home",
             "inputs",
-            "home/transcripts",
             "home/tool-output",
         ] {
             check_private_directory(&self.scope_root.join(name))?;
@@ -359,14 +301,13 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     }
     scoped.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;
     scoped.isolated_credential_storage = true;
-    // The product host must supply a Team-only original-human broker. No
-    // generic owner/RC answer route is installed by this profile.
-    scoped.ask_user_question_tx = profile.question_sender.clone();
+    // M1 has no waiting/question/owner approval continuation capability.
+    scoped.ask_user_question_tx = None;
     scoped.team_invocation = Some(profile.clone());
     scoped.session_tool_grant_lease = Some(profile.lease.clone());
     scoped.scope_output_quota = Some(profile.quota.clone());
     scoped.restricted = true;
-    scoped.restricted_tools = Some(vec!["Bash".into(), "AskUserQuestion".into()]);
+    scoped.restricted_tools = Some(vec!["TeamChatHistory".into(), "TeamKnowledge".into()]);
     scoped.setting_source_scope = (false, false);
     scoped.customization_gates = CustomizationGates {
         safe_mode: true,
@@ -401,26 +342,44 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     scoped.max_structured_output_retries = 1;
     scoped.lingxi_home = profile.scope_root.join("home");
     scoped.cwd = profile.scope_root.join("workspace");
-    scoped.session_id_override = Some(format!("sess:{}", profile.invocation_id));
-    scoped.session_transcript_path = Some(
-        scoped
-            .lingxi_home
-            .join("transcripts")
-            .join(format!("{}.jsonl", profile.invocation_id)),
-    );
+    scoped.session_id_override = Some(profile.session_id().to_string());
+    // The ordinary canonical projects path is required by captured resume.
+    // Preserve only a capture of this exact private Bot×Chat session.
+    if config
+        .session_id_override
+        .as_deref()
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
+        == Some(profile.session_id())
+        && config.lingxi_home == scoped.lingxi_home
+        && config.cwd == scoped.cwd
+    {
+        scoped.session_transcript_path = config.session_transcript_path.clone();
+        scoped.session_transcript_authority = config.session_transcript_authority.clone();
+        scoped.session_resume_snapshot = config.session_resume_snapshot.clone();
+        scoped.session_resume_target_snapshot = config.session_resume_target_snapshot.clone();
+        scoped.session_writer_lease = config.session_writer_lease.clone();
+        scoped.session_resume_cost = config.session_resume_cost.clone();
+        scoped.defer_session_start = config.defer_session_start;
+    }
     scoped.append_system_prompt = Some(profile.instructions.to_string().into());
     *config = scoped;
     Ok(())
 }
 
-/// Managed policy can still deny tools, but cannot grant Team shell execution
-/// on the owner's behalf. Every Bash call reaches the host approval adapter.
+/// Published read-only tools are the entire M1 capability set. A managed
+/// policy may deny them but cannot restore ambient owner capabilities.
 pub(super) fn enforce_team_permission_policy(policy: &mut permission::PermissionPolicy) {
     policy.allow_rules.clear();
+    policy.ask_rules.clear();
+    for name in ["TeamChatHistory", "TeamKnowledge"] {
+        let rule = permission::PermissionRule::allow_tool_session(name);
+        policy
+            .allow_rules
+            .entry(rule.source)
+            .or_default()
+            .push(rule);
+    }
     policy.sandbox_runtime = None;
-    let mut ask = permission::PermissionRule::allow_tool_session("Bash");
-    ask.behavior = permission::PermissionBehavior::Ask;
-    policy.ask_rules.entry(ask.source).or_default().push(ask);
     policy.set_mode(permission::PermissionMode::Default);
 }
 

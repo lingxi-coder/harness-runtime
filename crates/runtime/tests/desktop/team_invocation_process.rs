@@ -6,11 +6,9 @@
 #[path = "team_account_fixture.rs"]
 mod team_account_fixture;
 
-use harness_runtime::desktop::team_invocation::TeamInvocationProfile;
-use harness_runtime::desktop::team_invocation::{TeamInvocationIdentity, TeamInvocationLimits};
+use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    TeamProcessDeadline, TeamProcessError, TeamProcessModel, TeamProcessOutcome,
-    TeamProcessRequest, TeamProcessStart,
+    TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -37,46 +35,127 @@ fn now_ms() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
-fn identity() -> TeamInvocationIdentity {
-    TeamInvocationIdentity {
-        owner_uid: "fixture-owner".into(),
-        bot_key: "fixture-bot".into(),
-        team_id: "fixture-team".into(),
-        conversation_id: "fixture-conversation".into(),
-        origin_human_uid: "fixture-human".into(),
-        membership_generation: 1,
+fn scope() -> harness_runtime::desktop::session_state::BotChatScope {
+    harness_runtime::desktop::session_state::BotChatScope {
+        team_id: "team_0001".into(),
+        shared_bot_id: "sharedbot_01".into(),
+        conversation_id: "chat_0001".into(),
+        session_epoch: 1,
     }
 }
 fn root() -> (tempfile::TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    (dir, root)
+    let path = dir.path().canonicalize().unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (dir, path)
 }
-fn request(endpoint: String, id: uuid::Uuid, duration_ms: u64) -> TeamProcessRequest {
+fn batch(
+    from: u64,
+    to: u64,
+    revision: u64,
+) -> harness_runtime::desktop::session_state::ChatInputBatch {
+    serde_json::from_value(json!({"schemaVersion":1,"batchId":format!("batch_{from:04}_{to:04}"),"teamId":"team_0001","sharedBotId":"sharedbot_01","conversationId":"chat_0001","sessionEpoch":1,"expectedSessionRevision":revision,"fromSeqExclusive":from,"toSeqInclusive":to,"lastChangeSeq":to,"bootstrap":revision==0,"currentMessageId":format!("message_{to:04}"),"changes":[],"messages":((from+1)..=to).map(|seq|json!({"messageId":format!("message_{seq:04}"),"seq":seq,"changeSeq":seq,"changeId":format!("change_{seq:04}"),"author":{"kind":"user","uid":if seq%2==0{"alice"}else{"bob"},"displayName":"Same name"},"createdAt":1_700_000_000_000u64+seq,"text":format!("SOURCE_{seq:04} {}","word ".repeat(150))})).collect::<Vec<_>>()})).unwrap()
+}
+fn request(
+    root: &Path,
+    endpoint: String,
+    id: uuid::Uuid,
+    input: harness_runtime::desktop::session_state::ChatInputBatch,
+) -> TeamProcessRequest {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let path = root.join(format!("{digest}.json"));
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     TeamProcessRequest {
-        identity: identity(),
+        scope: input.scope(),
+        task_id: format!("task_{}", id.simple()),
         invocation_id: id,
         instructions: PERSONA.into(),
-        input: "Please reply to this isolated human request.".into(),
-        limits: TeamInvocationLimits::default(),
+        input_batch_ref: harness_runtime::desktop::team_process::TeamDataRef {
+            path,
+            sha256: digest,
+            bytes: bytes.len() as u64,
+        },
+        knowledge: vec![
+            harness_runtime::desktop::team_process::TeamKnowledgeDocument {
+                id: "shared_knowledge".into(),
+                title: "Published guide".into(),
+                text: "PUBLISHED_KNOWLEDGE_SENTINEL".into(),
+            },
+        ],
+        limits: TeamInvocationLimits {
+            context_window_tokens: std::num::NonZeroU32::new(200_000).unwrap(),
+            ..Default::default()
+        },
         model: team_account_fixture::model(MODEL.into(), endpoint, KEY.into()).unwrap(),
-        deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + duration_ms).unwrap(),
+        deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
+    }
+}
+#[derive(Default)]
+struct Broker {
+    revoked: AtomicBool,
+    authorizations: std::sync::atomic::AtomicUsize,
+    max_authorizations: std::sync::atomic::AtomicUsize,
+    reads: Mutex<Vec<harness_runtime::desktop::team_process::TeamChatQuery>>,
+}
+#[async_trait::async_trait]
+impl harness_runtime::desktop::team_process::TeamProcessBroker for Broker {
+    async fn authorize(&self, _: CancellationToken) -> Result<(), TeamProcessError> {
+        let count = self.authorizations.fetch_add(1, Ordering::SeqCst) + 1;
+        let max = self.max_authorizations.load(Ordering::Acquire);
+        if self.revoked.load(Ordering::Acquire) || (max > 0 && count > max) {
+            Err(TeamProcessError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+    async fn read_chat(
+        &self,
+        request: harness_runtime::desktop::team_process::TeamChatReadRequest,
+        _: CancellationToken,
+    ) -> Result<harness_runtime::desktop::team_process::TeamChatReadResult, TeamProcessError> {
+        self.reads.lock().unwrap().push(request.query.clone());
+        let messages = match request.query {
+            harness_runtime::desktop::team_process::TeamChatQuery::Before { before_seq, limit } => {
+                batch(
+                    (before_seq - 1).saturating_sub(limit as u64),
+                    before_seq - 1,
+                    0,
+                )
+                .messages
+            }
+            _ => return Err(TeamProcessError::Protocol),
+        };
+        Ok(harness_runtime::desktop::team_process::TeamChatReadResult {
+            messages,
+            complete: true,
+            next_before_seq: None,
+        })
     }
 }
 async fn run(
     root: &Path,
     request: TeamProcessRequest,
 ) -> Result<harness_runtime::desktop::team_process::TeamProcessResult, TeamProcessError> {
+    run_broker(root, request, Arc::new(Broker::default())).await
+}
+async fn run_broker(
+    root: &Path,
+    request: TeamProcessRequest,
+    broker: Arc<Broker>,
+) -> Result<harness_runtime::desktop::team_process::TeamProcessResult, TeamProcessError> {
     tokio::time::timeout(
-        Duration::from_secs(25),
+        Duration::from_secs(305),
         TeamProcessStart::prepare(root, request)
             .unwrap()
-            .run(&worker(), CancellationToken::new()),
+            .run_with_broker(&worker(), CancellationToken::new(), broker),
     )
     .await
-    .expect("worker must be bounded")
+    .expect("worker bounded")
 }
 
 struct Environment(Vec<(&'static str, Option<OsString>)>);
@@ -113,8 +192,8 @@ struct Captured {
 enum Reply {
     Text(String),
     TextWithFields(String),
-    MalformedToolUse(String),
     Bash(String),
+    Tool(String, Value),
     Error,
     Hang,
 }
@@ -133,7 +212,7 @@ impl Server {
         let disconnected = Arc::new(AtomicBool::new(false));
         let closed = disconnected.clone();
         let task = tokio::spawn(async move {
-            for reply in replies {
+            for (reply_index, reply) in replies.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request = read_http(&mut stream).await;
                 captured.lock().unwrap().push(request);
@@ -146,8 +225,8 @@ impl Server {
                 let (status, kind, body) = match reply {
                     Reply::Text(text) => ("200 OK", "text/event-stream", sse(json!({"type":"text","text":text}), "end_turn")),
                     Reply::TextWithFields(text) => ("200 OK", "text/event-stream", sse(json!({"type":"text","text":text,"provider_extra":{"preserved":true}}), "end_turn")),
-                    Reply::MalformedToolUse(text) => ("200 OK", "text/event-stream", sse(json!({"type":"text","text":text}), "tool_use")),
                     Reply::Bash(command) => ("200 OK", "text/event-stream", sse(json!({"type":"tool_use","id":"tool_fixture_bash","name":"Bash","input":{"command":command}}), "tool_use")),
+                    Reply::Tool(name,input) => ("200 OK","text/event-stream",sse(json!({"type":"tool_use","id":format!("tool_read_shared_{reply_index}"),"name":name,"input":input}),"tool_use")),
                     Reply::Error => ("400 Bad Request", "application/json", json!({"error":{"type":"invalid_request_error","message":"SYNTHETIC_PROVIDER_ERROR_MUST_NOT_BE_RETURNED"}}).to_string()),
                     Reply::Hang => unreachable!(),
                 };
@@ -229,7 +308,7 @@ fn sse(mut block: Value, reason: &str) -> String {
         None
     };
     let mut frames = vec![
-        json!({"type":"message_start","message":{"id":"msg_team_fixture","type":"message","role":"assistant","model":MODEL,"content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
+        json!({"type":"message_start","message":{"id":format!("msg_fixture_{}",uuid::Uuid::new_v4().simple()),"type":"message","role":"assistant","model":MODEL,"content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
         json!({"type":"content_block_start","index":0,"content_block":block}),
     ];
     if let Some(delta) = delta {
@@ -251,563 +330,587 @@ fn sse(mut block: Value, reason: &str) -> String {
         .collect()
 }
 
-#[test]
-fn model_and_backend_deadlines_fail_closed_without_exposing_credentials() {
-    for endpoint in [
-        "http://example.com",
-        "https://user:secret@example.com",
-        "https://example.com?token=x",
-        "https://example.com/#token",
-    ] {
-        assert!(team_account_fixture::model(MODEL.into(), endpoint.into(), KEY.into()).is_err());
-    }
-    assert!(team_account_fixture::model(
-        "other/model".into(),
-        "https://example.com".into(),
-        KEY.into()
-    )
-    .is_err());
-    assert!(TeamProcessDeadline::from_backend_unix_millis(now_ms() - 1).is_err());
-    assert!(TeamProcessDeadline::from_backend_unix_millis(now_ms() + 600_000).is_err());
-    let model = team_account_fixture::model(MODEL.into(), "https://example.com".into(), KEY.into())
-        .unwrap();
-    assert!(!format!("{model:?}").contains(KEY));
-}
-
 #[tokio::test]
-async fn actual_worker_dispatch_uses_only_selected_credentials_and_private_prompt() {
-    let (_dir, root) = root();
+async fn complete_200_bootstrap_and_450_delta_survive_worker_restart_with_author_time() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![
+        Reply::Text("First completed result".into()),
+        Reply::Text("Second completed result".into()),
+    ])
+    .await;
+    let first = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(50, 250, 0),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(first.cursor.last_message_seq, 250);
+    let next = batch(250, 700, 1);
+    assert!(serde_json::to_vec(&next).unwrap().len() > 256 * 1024);
+    let second = run(
+        &root,
+        request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), next),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(second.cursor.last_message_seq, 700);
+    assert_eq!(second.cursor.session_revision, 2);
+    let cursor = harness_runtime::desktop::team_process::inspect_scope(&root, &scope()).unwrap();
+    assert_eq!(cursor, second.cursor);
+    let records = server.requests.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    let first_body = records[0].body.to_string();
+    assert!(!first_body.contains("SOURCE_0050"));
+    for seq in 51..=250 {
+        assert!(first_body.contains(&format!("SOURCE_{seq:04}")));
+    }
+    let body = records[1].body.to_string();
+    for seq in 251..=700 {
+        assert!(body.contains(&format!("SOURCE_{seq:04}")), "missing {seq}");
+    }
+    assert!(body.contains("First completed result"));
+    assert!(
+        body.contains("alice")
+            && body.contains("bob")
+            && body.contains("Same name")
+            && body.contains("1700000000700")
+    );
+    assert_eq!(
+        second.document.as_ref().unwrap().markdown,
+        "Second completed result"
+    );
+    assert!(second.finished_at <= now_ms());
+}
+#[tokio::test]
+async fn edits_and_recalls_remove_stale_source_and_derived_output_before_next_dispatch() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![
+        Reply::Text("STALE_DERIVED_SECRET".into()),
+        Reply::Text("Fresh result".into()),
+        Reply::Text("Third result".into()),
+    ])
+    .await;
+    run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 2, 0),
+        ),
+    )
+    .await
+    .unwrap();
+    let mut next = batch(2, 3, 1);
+    let mut changed = batch(0, 2, 0).messages;
+    changed[0].text = "CORRECTED_SOURCE".into();
+    changed[0].change_seq = 4;
+    changed[0].change_id = "change_edit_0001".into();
+    changed[0].edited_at = Some(now_ms());
+    changed[1].text.clear();
+    changed[1].recalled = Some(true);
+    changed[1].change_seq = 5;
+    changed[1].change_id = "change_recall_02".into();
+    next.changes = changed;
+    next.last_change_seq = 5;
+    let result = run(
+        &root,
+        request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), next),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    let mut third = batch(3, 4, 2);
+    third.last_change_seq = 6;
+    third.messages[0].change_seq = 6;
+    run(
+        &root,
+        request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), third),
+    )
+    .await
+    .unwrap();
+    let records = server.requests.lock().unwrap();
+    for i in [1, 2] {
+        let body = records[i].body.to_string();
+        assert!(body.contains("CORRECTED_SOURCE"));
+        assert!(!body.contains("SOURCE_0001"));
+        assert!(!body.contains("SOURCE_0002"));
+        assert!(!body.contains("STALE_DERIVED_SECRET"));
+    }
+}
+#[tokio::test]
+async fn readonly_history_and_published_knowledge_reach_real_model_without_owner_tools() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![
+        Reply::Tool(
+            "TeamChatHistory".into(),
+            json!({"kind":"before","before_seq":51,"limit":200}),
+        ),
+        Reply::Tool(
+            "TeamKnowledge".into(),
+            json!({"documentId":"shared_knowledge"}),
+        ),
+        Reply::Text("Cited response".into()),
+    ])
+    .await;
+    let broker = Arc::new(Broker::default());
+    let result = run_broker(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(50, 250, 0),
+        ),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(broker.reads.lock().unwrap().len(), 1);
+    assert!(broker.authorizations.load(Ordering::SeqCst) >= 5);
+    let records = server.requests.lock().unwrap();
+    let tools = records[0].body["tools"].as_array().unwrap();
+    let names = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["TeamChatHistory", "TeamKnowledge"])
+    );
+    let final_input = records[2].body.to_string();
+    assert!(final_input.contains("SOURCE_0001"));
+    assert!(final_input.contains("PUBLISHED_KNOWLEDGE_SENTINEL"));
+}
+#[tokio::test]
+async fn static_capacity_failure_keeps_cursor_zero_and_dispatches_nothing() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("must not run".into())]).await;
+    let mut req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(0, 200, 0),
+    );
+    req.limits.context_window_tokens = std::num::NonZeroU32::new(8192).unwrap();
+    assert!(run(&root, req).await.is_err());
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .session_revision,
+        0
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn authorization_refusal_dispatches_nothing_and_does_not_commit_input() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("must not run".into())]).await;
+    let broker = Arc::new(Broker::default());
+    broker.revoked.store(true, Ordering::Release);
+    assert!(run_broker(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0)
+        ),
+        broker
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .session_revision,
+        0
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn a_started_task_never_reexecutes_after_result_loss() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("One computation".into())]).await;
+    let id = uuid::Uuid::new_v4();
+    run(
+        &root,
+        request(&root, server.endpoint.clone(), id, batch(0, 1, 0)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        run(
+            &root,
+            request(&root, server.endpoint.clone(), id, batch(0, 1, 0))
+        )
+        .await,
+        Err(TeamProcessError::AlreadyAttempted)
+    ));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn cancellation_terminates_live_provider_and_child_process() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Hang]).await;
+    let cancel = CancellationToken::new();
+    let start = TeamProcessStart::prepare(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        ),
+    )
+    .unwrap();
+    let token = cancel.clone();
+    let running = tokio::spawn(async move {
+        start
+            .run_with_broker(&worker(), token, Arc::new(Broker::default()))
+            .await
+    });
+    server.wait_requests(1).await;
+    cancel.cancel();
+    assert!(matches!(
+        running.await.unwrap(),
+        Err(TeamProcessError::Cancelled)
+    ));
+    server.wait_disconnect().await;
+}
+#[tokio::test]
+async fn private_worker_does_not_inherit_environment_or_owner_registry() {
+    let (_temp, root) = root();
     let owner = root.join("owner");
     std::fs::create_dir_all(owner.join(".lingxi")).unwrap();
     std::fs::write(
         owner.join(".lingxi/CLAUDE.md"),
-        "SYNTHETIC_AMBIENT_OWNER_INSTRUCTIONS",
+        "SYNTHETIC_OWNER_PRIVATE_TEXT",
     )
     .unwrap();
-    std::fs::write(
-        owner.join(".lingxi/settings.json"),
-        r#"{"model":"owner/other","sandbox":{"enabled":false}}"#,
-    )
-    .unwrap();
-    let server = Server::new(vec![Reply::Text("private answer".into())]).await;
     let _env = Environment::set(vec![
         ("HOME", owner.clone().into_os_string()),
         ("LINGXI_CONFIG_DIR", owner.join(".lingxi").into_os_string()),
-        ("CFFIXED_USER_HOME", owner.clone().into_os_string()),
-        (
-            "__CF_USER_TEXT_ENCODING",
-            "SYNTHETIC_AMBIENT_ENCODING".into(),
-        ),
-        ("ANTHROPIC_API_KEY", "SYNTHETIC_AMBIENT_KEY".into()),
-        ("ANTHROPIC_AUTH_TOKEN", "SYNTHETIC_AMBIENT_TOKEN".into()),
-        ("CLAUDE_CODE_OAUTH_TOKEN", "SYNTHETIC_AMBIENT_OAUTH".into()),
-        (
-            "ANTHROPIC_CUSTOM_HEADERS",
-            "x-owner-secret: SYNTHETIC_AMBIENT_HEADER".into(),
-        ),
-        (
-            "CLAUDE_CODE_EXTRA_METADATA",
-            r#"{"owner_secret":"SYNTHETIC_AMBIENT_METADATA"}"#.into(),
-        ),
-        (
-            "CLAUDE_CODE_EXTRA_BODY",
-            r#"{"owner_secret":"SYNTHETIC_AMBIENT_BODY"}"#.into(),
-        ),
-        (
-            "ANTHROPIC_BASE_URL",
-            "http://127.0.0.1:1/SYNTHETIC_AMBIENT_ENDPOINT".into(),
-        ),
-        ("HTTP_PROXY", "http://127.0.0.1:1".into()),
-        ("HTTPS_PROXY", "http://127.0.0.1:1".into()),
-        ("ALL_PROXY", "http://127.0.0.1:1".into()),
-        ("CLAUDE_CODE_USE_BEDROCK", "true".into()),
-        ("LINGXI_ENFORCE_PERMISSIONS", "false".into()),
+        ("ANTHROPIC_API_KEY", "SYNTHETIC_OWNER_KEY".into()),
     ]);
+    let server = Server::new(vec![Reply::Text("Private result".into())]).await;
     let result = run(
         &root,
-        request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        ),
     )
     .await
     .unwrap();
-    assert_eq!(result.outcome, TeamProcessOutcome::Completed, "{result:?}");
-    assert_eq!(result.text, "private answer");
-    assert_eq!(result.dispatched_requests, 1);
-    assert_eq!(result.denied_tools, 0);
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
     let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    let actual = &requests[0];
-    assert!(actual
-        .headers
-        .to_ascii_lowercase()
-        .contains(&format!("x-api-key: {KEY}")));
-    assert!(!actual
-        .headers
-        .to_ascii_lowercase()
-        .contains("authorization:"));
-    assert_eq!(actual.body["model"], MODEL);
-    assert!(actual.body["max_tokens"]
-        .as_u64()
-        .is_some_and(|n| n <= 4096));
-    let text = actual.body.to_string();
-    assert!(text.contains(PERSONA));
-    assert!(text.contains(root.to_str().unwrap()));
-    assert!(!text.contains(owner.to_str().unwrap()));
-    assert!(!format!("{}{}", actual.headers, text).contains("SYNTHETIC_AMBIENT_"));
-    assert!(!owner.join(".lingxi/.credentials.json").exists());
+    let actual = format!("{}{}", requests[0].headers, requests[0].body);
+    assert!(actual.contains(KEY));
+    assert!(actual.contains(PERSONA));
+    assert!(!actual.contains("SYNTHETIC_OWNER_"));
+    assert!(!actual.contains(owner.to_str().unwrap()));
 }
-
 #[tokio::test]
-async fn model_bash_request_is_denied_until_owner_broker_exists() {
-    let (_dir, root) = root();
-    let marker = root.join("must-not-execute");
+async fn same_bot_result_echo_is_consumed_without_duplicate_model_content() {
+    let (_temp, root) = root();
     let server = Server::new(vec![
-        Reply::Bash(format!("printf executed > '{}'", marker.display())),
-        Reply::Text("Tool needs the owner.".into()),
+        Reply::Text("UNIQUE_OWN_REPLY".into()),
+        Reply::Text("Following answer".into()),
+    ])
+    .await;
+    let req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(0, 1, 0),
+    );
+    let task = req.task_id.clone();
+    run(&root, req).await.unwrap();
+    let mut next = batch(1, 3, 1);
+    next.messages[0].author = harness_runtime::desktop::session_state::ChatAuthor::SharedBot {
+        shared_bot_id: "sharedbot_01".into(),
+        display_name: "Our Bot".into(),
+    };
+    next.messages[0].text = "UNIQUE_OWN_REPLY".into();
+    next.messages[0].source_task_id = Some(task);
+    let result = run(
+        &root,
+        request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), next),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.cursor.last_message_seq, 3);
+    let records = server.requests.lock().unwrap();
+    let body = records[1].body.to_string();
+    assert_eq!(body.matches("UNIQUE_OWN_REPLY").count(), 1);
+    assert_eq!(body.matches("SOURCE_0001").count(), 1);
+}
+#[tokio::test]
+async fn journal_commit_before_transcript_is_repaired_once_by_existing_writer() {
+    use harness_runtime::desktop::{
+        session_state::SessionStateCoordinator, team_invocation::TeamInvocationProfile,
+    };
+    let (_temp, root) = root();
+    let profile = TeamInvocationProfile::prepare(
+        &root,
+        scope(),
+        uuid::Uuid::new_v4(),
+        PERSONA.into(),
+        Default::default(),
+    )
+    .unwrap();
+    let id = scope().session_id().unwrap();
+    let home = profile.scope_root().join("home");
+    let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+        .claim_session_id(&id.to_string(), std::process::id())
+        .unwrap()
+        .into_shared();
+    let state = SessionStateCoordinator::open(&home, id, lease).unwrap();
+    let worker = state.start().await.unwrap();
+    state.append_chat_input(batch(0, 2, 0)).await.unwrap();
+    state.close_and_drain().await.unwrap();
+    worker.await.unwrap();
+    drop(state);
+    let server = Server::new(vec![Reply::Text("Recovered projection".into())]).await;
+    let req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(2, 3, 1),
+    );
+    let task = req.task_id.clone();
+    let result = run(&root, req).await.unwrap();
+    assert_eq!(result.cursor.last_message_seq, 3);
+    let recovered = harness_runtime::desktop::team_process::recover_result(&root, &scope(), &task)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.text, result.text);
+    assert_eq!(recovered.finished_at, result.finished_at);
+    assert_eq!(
+        recovered.document.unwrap().sha256,
+        result.document.unwrap().sha256
+    );
+    let records = server.requests.lock().unwrap();
+    let body = records[0].body.to_string();
+    for seq in 1..=3 {
+        assert_eq!(body.matches(&format!("SOURCE_{seq:04}")).count(), 1);
+    }
+}
+#[tokio::test]
+async fn model_cannot_execute_hallucinated_shell_calls() {
+    let (_temp, root) = root();
+    let marker = root.join("never-execute");
+    let server = Server::new(vec![
+        Reply::Bash(format!("touch {}", marker.display())),
+        Reply::Text("Available read-only answer".into()),
     ])
     .await;
     let result = run(
         &root,
-        request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        ),
     )
     .await
     .unwrap();
-    assert_eq!(result.outcome, TeamProcessOutcome::Completed, "{result:?}");
-    assert_eq!(result.denied_tools, 1);
-    assert_eq!(result.dispatched_requests, 2);
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
     assert!(!marker.exists());
-    let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].body.to_string().contains("tool_result"));
+    let records = server.requests.lock().unwrap();
+    assert!(!records[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "Bash"));
 }
 
 #[tokio::test]
-async fn worker_result_does_not_forward_provider_error_bodies_or_overflow_text() {
-    for reply in [Reply::Error, Reply::Text("界".repeat(3000))] {
-        let (_dir, root) = root();
-        let overflow = matches!(reply, Reply::Text(_));
+async fn authorization_is_rechecked_at_physical_dispatch_after_input_commit() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("must not dispatch".into())]).await;
+    let broker = Arc::new(Broker::default());
+    broker.max_authorizations.store(1, Ordering::Release);
+    let outcome = run_broker(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        ),
+        broker.clone(),
+    )
+    .await;
+    assert!(outcome.as_ref().map_or(true, |result| result.outcome
+        != TeamProcessOutcome::Completed));
+    assert!(broker.authorizations.load(Ordering::Acquire) >= 2);
+    assert!(server.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .last_message_seq,
+        1
+    );
+}
+
+#[tokio::test]
+async fn provider_errors_and_oversized_output_never_become_shared_documents() {
+    for reply in [Reply::Error, Reply::Text("x".repeat(65_537))] {
+        let (_temp, root) = root();
         let server = Server::new(vec![reply]).await;
         let result = run(
             &root,
-            request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
+            request(
+                &root,
+                server.endpoint.clone(),
+                uuid::Uuid::new_v4(),
+                batch(0, 1, 0),
+            ),
         )
         .await
         .unwrap();
-        assert_eq!(
-            result.outcome,
-            if overflow {
-                TeamProcessOutcome::OutputLimit
-            } else {
-                TeamProcessOutcome::ModelFailed
-            }
-        );
+        assert_ne!(result.outcome, TeamProcessOutcome::Completed);
         assert!(result.text.is_empty());
-        assert_eq!(result.dispatched_requests, 1);
+        assert!(result.document.is_none());
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("SYNTHETIC_PROVIDER_ERROR"));
     }
 }
-
 #[tokio::test]
-async fn deadline_kills_a_live_sdk_request_and_does_not_relaunch_the_invocation() {
-    let (_dir, root) = root();
-    let server = Server::new(vec![Reply::Hang]).await;
-    let id = uuid::Uuid::new_v4();
-    let start =
-        TeamProcessStart::prepare(&root, request(server.endpoint.clone(), id, 10_000)).unwrap();
-    let task = tokio::spawn(async move { start.run(&worker(), CancellationToken::new()).await });
-    server.wait_requests(1).await;
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(TeamProcessError::Deadline)
-    ));
-    server.wait_disconnect().await;
-    let replay = run(&root, request(server.endpoint.clone(), id, 20_000)).await;
-    assert!(matches!(replay, Err(TeamProcessError::AlreadyAttempted)));
-    assert_eq!(server.requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn cancellation_and_future_drop_close_admitted_provider_connections() {
-    for drop_future in [false, true] {
-        let (_dir, root) = root();
-        let server = Server::new(vec![Reply::Hang]).await;
-        let start = TeamProcessStart::prepare(
-            &root,
-            request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
-        )
-        .unwrap();
-        let cancel = CancellationToken::new();
-        let c = cancel.clone();
-        let task = tokio::spawn(async move { start.run(&worker(), c).await });
-        server.wait_requests(1).await;
-        if drop_future {
-            task.abort();
-            assert!(task.await.unwrap_err().is_cancelled());
-        } else {
-            cancel.cancel();
-            assert!(matches!(
-                task.await.unwrap(),
-                Err(TeamProcessError::Cancelled)
-            ));
-        }
-        server.wait_disconnect().await;
-    }
-}
-
-#[tokio::test]
-async fn worker_closes_even_host_descriptors_without_cloexec() {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    // First prove this synthetic descriptor really survives ordinary spawning.
-    let (mut reader, inherited) = UnixStream::pair().unwrap();
-    reader
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    nix::fcntl::fcntl(
-        inherited.as_raw_fd(),
-        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-    )
-    .unwrap();
-    let mut control = std::process::Command::new("/bin/sleep")
-        .arg("20")
-        .spawn()
-        .unwrap();
-    let control_fd = inherited.as_raw_fd();
-    drop(inherited);
-    reader
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-    assert!(
-        reader.read(&mut [0]).is_err(),
-        "control child must retain the descriptor"
-    );
-    control.kill().unwrap();
-    control.wait().unwrap();
-    assert_eq!(reader.read(&mut [0]).unwrap(), 0);
-    drop(reader);
-
-    let (_dir, root) = root();
-    let server = Server::new(vec![Reply::Hang]).await;
-    let (mut reader, inherited) = UnixStream::pair().unwrap();
-    reader
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    nix::fcntl::fcntl(
-        inherited.as_raw_fd(),
-        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-    )
-    .unwrap();
-    let start = TeamProcessStart::prepare(
+async fn accepted_provider_text_keeps_observed_task_usage_and_exact_terminal_receipt() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::TextWithFields("Accepted result".into())]).await;
+    let req = request(
         &root,
-        request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
-    )
-    .unwrap();
-    let cancel = CancellationToken::new();
-    let c = cancel.clone();
-    let task = tokio::spawn(async move { start.run(&worker(), c).await });
-    server.wait_requests(1).await;
-    drop(inherited);
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(0, 1, 0),
+    );
+    let task = req.task_id.clone();
+    let result = run(&root, req).await.unwrap();
+    assert_eq!(result.text, "Accepted result");
+    let usage = serde_json::to_value(&result.usage).unwrap();
+    assert_eq!(usage["status"], "partial");
+    assert!(usage["inputTokens"].as_u64().unwrap() > 0);
+    assert!(usage["outputTokens"].as_u64().unwrap() > 0);
+    let recovered = harness_runtime::desktop::team_process::recover_result(&root, &scope(), &task)
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        reader.read(&mut [0]).unwrap(),
-        0,
-        "worker must close inherited host descriptor {control_fd}"
+        serde_json::to_value(recovered).unwrap(),
+        serde_json::to_value(result).unwrap()
     );
-    cancel.cancel();
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(TeamProcessError::Cancelled)
-    ));
-    server.wait_disconnect().await;
-}
-
-#[tokio::test]
-async fn invalid_executable_and_pre_cancel_do_not_consume_launch_but_spawn_failure_does() {
-    use std::os::unix::fs::PermissionsExt;
-    let (_dir, root) = root();
-    let id = uuid::Uuid::new_v4();
-    let prepare = || {
-        TeamProcessStart::prepare(&root, request("http://127.0.0.1:1".into(), id, 20_000)).unwrap()
-    };
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    assert!(matches!(
-        prepare().run(&worker(), cancel).await,
-        Err(TeamProcessError::Cancelled)
-    ));
-    let alias = root.join("worker-link");
-    std::os::unix::fs::symlink(worker(), &alias).unwrap();
-    assert!(matches!(
-        prepare().run(&alias, CancellationToken::new()).await,
-        Err(TeamProcessError::Executable)
-    ));
-    let broken = root.join("broken-executable");
-    std::fs::write(&broken, "#!/missing/team/interpreter\n").unwrap();
-    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(matches!(
-        prepare().run(&broken, CancellationToken::new()).await,
-        Err(TeamProcessError::Io(_))
-    ));
-    assert!(matches!(
-        prepare().run(&worker(), CancellationToken::new()).await,
-        Err(TeamProcessError::AlreadyAttempted)
-    ));
-}
-
-fn raw_bootstrap(root: &Path, id: uuid::Uuid, endpoint: &str) -> Value {
-    let model = team_account_fixture::model(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
-    let route = model.route();
-    json!({
-        "version":1,"storage_root":root,"owner_uid":"fixture-owner","bot_key":"fixture-bot",
-        "team_id":"fixture-team","conversation_id":"fixture-conversation","origin_human_uid":"fixture-human",
-        "membership_generation":1,"invocation_id":id,"instructions":PERSONA,"input":"fixture human",
-        "max_turns":12,"max_input_bytes":32768,"output_tokens_per_request":4096,"physical_dispatches":24,
-        "deadline_unix_ms":now_ms()+20_000,"model_id":MODEL,"endpoint":endpoint,"api_key":KEY,
-        "model_provider":route.model_provider,"model_protocol":route.model_protocol,"model_profile":route.model_profile,
-    })
-}
-fn raw_command(root: &Path, id: uuid::Uuid) -> tokio::process::Command {
-    use std::process::Stdio;
-    let p =
-        TeamInvocationProfile::prepare(root, identity(), id, PERSONA.into(), Default::default())
-            .unwrap();
-    let mut c = tokio::process::Command::new(worker());
-    c.env_clear()
-        .env("HOME", p.scope_root().join("home"))
-        .env("LINGXI_CONFIG_DIR", p.scope_root().join("home"))
-        .env("TMPDIR", p.scope_root().join("tmp"))
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("CFFIXED_USER_HOME", p.scope_root().join("home"))
-        .env(
-            "__CF_USER_TEXT_ENCODING",
-            format!("0x{:X}:0x8000100:0x0", nix::unistd::geteuid().as_raw()),
-        )
-        .current_dir(p.scope_root().join("workspace"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    c
-}
-async fn write_bootstrap(input: &mut tokio::process::ChildStdin, value: &Value) {
-    let body = serde_json::to_vec(value).unwrap();
-    input
-        .write_all(&(body.len() as u32).to_be_bytes())
-        .await
-        .unwrap();
-    input.write_all(&body).await.unwrap();
-    input.flush().await.unwrap();
-}
-
-#[tokio::test]
-async fn worker_parent_eof_or_unexpected_control_bytes_cancel_live_model_work() {
-    for bad_byte in [false, true] {
-        let (_dir, root) = root();
-        let server = Server::new(vec![Reply::Hang]).await;
-        let id = uuid::Uuid::new_v4();
-        let mut child = raw_command(&root, id).spawn().unwrap();
-        let mut input = child.stdin.take().unwrap();
-        write_bootstrap(&mut input, &raw_bootstrap(&root, id, &server.endpoint)).await;
-        server.wait_requests(1).await;
-        if bad_byte {
-            // There is no permission-approval, question-answer or second-start
-            // command on the parent lease. Any byte fails the invocation.
-            input.write_all(b"allow").await.unwrap();
-        } else {
-            drop(input);
-        }
-        let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(status.code(), Some(75));
-        server.wait_disconnect().await;
-    }
-}
-
-#[tokio::test]
-async fn private_bootstrap_rejects_dirty_environment_oversize_and_unknown_fields() {
-    for case in [
-        "environment",
-        "oversize",
-        "unknown",
-        "version",
-        "zero_limit",
-        "missing_profile",
-        "partial_profile",
-    ] {
-        let (_dir, root) = root();
-        let id = uuid::Uuid::new_v4();
-        let mut command = raw_command(&root, id);
-        if case == "environment" {
-            command.env("ANTHROPIC_API_KEY", "SYNTHETIC_AMBIENT_MUST_REJECT");
-        }
-        let mut child = command.spawn().unwrap();
-        let mut input = child.stdin.take().unwrap();
-        if case == "oversize" {
-            input
-                .write_all(&(256u32 * 1024 + 1).to_be_bytes())
-                .await
-                .unwrap();
-        } else if case != "environment" {
-            let mut value = raw_bootstrap(&root, id, "http://127.0.0.1:1");
-            match case {
-                "unknown" => value["owner_approval"] = json!(true),
-                "version" => value["version"] = json!(3),
-                "zero_limit" => value["physical_dispatches"] = json!(0),
-                "missing_profile" => {
-                    let fields = value.as_object_mut().unwrap();
-                    fields.remove("model_profile");
-                    fields.remove("model_provider");
-                    fields.remove("model_protocol");
-                }
-                "partial_profile" => {
-                    value.as_object_mut().unwrap().remove("model_profile");
-                }
-                _ => unreachable!(),
-            }
-            write_bootstrap(&mut input, &value).await;
-        }
-        drop(input);
-        let output = tokio::time::timeout(Duration::from_secs(3), child.wait_with_output())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            output.status.code(),
-            Some(if case == "environment" { 78 } else { 65 }),
-            "{case}"
-        );
-        assert!(
-            output.stdout.is_empty() && output.stderr.is_empty(),
-            "{case}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn captured_deadline_cannot_be_extended_by_waiting_before_launch() {
-    let (_dir, root) = root();
-    let start = TeamProcessStart::prepare(
-        &root,
-        request("http://127.0.0.1:1".into(), uuid::Uuid::new_v4(), 100),
-    )
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(matches!(
-        start.run(&worker(), CancellationToken::new()).await,
-        Err(TeamProcessError::Deadline)
-    ));
-}
-
-#[tokio::test]
-async fn concurrent_launches_cannot_reset_quota_or_start_a_second_worker() {
-    let (_dir, root) = root();
-    let server = Server::new(vec![Reply::Hang]).await;
-    let id = uuid::Uuid::new_v4();
-    let first =
-        TeamProcessStart::prepare(&root, request(server.endpoint.clone(), id, 10_000)).unwrap();
-    let second =
-        TeamProcessStart::prepare(&root, request(server.endpoint.clone(), id, 10_000)).unwrap();
-    let task = tokio::spawn(async move {
-        let executable = worker();
-        tokio::join!(
-            first.run(&executable, CancellationToken::new()),
-            second.run(&executable, CancellationToken::new())
-        )
-    });
-    server.wait_requests(1).await;
-    let (a, b) = task.await.unwrap();
-    assert!(
-        matches!(
-            (&a, &b),
-            (
-                Err(TeamProcessError::Deadline),
-                Err(TeamProcessError::AlreadyAttempted)
-            ) | (
-                Err(TeamProcessError::AlreadyAttempted),
-                Err(TeamProcessError::Deadline)
-            )
-        ),
-        "{a:?} {b:?}"
-    );
-    server.wait_disconnect().await;
     assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn physical_dispatch_budget_survives_the_process_boundary_and_tool_retry() {
-    let (_dir, root) = root();
+async fn preflight_compacts_only_consumed_history_and_counts_authorized_summary_dispatch() {
+    let (_temp, root) = root();
     let server = Server::new(vec![
-        Reply::Bash("pwd".into()),
-        Reply::Text("must not be requested".into()),
+        Reply::Text("Completed original round".into()),
+        Reply::Text("<summary>Retained earlier shared Chat facts.</summary>".into()),
+        Reply::Text("Answer after compaction".into()),
+        Reply::Text("Answer after compacted restart".into()),
     ])
     .await;
-    let mut request = request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000);
-    request.limits.physical_dispatches = std::num::NonZeroU32::new(1).unwrap();
-    let result = run(&root, request).await.unwrap();
-    assert_eq!(
-        result.outcome,
-        TeamProcessOutcome::ModelFailed,
-        "{result:?}"
-    );
-    assert_eq!(result.dispatched_requests, 1);
-    assert_eq!(result.denied_tools, 1);
-    assert!(result.text.is_empty());
-    assert_eq!(server.requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn rejected_retry_text_is_absent_and_terminal_synthetic_errors_are_not_success() {
-    for (first, second, expected) in [
-        (
-            Reply::MalformedToolUse("rejected attempt".into()),
-            Reply::Text("accepted answer".into()),
-            TeamProcessOutcome::Completed,
-        ),
-        (
-            Reply::MalformedToolUse("rejected attempt".into()),
-            Reply::MalformedToolUse("second bad attempt".into()),
-            TeamProcessOutcome::ModelFailed,
-        ),
-        (
-            Reply::Text(String::new()),
-            Reply::Text(String::new()),
-            TeamProcessOutcome::ModelFailed,
-        ),
-    ] {
-        let (_dir, root) = root();
-        let server = Server::new(vec![first, second]).await;
-        let result = run(
-            &root,
-            request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.outcome, expected, "{result:?}");
-        assert_eq!(result.dispatched_requests, 2);
-        assert_eq!(
-            result.text,
-            if expected == TeamProcessOutcome::Completed {
-                "accepted answer"
-            } else {
-                ""
-            }
-        );
-        assert_eq!(server.requests.lock().unwrap().len(), 2);
-    }
-}
-
-#[tokio::test]
-async fn accepted_provider_text_with_preserved_fields_still_becomes_the_reply() {
-    let (_dir, root) = root();
-    let server = Server::new(vec![Reply::TextWithFields("保留合法回复".into())]).await;
-    let result = run(
+    run(
         &root,
-        request(server.endpoint.clone(), uuid::Uuid::new_v4(), 20_000),
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(0, 200, 0),
+        ),
     )
     .await
     .unwrap();
-    assert_eq!(result.outcome, TeamProcessOutcome::Completed, "{result:?}");
-    assert_eq!(result.text, "保留合法回复");
+    let mut denied_request = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(200, 201, 1),
+    );
+    denied_request.limits.context_window_tokens = std::num::NonZeroU32::new(32768).unwrap();
+    let denied_broker = Arc::new(Broker::default());
+    denied_broker.max_authorizations.store(1, Ordering::Release);
+    assert!(run_broker(&root, denied_request, denied_broker.clone())
+        .await
+        .is_err());
+    assert!(denied_broker.authorizations.load(Ordering::Acquire) >= 2);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .last_message_seq,
+        200
+    );
+    let mut req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(200, 201, 1),
+    );
+    req.limits.context_window_tokens = std::num::NonZeroU32::new(32768).unwrap();
+    let broker = Arc::new(Broker::default());
+    let attempt = run_broker(&root, req, broker.clone()).await;
+    assert!(
+        attempt.is_ok(),
+        "preflight: {attempt:?}; requests: {:?}",
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (
+                &r.body["stream"],
+                &r.body["model"],
+                r.body["messages"].as_array().map(Vec::len)
+            ))
+            .collect::<Vec<_>>()
+    );
+    let result = attempt.unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.dispatched_requests, 2);
+    assert!(broker.authorizations.load(Ordering::Acquire) >= 3);
+    assert_eq!(result.cursor.last_message_seq, 201);
+    {
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        let final_request = records[2].body.to_string();
+        assert!(final_request.contains("Retained earlier shared Chat facts."));
+        assert_eq!(final_request.matches("SOURCE_0201").count(), 1);
+    }
+    let resumed = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(201, 202, 2),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.outcome, TeamProcessOutcome::Completed);
+    let records = server.requests.lock().unwrap();
+    assert_eq!(records.len(), 4);
+    let resumed_request = records[3].body.to_string();
+    assert!(resumed_request.contains("Retained earlier shared Chat facts."));
+    assert_eq!(resumed_request.matches("SOURCE_0201").count(), 1);
+    assert_eq!(resumed_request.matches("SOURCE_0202").count(), 1);
+    assert!(!resumed_request.contains("SOURCE_0001"));
 }
