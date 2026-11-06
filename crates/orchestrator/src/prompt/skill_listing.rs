@@ -355,6 +355,11 @@ pub struct NativeSkillListingDiagnostics {
 /// (`commands.ts:565`).
 #[async_trait]
 pub trait SkillListingProvider: Send + Sync {
+    /// Live host capability gate, also checked before restoring an invoked skill.
+    /// Ordinary user-selected visibility and preload rules retain their behavior.
+    fn is_skill_available(&self, _name: &Source) -> bool {
+        true
+    }
     /// Return one complete view so entries, mode, priority, and settings do
     /// not come from separate registry/settings reads.
     async fn skill_listing_snapshot(&self) -> Result<SkillListingSnapshot, SettingsError>;
@@ -365,6 +370,42 @@ pub trait SkillListingProvider: Send + Sync {
         _entries: &[SkillListingEntry],
     ) -> Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError> {
         Ok(tool_api::tool_trait::BashPrecommitSkills::default())
+    }
+}
+
+/// Apply host capability availability without rebuilding static catalog metadata.
+pub struct CapabilityGatedSkillListingProvider {
+    inner: Arc<dyn SkillListingProvider>,
+    available: Arc<dyn Fn(&Source) -> bool + Send + Sync>,
+}
+
+impl CapabilityGatedSkillListingProvider {
+    /// Wrap the existing provider with a synchronous, host-owned capability fact.
+    pub fn new(
+        inner: Arc<dyn SkillListingProvider>,
+        available: Arc<dyn Fn(&Source) -> bool + Send + Sync>,
+    ) -> Self {
+        Self { inner, available }
+    }
+}
+
+#[async_trait]
+impl SkillListingProvider for CapabilityGatedSkillListingProvider {
+    fn is_skill_available(&self, name: &Source) -> bool {
+        (self.available)(name) && self.inner.is_skill_available(name)
+    }
+    async fn skill_listing_snapshot(&self) -> Result<SkillListingSnapshot, SettingsError> {
+        let mut snapshot = self.inner.skill_listing_snapshot().await?;
+        snapshot
+            .entries
+            .retain(|entry| self.is_skill_available(&entry.name));
+        Ok(snapshot)
+    }
+    async fn bash_precommit_skills(
+        &self,
+        entries: &[SkillListingEntry],
+    ) -> Result<tool_api::tool_trait::BashPrecommitSkills, SettingsError> {
+        self.inner.bash_precommit_skills(entries).await
     }
 }
 

@@ -1229,35 +1229,18 @@ impl ConversationOrchestrator {
         let entries = listing_snapshot.entries;
 
         // DELTA: keep only skills not yet sent this session, then record them as
-        // sent. Turn 0 keeps everything (the set is empty); subsequent turns keep
-        // only newly-appeared names. An empty delta ⇒ no reminder this turn.
-        let (new_entries, is_initial): (
-            Vec<crate::prompt::skill_listing::SkillListingEntry>,
-            bool,
-        ) = {
+        // sent. Stable membership emits nothing; additions and withdrawals append
+        // small reminders while prior history remains cacheable.
+        let delta = {
             let mut sent = self.prompt_runtime.sent_skill_names.lock().await;
-            let is_initial = sent.is_empty();
-            let delta: Vec<_> = entries
-                .into_iter()
-                .filter(|entry| {
-                    let name_units = entry
-                        .name
-                        .string_units("")
-                        .expect("skill listing names must be root strings");
-                    !sent.contains(&name_units)
-                })
-                .collect();
-            for entry in &delta {
-                sent.insert(
-                    entry
-                        .name
-                        .string_units("")
-                        .expect("skill listing names must be root strings"),
-                );
-            }
-            (delta, is_initial)
+            crate::prompt::skill_listing_delta::collect(entries, &mut sent, |entry| {
+                entry.name.string_units("").expect("skill listing name")
+            })
         };
-        if new_entries.is_empty() {
+        let new_entries = delta.added;
+        let withdrawn = delta.withdrawn;
+        let is_initial = delta.initial;
+        if new_entries.is_empty() && withdrawn.is_empty() {
             return Ok(None);
         }
 
@@ -1277,13 +1260,35 @@ impl ConversationOrchestrator {
             .and_then(|n| usize::try_from(n).ok());
         let chars_per_token = memory::native_skill_listing_chars_per_token(Some(&model)) as usize;
         let settings = listing_snapshot.budget_settings;
-        let Some(rendered_source) = crate::prompt::skill_listing::render_reminder(
+        let listing = crate::prompt::skill_listing::render_reminder(
             &new_entries,
             window,
             chars_per_token,
             settings,
-        ) else {
-            return Ok(None);
+        );
+        let rendered_source = if withdrawn.is_empty() {
+            let Some(listing) = listing else {
+                return Ok(None);
+            };
+            listing
+        } else {
+            let mut revoked = Vec::new();
+            for name in &withdrawn {
+                let name = Source::root_string(String::from_utf16_lossy(name), name.clone())?;
+                revoked.push(
+                    name.to_json_string()?
+                        .replace('<', "\\u003c")
+                        .replace('>', "\\u003e")
+                        .replace('&', "\\u0026"),
+                );
+            }
+            let notice = format!("The following skills are no longer available (JSON names): [{}]. Do not invoke them or rely on their previous availability.", revoked.join(", "));
+            let base = listing.unwrap_or_else(|| Source::from("<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n\n</system-reminder>"));
+            let mut units = base.string_units("").expect("listing source");
+            let suffix_length = "\n</system-reminder>".encode_utf16().count();
+            units.truncate(units.len() - suffix_length);
+            units.extend(format!("\n\n{notice}\n</system-reminder>").encode_utf16());
+            Source::root_string(String::from_utf16_lossy(&units), units)?
         };
         let rendered_units = rendered_source.string_units("").ok_or_else(|| {
             lingxi_core::settings::SettingsError::SchemaViolation(
@@ -3228,7 +3233,10 @@ message with multiple tool uses so they run concurrently."
         };
         telemetry::emit_skill_discovery_collected(true);
 
-        let skills = pending.take().await;
+        let mut skills = pending.take().await;
+        if let Some(provider) = self.prompt_runtime.skill_listing.as_ref() {
+            skills.retain(|skill| provider.is_skill_available(&skill.name.clone().into()));
+        }
         if skills.is_empty() {
             return None;
         }

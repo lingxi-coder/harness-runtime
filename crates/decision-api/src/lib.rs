@@ -97,6 +97,38 @@ pub struct Request {
     pub questions: BTreeMap<String, Question>,
 }
 
+/// Evidence and questions submitted to a host-selected Decision service.
+/// Credentials, model selection and endpoints are never tool parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Input {
+    /// Text or JSON evidence to evaluate.
+    pub state: serde_json::Value,
+    /// Explicit inline images. No URLs are fetched on behalf of callers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
+    /// Named condition, choice or rubric questions.
+    pub questions: BTreeMap<String, Question>,
+}
+
+impl Input {
+    /// Validate evidence independently from the host's private model binding.
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_payload(&self.images, &self.questions)
+    }
+
+    /// Apply a trusted host binding. Tool callers cannot choose this binding.
+    pub fn with_model(self, model: ModelRef) -> Request {
+        Request {
+            model,
+            state_revision: 0,
+            state: self.state,
+            images: self.images,
+            questions: self.questions,
+        }
+    }
+}
+
 /// Explicitly observed token usage; absent values do not mean zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -161,6 +193,19 @@ pub trait DecisionModel: Send + Sync {
     ) -> Result<Response, Error>;
 }
 
+/// Host facade over the globally configured backend, independent of sessions.
+#[async_trait]
+pub trait DecisionService: Send + Sync {
+    /// Whether the Desktop has configured the service. This is a live capability
+    /// fact; backend names, credential revisions and endpoints stay host-private.
+    fn is_configured(&self) -> bool {
+        true
+    }
+
+    /// Evaluate evidence using the host configuration captured at admission.
+    async fn evaluate(&self, input: Input, context: InvocationContext) -> Result<Response, Error>;
+}
+
 impl Request {
     /// Validate a decision request before handing it to a future backend.
     pub fn validate(&self) -> Result<(), Error> {
@@ -170,55 +215,59 @@ impl Request {
         {
             return Err(Error::Invalid("incomplete model binding".into()));
         }
-        if self.questions.is_empty()
-            || self.questions.len() > 400
-            || self.questions.keys().any(|name| name.trim().is_empty())
-        {
-            return Err(Error::Invalid("questions must have nonempty names".into()));
-        }
-        if self.images.len() > 8
-            || self.images.iter().any(|image| {
-                image.data_url.len() > 12 * 1024 * 1024
-                    || !["data:image/png;base64,", "data:image/jpeg;base64,"]
-                        .iter()
-                        .any(|prefix| image.data_url.starts_with(prefix))
-            })
-        {
-            return Err(Error::Invalid(
-                "images must be inline PNG/JPEG data URLs within the size limit".into(),
-            ));
-        }
-        for question in self.questions.values() {
-            let instructions = match question {
-                Question::Binary { instructions }
-                | Question::Choice { instructions, .. }
-                | Question::Score { instructions, .. } => instructions,
-            };
-            if instructions.trim().is_empty() {
-                return Err(Error::Invalid("empty instructions".into()));
-            }
-            match question {
-                Question::Choice { options, .. }
-                    if options.is_empty()
-                        || options.len() > 255
-                        || options.keys().any(|id| id.trim().is_empty()) =>
-                {
-                    return Err(Error::Invalid(
-                        "choice options must have nonempty IDs".into(),
-                    ));
-                }
-                Question::Score { levels, .. }
-                    if levels.len() < 2
-                        || levels.len() > 10
-                        || levels.iter().any(|v| v.trim().is_empty()) =>
-                {
-                    return Err(Error::Invalid("score rubric must not be empty".into()));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        validate_payload(&self.images, &self.questions)
     }
+}
+
+fn validate_payload(images: &[Image], questions: &BTreeMap<String, Question>) -> Result<(), Error> {
+    if questions.is_empty()
+        || questions.len() > 400
+        || questions.keys().any(|name| name.trim().is_empty())
+    {
+        return Err(Error::Invalid("questions must have nonempty names".into()));
+    }
+    if images.len() > 8
+        || images.iter().any(|image| {
+            image.data_url.len() > 12 * 1024 * 1024
+                || !["data:image/png;base64,", "data:image/jpeg;base64,"]
+                    .iter()
+                    .any(|prefix| image.data_url.starts_with(prefix))
+        })
+    {
+        return Err(Error::Invalid(
+            "images must be inline PNG/JPEG data URLs within the size limit".into(),
+        ));
+    }
+    for question in questions.values() {
+        let instructions = match question {
+            Question::Binary { instructions }
+            | Question::Choice { instructions, .. }
+            | Question::Score { instructions, .. } => instructions,
+        };
+        if instructions.trim().is_empty() {
+            return Err(Error::Invalid("empty instructions".into()));
+        }
+        match question {
+            Question::Choice { options, .. }
+                if options.is_empty()
+                    || options.len() > 255
+                    || options.keys().any(|id| id.trim().is_empty()) =>
+            {
+                return Err(Error::Invalid(
+                    "choice options must have nonempty IDs".into(),
+                ));
+            }
+            Question::Score { levels, .. }
+                if levels.len() < 2
+                    || levels.len() > 10
+                    || levels.iter().any(|v| v.trim().is_empty()) =>
+            {
+                return Err(Error::Invalid("score rubric must not be empty".into()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn probability(value: f64) -> bool {
@@ -240,14 +289,26 @@ impl Response {
     /// Check correspondence and numeric domains without inventing confidence.
     pub fn validate_for(&self, request: &Request) -> Result<(), Error> {
         request.validate()?;
-        if self.state_revision != request.state_revision
-            || self.answers.keys().ne(request.questions.keys())
-        {
+        self.validate_answers_for(request.state_revision, &request.questions)
+    }
+
+    /// Validate a host-service result against the original evidence questions.
+    pub fn validate_for_input(&self, input: &Input) -> Result<(), Error> {
+        input.validate()?;
+        self.validate_answers_for(0, &input.questions)
+    }
+
+    fn validate_answers_for(
+        &self,
+        state_revision: u64,
+        questions: &BTreeMap<String, Question>,
+    ) -> Result<(), Error> {
+        if self.state_revision != state_revision || self.answers.keys().ne(questions.keys()) {
             return Err(Error::Invalid(
                 "state revision or question IDs do not match".into(),
             ));
         }
-        for (name, question) in &request.questions {
+        for (name, question) in questions {
             let answer = &self.answers[name];
             let valid = match (question, answer) {
                 (_, Answer::Refused { .. }) => true,

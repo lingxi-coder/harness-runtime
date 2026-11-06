@@ -14,6 +14,8 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod decision;
+pub use decision::DecisionTool;
 pub mod config;
 pub mod tool_search;
 pub use config::ConfigTool;

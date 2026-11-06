@@ -7091,6 +7091,7 @@ dependencies = [
  "async-trait",
  "branding",
  "core",
+ "decision-api",
  "mcp",
  "mobile-linux-api",
  "once_cell",
@@ -7101,6 +7102,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tool-api",
 ]
 

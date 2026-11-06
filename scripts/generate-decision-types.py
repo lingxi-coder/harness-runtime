@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1] / 'crates/decision-api/src/lib.rs'
-NAMES = ['ModelRef', 'Image', 'Question', 'Answer', 'Request', 'Usage', 'Response']
+NAMES = ['ModelRef', 'Image', 'Question', 'Answer', 'Request', 'Input', 'Usage', 'Response']
 
 def split_top(text):
     result, start, depth = [], 0, 0

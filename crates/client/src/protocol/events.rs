@@ -454,6 +454,11 @@ define_client_event! {
         enabled: bool,
     },
 
+    // Evidence-only request to the Desktop's globally configured Decision host.
+    DecisionRequest { request_id: String, input_json: String, timeout_ms: u64 },
+    // Cancel only the exact foreground Decision invocation.
+    DecisionCancel { request_id: String },
+
     // Ask a client to perform one host-owned audio operation.
     AudioRequest {
         // Trusted owner, operation identity, budget, and requested operation.
@@ -1278,6 +1283,16 @@ impl From<ClientEventWire> for ClientEvent {
                 Self::ConversationControlsChanged { controls }
             }
             ClientEventWire::FastModeChanged { enabled } => Self::FastModeChanged { enabled },
+            ClientEventWire::DecisionRequest {
+                request_id,
+                input_json,
+                timeout_ms,
+            } => Self::DecisionRequest {
+                request_id,
+                input_json,
+                timeout_ms,
+            },
+            ClientEventWire::DecisionCancel { request_id } => Self::DecisionCancel { request_id },
             ClientEventWire::AudioRequest { request } => Self::AudioRequest { request },
             ClientEventWire::MediaConnectionRequest { request } => {
                 Self::MediaConnectionRequest { request }

@@ -41,7 +41,7 @@ pub fn desktop_builtin_skill_prompt(
     let body = desktop_builtin_skill_content(name)?;
     Some(match name {
         "lingxi-api" => lingxi_api::render(body, args),
-        "create-bot" | "document-authoring" | "artifact-design" | "plan-artifact" => {
+        "decision" | "create-bot" | "document-authoring" | "artifact-design" | "plan-artifact" => {
             with_user_request(body, args)
         }
         _ => body,
@@ -135,6 +135,7 @@ mod tests {
             vec![
                 "artifact-design",
                 "create-bot",
+                "decision",
                 "document-authoring",
                 "lingxi-api",
                 "plan-artifact",

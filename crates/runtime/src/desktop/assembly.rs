@@ -5508,6 +5508,9 @@ pub async fn build_with_credential_stack(
             fusion_recorder_factory.clone(),
         )),
     );
+    if let Some(service) = cfg.decision_service.clone() {
+        tools_inner.register_builtin(Arc::new(tool_meta::DecisionTool::new(service)));
+    }
     if let Some(ctx) = visualization_tool_ctx {
         let store = crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
         crate::inline_visualization::register_tool(&mut tools_inner, ctx, store);
@@ -6353,6 +6356,19 @@ pub async fn build_with_credential_stack(
                     command_visibility_settings_loader.clone(),
                     command_snapshot_provider.clone(),
                 );
+                let decision = cfg.decision_service.clone();
+                let provider: Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> =
+                    Arc::new(
+                        orchestrator::prompt::skill_listing::CapabilityGatedSkillListingProvider::new(
+                            provider,
+                            Arc::new(move |name| {
+                                name.string_at("") != Some("decision")
+                                    || decision
+                                        .as_ref()
+                                        .is_some_and(|service| service.is_configured())
+                            }),
+                        ),
+                    );
                 let child_provider = provider.clone();
                 tools.set_bash_precommit_skills_provider(move || {
                     let provider = child_provider.clone();
@@ -6506,8 +6522,15 @@ pub async fn build_with_credential_stack(
             || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
             || is_env_truthy("LINGXI_SKILL_SEARCH"));
     let orch_builder = if skill_search_on {
+        let decision = cfg.decision_service.clone();
         let source: Arc<dyn skill::SkillCandidateSource> = Arc::new(
-            skill::RegistryCandidateSource::new(Arc::new(desktop_skill_registry())),
+            skill::RegistryCandidateSource::new(Arc::new(desktop_skill_registry()))
+                .with_availability(Arc::new(move |name| {
+                    name != "decision"
+                        || decision
+                            .as_ref()
+                            .is_some_and(|service| service.is_configured())
+                })),
         );
         orch_builder.with_skill_discovery_prefetch(Arc::new(skill::SkillDiscoveryPrefetch::new(
             source,
@@ -7059,6 +7082,10 @@ pub async fn build_with_credential_stack(
         }
     }
     drop(mcp_connections);
+    if let Some(service) = cfg.decision_service.clone() {
+        command_api::builtins::bundled::register_decision_skill(&mut reg);
+        reg.set_bundled_capability_gate("decision", Arc::new(move || service.is_configured()));
+    }
     *shared_command_registry.write().await = reg;
     shared_command_registry
         .write()
