@@ -41,7 +41,9 @@ pub fn desktop_builtin_skill_prompt(
     let body = desktop_builtin_skill_content(name)?;
     Some(match name {
         "lingxi-api" => lingxi_api::render(body, args),
-        "document-authoring" | "artifact-design" | "plan-artifact" => with_user_request(body, args),
+        "create-bot" | "document-authoring" | "artifact-design" | "plan-artifact" => {
+            with_user_request(body, args)
+        }
         _ => body,
     })
 }
@@ -132,6 +134,7 @@ mod tests {
             names,
             vec![
                 "artifact-design",
+                "create-bot",
                 "document-authoring",
                 "lingxi-api",
                 "plan-artifact",
@@ -178,6 +181,25 @@ mod tests {
                 .iter()
                 .any(|skill| skill.name == "lingxi-api"));
         }
+    }
+
+    #[test]
+    fn bot_skill_is_discoverable_and_preserves_the_request() {
+        let mut registry = SkillRegistry::new();
+        register_desktop(&mut registry);
+        for query in ["/create-bot", "create a bot", "创建 bot"] {
+            assert!(registry
+                .discover(query)
+                .iter()
+                .any(|skill| skill.name == "create-bot"));
+        }
+        let request = "帮我创建一个写作助手，保留 !`literal text`。";
+        let prompt = desktop_builtin_skill_prompt("create-bot", &request.into()).unwrap();
+        assert!(prompt.string_at("").unwrap().ends_with(request));
+        assert_eq!(
+            desktop_builtin_skill_prompt("create-bot", &"".into()),
+            desktop_builtin_skill_content("create-bot")
+        );
     }
 
     #[test]
