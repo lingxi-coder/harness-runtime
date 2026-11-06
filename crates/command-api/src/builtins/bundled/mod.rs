@@ -58,6 +58,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_document_authoring_skill(reg);
     register_artifact_design_skill(reg);
     register_plan_artifact_skill(reg);
+    register_desktop_prompt_skill(reg, "create-bot", "[what your Bot should do]");
 
     // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
@@ -690,6 +691,7 @@ mod tests {
             "batch".to_string(),
             "code-review".to_string(),
             "commit".to_string(),
+            "create-bot".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.

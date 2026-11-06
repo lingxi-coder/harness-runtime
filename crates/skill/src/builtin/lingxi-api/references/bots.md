@@ -12,6 +12,11 @@ host, empty list or disabled Bot does not establish an always-running cloud Bot.
 Check the host's actual availability and selected Bot; explain the native Bots
 page when the current caller has no Bot management tools.
 
+For conversational setup, use the `create-bot` Skill (or `/create-bot` with the
+owner's request). It clarifies the goal and presents a Bot proposal. Desktop's
+**Review & create** action fills the native creation form; the owner edits it
+and chooses **Create Bot**. A proposal alone is not a created Bot.
+
 The owner creates/configures Bots in that UI: persona, model, explicit permission
 mode, bound read/write folders, imported skills, permitted senders, routines and
 remote access. Updates use the observed revision. Skill import copies once;
