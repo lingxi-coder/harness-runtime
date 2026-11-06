@@ -12,6 +12,7 @@ fn request() -> Request {
             model: "decision-fixture".into(),
         },
         state_revision: 7,
+        images: Vec::new(),
         state: serde_json::json!({"task": "choose a route"}),
         questions: BTreeMap::from([
             (
@@ -63,6 +64,8 @@ fn response() -> Response {
                 },
             ),
         ]),
+        actual_model: None,
+        elapsed_ms: 0,
         usage: Usage {
             input_tokens: Some(20),
             output_tokens: None,
