@@ -35,7 +35,7 @@ pub(super) fn is_scheduled_controller_cwd(config: &MobileConfig) -> bool {
     if !config.scheduler_controller {
         return false;
     }
-    let expected = config.lingxi_home.join("scheduled");
+    let expected = branding::workspace_home(&config.lingxi_home).join("scheduled");
     std::fs::canonicalize(&config.cwd)
         .ok()
         .zip(std::fs::canonicalize(expected).ok())
@@ -84,6 +84,8 @@ impl ScheduledWorkspace {
         let canonical_root =
             std::fs::canonicalize(&config.lingxi_home).map_err(|e| e.to_string())?;
         let root = &canonical_root;
+        let workspace_root = branding::workspace_home(root);
+        directory(&workspace_root)?;
         let manifest = if let Some(target) = target {
             let path = root
                 .join("automations/sessions")
@@ -101,8 +103,9 @@ impl ScheduledWorkspace {
             let record: Manifest = serde_json::from_str(&body).map_err(|e| e.to_string())?;
             let parts: Vec<_> = Path::new(&record.workspace).components().collect();
             if record.version != 1
-                || parts.len() != 3
-                || parts[0] != Component::Normal("workspaces".as_ref())
+                || parts.len() != 5
+                || parts[0] != Component::Normal("cron".as_ref())
+                || parts[2] != Component::Normal("runs".as_ref())
                 || parts
                     .iter()
                     .any(|part| !matches!(part, Component::Normal(_)))
@@ -125,17 +128,26 @@ impl ScheduledWorkspace {
                 .collect();
             let slug = slug.trim_matches('-');
             let slug = if slug.is_empty() { "task" } else { slug };
-            let relative = format!("workspaces/{date}/{slug}-{}", uuid::Uuid::new_v4());
-            directory(&root.join("workspaces"))?;
-            directory(&root.join("workspaces").join(date))?;
-            std::fs::create_dir(root.join(&relative)).map_err(|e| e.to_string())?;
+            let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
+            let relative = format!("cron/{key}/runs/{date}/{slug}-{}", uuid::Uuid::new_v4());
+            directory(&workspace_root.join("cron"))?;
+            directory(&workspace_root.join("cron").join(&key))?;
+            directory(&workspace_root.join("cron").join(&key).join("runs"))?;
+            directory(
+                &workspace_root
+                    .join("cron")
+                    .join(&key)
+                    .join("runs")
+                    .join(date),
+            )?;
+            std::fs::create_dir(workspace_root.join(&relative)).map_err(|e| e.to_string())?;
             Manifest {
                 version: 1,
                 workspace: relative,
                 task_id: task_id.into(),
             }
         };
-        let mut checked = root.clone();
+        let mut checked = workspace_root.clone();
         for part in Path::new(&manifest.workspace).components() {
             checked.push(part);
             let metadata = std::fs::symlink_metadata(&checked).map_err(|e| e.to_string())?;
@@ -145,9 +157,11 @@ impl ScheduledWorkspace {
         }
         let host = checked;
         let guest_root = if config.logical_cwd.is_some() {
-            config.brand_runtime_profile.config_guest_path()
+            config
+                .brand_runtime_profile
+                .workspace_container_guest_path()
         } else {
-            root.clone()
+            workspace_root.clone()
         };
         let logical = guest_root.join(&manifest.workspace);
         if let Some((current_cwd, captured_source)) = selected {
@@ -163,9 +177,9 @@ impl ScheduledWorkspace {
         }
         // A task selecting another task's conversation cannot inherit its memory.
         let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
-        directory(&root.join("automations"))?;
-        directory(&root.join("automations").join(&key))?;
-        let memory_host = root.join("automations").join(&key).join("memory.md");
+        directory(&workspace_root.join("cron"))?;
+        directory(&workspace_root.join("cron").join(&key))?;
+        let memory_host = workspace_root.join("cron").join(&key).join("memory.md");
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -183,7 +197,7 @@ impl ScheduledWorkspace {
             host,
             logical,
             memory_host,
-            memory_logical: guest_root.join("automations").join(key).join("memory.md"),
+            memory_logical: guest_root.join("cron").join(key).join("memory.md"),
             relative: manifest.workspace,
             task_id: task_id.into(),
         }))
@@ -220,20 +234,20 @@ mod tests {
     use super::*;
 
     fn config(root: &Path) -> MobileConfig {
-        let controller = root.join(".atlas/scheduled");
+        let controller = root.join(".atlas-workspaces/scheduled");
         std::fs::create_dir_all(&controller).unwrap();
         let mut config = crate::mobile::test_support::test_config(&controller);
         config.brand_runtime_profile =
             mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
         config.lingxi_home = root.join(".atlas");
         std::fs::create_dir_all(&config.lingxi_home).unwrap();
-        config.logical_cwd = Some("/home/atlas_user/.atlas/scheduled".into());
+        config.logical_cwd = Some("/home/atlas_user/.atlas-workspaces/scheduled".into());
         config.scheduler_controller = true;
         config
     }
 
     #[test]
-    fn default_and_custom_brand_controllers_use_the_hidden_config_home() {
+    fn default_and_custom_brand_controllers_use_the_workspace_sibling() {
         let root = tempfile::tempdir().unwrap();
         let dirs = crate::mobile::mobile_user_directories(
             root.path().join("runtime").display().to_string(),
@@ -248,14 +262,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(workspace.host.starts_with(
-            Path::new(&dirs.config_home)
-                .canonicalize()
-                .unwrap()
-                .join("workspaces")
+            branding::workspace_home(&Path::new(&dirs.config_home).canonicalize().unwrap())
+                .join("cron")
         ));
         assert!(workspace
             .logical
-            .starts_with("/home/lingxi/.lingxi/workspaces"));
+            .starts_with("/home/lingxi/.lingxi-workspaces/cron"));
 
         let mut custom = config(root.path());
         assert!(is_scheduled_controller_cwd(&custom));
@@ -281,13 +293,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(first.host.starts_with(
-            std::fs::canonicalize(&config.lingxi_home)
-                .unwrap()
-                .join("workspaces")
+            branding::workspace_home(&config.lingxi_home.canonicalize().unwrap()).join("cron")
         ));
         assert!(first
             .logical
-            .starts_with("/home/atlas_user/.atlas/workspaces"));
+            .starts_with("/home/atlas_user/.atlas-workspaces/cron"));
         assert_ne!(first.host, second.host);
         assert_eq!(first.memory_host, second.memory_host);
         assert!(first.host.join("work").is_dir());

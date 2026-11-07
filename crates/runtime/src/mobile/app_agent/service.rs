@@ -30,6 +30,7 @@ pub struct AppAgentHost {
     service: Weak<MobileLocalAppServiceHandle>,
     factory: Arc<AppAgentFactory>,
     apps_root: PathBuf,
+    workspace_root: PathBuf,
     apps: Mutex<HashMap<String, Arc<AppAgentState>>>,
     wake_reservations: Mutex<WakeRegistry>,
     active: AsyncMutex<HashMap<String, Arc<Control>>>,
@@ -927,7 +928,7 @@ impl AppAgentHost {
     pub(crate) fn new_in_generation(
         service: &Arc<MobileLocalAppServiceHandle>,
         factory: Arc<AppAgentFactory>,
-        _config_home: &std::path::Path,
+        config_home: &std::path::Path,
         generation: &mut u64,
     ) -> Result<Arc<Self>, String> {
         *generation = generation
@@ -957,6 +958,7 @@ impl AppAgentHost {
             service: Arc::downgrade(service),
             factory,
             apps_root,
+            workspace_root: branding::workspace_home(config_home).join("app-agents"),
             apps: Mutex::new(apps),
             wake_reservations: Mutex::new(WakeRegistry::default()),
             active: AsyncMutex::new(HashMap::new()),
@@ -1938,7 +1940,6 @@ impl AppAgentHost {
         self.active.lock().await.insert(id.clone(), control.clone());
         drop(_serial);
         let host = self.clone();
-        let app_root = state.root.clone();
         let execute_control = control.clone();
         tokio::spawn(async move {
             #[cfg(test)]
@@ -1951,8 +1952,7 @@ impl AppAgentHost {
                     _ = release => {},
                 }
             }
-            host.execute(execute_control, admitted, input, app_root)
-                .await;
+            host.execute(execute_control, admitted, input).await;
         });
         if is_chat {
             if let Err(error) =
@@ -2103,13 +2103,7 @@ impl AppAgentHost {
         }
     }
 
-    async fn execute(
-        self: Arc<Self>,
-        control: Arc<Control>,
-        admission: Admission,
-        input: Input,
-        app_root: PathBuf,
-    ) {
+    async fn execute(self: Arc<Self>, control: Arc<Control>, admission: Admission, input: Input) {
         let id = control.id.clone();
         let owner = control.owner.clone();
         let timer_control = control.clone();
@@ -2119,9 +2113,7 @@ impl AppAgentHost {
             timer_control.timed_out.store(true, Ordering::Release);
             timer_control.revoke();
         });
-        let mut result = self
-            .execute_inner(&control, &admission, input, app_root)
-            .await;
+        let mut result = self.execute_inner(&control, &admission, input).await;
         // The scope is unique to this run, never reused by the next Chat turn.
         // Retain it with the admission fence whenever native tool cleanup has
         // not been confirmed. Cancelling or dropping a handle is not a drain.
@@ -2366,20 +2358,28 @@ impl AppAgentHost {
         control: &Arc<Control>,
         admission: &Admission,
         input: Input,
-        app_root: PathBuf,
     ) -> Result<(TaskResult, Value), String> {
         self.validate_current_release(&control.owner).await?;
         let relative = match &control.chat_id {
-            Some(chat_id) => PathBuf::from("workspaces").join(chat_id),
+            Some(chat_id) => PathBuf::from("chats").join(chat_id),
             None => PathBuf::from("tasks").join(&control.id),
         };
-        let cwd = app_root.join(&relative);
+        let relative = PathBuf::from(&control.owner.app_id).join(relative);
+        let cwd = self.workspace_root.join(&relative);
+        let workspace_home = self
+            .workspace_root
+            .parent()
+            .ok_or("invalid_workspace_root")?
+            .to_path_buf();
+        let relative = PathBuf::from("app-agents").join(relative);
         tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&workspace_home).map_err(|error| error.to_string())?;
             lingxi_core::host::rooted_fs::ensure_private_directory(
-                &app_root,
+                &workspace_home,
                 &relative,
                 lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
             )
+            .map_err(|error| error.to_string())
         })
         .await
         .map_err(|_| "task_storage_failed")?
@@ -4764,7 +4764,11 @@ mod progress_tests {
             state.chats.clone(),
             persisted,
         ));
-        let workspace = state.root.join("workspaces").join(&chat.chat_id);
+        let workspace = host
+            .workspace_root
+            .join(&control.owner.app_id)
+            .join("chats")
+            .join(&chat.chat_id);
         std::fs::create_dir_all(&workspace).unwrap();
         let source = root.path().join("scope-source");
         std::fs::create_dir_all(source.join("skills/a")).unwrap();
@@ -4805,7 +4809,7 @@ mod progress_tests {
             .insert(control.id.clone(), control.clone());
 
         host.clone()
-            .execute(control.clone(), admission, input, state.root.clone())
+            .execute(control.clone(), admission, input)
             .await;
 
         assert!(control.finished.load(Ordering::Acquire));
@@ -6322,7 +6326,7 @@ mod progress_tests {
                 .unwrap();
         std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o400)).unwrap();
         host.clone()
-            .execute(control.clone(), admission, input, app_root)
+            .execute(control.clone(), admission, input)
             .await;
         std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(control.finished.load(Ordering::Acquire));

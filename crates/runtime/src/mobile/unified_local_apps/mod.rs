@@ -760,7 +760,7 @@ impl MobileLocalAppServiceHandle {
         &self,
         host_source: &Path,
     ) -> Result<Option<String>, ServiceError> {
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let apps_metadata = match std::fs::symlink_metadata(&apps_root) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -829,7 +829,7 @@ impl MobileLocalAppServiceHandle {
         } else {
             slug.trim_matches('-')
         };
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let leaf = format!("{slug}-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let directory = apps_root.join(&leaf);
         let proposed_source = self.guest_path(&directory)?;
@@ -882,7 +882,7 @@ impl MobileLocalAppServiceHandle {
                 "revision must be positive",
             ));
         }
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let leaf = format!("restored-{}", uuid::Uuid::new_v4());
         let destination = apps_root.join(leaf);
         let proposed_source = self.guest_path(&destination)?;
@@ -935,7 +935,7 @@ impl MobileLocalAppServiceHandle {
             .as_object_mut()
             .expect("validated request")
             .remove("requestId");
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let destination = apps_root.join(format!("remix-{}", uuid::Uuid::new_v4()));
         let proposed_source = self.guest_path(&destination)?;
         let host = Arc::clone(self);
@@ -1007,7 +1007,7 @@ impl MobileLocalAppServiceHandle {
             .as_object_mut()
             .expect("validated request")
             .remove("requestId");
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let destination = apps_root.join(format!("remix-{}", uuid::Uuid::new_v4()));
         let proposed_source = self.guest_path(&destination)?;
         let host = Arc::clone(self);
@@ -1245,7 +1245,7 @@ impl MobileLocalAppServiceHandle {
         source_directory: &str,
     ) -> Result<rooted_fs::RootIdentity, ServiceError> {
         let source_path = self.host_path(source_directory)?;
-        let apps_root = self.config_home.join(".apps");
+        let apps_root = branding::workspace_home(&self.config_home).join("apps");
         let apps_metadata = std::fs::symlink_metadata(&apps_root).map_err(|error| {
             ServiceError::new(
                 "invalidPath",

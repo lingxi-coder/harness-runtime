@@ -625,11 +625,10 @@ fn apply_app_chat(
         .join(&identity.app_id)
         .join("agent/agui-v1/chats")
         .join(&chat.chat_id);
-    let workspace = config
-        .lingxi_home
-        .join("local-apps/v2/apps")
+    let workspace = branding::workspace_home(&config.lingxi_home)
+        .join("app-agents")
         .join(&identity.app_id)
-        .join("agent/agui-v1/workspaces")
+        .join("chats")
         .join(&chat.chat_id);
     if chat.session_directory != expected || config.cwd != workspace {
         return Err(AppInvocationError::InvalidChat);
@@ -927,8 +926,8 @@ mod tests {
         let transcript = chat_directory.join(format!("{session_id}.jsonl"));
         std::fs::write(&transcript, "app-owned chat transcript\n").unwrap();
         let mut config = config();
-        config.cwd = home
-            .join("local-apps/v2/apps/food/agent/agui-v1/workspaces")
+        config.cwd = branding::workspace_home(&home)
+            .join("app-agents/food/chats")
             .join(&chat_id);
         std::fs::create_dir_all(&config.cwd).unwrap();
         config.lingxi_home = home;

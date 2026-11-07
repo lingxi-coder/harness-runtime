@@ -1094,7 +1094,7 @@ mod tests {
             .expect("ok");
         assert_eq!(
             injected_text(&out),
-            "Base directory for this skill: /skills/foo\n\nscripts live in /skills/foo/bin"
+            "Base directory for this skill: /skills/foo\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\nscripts live in /skills/foo/bin"
         );
     }
 
@@ -1115,7 +1115,7 @@ mod tests {
             .expect("ok");
         assert_eq!(
             injected_text(&out),
-            "Base directory for this skill: /skills/foo\n\nUse the local scripts"
+            "Base directory for this skill: /skills/foo\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\nUse the local scripts"
         );
     }
 
@@ -1161,7 +1161,7 @@ mod tests {
             .expect("ok");
         assert_eq!(
             injected_text(&out),
-            "Base directory for this skill: /r\n\n/r/a and /r/b"
+            "Base directory for this skill: /r\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\n/r/a and /r/b"
         );
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
             .expect("ok");
         assert_eq!(
             injected_text(&out),
-            format!("Base directory for this skill: /r\n\n{expected}")
+            format!("Base directory for this skill: /r\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\n{expected}")
         );
     }
 

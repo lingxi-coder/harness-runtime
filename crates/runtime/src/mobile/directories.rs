@@ -60,13 +60,14 @@ fn mobile_user_directories_for_profile(
     let guest_home = profile.guest_home();
     let config = home.join(profile.config_dir_name);
     let config_guest_path = profile.config_guest_path();
-    let chat_cwd = config.join("chat");
-    let code_cwd = config.join("code");
-    let projects = config.join("projects");
+    let workspace = branding::workspace_home(&config);
+    let chat_cwd = workspace.join("chat");
+    let code_cwd = workspace.join("code");
+    let projects = workspace.join("projects");
     let projects_guest_path = profile.projects_guest_path();
-    let scheduled = config.join("scheduled");
+    let scheduled = workspace.join("scheduled");
     let scheduled_guest_path = profile.workspace_container_guest_path().join("scheduled");
-    let apps = config.join(".apps");
+    let apps = workspace.join("apps");
     let apps_guest_path = profile.apps_guest_path();
     Ok(MobileUserDirectories {
         brand_id: profile.brand_id.into(),
@@ -230,11 +231,11 @@ mod tests {
         let profile = LINGXI_RUNTIME_PROFILE;
         assert_eq!(
             Path::new(&dirs.chat_cwd),
-            Path::new(&dirs.config_home).join("chat")
+            branding::workspace_home(Path::new(&dirs.config_home)).join("chat")
         );
         assert_eq!(
             Path::new(&dirs.code_cwd),
-            Path::new(&dirs.config_home).join("code")
+            branding::workspace_home(Path::new(&dirs.config_home)).join("code")
         );
         assert_eq!(dirs.brand_id, profile.brand_id);
         assert_eq!(dirs.linux_user, profile.linux_user);
@@ -332,13 +333,22 @@ mod tests {
                 .to_string()
         );
         assert_eq!(dirs.config_guest_path, "/home/atlas_guest/.atlas");
-        assert_eq!(dirs.chat_guest_cwd, "/home/atlas_guest/.atlas/chat");
-        assert_eq!(dirs.code_guest_cwd, "/home/atlas_guest/.atlas/code");
+        assert_eq!(
+            dirs.chat_guest_cwd,
+            "/home/atlas_guest/.atlas-workspaces/chat"
+        );
+        assert_eq!(
+            dirs.code_guest_cwd,
+            "/home/atlas_guest/.atlas-workspaces/code"
+        );
         assert_eq!(
             dirs.projects_guest_path,
-            "/home/atlas_guest/.atlas/projects"
+            "/home/atlas_guest/.atlas-workspaces/projects"
         );
-        assert_eq!(dirs.apps_guest_path, "/home/atlas_guest/.atlas/.apps");
+        assert_eq!(
+            dirs.apps_guest_path,
+            "/home/atlas_guest/.atlas-workspaces/apps"
+        );
 
         dirs.prepare().unwrap();
         assert!(Path::new(&dirs.projects).is_dir());

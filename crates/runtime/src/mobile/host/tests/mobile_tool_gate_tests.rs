@@ -61,8 +61,9 @@ async fn mode_default_boot_policy_and_deny_globs_use_its_owner_cwd() {
         )
         .unwrap();
         dirs.prepare().unwrap();
-        let cwd = std::path::Path::new(&dirs.config_home).join(component);
-        let guest = std::path::Path::new(&dirs.config_guest_path).join(component);
+        let cwd = branding::workspace_home(std::path::Path::new(&dirs.config_home)).join(component);
+        let guest =
+            branding::workspace_home(std::path::Path::new(&dirs.config_guest_path)).join(component);
         let settings = cwd.join(branding::DOT_DIR);
         std::fs::create_dir_all(&settings).unwrap();
         std::fs::write(

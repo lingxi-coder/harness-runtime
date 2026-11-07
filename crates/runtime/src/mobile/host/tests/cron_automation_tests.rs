@@ -704,7 +704,7 @@ async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
 async fn global_selected_conversation_retains_exact_source_and_relocated_cwd() {
     use crate::mobile::test_support::{test_config, HostFakePlatform};
     let temp = tempfile::tempdir().unwrap();
-    let controller = temp.path().join("atlas/scheduled");
+    let controller = temp.path().join(".atlas-workspaces/scheduled");
     let original_cwd = temp.path().join("ordinary-global");
     let moved_cwd = temp.path().join("relocated-global");
     for path in [&controller, &original_cwd, &moved_cwd] {
@@ -1464,7 +1464,7 @@ fn malformed_configuration_cannot_replace_a_saved_task() {
 async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledger() {
     use crate::mobile::test_support::{test_config, HostFakePlatform};
     let root = tempfile::tempdir().unwrap();
-    let controller = root.path().join(".atlas/scheduled");
+    let controller = root.path().join(".atlas-workspaces/scheduled");
     std::fs::create_dir_all(&controller).unwrap();
     let mut cfg = test_config(&controller);
     cfg.brand_runtime_profile =
@@ -1529,9 +1529,7 @@ async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledg
     .unwrap()
     .unwrap();
     assert!(workspace.host.starts_with(
-        std::fs::canonicalize(&cfg.lingxi_home)
-            .unwrap()
-            .join("workspaces")
+        branding::workspace_home(&std::fs::canonicalize(&cfg.lingxi_home).unwrap()).join("cron")
     ));
     let transcript =
         session::jsonl::session_path(&cfg.lingxi_home, &workspace.logical.to_string_lossy(), &id);
@@ -1557,13 +1555,14 @@ async fn project_scope_at_scheduled_cwd_never_receives_scheduled_workspace() {
         cron::RunMode::SelectedSession,
     ] {
         let root = tempfile::tempdir().unwrap();
-        let controller = root.path().join(".atlas/scheduled");
+        let controller = root.path().join(".atlas-workspaces/scheduled");
         std::fs::create_dir_all(&controller).unwrap();
         let controller = controller.canonicalize().unwrap();
         let mut cfg = test_config(&controller);
         cfg.brand_runtime_profile =
             mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
-        cfg.lingxi_home = controller.parent().unwrap().to_path_buf();
+        cfg.lingxi_home = root.path().join(".atlas");
+        std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
         cfg.scheduler_controller = true;
         let platform: Arc<dyn Platform> =
             Arc::new(HostFakePlatform::new(root.path().to_path_buf()));
@@ -1651,7 +1650,9 @@ async fn project_scope_at_scheduled_cwd_never_receives_scheduled_workspace() {
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .any(|value| value.get("cwd").and_then(|value| value.as_str()) == controller.to_str()));
-        assert!(!cfg.lingxi_home.join("workspaces").exists());
+        assert!(!branding::workspace_home(&cfg.lingxi_home)
+            .join("cron")
+            .exists());
         let memory = cfg
             .lingxi_home
             .join("automations")

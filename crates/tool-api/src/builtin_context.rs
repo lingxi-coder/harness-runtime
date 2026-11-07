@@ -76,6 +76,13 @@ pub struct BashEditDiffSetup {
     pub shadow_root: std::path::PathBuf,
 }
 
+/// Supplies live registered skill roots without coupling file tools to commands.
+#[async_trait::async_trait]
+pub trait SkillReadRoots: Send + Sync {
+    /// Return the directories currently owned by registered skills.
+    async fn roots(&self) -> Vec<PathBuf>;
+}
+
 /// Static surface every builtin tool needs at construction time.
 ///
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
@@ -311,6 +318,9 @@ pub struct BuiltinToolContext {
     /// `Read`-deny rule applies. A live [`Self::permission_gate`] supersedes it
     /// on every search call so runtime `updatedPermissions` are observed.
     pub read_deny_exclude_globs: Vec<String>,
+    /// Host-owned skill directories available to Read/Grep/Glob only. Never
+    /// included in the write or shell trusted-directory set.
+    pub skill_read_roots: Option<Arc<dyn SkillReadRoots>>,
 
     // ===== Mobile Linux shell / git seams =====
     /// Mobile `Shell` tool wiring shared across mobile hosts.
@@ -459,6 +469,16 @@ impl BuiltinToolContext {
     #[must_use]
     pub fn trusted_dirs(&self) -> Vec<PathBuf> {
         self.session_cwd.trusted_dirs()
+    }
+
+    /// Read-only tools may also access registered skill assets. Canonical and
+    /// rooted-open checks still reject paths/symlinks escaping these roots.
+    pub async fn read_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.trusted_dirs();
+        if let Some(provider) = &self.skill_read_roots {
+            roots.extend(provider.roots().await);
+        }
+        roots
     }
 
     /// Current `(cwd, trusted_dirs)` pair from a SINGLE `load()` of the

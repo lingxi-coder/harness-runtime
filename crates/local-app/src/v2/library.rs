@@ -594,9 +594,9 @@ impl AppLibrary {
             acquired_at_ms,
         })
     }
-    /// Return the host configuration directory reserved for authoring source trees.
+    /// Return the brand workspace directory reserved for authoring source trees.
     pub fn default_authoring_root(&self) -> PathBuf {
-        self.config_home.join(".apps")
+        branding::workspace_home(&self.config_home).join("apps")
     }
     fn lock(&self) -> Result<File, AppError> {
         let path = self.root.join(".lock");
