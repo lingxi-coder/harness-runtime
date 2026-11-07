@@ -238,9 +238,26 @@ pub fn handoff_action(quoted: &Utf16JsonProjection) -> Utf16JsonProjection {
         .expect("handoff action is a JSON string with exact source units")
 }
 
+/// The stage belongs to one independent authorization judgment, not a
+/// continuation of the preceding stage's generated answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifierStage {
+    Fast,
+    Thinking,
+}
+impl ClassifierStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Thinking => "thinking",
+        }
+    }
+}
+
 /// One bounded classifier request; hosts supply provider/session routing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    pub stage: ClassifierStage,
     /// Transcript and action blocks, in oracle order.
     pub blocks: Vec<Utf16JsonProjection>,
     /// Base output limit, before any model-required reasoning overhead.
@@ -527,6 +544,7 @@ pub async fn classify_detailed(
     let fast = stage(
         transport,
         Query {
+            stage: ClassifierStage::Fast,
             blocks: fast,
             max_tokens: 64,
             stop_sequences: vec!["</block>".into()],
@@ -557,6 +575,7 @@ pub async fn classify_detailed(
     let reply = match stage(
         transport,
         Query {
+            stage: ClassifierStage::Thinking,
             blocks: thinking,
             max_tokens: 8192,
             stop_sequences: vec![],
@@ -730,6 +749,7 @@ mod tests {
 
     fn timed_query(parse_budget: u64, ceiling: u64) -> Query {
         Query {
+            stage: ClassifierStage::Fast,
             blocks: vec![],
             max_tokens: 64,
             stop_sequences: vec![],
@@ -1071,6 +1091,7 @@ mod tests {
         ));
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].stage, ClassifierStage::Fast);
         assert_eq!(requests[0].max_tokens, 64);
         assert_eq!(requests[0].stop_sequences, ["</block>"]);
         assert_eq!(requests[0].temperature, 1.0);
@@ -1087,6 +1108,8 @@ mod tests {
         ));
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].stage, ClassifierStage::Fast);
+        assert_eq!(requests[1].stage, ClassifierStage::Thinking);
         assert_eq!(requests[1].max_tokens, 8192);
         assert!(requests[1].stop_sequences.is_empty());
         assert_eq!(

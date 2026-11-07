@@ -2878,7 +2878,9 @@ impl ApiService {
         prepared: &crate::PreparedLlmCall,
     ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
         let Some(context) = request.execution.model_attempt.as_ref() else {
-            return Ok(crate::model_attempt::WireAttempt::new(None));
+            return Ok(
+                crate::model_attempt::WireAttempt::new(None).with_classifier(request, prepared)
+            );
         };
         let hooks = self
             .model_attempt_hooks
@@ -2890,7 +2892,7 @@ impl ApiService {
             .begin(context, request, prepared)
             .await
             .map_err(crate::model_attempt::accounting_error)?;
-        Ok(crate::model_attempt::WireAttempt::new(Some(lease)))
+        Ok(crate::model_attempt::WireAttempt::new(Some(lease)).with_classifier(request, prepared))
     }
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     /// Protocol selected for the model's canonical request and history adapter.
