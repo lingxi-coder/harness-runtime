@@ -145,6 +145,30 @@ pub struct CostSnapshot {
     /// omitted entirely — it is not a tab.
     #[serde(default)]
     pub loops: Vec<LoopUsageRow>,
+    /// This session's usage split by provider account and model.
+    ///
+    /// `attribution: None` is the unattributed bucket. The array is always
+    /// present and is empty when no response has been recorded.
+    pub by_account: Vec<AccountUsageRow>,
+}
+
+/// One model slice for one account, or for requests with no selected account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountUsageRow {
+    /// Selected account. `None` means the request had no account.
+    pub attribution: Option<super::provider_accounts::AccountUsageAttribution>,
+    /// Provider-scoped model name.
+    pub model: String,
+    /// Cumulative cost for this account and model, in nano-USD.
+    pub total_nano_usd: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub web_search_requests: u64,
+    /// Successful recorded responses, not a provider bill.
+    pub request_count: u64,
 }
 
 /// Supplies `/usage` Loops rows (oracle `gl()`). Hosts that run a cron

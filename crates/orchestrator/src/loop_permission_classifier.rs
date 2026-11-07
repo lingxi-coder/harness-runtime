@@ -81,11 +81,12 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             )
         });
         let transport = ProviderTransport {
+            logical_id: lingxi_core::types::MessageId::new().to_string(),
             service: self.service.clone(),
             model: classifier_model(&main_model, &available),
             profile,
             main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&request.transcript),
-            system: classifier_system_prompt(orch.perms.as_ref(), deny_rules),
+            system: classifier_system_snapshot(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
         permission::handback_review::report_review(
@@ -151,11 +152,12 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             )
         });
         let transport = ProviderTransport {
+            logical_id: lingxi_core::types::MessageId::new().to_string(),
             service: self.service.clone(),
             model,
             profile,
             main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&history),
-            system: classifier_system_prompt(orch.perms.as_ref(), deny_rules),
+            system: classifier_system_snapshot(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
         loop_llm::classify(
@@ -208,13 +210,14 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             .map(|listing| listing.request_model)
             .collect::<Vec<_>>();
         let transport = ProviderTransport {
+            logical_id: lingxi_core::types::MessageId::new().to_string(),
             service: self.service.clone(),
             model: classifier_model(&main_model, &available),
             profile,
             // Only the child's rendered transcript is available here. Its
             // real text is included in classifier_input_tokens below.
             main_loop_tokens: 0,
-            system: classifier_system_prompt(orch.perms.as_ref(), &[]),
+            system: classifier_system_snapshot(orch.perms.as_ref(), &[]),
             // A handoff review judges the subagent's work, not the user's
             // configuration; `EZe` passes no CLAUDE.md either.
             user_configuration: None,
@@ -652,7 +655,18 @@ fn tool_summary(name: &str, input: &lingxi_core::types::utf16_json::Utf16JsonPro
     }
 }
 
+fn classifier_system_snapshot(
+    gate: &dyn lingxi_core::host::permission_gate::PermissionGate,
+    deny_rules: &[Utf16JsonProjection],
+) -> Utf16JsonProjection {
+    let system = classifier_system_prompt(gate, deny_rules);
+    user_identity_context()
+        .map(|identity| append_system_context(&system, &identity))
+        .unwrap_or(system)
+}
+
 struct ProviderTransport {
+    logical_id: String,
     service: Arc<llm_runtime::ApiService>,
     model: String,
     profile: Option<String>,
@@ -680,15 +694,11 @@ impl Transport for ProviderTransport {
         if let Some(configuration) = &self.user_configuration {
             chars += configuration.encode_utf16().count() as u64;
         }
-        if let Some(identity) = user_identity_context() {
-            chars += identity.encode_utf16().count() as u64;
-        }
         chars.saturating_add(2) / 4
     }
     async fn query(&self, query: Query) -> Result<Reply, QueryError> {
-        let system = user_identity_context()
-            .map(|identity| append_system_context(&self.system, &identity))
-            .unwrap_or_else(|| self.system.clone());
+        // Fast, Thinking and parse retries see the same immutable instructions.
+        let system = &self.system;
         let can_disable_thinking = self.model.contains("claude-3-")
             || [
                 "opus-4-0",
@@ -715,7 +725,7 @@ impl Transport for ProviderTransport {
             .build_side_query_request_with_thinking(
                 &self.model,
                 self.profile.as_deref(),
-                Some(&system),
+                Some(system),
                 None,
                 false,
                 vec![ConversationMessage::user(
@@ -796,6 +806,23 @@ impl Transport for ProviderTransport {
             .prompt_cache
             .breakpoints
             .extend(input.prompt_cache.breakpoints);
+        let message_index = messages.len() - 1;
+        request.execution.classifier_cache_layout = Some(llm_runtime::ClassifierCacheLayout {
+            logical_id: self.logical_id.clone(),
+            stage: query.stage.as_str(),
+            history: latest_history_checkpoint.map(|block| {
+                lingxi_llm_client::protocol::CachePosition::Message {
+                    index: message_index,
+                    block,
+                }
+            }),
+            action: current_action_checkpoint.map(|block| {
+                lingxi_llm_client::protocol::CachePosition::Message {
+                    index: message_index,
+                    block,
+                }
+            }),
+        });
         request.execution.message_json_string_overrides = exact;
         request.execution.input_protocol = Some(family);
         let response = if family == llm_runtime::ProtocolFamily::OpenAiResponses {

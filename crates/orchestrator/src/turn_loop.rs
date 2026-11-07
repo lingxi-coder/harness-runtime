@@ -1031,6 +1031,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         cache_read_input_tokens: cache_read,
                         cache_creation_input_tokens: cache_create,
                         is_batch_request: false,
+                        account: call.response.usage.account_usage.clone(),
                         bus: orch.model_runtime.analytics_bus.clone(),
                     },
                     pricing,

@@ -411,6 +411,10 @@ pub(crate) fn merge_usage(seed: &ExecutionUsage, delta: &ExecutionUsage) -> Exec
         },
         native_resume_context_observed: delta.native_resume_context_observed
             || seed.native_resume_context_observed,
+        account_usage: delta
+            .account_usage
+            .clone()
+            .or_else(|| seed.account_usage.clone()),
     }
 }
 

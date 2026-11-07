@@ -7,6 +7,16 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
+/// Classifier-owned positions in the FULL logical input, before any SDK
+/// message continuation delta. Never deserialize this from model input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifierCacheLayout {
+    pub logical_id: String,
+    pub stage: &'static str,
+    pub history: Option<lingxi_llm_client::protocol::CachePosition>,
+    pub action: Option<lingxi_llm_client::protocol::CachePosition>,
+}
+
 /// Native's optional operation-scoped `apiAttemptsLeft` counter.
 ///
 /// Clones share one count so compaction prefix retries, summary fallback, and
@@ -355,6 +365,8 @@ pub struct ExecutionContext {
     /// Trusted classifier-owned timeout for each physical provider attempt.
     /// Absent for ordinary requests; the caller owns its overall stage ceiling.
     pub classifier_attempt_timeout_ms: Option<u64>,
+    /// Absent for ordinary calls; authorizes only classifier-generated hints.
+    pub classifier_cache_layout: Option<ClassifierCacheLayout>,
     /// Host-admitted native server fallback policy, outside provider input.
     pub server_fallback:
         Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,

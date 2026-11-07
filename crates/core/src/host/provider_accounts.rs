@@ -13,6 +13,42 @@ pub enum AccountAuthKind {
     OAuth,
 }
 
+/// Non-secret identity of the account that served one model response.
+///
+/// One account holds one credential: an API key or one signed-in session.
+/// Several keys for the same provider are several accounts. `credential_slot`
+/// is the opaque `credential_ref.secret_ref`, never the key or token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountUsageAttribution {
+    /// Logical provider id. `openai-chatgpt` is recorded as `openai`.
+    pub provider_id: String,
+    pub account_id: String,
+    /// Bumps when the credential is replaced, so the previous key stays separate.
+    pub identity_generation: u64,
+    pub auth_kind: AccountAuthKind,
+    /// Opaque credential slot. Not a secret.
+    pub credential_slot: String,
+}
+
+impl AccountUsageAttribution {
+    /// Build the usage identity from a host account row.
+    #[must_use]
+    pub fn from_account(account: &AccountMetadata) -> Self {
+        let provider_id = if account.provider_id == "openai-chatgpt" {
+            "openai".to_owned()
+        } else {
+            account.provider_id.clone()
+        };
+        Self {
+            provider_id,
+            account_id: account.account_id.clone(),
+            identity_generation: account.identity_generation,
+            auth_kind: account.auth_kind,
+            credential_slot: account.credential_ref.secret_ref.clone(),
+        }
+    }
+}
+
 /// An exact opaque slot in one credential storage domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

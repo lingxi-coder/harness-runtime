@@ -3572,6 +3572,7 @@ impl ConversationOrchestrator {
             cache_read_input_tokens: usage.tokens.cache_read,
             cache_creation_input_tokens: usage.tokens.cache_write,
             is_batch_request: false,
+            account: None,
             bus: self.model_runtime.analytics_bus.clone(),
         }))
     }

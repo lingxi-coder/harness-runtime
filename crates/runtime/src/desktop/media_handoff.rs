@@ -350,6 +350,7 @@ mod tests {
                 api_calls: 0,
                 session_duration_secs: 0,
                 formatted: "$0.00".into(),
+                by_account: vec![],
             },
         }
     }

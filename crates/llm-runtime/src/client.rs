@@ -2408,6 +2408,7 @@ impl ModelRuntime {
                 .native_anthropic_request_context
                 .clone(),
             classifier_system_blocks: request.execution.classifier_system_blocks,
+            continuation_snapshot: Default::default(),
             plain_text_message_content: plain_text_message_content_for_execution(
                 &request.execution,
             ),
@@ -3226,6 +3227,7 @@ pub struct PreparedLlmCall {
     pub(crate) effort_policy:
         Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
     pub(crate) classifier_system_blocks: bool,
+    pub(crate) continuation_snapshot: lingxi_llm_client::ConversationRequestSnapshot,
     /// Preserve source plain-string content only for the explicitly uncached
     /// Native Insights side query, while retaining classifier behavior.
     pub(crate) plain_text_message_content: bool,
@@ -3513,7 +3515,7 @@ impl ModelRuntime {
     pub(crate) async fn seal_prepared_with_session(
         &self,
         prepared: &mut PreparedLlmCall,
-        session: Option<&mut lingxi_llm_client::ConversationSession>,
+        mut session: Option<&mut lingxi_llm_client::ConversationSession>,
     ) -> Result<(), LlmError> {
         let mut draft = prepared
             .wire_draft
@@ -3528,7 +3530,7 @@ impl ModelRuntime {
             draft,
             &prepared.provider_request,
             Some(&prepared.route.resolved_route.provider_id),
-            session,
+            session.as_deref_mut(),
         )
         .await
         .map_err(|error| {
@@ -3539,6 +3541,9 @@ impl ModelRuntime {
                 .take()
                 .unwrap_or(error)
         })?;
+        if let Some(session) = session {
+            prepared.continuation_snapshot = session.last_request().clone();
+        }
         prepared.provider_request.headers = call.request().headers.iter().cloned().collect();
         if let Ok(body) =
             serde_json::from_slice::<lingxi_llm_client::protocol::JsonPayload>(&call.request().body)
@@ -3589,6 +3594,7 @@ impl ModelRuntime {
             .map_err(crate::upstream::error)?;
         {
             let snapshot = session.last_request();
+            prepared.continuation_snapshot = snapshot.clone();
             let transport = session.responses_transport();
             tracing::debug!(target: "llm_runtime::continuation", mode = ?snapshot.mode,
                 logical_bytes = snapshot.logical_bytes, wire_bytes = snapshot.wire_bytes,

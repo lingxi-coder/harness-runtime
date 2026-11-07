@@ -49,6 +49,7 @@ pub mod config;
 pub use computer::{scope_computer_request, ComputerNativeDeclaration, ComputerRequestProjection};
 pub mod convert;
 pub mod cost;
+mod classifier_cache;
 mod dispatch_header;
 pub mod error;
 mod execution;
@@ -57,7 +58,8 @@ mod scope_output_quota;
 pub use scope_output_quota::{ScopeOutputQuota, ScopeDispatchAuthorization};
 mod structured_output;
 pub use execution_context::{
-    ApiAttemptsLeft, ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,
+    ApiAttemptsLeft, ClassifierCacheLayout, ExecutionContext, PendingPromptCacheObservation,
+    PromptCacheRequestContext,
     RequestCredentials, RequestDispatchAdmission, RequestDispatchObserver,
 };
 pub mod auth;

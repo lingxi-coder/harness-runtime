@@ -1038,6 +1038,7 @@ impl OutputStream for AdapterOutputStream {
                 api_calls: cost_dto.api_calls,
                 session_duration_secs: cost_dto.session_duration_secs,
                 formatted: cost_dto.formatted.clone(),
+                by_account: cost_dto.by_account.clone(),
             })
             .await;
 
@@ -2144,6 +2145,7 @@ mod tests {
                 api_calls,
                 session_duration_secs,
                 formatted,
+                by_account,
             } => {
                 #[allow(clippy::float_cmp)]
                 {
@@ -2154,6 +2156,7 @@ mod tests {
                 assert_eq!(*api_calls, 3);
                 assert_eq!(*session_duration_secs, 125);
                 assert_eq!(formatted, "$0.0123");
+                assert!(by_account.is_empty());
             }
             other => panic!("expected CostUpdate first, got {other:?}"),
         }

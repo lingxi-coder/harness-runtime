@@ -143,6 +143,7 @@ impl PhysicalStepResponse {
                         cache_read_input_tokens: cache_read,
                         cache_creation_input_tokens: cache_create,
                         is_batch_request: false,
+                        account: response.usage.account_usage.clone(),
                         bus: orch.model_runtime.analytics_bus.clone(),
                     },
                     pricing,

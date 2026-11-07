@@ -2578,6 +2578,24 @@ impl ConversationOrchestrator {
             }),
             safety_stops: Some(scoped_tracker.safety_stops()),
             loops,
+            by_account: state
+                .per_account_usage
+                .iter()
+                .map(|row| lingxi_core::host::orchestrator::AccountUsageRow {
+                    attribution: row.attribution.clone(),
+                    model: row.model.clone(),
+                    total_nano_usd: row.cost_nano_usd,
+                    input_tokens: row.usage.tokens.input,
+                    output_tokens: row.usage.tokens.output,
+                    cache_read_input_tokens: row.cache_read_input_tokens,
+                    cache_creation_input_tokens: row.cache_creation_input_tokens,
+                    reasoning_tokens: row.usage.tokens.reasoning_output,
+                    web_search_requests: row.usage.server_tool_use.map_or(0, |tools| {
+                        u64::from(tools.web_search_requests)
+                    }),
+                    request_count: row.request_count,
+                })
+                .collect(),
         }
     }
 

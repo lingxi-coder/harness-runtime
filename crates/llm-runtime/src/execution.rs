@@ -224,6 +224,18 @@ pub(crate) async fn prepare(
     let client = cache.get(&profile, transport)?;
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
+    if let Some(layout) = &request.execution.classifier_cache_layout {
+        crate::classifier_cache::project(
+            &mut input,
+            &profile,
+            &route.request_model,
+            body_auth_strategy,
+            mode,
+            layout,
+            request.execution.request_session_id.as_deref(),
+            request.execution.enable_prompt_caching.unwrap_or(true),
+        );
+    }
     let native_anthropic_endpoint_admission = request
         .execution
         .native_anthropic_base_url_fingerprint

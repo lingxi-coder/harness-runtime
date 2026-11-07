@@ -2878,7 +2878,9 @@ impl ApiService {
         prepared: &crate::PreparedLlmCall,
     ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
         let Some(context) = request.execution.model_attempt.as_ref() else {
-            return Ok(crate::model_attempt::WireAttempt::new(None));
+            return Ok(
+                crate::model_attempt::WireAttempt::new(None).with_classifier(request, prepared)
+            );
         };
         let hooks = self
             .model_attempt_hooks
@@ -2890,7 +2892,7 @@ impl ApiService {
             .begin(context, request, prepared)
             .await
             .map_err(crate::model_attempt::accounting_error)?;
-        Ok(crate::model_attempt::WireAttempt::new(Some(lease)))
+        Ok(crate::model_attempt::WireAttempt::new(Some(lease)).with_classifier(request, prepared))
     }
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     /// Protocol selected for the model's canonical request and history adapter.
@@ -8887,6 +8889,9 @@ impl ApiService {
                         )?;
                         let per_turn_effort = self.prepared_per_turn_effort(&prepared);
                         response.set_per_turn_effort(per_turn_effort.as_ref())?;
+                        response.usage.account_usage = account_coordinator
+                            .as_ref()
+                            .and_then(|coordinator| coordinator.usage_attribution());
                         response.usage.cost_estimate = estimate.clone();
                         if let Some(quote) = &server_fallback_quote {
                             crate::history_projection::attach_server_fallback_cost_quote(
@@ -11715,6 +11720,10 @@ impl ApiService {
                                     if let HistoryEvent::MessageStart { response }
                                     | HistoryEvent::Completed { response } = &mut event
                                     {
+                                        response.usage.account_usage = s
+                                            .account_coordinator
+                                            .as_ref()
+                                            .and_then(|coordinator| coordinator.usage_attribution());
                                         if let Err(error) =
                                             response.set_per_turn_effort(s.per_turn_effort.as_ref())
                                         {

@@ -80,6 +80,8 @@ pub struct ExecutionUsage {
     /// clear an earlier zero-usage `Some(false)` when later usage removes the
     /// SDK's basis for a decision. This is never persisted.
     pub native_resume_context_observed: bool,
+    /// Account that produced this response. Runtime-only: history serde drops it.
+    pub account_usage: Option<lingxi_core::host::provider_accounts::AccountUsageAttribution>,
 }
 
 impl ExecutionUsage {
