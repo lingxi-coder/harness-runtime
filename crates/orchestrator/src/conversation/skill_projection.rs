@@ -206,6 +206,12 @@ impl ConversationOrchestrator {
         let selected = candidates
             .into_iter()
             .filter(|candidate| {
+                self.prompt_runtime
+                    .skill_listing
+                    .as_ref()
+                    .is_none_or(|provider| provider.is_skill_available(&candidate.name))
+            })
+            .filter(|candidate| {
                 candidate
                     .name
                     .string_units("")

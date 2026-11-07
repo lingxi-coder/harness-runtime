@@ -2293,9 +2293,12 @@ impl ConversationOrchestrator {
         // deduplication against both plain message bodies and skill content
         // that already survived in an earlier invoked-skills attachment.
         let session_id = self.session.lock().await.session_id.to_string();
-        let skill_candidates = compaction::invoked_skills::filter_for_scope(
+        let mut skill_candidates = compaction::invoked_skills::filter_for_scope(
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
         );
+        if let Some(provider) = self.prompt_runtime.skill_listing.as_ref() {
+            skill_candidates.retain(|skill| provider.is_skill_available(&skill.name));
+        }
         let already_attached_skills = self.post_compact_attached_skill_contents(boundary_context);
         let (restored_skills, staged_skills) = if stage_skills {
             compaction::post_compact::stage_post_compact_skills(

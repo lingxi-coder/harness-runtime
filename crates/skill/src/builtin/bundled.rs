@@ -21,6 +21,12 @@ pub(crate) struct BundledResource {
 /// Desktop builtin skill templates.
 pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
     BundledSkill {
+        name: "decision",
+        raw: include_str!("decision/SKILL.md"),
+        triggers: &["/decision", "Decision tool", "用 Decision", "决策模型"],
+        references: &[],
+    },
+    BundledSkill {
         name: "create-bot",
         raw: include_str!("create-bot/SKILL.md"),
         triggers: &[

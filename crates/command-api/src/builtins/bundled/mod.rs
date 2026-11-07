@@ -130,6 +130,12 @@ fn register_plan_artifact_skill(reg: &mut CommandRegistry) {
     register_desktop_prompt_skill(reg, "plan-artifact", "[plan]");
 }
 
+/// Register the Decision skill only for a host with a Decision service.
+/// The caller must bind its live configuration availability gate.
+pub fn register_decision_skill(reg: &mut CommandRegistry) {
+    register_desktop_prompt_skill(reg, "decision", "[evidence and questions]");
+}
+
 fn register_desktop_prompt_skill(
     reg: &mut CommandRegistry,
     name: &'static str,

@@ -27,6 +27,7 @@ pub struct CommandRegistry {
     aliases: HashMap<Vec<u16>, Vec<u16>>,
     builtin_handlers: HashMap<Vec<u16>, Arc<dyn BuiltinCommandHandler>>,
     plugin_commands: HashMap<PluginId, Vec<Vec<u16>>>,
+    bundled_capability_gates: HashMap<Vec<u16>, Arc<dyn Fn() -> bool + Send + Sync>>,
     side_chat: bool,
     session_skill_allowlist: Option<Vec<String>>,
     /// Exact plugin display-name units -> (owner id, storage identity, native provider).
@@ -77,6 +78,7 @@ impl CommandRegistry {
             aliases: HashMap::new(),
             builtin_handlers: HashMap::new(),
             plugin_commands: HashMap::new(),
+            bundled_capability_gates: HashMap::new(),
             side_chat: false,
             session_skill_allowlist: None,
             plugin_describe_providers: HashMap::new(),
@@ -92,6 +94,17 @@ impl CommandRegistry {
         self.native_headless_context = Some(context);
     }
 
+    /// Gate a host-provided bundled skill without rebuilding or reordering the catalog.
+    /// User and plugin skills with the same name keep their own availability.
+    pub fn set_bundled_capability_gate(
+        &mut self,
+        name: &str,
+        gate: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        self.bundled_capability_gates
+            .insert(name.encode_utf16().collect(), gate);
+    }
+
     /// Restrict this registry instance to lightweight side conversations.
     pub fn set_side_chat(&mut self, enabled: bool) {
         self.side_chat = enabled;
@@ -100,6 +113,14 @@ impl CommandRegistry {
     /// Check Side Chat admission before handlers, hooks, or prompt expansion.
     #[must_use]
     pub fn execution_allowed(&self, command: &SlashCommand) -> bool {
+        if command.source == CommandSource::Bundled
+            && self
+                .bundled_capability_gates
+                .get(&string_units(&command.name))
+                .is_some_and(|enabled| !enabled())
+        {
+            return false;
+        }
         if !self.side_chat {
             return true;
         }
@@ -3459,5 +3480,49 @@ mod tests {
         assert!(!commands
             .iter()
             .any(|command| command.name.string_at("") == Some("loop")));
+    }
+}
+
+#[cfg(test)]
+mod capability_gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn decision_configuration_changes_admission_without_rebuilding_the_catalog() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "decision".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            ..Default::default()
+        });
+        let enabled = Arc::new(AtomicBool::new(false));
+        let configured = enabled.clone();
+        registry.set_bundled_capability_gate(
+            "decision",
+            Arc::new(move || configured.load(Ordering::Acquire)),
+        );
+        let source = Utf16JsonProjection::from("decision");
+        let metadata = serde_json::to_string(registry.resolve(&source).unwrap()).unwrap();
+        let admitted = || registry.session_skill_allowed(registry.resolve(&source).unwrap());
+        assert!(!admitted());
+        enabled.store(true, Ordering::Release);
+        assert!(admitted());
+        assert_eq!(
+            metadata,
+            serde_json::to_string(registry.resolve(&source).unwrap()).unwrap()
+        );
+        enabled.store(false, Ordering::Release);
+        assert!(!admitted());
+        enabled.store(true, Ordering::Release);
+        assert!(admitted());
+        assert_eq!(
+            metadata,
+            serde_json::to_string(registry.resolve(&source).unwrap()).unwrap()
+        );
     }
 }

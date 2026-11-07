@@ -20,7 +20,8 @@ impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
     fn skip_shell_expansion(&self) -> bool {
         matches!(
             self.name,
-            "create-bot"
+            "decision"
+                | "create-bot"
                 | "lingxi-api"
                 | "document-authoring"
                 | "artifact-design"

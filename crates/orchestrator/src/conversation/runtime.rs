@@ -1026,12 +1026,9 @@ pub(crate) struct PromptRuntime {
     /// `StaticMemoryProvider`'s role for the eager block. Set via
     /// [`Self::with_nested_memory_roots`].
     pub(crate) nested_memory_roots: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
-    /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
-    /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
-    /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
-    /// attachments.ts:2607/2699). When no new skill appears,
-    /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
-    /// turn). Process-/session-local, exactly like the TS module-scope map.
+    /// Current advertised skill membership. Initial ingress emits a listing;
+    /// later additions and withdrawals append only their delta. Stable membership
+    /// emits nothing. Clear/resume/compaction reset this context-local baseline.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<Vec<u16>>>,
     /// `plan_mode` attachment cadence (2.1.238 `X4T` @296525982 + `txl`
     /// @296558044). See [`PlanReminderCadence`].

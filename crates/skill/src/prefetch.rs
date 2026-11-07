@@ -98,13 +98,22 @@ pub trait SkillCandidateSource: Send + Sync {
 /// (`{name, description, whenToUse}`, in-memory, no embeddings/scores).
 pub struct RegistryCandidateSource {
     registry: Arc<SkillRegistry>,
+    availability: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 impl RegistryCandidateSource {
     /// Wrap a shared registry snapshot.
     #[must_use]
     pub fn new(registry: Arc<SkillRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            availability: None,
+        }
+    }
+    /// Apply live host capability gates while preserving discovery order.
+    pub fn with_availability(mut self, available: Arc<dyn Fn(&str) -> bool + Send + Sync>) -> Self {
+        self.availability = Some(available);
+        self
     }
 }
 
@@ -114,6 +123,11 @@ impl SkillCandidateSource for RegistryCandidateSource {
         self.registry
             .discover(query)
             .into_iter()
+            .filter(|skill| {
+                self.availability
+                    .as_ref()
+                    .is_none_or(|available| available(&skill.name))
+            })
             .map(|s| DiscoveredSkill {
                 name: s.name.clone(),
                 description: s.description.clone(),
