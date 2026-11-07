@@ -1141,3 +1141,64 @@ async fn hidden_skill_does_not_emit_or_consume_listing() {
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn decision_visibility_deltas_preserve_the_existing_prompt_prefix() {
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(NamedTool("Skill")));
+    let shared = Arc::new(std::sync::Mutex::new(vec![skill("stable")]));
+    let orchestrator = orch_with(registry, Some(Arc::new(MutableSkills(shared.clone()))));
+    let initial = orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .unwrap()
+        .text_content();
+    assert!(!initial.contains("decision"));
+    assert!(orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
+    shared.lock().unwrap().push(skill("decision"));
+    let enabled = orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .unwrap()
+        .text_content();
+    assert!(enabled.contains("- decision:"));
+    assert!(!enabled.contains("- stable:"));
+    // Endpoint/key/model edits do not change capability metadata: no extra input.
+    assert!(orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
+    shared
+        .lock()
+        .unwrap()
+        .retain(|entry| entry.name.string_at("") != Some("decision"));
+    let disabled = orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .unwrap()
+        .text_content();
+    assert!(disabled.contains("no longer available"));
+    assert!(!disabled.contains("- decision:"));
+    assert!(orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .is_none());
+    shared.lock().unwrap().push(skill("decision"));
+    let restored = orchestrator
+        .skill_listing_reminder_message()
+        .await
+        .unwrap()
+        .unwrap()
+        .text_content();
+    assert_eq!(enabled, restored);
+    assert!(initial.contains("- stable:"));
+}

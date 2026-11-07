@@ -187,6 +187,7 @@ collaboration = [
 ]
 
 [dependencies]
+decision-api = { path = "../decision-api" }
 jsonschema = { version = "=0.46.10", default-features = false, optional = true }
 media-runtime = { path = "../media-runtime" }
 media-api.workspace = true

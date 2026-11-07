@@ -58,6 +58,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_document_authoring_skill(reg);
     register_artifact_design_skill(reg);
     register_plan_artifact_skill(reg);
+    register_desktop_prompt_skill(reg, "create-bot", "[what your Bot should do]");
 
     // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
@@ -127,6 +128,12 @@ fn register_artifact_design_skill(reg: &mut CommandRegistry) {
 /// A plan shown as a hosted page. Approval stays on `ExitPlanMode`.
 fn register_plan_artifact_skill(reg: &mut CommandRegistry) {
     register_desktop_prompt_skill(reg, "plan-artifact", "[plan]");
+}
+
+/// Register the Decision skill only for a host with a Decision service.
+/// The caller must bind its live configuration availability gate.
+pub fn register_decision_skill(reg: &mut CommandRegistry) {
+    register_desktop_prompt_skill(reg, "decision", "[evidence and questions]");
 }
 
 fn register_desktop_prompt_skill(
@@ -690,6 +697,7 @@ mod tests {
             "batch".to_string(),
             "code-review".to_string(),
             "commit".to_string(),
+            "create-bot".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.

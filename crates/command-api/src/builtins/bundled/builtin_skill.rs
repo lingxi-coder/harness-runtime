@@ -20,7 +20,12 @@ impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
     fn skip_shell_expansion(&self) -> bool {
         matches!(
             self.name,
-            "lingxi-api" | "document-authoring" | "artifact-design" | "plan-artifact"
+            "decision"
+                | "create-bot"
+                | "lingxi-api"
+                | "document-authoring"
+                | "artifact-design"
+                | "plan-artifact"
         )
     }
 
@@ -37,6 +42,7 @@ mod tests {
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
+            ("create-bot", "# Create a Bot".to_owned()),
             (
                 "document-authoring",
                 format!("Document authoring in {}", branding::PRODUCT_NAME),

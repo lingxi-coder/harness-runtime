@@ -806,6 +806,8 @@ pub struct DesktopConfig {
     /// schemas. Every other desktop host (CLI, TUI, offline factories) leaves it
     /// `None`, so audio tools are absent.
     pub audio: Option<DesktopAudio>,
+    /// Host-owned global Decision service. Only Desktop app hosts inject it.
+    pub decision_service: Option<Arc<dyn decision_api::DecisionService>>,
     /// App-scoped host media facade shared by media tools and UI/remote callers.
     pub media_service: Option<Arc<dyn media_api::MediaService>>,
     /// Host-selected native Agent attachment for Conversation-intent media
@@ -1164,6 +1166,10 @@ impl std::fmt::Debug for DesktopConfig {
                 "session_agent_observer",
                 &self.session_agent_observer.as_ref().map(|_| "<configured>"),
             )
+            .field(
+                "decision_service",
+                &self.decision_service.as_ref().map(|_| "<configured>"),
+            )
             .field("audio", &self.audio.as_ref().map(|_| "<configured>"))
             .field(
                 "media_service",
@@ -1345,6 +1351,7 @@ impl Default for DesktopConfig {
             // Default: no device audio ⟶ the `voice`/`speech` tools are not
             // registered (only the bridge composition root wires an AudioBridge).
             audio: None,
+            decision_service: None,
             media_service: None,
             media_conversation_attachment: None,
             media_agent_handoffs: None,

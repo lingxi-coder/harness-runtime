@@ -317,7 +317,11 @@ impl SkillLoader for AgentSkillLoader {
         let Some(resolved) = Self::resolve_name(&reg, skill_name, agent_type) else {
             return Ok(None);
         };
-        let Some(cmd) = reg.resolve(&resolved).cloned() else {
+        let Some(cmd) = reg
+            .resolve(&resolved)
+            .filter(|command| reg.execution_allowed(command))
+            .cloned()
+        else {
             return Ok(None);
         };
         drop(reg);

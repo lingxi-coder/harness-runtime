@@ -679,6 +679,10 @@ define_client_command! {
         name: String,
     },
 
+    // Host capability and completion for a foreground Decision call on this connection.
+    DecisionConfigurationChanged { configured: bool },
+    DecisionResponse { request_id: String, result_json: String },
+
     // ── Audio (engine -> device AudioService request/result) ────────────
     AudioResponse {
         // Globally unique identity echoed by the matching AudioRequest.
@@ -1130,6 +1134,16 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::RemoveMcpServer { scope, name } => {
                 Self::RemoveMcpServer { scope, name }
             }
+            ClientCommandWire::DecisionConfigurationChanged { configured } => {
+                Self::DecisionConfigurationChanged { configured }
+            }
+            ClientCommandWire::DecisionResponse {
+                request_id,
+                result_json,
+            } => Self::DecisionResponse {
+                request_id,
+                result_json,
+            },
             ClientCommandWire::AudioResponse { identity, result } => {
                 Self::AudioResponse { identity, result }
             }

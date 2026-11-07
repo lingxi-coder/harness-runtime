@@ -28,6 +28,7 @@ pub mod plan_reminder;
 pub mod sanitize;
 pub mod silent_turn;
 pub mod skill_listing;
+pub(crate) mod skill_listing_delta;
 pub mod subagent_env;
 pub mod task_notification;
 pub mod todo_reminder;
