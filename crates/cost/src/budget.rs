@@ -1540,6 +1540,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         });
         let request = requests_rx.recv().await.expect("ordinary durable charge");
@@ -1600,6 +1601,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     is_batch_request: false,
+                    account: None,
                     bus: None,
                 });
         let request = requests_rx.recv().await.expect("ordinary durable charge");

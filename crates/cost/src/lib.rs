@@ -26,6 +26,7 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+mod account_usage;
 pub mod attempt;
 pub mod budget;
 pub mod calculator;
@@ -41,6 +42,7 @@ pub mod token_usage_replay;
 pub mod tracker;
 pub mod usage;
 
+pub use account_usage::AccountModelUsage;
 pub use attempt::{
     calculate_pinned_attempt_cost, AttemptBillingMode, AttemptContribution, AttemptDisposition,
     AttemptFoldAck, AttemptFoldError, AttemptIntent, AttemptLedger, AttemptOutputRecovery,

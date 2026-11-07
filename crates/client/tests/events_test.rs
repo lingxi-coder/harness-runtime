@@ -14,7 +14,9 @@ use client::protocol::controls::{
     PermissionControlStateDto, PermissionModeOptionDto, ReasoningControlSpecDto,
     ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
-use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
+use client::protocol::events::{
+    AccountUsageAttributionDto, AccountUsageRowDto, ClientEvent, CostDto, TurnOutcomeDto,
+};
 use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
 use client::protocol::message::{MessageBlockDto, MessageDto};
 use client::protocol::permission::PermissionResolutionDto;
@@ -475,6 +477,7 @@ fn turn_ended_round_trips() {
             api_calls: 3,
             session_duration_secs: 42,
             formatted: "$0.0123".to_string(),
+            by_account: vec![],
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize TurnEnded");
@@ -497,6 +500,7 @@ fn cost_update_round_trips() {
         api_calls: 2,
         session_duration_secs: 99,
         formatted: "$1.5000".to_string(),
+        by_account: vec![],
     };
     let json = serde_json::to_value(&ev).expect("serialize CostUpdate");
     assert_eq!(json["type"], "cost_update");
@@ -504,7 +508,63 @@ fn cost_update_round_trips() {
     assert_eq!(json["api_calls"], 2);
     assert_eq!(json["session_duration_secs"], 99);
     assert_eq!(json["formatted"], "$1.5000");
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize CostUpdate");
+    assert_eq!(json["by_account"].as_array().map(Vec::len), Some(0));
+    let back: ClientEvent = serde_json::from_value(json.clone()).expect("deserialize CostUpdate");
+    assert_eq!(back, ev);
+
+    let mut missing = json;
+    missing
+        .as_object_mut()
+        .expect("object")
+        .remove("by_account");
+    assert!(serde_json::from_value::<ClientEvent>(missing).is_err());
+}
+
+#[test]
+fn cost_update_keeps_provider_accounts_apart_without_the_credential_slot() {
+    let row = |provider: &str, account: &str, generation: u64, auth_kind: &str, model: &str| {
+        AccountUsageRowDto {
+            attribution: Some(AccountUsageAttributionDto {
+                provider_id: provider.to_owned(),
+                account_id: account.to_owned(),
+                identity_generation: generation,
+                auth_kind: auth_kind.to_owned(),
+            }),
+            model: model.to_owned(),
+            total_nano_usd: 10,
+            input_tokens: 3,
+            output_tokens: 4,
+            cache_read_input_tokens: 1,
+            cache_creation_input_tokens: 2,
+            reasoning_tokens: 0,
+            web_search_requests: 0,
+            request_count: 1,
+        }
+    };
+    let ev = ClientEvent::CostUpdate {
+        total_usd: 0.0,
+        input_tokens: 6,
+        output_tokens: 8,
+        api_calls: 2,
+        session_duration_secs: 1,
+        formatted: "$0.0000".to_string(),
+        by_account: vec![
+            row("anthropic", "key-a", 1, "api_key", "claude"),
+            row("anthropic", "key-b", 1, "api_key", "claude"),
+            row("openai", "sub-a", 2, "oauth", "gpt"),
+        ],
+    };
+    let json = serde_json::to_value(&ev).expect("serialize");
+    let rows = json["by_account"].as_array().expect("rows");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["attribution"]["account_id"], "key-a");
+    assert_eq!(rows[1]["attribution"]["account_id"], "key-b");
+    assert_eq!(rows[2]["attribution"]["provider_id"], "openai");
+    assert_eq!(rows[2]["attribution"]["identity_generation"], 2);
+    let encoded = serde_json::to_string(&ev).expect("string");
+    assert!(!encoded.contains("credential"));
+    assert!(!encoded.contains("slot"));
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize");
     assert_eq!(back, ev);
 }
 

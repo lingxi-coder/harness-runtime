@@ -870,6 +870,7 @@ impl StreamingTurnDriver<'_> {
                 cache_creation_input_tokens:
                     usage.map_or(0, |usage| usage.counts().cache_write_tokens),
                 is_batch_request: false,
+                account: usage.and_then(|usage| usage.account_usage.clone()),
                 bus: orch.model_runtime.analytics_bus.clone(),
             },
             pricing,

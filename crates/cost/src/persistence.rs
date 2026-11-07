@@ -64,6 +64,8 @@ pub struct CostStateVector {
     pub total_nano_usd: u64,
     /// Per-model vector.
     pub per_model_usage: Vec<ModelUsage>,
+    /// Per-account vector. Always stored, including when it is empty.
+    pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
     /// Aggregate timing/counters.
     pub total_api_duration_ms: u64,
     /// Aggregate non-retry timing.
@@ -127,6 +129,10 @@ impl From<&CostState> for CostStateVector {
                 entry.model_ref.model
             )
         });
+        let mut per_account_usage = state.per_account_usage.clone();
+        per_account_usage.sort_by(|left, right| {
+            crate::account_usage::identity_key(left).cmp(&crate::account_usage::identity_key(right))
+        });
         let mut unpriced_models = state.unpriced_models.iter().cloned().collect::<Vec<_>>();
         unpriced_models.sort_by_key(|model| {
             format!(
@@ -140,6 +146,7 @@ impl From<&CostState> for CostStateVector {
             cost_revision: state.cost_revision,
             total_nano_usd: state.total_nano_usd,
             per_model_usage,
+            per_account_usage,
             total_api_duration_ms: state.total_api_duration_ms,
             total_api_duration_without_retries_ms: state.total_api_duration_without_retries_ms,
             total_tool_duration_ms: state.total_tool_duration_ms,
@@ -183,11 +190,20 @@ impl CostStateVector {
                 ));
             }
         }
+        let mut seen_accounts = BTreeSet::new();
+        for entry in &self.per_account_usage {
+            if !seen_accounts.insert(crate::account_usage::identity_key(entry)) {
+                return Err(CostPersistError::Storage(
+                    "cost vector contains a duplicate account usage identity".into(),
+                ));
+            }
+        }
         Ok(CostState {
             session_id: self.session_id,
             cost_revision: self.cost_revision,
             total_nano_usd: self.total_nano_usd,
             per_model_usage,
+            per_account_usage: self.per_account_usage,
             total_api_duration_ms: self.total_api_duration_ms,
             total_api_duration_without_retries_ms: self.total_api_duration_without_retries_ms,
             total_tool_duration_ms: self.total_tool_duration_ms,

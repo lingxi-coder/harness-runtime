@@ -664,6 +664,13 @@ impl AttemptCoordinator {
             }))
         .then(|| account.clone())
     }
+    pub fn usage_attribution(
+        &self,
+    ) -> Option<lingxi_core::host::provider_accounts::AccountUsageAttribution> {
+        self.active.as_ref().map(|(account, _, _, _)| {
+            lingxi_core::host::provider_accounts::AccountUsageAttribution::from_account(account)
+        })
+    }
     pub fn active_scope(&self) -> Option<AccountResourceScope> {
         self.active
             .as_ref()

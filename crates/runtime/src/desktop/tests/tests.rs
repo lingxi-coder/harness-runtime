@@ -3136,6 +3136,7 @@ async fn desktop_shutdown_waits_for_blocked_known_cost_wal_ack() {
         cache_read_input_tokens: 3,
         cache_creation_input_tokens: 0,
         is_batch_request: false,
+        account: None,
         bus: None,
     });
     let mutation_id = receipt.mutation_id().clone();

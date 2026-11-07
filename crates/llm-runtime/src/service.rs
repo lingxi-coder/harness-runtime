@@ -8886,6 +8886,9 @@ impl ApiService {
                         )?;
                         let per_turn_effort = self.prepared_per_turn_effort(&prepared);
                         response.set_per_turn_effort(per_turn_effort.as_ref())?;
+                        response.usage.account_usage = account_coordinator
+                            .as_ref()
+                            .and_then(|coordinator| coordinator.usage_attribution());
                         response.usage.cost_estimate = estimate.clone();
                         if let Some(quote) = &server_fallback_quote {
                             crate::history_projection::attach_server_fallback_cost_quote(
@@ -11711,6 +11714,10 @@ impl ApiService {
                                     if let HistoryEvent::MessageStart { response }
                                     | HistoryEvent::Completed { response } = &mut event
                                     {
+                                        response.usage.account_usage = s
+                                            .account_coordinator
+                                            .as_ref()
+                                            .and_then(|coordinator| coordinator.usage_attribution());
                                         if let Err(error) =
                                             response.set_per_turn_effort(s.per_turn_effort.as_ref())
                                         {

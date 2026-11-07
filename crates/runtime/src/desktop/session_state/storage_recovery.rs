@@ -217,6 +217,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         };
         let receipt = scope.submit_model_response_with_pricing(

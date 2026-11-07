@@ -220,6 +220,7 @@ impl ModelCallPreparer for VisionModelCallPreparer {
                             .cache_write
                             .saturating_add(result.usage.tokens.cache_write_1h),
                         is_batch_request: false,
+                        account: None,
                         bus: orch.model_runtime.analytics_bus.clone(),
                     }),
                     result.api_calls,
@@ -256,6 +257,7 @@ impl ModelCallPreparer for VisionModelCallPreparer {
                             .cache_write
                             .saturating_add(usage.tokens.cache_write_1h),
                         is_batch_request: false,
+                        account: None,
                         bus: orch.model_runtime.analytics_bus.clone(),
                     }),
                     accounting.api_calls,

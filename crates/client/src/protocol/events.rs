@@ -156,6 +156,10 @@ define_client_event! {
         api_calls: u32,
         session_duration_secs: u64,
         formatted: String,
+        /// This session's usage by provider account. Empty when no response
+        /// has been recorded. The credential slot stays in the ledger and is
+        /// not sent to the client.
+        by_account: Vec<AccountUsageRowDto>,
     },
 
     CompactionCompleted {
@@ -1062,6 +1066,7 @@ impl From<ClientEventWire> for ClientEvent {
                 api_calls,
                 session_duration_secs,
                 formatted,
+                by_account,
             } => Self::CostUpdate {
                 total_usd,
                 input_tokens,
@@ -1069,6 +1074,7 @@ impl From<ClientEventWire> for ClientEvent {
                 api_calls,
                 session_duration_secs,
                 formatted,
+                by_account,
             },
             ClientEventWire::CompactionCompleted {
                 messages_before,
@@ -1825,6 +1831,40 @@ pub struct TurnRecoverySnapshotDto {
     pub reason: Option<String>,
 }
 
+/// Account that served one recorded response. The opaque credential slot stays
+/// in the cost ledger and is not part of this client DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AccountUsageAttributionDto {
+    /// Logical provider id. `openai-chatgpt` is already folded to `openai`.
+    pub provider_id: String,
+    pub account_id: String,
+    /// Bumps when that account's credential is replaced.
+    pub identity_generation: u64,
+    /// `"api_key"` or `"oauth"`.
+    pub auth_kind: String,
+}
+
+/// One model slice for one account, or for requests with no selected account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AccountUsageRowDto {
+    /// Selected account. `None` is the unattributed bucket.
+    pub attribution: Option<AccountUsageAttributionDto>,
+    /// Provider-scoped model name.
+    pub model: String,
+    /// Cumulative cost for this account and model, in nano-USD.
+    pub total_nano_usd: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub web_search_requests: u64,
+    /// Successful recorded responses, not a provider bill.
+    pub request_count: u64,
+}
+
 /// Cumulative cost snapshot — the lowered analog of `lingxi_core::host::CostSnapshot`
 /// (`Duration` → whole seconds; only the display-relevant fields, decision
 /// §0.4). Carried by [`ClientEvent::TurnEnded`].
@@ -1843,6 +1883,9 @@ pub struct CostDto {
     pub session_duration_secs: u64,
     /// Pre-formatted display string (e.g. `"$0.0123"`).
     pub formatted: String,
+    /// This session's usage by provider account and model. Empty when no
+    /// response has been recorded.
+    pub by_account: Vec<AccountUsageRowDto>,
 }
 
 /// A durable task from the workspace's existing cron scheduler.
