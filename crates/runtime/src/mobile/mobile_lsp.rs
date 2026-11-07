@@ -797,10 +797,10 @@ mod tests {
         assert!(lsp_startup_workspace(&config).is_err());
         config.workspace_folder = Some("relative".into());
         assert!(lsp_startup_workspace(&config).is_err());
-        config.workspace_folder = Some("/home/lingxi/.lingxi/code".into());
+        config.workspace_folder = Some("/home/lingxi/.lingxi-workspaces/code".into());
         assert_eq!(
             lsp_startup_workspace(&config).unwrap(),
-            "/home/lingxi/.lingxi/code"
+            "/home/lingxi/.lingxi-workspaces/code"
         );
     }
 

@@ -443,7 +443,7 @@ impl Tool for GlobTool {
         // effective cwd (base fallback + relativize) comes from `cwd_now()`,
         // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
         // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
-        let trusted = self.ctx.trusted_dirs();
+        let trusted = self.ctx.read_roots().await;
 
         let pattern = crate::input_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;

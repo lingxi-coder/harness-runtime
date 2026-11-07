@@ -443,3 +443,20 @@ fn descriptor_rejects_non_loopback_and_world_readable_files() {
     }
     host.finish();
 }
+
+#[tokio::test]
+async fn readiness_status_is_read_only_and_does_not_request_approval() {
+    let host = Host::new(vec![(
+        200,
+        json!({"result":{"connected":false,"enabled":true}}),
+    )]);
+    let resolver = resolver(vec![]);
+    let tool = host.tool(resolver.clone());
+    let request = input("status");
+    assert!(tool.is_read_only(&request));
+    tool.execute(&request, &tool_api::test_support::fresh_ctx())
+        .await
+        .unwrap();
+    assert!(resolver.requests.lock().unwrap().is_empty());
+    assert_eq!(host.finish()[0]["action"], "status");
+}

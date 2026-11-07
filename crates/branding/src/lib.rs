@@ -96,10 +96,10 @@ impl BrandRuntimeProfile {
         Path::new("/home").join(self.linux_user)
     }
 
-    /// Brand-owned container for configuration, project and scheduled data.
+    /// Brand-owned workspace container, separate from private configuration.
     #[must_use]
     pub fn workspace_container_guest_path(self) -> PathBuf {
-        self.config_guest_path()
+        workspace_home(&self.config_guest_path())
     }
 
     /// Default guest working directory for a new Global Chat conversation.
@@ -129,7 +129,7 @@ impl BrandRuntimeProfile {
     /// Guest path of the mobile authoring source directory root.
     #[must_use]
     pub fn apps_guest_path(self) -> PathBuf {
-        self.config_guest_path().join(".apps")
+        self.workspace_container_guest_path().join("apps")
     }
 
     /// Host-side persistent account home below a runtime managed root.
@@ -475,6 +475,15 @@ pub fn config_home(home: &Path, config_dir_env: Option<OsString>) -> PathBuf {
     }
 }
 
+/// Workspace sibling of the selected brand configuration directory. This also
+/// honors custom branded configuration homes without a hard-coded product name.
+#[must_use]
+pub fn workspace_home(config_home: &Path) -> PathBuf {
+    let mut name = config_home.file_name().unwrap_or_default().to_os_string();
+    name.push("-workspaces");
+    config_home.with_file_name(name)
+}
+
 /// Render bundled documentation using the owning product namespace.
 #[must_use]
 pub fn render_namespace_template(template: &str) -> String {
@@ -496,24 +505,26 @@ mod tests {
         ] {
             assert_eq!(
                 profile.workspace_container_guest_path(),
-                profile.config_guest_path()
+                profile
+                    .guest_home()
+                    .join(format!("{}-workspaces", profile.config_dir_name))
             );
             assert_eq!(
                 profile.chat_workspace_guest_path(),
-                profile.config_guest_path().join("chat")
+                profile.workspace_container_guest_path().join("chat")
             );
             assert_eq!(
                 profile.code_workspace_guest_path(),
-                profile.config_guest_path().join("code")
+                profile.workspace_container_guest_path().join("code")
             );
             assert_eq!(
                 profile.projects_guest_path(),
-                profile.config_guest_path().join("projects")
+                profile.workspace_container_guest_path().join("projects")
             );
         }
         assert_eq!(
             BrandRuntimeProfile::LINGXI.workspace_container_guest_path(),
-            Path::new("/home/lingxi/.lingxi")
+            Path::new("/home/lingxi/.lingxi-workspaces")
         );
     }
     use super::*;

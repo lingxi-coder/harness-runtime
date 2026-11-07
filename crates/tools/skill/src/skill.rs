@@ -1683,7 +1683,7 @@ a topic not yet loaded retrieves new material; do not repeat a topic already pre
                 skill_dir.into_owned()
             };
             expanded_prompt = join_source_parts(&[
-                format!("Base directory for this skill: {skill_dir}\n\n").into(),
+                format!("Base directory for this skill: {skill_dir}\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\n").into(),
                 expanded_prompt,
             ]);
         }

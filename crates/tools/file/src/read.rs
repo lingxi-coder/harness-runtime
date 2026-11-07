@@ -2001,7 +2001,7 @@ impl Tool for FileReadTool {
         // One snapshot of trusted_dirs for both containment checks below (the
         // primary path and the macOS screenshot alt-path retry), so they
         // can't straddle a swap between the two calls.
-        let mut trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = self.ctx.read_roots().await;
         if let Some(root) =
             lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
@@ -4075,6 +4075,91 @@ mod tests {
         assert!(
             matches!(err, ToolError::PathBlocked { .. }),
             "expected PathBlocked, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_skill_assets_are_readable_but_not_writable_or_escapable() {
+        struct Roots(std::path::PathBuf);
+        #[async_trait::async_trait]
+        impl tool_api::builtin_context::SkillReadRoots for Roots {
+            async fn roots(&self) -> Vec<std::path::PathBuf> {
+                vec![self.0.clone()]
+            }
+        }
+        let workspace = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let skill = home.path().join("skills/dataviz");
+        std::fs::create_dir_all(skill.join("references")).unwrap();
+        let reference = skill.join("references/choosing-a-form.md");
+        std::fs::write(&reference, "Use a bar chart").unwrap();
+        let secret = home.path().join("credentials.json");
+        std::fs::write(&secret, "private").unwrap();
+        std::os::unix::fs::symlink(&secret, skill.join("escape.md")).unwrap();
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![workspace.path().to_path_buf()],
+        );
+        ctx.skill_read_roots = Some(Arc::new(Roots(skill.clone())));
+        let read = FileReadTool::new(ctx.clone());
+        read.call(
+            crate::generated_result(&json!({"file_path":reference})),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let glob = crate::glob::GlobTool::new(ctx.clone());
+        glob.call(
+            crate::generated_result(&json!({"path":skill,"pattern":"**/*.md"})),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let grep = crate::grep::GrepTool::new(ctx.clone());
+        grep.call(
+            crate::generated_result(&json!({"path":reference,"pattern":"bar chart"})),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        for file in [secret, skill.join("escape.md")] {
+            assert!(matches!(
+                read.call(
+                    crate::generated_result(&json!({"file_path":file})),
+                    fresh_ctx(),
+                    fresh_tx()
+                )
+                .await,
+                Err(ToolError::PathBlocked { .. })
+            ));
+        }
+        assert!(matches!(
+            glob.call(
+                crate::generated_result(&json!({"path":home.path(),"pattern":"**/*.md"})),
+                fresh_ctx(),
+                fresh_tx()
+            )
+            .await,
+            Err(ToolError::PathBlocked { .. })
+        ));
+        let write = crate::write::FileWriteTool::new(ctx);
+        assert!(matches!(
+            write
+                .call(
+                    crate::generated_result(&json!({"file_path":reference,"content":"changed"})),
+                    fresh_ctx(),
+                    fresh_tx()
+                )
+                .await,
+            Err(ToolError::PathBlocked { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(reference).unwrap(),
+            "Use a bar chart"
         );
     }
 

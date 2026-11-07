@@ -273,6 +273,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_roots_follow_skill_registration_and_removal() {
+        use tool_api::builtin_context::SkillReadRoots;
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let roots = RegisteredSkillReadRoots(registry.clone());
+        assert!(roots.roots().await.is_empty());
+        let mut command = markdown_cmd("dataviz", "Read references/choosing-a-form.md");
+        command.skill_root = Some(PathBuf::from("/skills/dataviz"));
+        command.loaded_from = Some("test-plugin".into());
+        registry.write().await.register_command(command);
+        assert_eq!(roots.roots().await, vec![PathBuf::from("/skills/dataviz")]);
+        registry.write().await.unregister_loaded_from("test-plugin");
+        assert!(roots.roots().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn resolves_registered_markdown_command_to_prompt_descriptor() {
         let mut reg = CommandRegistry::new();
         reg.register_command(markdown_cmd("review-pr", "Review $ARGUMENTS"));
@@ -597,5 +612,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["other", "some-plugin:deploy"]
         );
+    }
+}
+
+/// File tools use the same live registry as Skill and slash invocations. Removing
+/// a plugin removes its asset roots on the next call, without granting writes.
+pub(super) struct RegisteredSkillReadRoots(pub Arc<RwLock<CommandRegistry>>);
+
+#[async_trait::async_trait]
+impl tool_api::builtin_context::SkillReadRoots for RegisteredSkillReadRoots {
+    async fn roots(&self) -> Vec<std::path::PathBuf> {
+        self.0.read().await.list_all().into_iter()
+            .filter_map(|command| command.skill_root.clone())
+            .collect()
     }
 }

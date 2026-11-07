@@ -67,9 +67,9 @@ pub(super) fn is_bound_mode_default_cwd(cfg: &MobileConfig, cwd: &std::path::Pat
     };
     let expected_guest = cfg
         .brand_runtime_profile
-        .config_guest_path()
+        .workspace_container_guest_path()
         .join(component);
-    cwd == cfg.lingxi_home.join(component)
+    cwd == branding::workspace_home(&cfg.lingxi_home).join(component)
         && cfg.logical_cwd.as_deref() == Some(expected_guest.as_path())
 }
 
@@ -1338,7 +1338,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = if cfg.cwd.starts_with(cfg.lingxi_home.join("workspaces"))
+    let permission_cwd = if cfg.cwd.starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
         || is_bound_mode_default_cwd(&cfg, &cwd)
     {
         cwd.clone()
@@ -2334,6 +2334,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `PermissionPolicy` built above (empty when no Read-deny rule ⇒
         // unchanged default).
         read_deny_exclude_globs,
+        skill_read_roots: None,
         // P1.8: kept a clone rather than a move — `build_mobile_inner` needs
         // `fs` again below to compose the mobile `PluginManager` with the
         // SAME filesystem handle the rest of the boot path uses.

@@ -4877,7 +4877,12 @@ pub async fn build_with_credential_stack(
         .as_ref()
         .filter(|_| desktop_media.is_some() && desktop_media_attachment.is_some())
         .map(|handoffs| handoffs.clone() as Arc<dyn tool_api::MediaAgentHandoffHandle>);
+    let shared_command_registry: Arc<RwLock<CommandRegistry>> =
+        Arc::new(RwLock::new(CommandRegistry::new()));
     let tool_ctx = BuiltinToolContext {
+        skill_read_roots: Some(Arc::new(super::skill_loader::RegisteredSkillReadRoots(
+            shared_command_registry.clone(),
+        ))),
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         side_chat: false,
         side_chat_cleanup_failed: cfg
@@ -5163,8 +5168,6 @@ pub async fn build_with_credential_stack(
     // loader to the `Skill` tool, then FILL the same `Arc` with the real registry
     // at (6) and reuse it for the slash dispatcher. No skill call can fire before
     // `build()` returns, so the loader never reads the empty registry.
-    let shared_command_registry: Arc<RwLock<CommandRegistry>> =
-        Arc::new(RwLock::new(CommandRegistry::new()));
     let workflow_tool_slot = Arc::new(RwLock::new(None));
     // Share the same mutable cwd observed by Bash, worktree swaps, the
     // orchestrator, and the workflow snapshot cache key.
