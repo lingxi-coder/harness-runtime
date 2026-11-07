@@ -9275,6 +9275,7 @@ async fn lifecycle_listener_rewrites_cancelled_terminal_and_drops_late_events() 
                 api_calls: 0,
                 session_duration_secs: 0,
                 formatted: "$0.00".to_string(),
+                by_account: vec![],
             },
         })
         .await;
@@ -9331,6 +9332,7 @@ async fn lifecycle_listener_drops_quiesced_events_without_cancel_rewrite() {
                 api_calls: 0,
                 session_duration_secs: 0,
                 formatted: "$0.00".to_string(),
+                by_account: vec![],
             },
         })
         .await;
@@ -9656,6 +9658,7 @@ async fn media_handoff_defers_terminal_until_the_owned_continuation_finishes() {
             api_calls: 0,
             session_duration_secs: 0,
             formatted: "$0".into(),
+            by_account: vec![],
         },
     };
     listener.on_event(terminal.clone()).await;
@@ -10576,6 +10579,7 @@ async fn lifecycle_listener_delivers_terminal_event_the_journal_refuses() {
                 api_calls: 0,
                 session_duration_secs: 0,
                 formatted: "$0.00".to_string(),
+                by_account: vec![],
             },
         })
         .await;

@@ -394,6 +394,7 @@ pub(crate) fn usage(
             cost_estimate: None,
             native_resume_context_exhausted: None,
             native_resume_context_observed: false,
+            account_usage: None,
         },
         completeness,
     ))

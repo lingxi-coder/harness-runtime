@@ -507,6 +507,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 api_calls: 3,
                 session_duration_secs: 42,
                 formatted: "$0.0123".to_string(),
+                by_account: vec![],
             },
         ),
         (
@@ -2272,6 +2273,7 @@ fn canonical_cost() -> CostDto {
         api_calls: 3,
         session_duration_secs: 42,
         formatted: "$0.0123".to_string(),
+        by_account: vec![],
     }
 }
 

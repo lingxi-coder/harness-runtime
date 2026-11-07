@@ -48,7 +48,7 @@ pub fn lower_current_usage(
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::protocol::events::CostDto;
+use crate::protocol::events::{AccountUsageAttributionDto, AccountUsageRowDto, CostDto};
 use crate::protocol::listings::{
     AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, SessionModeDto, SessionRowDto, SkillDto,
@@ -56,9 +56,10 @@ use crate::protocol::listings::{
 };
 
 use lingxi_core::host::orchestrator::{
-    AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
-    McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
+    AccountUsageRow, AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport,
+    DoctorSummary, HookInfo, McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
 };
+use lingxi_core::host::provider_accounts::AccountAuthKind;
 use lingxi_core::host::task_registry::{TaskOutputChunk, TaskRecord};
 use lingxi_core::host::team_registry::WorkerInfo;
 use permission::PromptDefault;
@@ -183,6 +184,38 @@ pub fn lower_cost_snapshot(cost: &CostSnapshot) -> CostDto {
         api_calls: cost.api_calls,
         session_duration_secs: duration_to_secs(cost.session_duration),
         formatted: format!("${:.4}", cost.total_usd),
+        by_account: cost
+            .by_account
+            .iter()
+            .map(lower_account_usage_row)
+            .collect(),
+    }
+}
+
+fn lower_account_usage_row(row: &AccountUsageRow) -> AccountUsageRowDto {
+    AccountUsageRowDto {
+        attribution: row
+            .attribution
+            .as_ref()
+            .map(|account| AccountUsageAttributionDto {
+                provider_id: account.provider_id.clone(),
+                account_id: account.account_id.clone(),
+                identity_generation: account.identity_generation,
+                auth_kind: match account.auth_kind {
+                    AccountAuthKind::ApiKey => "api_key",
+                    AccountAuthKind::OAuth => "oauth",
+                }
+                .to_owned(),
+            }),
+        model: row.model.clone(),
+        total_nano_usd: row.total_nano_usd,
+        input_tokens: row.input_tokens,
+        output_tokens: row.output_tokens,
+        cache_read_input_tokens: row.cache_read_input_tokens,
+        cache_creation_input_tokens: row.cache_creation_input_tokens,
+        reasoning_tokens: row.reasoning_tokens,
+        web_search_requests: row.web_search_requests,
+        request_count: row.request_count,
     }
 }
 

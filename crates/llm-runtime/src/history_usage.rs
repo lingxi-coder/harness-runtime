@@ -200,6 +200,7 @@ impl<'de> Deserialize<'de> for ExecutionUsage {
             cost_estimate: None,
             native_resume_context_exhausted: None,
             native_resume_context_observed: false,
+            account_usage: None,
         })
     }
 }

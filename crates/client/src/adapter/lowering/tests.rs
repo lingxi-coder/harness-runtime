@@ -131,6 +131,77 @@ mod regressions {
         assert_eq!(dto.session_duration_secs, 125);
         // 4-decimal `"${:.4}"` format, matching the TUI bridge (parity).
         assert_eq!(dto.formatted, "$0.0123");
+        assert!(dto.by_account.is_empty());
+    }
+
+    #[test]
+    fn cost_snapshot_lowers_accounts_without_the_credential_slot() {
+        use lingxi_core::host::orchestrator::AccountUsageRow;
+        use lingxi_core::host::provider_accounts::{AccountAuthKind, AccountUsageAttribution};
+
+        let row = |provider: &str, account: &str, generation: u64, kind, model: &str, nano| {
+            AccountUsageRow {
+                attribution: Some(AccountUsageAttribution {
+                    provider_id: provider.to_owned(),
+                    account_id: account.to_owned(),
+                    identity_generation: generation,
+                    auth_kind: kind,
+                    credential_slot: format!("slot-{account}-secret"),
+                }),
+                model: model.to_owned(),
+                total_nano_usd: nano,
+                input_tokens: 15,
+                output_tokens: 4,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 3,
+                reasoning_tokens: 1,
+                web_search_requests: 0,
+                request_count: 2,
+            }
+        };
+        let cost = CostSnapshot {
+            by_account: vec![
+                row(
+                    "anthropic",
+                    "key-a",
+                    1,
+                    AccountAuthKind::ApiKey,
+                    "claude",
+                    10,
+                ),
+                row("openai", "key-b", 4, AccountAuthKind::OAuth, "gpt", 20),
+                AccountUsageRow {
+                    attribution: None,
+                    model: "other".to_owned(),
+                    total_nano_usd: 5,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning_tokens: 0,
+                    web_search_requests: 0,
+                    request_count: 1,
+                },
+            ],
+            ..CostSnapshot::default()
+        };
+        let dto = lower_cost_snapshot(&cost);
+        let rows = &dto.by_account;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].attribution.as_ref().unwrap().provider_id,
+            "anthropic"
+        );
+        assert_eq!(rows[0].attribution.as_ref().unwrap().auth_kind, "api_key");
+        assert_eq!(rows[0].attribution.as_ref().unwrap().identity_generation, 1);
+        assert_eq!(rows[1].attribution.as_ref().unwrap().provider_id, "openai");
+        assert_eq!(rows[1].attribution.as_ref().unwrap().auth_kind, "oauth");
+        assert_eq!(rows[1].request_count, 2);
+        assert!(rows[2].attribution.is_none());
+        let json = serde_json::to_string(&dto).expect("serialize cost");
+        assert!(!json.contains("slot-"));
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("credential"));
     }
 
     #[test]

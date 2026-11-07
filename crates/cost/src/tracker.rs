@@ -18,6 +18,7 @@ use crate::{
     ModelRef,
 };
 use indexmap::IndexMap;
+use lingxi_core::host::provider_accounts::AccountUsageAttribution;
 use lingxi_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -100,6 +101,10 @@ pub struct CostState {
     /// importing the same opening balance twice.
     #[serde(default)]
     pub legacy_import_evaluated: bool,
+    /// Same settlements as [`Self::per_model_usage`], split by the account
+    /// that served each response. These rows are not added into
+    /// [`Self::total_nano_usd`] again.
+    pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
 }
 
 /// Provider usage transferred to an owned cost finalizer immediately after a
@@ -121,6 +126,8 @@ pub struct CostModelResponse {
     pub cache_creation_input_tokens: u64,
     /// Batch request marker retained for compatibility telemetry.
     pub is_batch_request: bool,
+    /// Account that served this response. `None` stays in the unattributed bucket.
+    pub account: Option<AccountUsageAttribution>,
     /// Optional shared analytics bus.
     pub bus: Option<Arc<AnalyticsBus>>,
 }
@@ -569,6 +576,7 @@ impl CostSessionScope {
                         quoted_nano_usd,
                         response_pricing,
                         measurement,
+                        response.account,
                         durability_turn,
                     )
                     .await
@@ -1712,6 +1720,7 @@ impl CostTracker {
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
                 is_batch_request,
+                account: None,
                 bus: bus.cloned(),
             })
             .settle()
@@ -1754,6 +1763,7 @@ impl CostTracker {
         quoted_nano_usd: Option<u64>,
         response_pricing: CostResponsePricing,
         measurement: CostResponseMeasurement,
+        account: Option<AccountUsageAttribution>,
         mut durability_turn: Option<CostDurabilityTurn>,
     ) -> CostResponseSettlement {
         // A complete frozen USD quote from the physical call is authoritative
@@ -1843,6 +1853,15 @@ impl CostTracker {
             entry.cache_creation_input_tokens = entry
                 .cache_creation_input_tokens
                 .saturating_add(cache_creation_input_tokens);
+            crate::account_usage::add(
+                &mut staged.per_account_usage,
+                account,
+                &model_ref.model,
+                &usage,
+                cost,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            );
             let unknown_hosted_tool = usage.server_tool_use.is_some_and(|tools| {
                 tools.web_search_requests > 0
                     && (matches!(&resolution, PricingResolution::UnpricedModel { .. })
@@ -2507,6 +2526,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         };
         let quoted = tracker
@@ -2622,6 +2642,7 @@ mod tests {
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                         is_batch_request: false,
+                        account: None,
                         bus: None,
                     },
                     pricing,
@@ -2658,6 +2679,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 is_batch_request: false,
+                account: None,
                 bus: None,
             },
             CostResponsePricing::CompleteQuote(12_000_000),
@@ -3030,6 +3052,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 is_batch_request: false,
+                account: None,
                 bus: None,
             });
 
@@ -3084,6 +3107,7 @@ mod tests {
             cache_read_input_tokens: 2,
             cache_creation_input_tokens: 1,
             is_batch_request: false,
+            account: None,
             bus: None,
         });
         let mutation_id = receipt.mutation_id().clone();
@@ -3152,6 +3176,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 is_batch_request: false,
+                account: None,
                 bus: None,
             });
         drop(receipt);
@@ -3220,6 +3245,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         };
         let first = scope.submit_model_response(response());
@@ -3293,6 +3319,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         };
 
@@ -3388,6 +3415,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         });
         let preflight = scope.preflight();
@@ -3650,6 +3678,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             is_batch_request: false,
+            account: None,
             bus: None,
         };
         let late_a1 = a1_scope.submit_model_response(response());
@@ -3775,6 +3804,125 @@ mod tests {
             matches!(error, CostPersistError::Rejected(message) if message.contains("authority"))
         );
         assert_eq!(tracker.session_id().await, session_b);
+    }
+
+    #[tokio::test]
+    async fn account_rows_share_one_settlement_with_the_model_total() {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, AccountUsageAttribution, CredentialRef,
+        };
+        fn attribution(
+            id: &str,
+            provider: &str,
+            kind: AccountAuthKind,
+            generation: u64,
+        ) -> AccountUsageAttribution {
+            AccountUsageAttribution::from_account(&AccountMetadata {
+                account_id: id.into(),
+                provider_id: provider.into(),
+                display_name: format!("name-{id}"),
+                auth_kind: kind,
+                execution_binding_id: provider.into(),
+                credential_ref: CredentialRef {
+                    store_scope: "host".into(),
+                    secret_ref: format!("slot-{id}-{generation}"),
+                },
+                enabled: true,
+                user_priority: 0,
+                config_revision: 1,
+                identity_generation: generation,
+            })
+        }
+        let session_id = SessionId::new();
+        let (persist_tx, _legacy_rx) = mpsc::channel(8);
+        let tracker = Arc::new(CostTracker::new(
+            session_id,
+            Arc::new(PricingCatalog::builtin_reference()),
+            persist_tx,
+        ));
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        let response = |account: Option<AccountUsageAttribution>, input: u64| CostModelResponse {
+            model_ref: model_ref.clone(),
+            usage: Usage {
+                tokens: TokenUsage {
+                    input,
+                    output: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(1),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            account,
+            bus: None,
+        };
+        let scope = tracker.session_scope(session_id);
+        for (account, input) in [
+            (
+                Some(attribution("a", "openai", AccountAuthKind::ApiKey, 1)),
+                10,
+            ),
+            (
+                Some(attribution("a", "openai", AccountAuthKind::ApiKey, 1)),
+                5,
+            ),
+            (
+                Some(attribution("b", "openai", AccountAuthKind::ApiKey, 1)),
+                7,
+            ),
+            (
+                Some(attribution(
+                    "sub",
+                    "openai-chatgpt",
+                    AccountAuthKind::OAuth,
+                    3,
+                )),
+                3,
+            ),
+            (
+                Some(attribution("a", "openai", AccountAuthKind::ApiKey, 2)),
+                9,
+            ),
+            (None, 1),
+        ] {
+            scope
+                .submit_model_response(response(account, input))
+                .settle()
+                .await;
+        }
+        let state = tracker.snapshot().await;
+        assert_eq!(state.per_model_usage.len(), 1);
+        assert_eq!(state.per_account_usage.len(), 5);
+        let model_sum: u64 = state
+            .per_model_usage
+            .values()
+            .map(|row| row.cost_nano_usd)
+            .sum();
+        let account_sum: u64 = state
+            .per_account_usage
+            .iter()
+            .map(|row| row.cost_nano_usd)
+            .sum();
+        assert_eq!(account_sum, model_sum);
+        assert_eq!(state.total_nano_usd, model_sum);
+        assert_eq!(state.per_account_usage[0].request_count, 2);
+        assert_eq!(state.per_account_usage[0].usage.tokens.input, 15);
+        assert!(state.per_account_usage.iter().any(|row| {
+            row.attribution.as_ref().is_some_and(|item| {
+                item.account_id == "sub"
+                    && item.provider_id == "openai"
+                    && item.auth_kind == AccountAuthKind::OAuth
+            })
+        }));
+        let dumped = format!("{:?}", state.per_account_usage);
+        assert!(!dumped.contains("name-a"));
+        assert!(!dumped.contains("sk-"));
     }
 
     #[test]

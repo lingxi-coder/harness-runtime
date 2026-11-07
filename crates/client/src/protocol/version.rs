@@ -188,4 +188,7 @@
 /// `PageBlock` is appended after every existing ClientEvent variant. Existing
 /// native ordinals are unchanged, so this additive event keeps 32.1.0 and
 /// updates the contract index only.
-pub const CLIENT_PROTOCOL_VERSION: &str = "32.1.0";
+/// Version 33 requires `by_account` on `CostDto` and `CostUpdate`. The array is
+/// always present; a missing field is not filled from an older total, and the
+/// generated native record no longer defaults it.
+pub const CLIENT_PROTOCOL_VERSION: &str = "33.0.0";

@@ -570,6 +570,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CostUpdate.api_calls", "u32");
     put("ClientEvent::CostUpdate.session_duration_secs", "u64");
     put("ClientEvent::CostUpdate.formatted", "String");
+    put(
+        "ClientEvent::CostUpdate.by_account",
+        "Vec<AccountUsageRowDto>",
+    );
 
     put("ClientEvent::CompactionStatus", "compaction_status");
     put("ClientEvent::CompactionStatus.phase", "String");
@@ -1006,6 +1010,24 @@ fn current_contract_index() -> ContractIndex {
     put("CostDto.api_calls", "u32");
     put("CostDto.session_duration_secs", "u64");
     put("CostDto.formatted", "String");
+    put("CostDto.by_account", "Vec<AccountUsageRowDto>");
+    put("AccountUsageAttributionDto.provider_id", "String");
+    put("AccountUsageAttributionDto.account_id", "String");
+    put("AccountUsageAttributionDto.identity_generation", "u64");
+    put("AccountUsageAttributionDto.auth_kind", "String");
+    put(
+        "AccountUsageRowDto.attribution",
+        "Option<AccountUsageAttributionDto>",
+    );
+    put("AccountUsageRowDto.model", "String");
+    put("AccountUsageRowDto.total_nano_usd", "u64");
+    put("AccountUsageRowDto.input_tokens", "u64");
+    put("AccountUsageRowDto.output_tokens", "u64");
+    put("AccountUsageRowDto.cache_read_input_tokens", "u64");
+    put("AccountUsageRowDto.cache_creation_input_tokens", "u64");
+    put("AccountUsageRowDto.reasoning_tokens", "u64");
+    put("AccountUsageRowDto.web_search_requests", "u64");
+    put("AccountUsageRowDto.request_count", "u64");
 
     // ── ClientCommand (commands.rs) ───────────────────────────────────────
     put("ClientCommand::SendPrompt", "send_prompt");
@@ -3602,6 +3624,7 @@ fn contract_index_covers_every_dto() {
         api_calls: 0,
         session_duration_secs: 0,
         formatted: String::new(),
+        by_account: vec![],
     };
     let skill_admin_command = SkillAdminCommandDto {
         action: "get_catalog".into(),

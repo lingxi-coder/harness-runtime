@@ -171,6 +171,96 @@ pub fn usage_by_model_block(by_model: &[lingxi_core::host::ModelUsageRow]) -> St
     r
 }
 
+/// This session's usage split by provider account. Empty when no response has
+/// been attributed, so callers can append it without changing the `/cost` text.
+#[must_use]
+pub fn usage_by_account_block(rows: &[lingxi_core::host::orchestrator::AccountUsageRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut rows = rows.to_vec();
+    rows.sort_by(|left, right| account_row_key(left).cmp(&account_row_key(right)));
+    let mut out = String::from("Usage by provider account:");
+    let mut provider: Option<String> = None;
+    let mut account: Option<String> = None;
+    for row in &rows {
+        match &row.attribution {
+            Some(item) => {
+                if provider.as_deref() != Some(item.provider_id.as_str()) {
+                    out.push_str("\n\n");
+                    out.push_str(&item.provider_id);
+                    provider = Some(item.provider_id.clone());
+                    account = None;
+                }
+                let key = format!(
+                    "{}:{}:{}",
+                    item.account_id,
+                    auth_label(item.auth_kind),
+                    item.identity_generation
+                );
+                if account.as_deref() != Some(key.as_str()) {
+                    out.push('\n');
+                    out.push_str(&format!(
+                        "  {} · {} · generation {}",
+                        item.account_id,
+                        auth_label(item.auth_kind),
+                        item.identity_generation
+                    ));
+                    account = Some(key);
+                }
+            }
+            None => {
+                if provider.as_deref() != Some("") {
+                    out.push_str("\n\nUnattributed");
+                    provider = Some(String::new());
+                    account = None;
+                }
+            }
+        }
+        let requests = if row.request_count == 1 {
+            "request"
+        } else {
+            "requests"
+        };
+        out.push('\n');
+        out.push_str(&format!(
+            "    {}: {} input, {} output, {} cache read, {} cache write ({}) · {} {}",
+            row.model,
+            format_token_count_ed(row.input_tokens),
+            format_token_count_ed(row.output_tokens),
+            format_token_count_ed(row.cache_read_input_tokens),
+            format_token_count_ed(row.cache_creation_input_tokens),
+            format_cost(nano_to_usd(row.total_nano_usd)),
+            format_token_count_ed(row.request_count),
+            requests
+        ));
+    }
+    out
+}
+
+fn auth_label(kind: lingxi_core::host::provider_accounts::AccountAuthKind) -> &'static str {
+    use lingxi_core::host::provider_accounts::AccountAuthKind;
+    match kind {
+        AccountAuthKind::ApiKey => "api key",
+        AccountAuthKind::OAuth => "subscription",
+    }
+}
+
+fn account_row_key(row: &lingxi_core::host::orchestrator::AccountUsageRow) -> String {
+    match &row.attribution {
+        Some(account) => format!(
+            "a\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            account.provider_id,
+            account.account_id,
+            account.identity_generation,
+            auth_label(account.auth_kind),
+            account.credential_slot,
+            row.model
+        ),
+        None => format!("z\u{1}{}", row.model),
+    }
+}
+
 /// Inputs to [`cost_summary`], mapped by the caller from the session's cost
 /// snapshot. The caller maps its `CostSnapshot` onto this input; `by_model`
 /// borrows the snapshot's `Vec<lingxi_core::host::ModelUsageRow>` directly.
@@ -377,6 +467,60 @@ fn miss_cause_clause(attribution: Option<&crate::prompt_cache_ledger::MissAttrib
 mod tests {
     use super::*;
     use lingxi_core::host::orchestrator::ModelUsageRow;
+
+    #[test]
+    fn account_block_is_empty_without_rows_and_keeps_keys_apart() {
+        use lingxi_core::host::orchestrator::AccountUsageRow;
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountUsageAttribution,
+        };
+        assert_eq!(usage_by_account_block(&[]), "");
+        let row = |id: &str, generation: u64, kind: AccountAuthKind| AccountUsageRow {
+            attribution: Some(AccountUsageAttribution {
+                provider_id: "openai".into(),
+                account_id: id.into(),
+                identity_generation: generation,
+                auth_kind: kind,
+                credential_slot: format!("slot-{id}-{generation}"),
+            }),
+            model: "gpt-4.1-mini".into(),
+            total_nano_usd: 1_500_000_000,
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
+            web_search_requests: 0,
+            request_count: 1,
+        };
+        let text = usage_by_account_block(&[
+            row("b", 1, AccountAuthKind::ApiKey),
+            row("a", 1, AccountAuthKind::ApiKey),
+            row("a", 2, AccountAuthKind::ApiKey),
+            row("sub", 3, AccountAuthKind::OAuth),
+            AccountUsageRow {
+                attribution: None,
+                model: "gpt-4.1-mini".into(),
+                total_nano_usd: 0,
+                input_tokens: 1,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+                request_count: 1,
+            },
+        ]);
+        assert!(text.contains("openai"));
+        assert!(text.contains("a · api key · generation 1"));
+        assert!(text.contains("a · api key · generation 2"));
+        assert!(text.contains("b · api key · generation 1"));
+        assert!(text.contains("sub · subscription · generation 3"));
+        assert!(text.contains("Unattributed"));
+        assert!(!text.contains("slot-"));
+        let summary = cost_summary_from_snapshot(&lingxi_core::host::CostSnapshot::default());
+        assert!(!summary.contains("Usage by provider account"));
+    }
 
     #[test]
     fn cbg_empty_and_per_model() {
