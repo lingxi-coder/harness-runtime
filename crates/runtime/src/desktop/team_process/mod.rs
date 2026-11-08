@@ -205,6 +205,9 @@ pub struct TeamProcessResult {
     pub usage: TeamUsage,
 }
 
+/// Token/cost accounting for one Team task. `Complete` is a promise that every
+/// model request of the task finished and was recorded by the session cost
+/// tracker at a known price; anything weaker is `Partial`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamUsage {
@@ -219,11 +222,25 @@ pub enum TeamUsage {
         #[serde(skip_serializing_if = "Option::is_none")]
         currency: Option<String>,
     },
+    Complete {
+        #[serde(rename = "inputTokens")]
+        input_tokens: u64,
+        #[serde(rename = "outputTokens")]
+        output_tokens: u64,
+        #[serde(rename = "costMicros")]
+        cost_micros: u64,
+        currency: String,
+    },
 }
 impl TeamUsage {
+    /// `settled` is true only when the task ended normally and no request whose
+    /// usage may be unrecorded (an aborted stream, a failed compaction summary)
+    /// can have happened. Complete additionally needs a known price for every
+    /// model the session has used and a monotonic cost total.
     pub(super) fn from_snapshots(
         before: &lingxi_core::host::CostSnapshot,
         after: &lingxi_core::host::CostSnapshot,
+        settled: bool,
     ) -> Self {
         let input = after.input_tokens.saturating_sub(before.input_tokens);
         let output = after.output_tokens.saturating_sub(before.output_tokens);
@@ -231,11 +248,20 @@ impl TeamUsage {
             return Self::Missing;
         }
         let priced = !after.unknown_models && after.total_nano_usd >= before.total_nano_usd;
-        Self::Partial {
-            input_tokens: input,
-            output_tokens: output,
-            cost_micros: priced.then(|| (after.total_nano_usd - before.total_nano_usd) / 1000),
-            currency: priced.then(|| "USD".into()),
+        let cost_micros = priced.then(|| (after.total_nano_usd - before.total_nano_usd) / 1000);
+        match cost_micros {
+            Some(cost_micros) if settled => Self::Complete {
+                input_tokens: input,
+                output_tokens: output,
+                cost_micros,
+                currency: "USD".into(),
+            },
+            _ => Self::Partial {
+                input_tokens: input,
+                output_tokens: output,
+                cost_micros,
+                currency: priced.then(|| "USD".into()),
+            },
         }
     }
 }
@@ -639,5 +665,109 @@ pub fn worker_main() -> i32 {
             }
             status
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::TeamUsage;
+    use lingxi_core::host::CostSnapshot;
+
+    fn snapshot(calls: u32, input: u64, output: u64, nano: u64, unknown: bool) -> CostSnapshot {
+        CostSnapshot {
+            api_calls: calls,
+            input_tokens: input,
+            output_tokens: output,
+            total_nano_usd: nano,
+            unknown_models: unknown,
+            ..CostSnapshot::default()
+        }
+    }
+
+    fn json(usage: &TeamUsage) -> serde_json::Value {
+        serde_json::to_value(usage).unwrap()
+    }
+
+    #[test]
+    fn no_new_model_call_or_tokens_is_missing() {
+        let before = snapshot(2, 10, 5, 4_000, false);
+        for settled in [true, false] {
+            assert!(matches!(
+                TeamUsage::from_snapshots(&before, &before, settled),
+                TeamUsage::Missing
+            ));
+            // A call that reported no tokens is not observed usage.
+            assert!(matches!(
+                TeamUsage::from_snapshots(&before, &snapshot(3, 10, 5, 4_000, false), settled),
+                TeamUsage::Missing
+            ));
+        }
+    }
+
+    #[test]
+    fn settled_priced_task_is_complete_with_required_cost() {
+        let before = snapshot(1, 10, 5, 4_000, false);
+        let after = snapshot(2, 110, 25, 4_000 + 12_345_678, false);
+        let usage = TeamUsage::from_snapshots(&before, &after, true);
+        assert_eq!(
+            json(&usage),
+            serde_json::json!({
+                "status": "complete",
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "costMicros": 12_345,
+                "currency": "USD"
+            })
+        );
+    }
+
+    #[test]
+    fn unsettled_task_stays_partial_but_keeps_known_cost() {
+        let before = snapshot(0, 0, 0, 0, false);
+        let after = snapshot(1, 7, 3, 9_000, false);
+        assert_eq!(
+            json(&TeamUsage::from_snapshots(&before, &after, false)),
+            serde_json::json!({
+                "status": "partial",
+                "inputTokens": 7,
+                "outputTokens": 3,
+                "costMicros": 9,
+                "currency": "USD"
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_model_or_backwards_cost_is_partial_without_cost() {
+        let before = snapshot(0, 0, 0, 5_000, false);
+        for after in [
+            snapshot(1, 7, 3, 9_000, true),
+            snapshot(1, 7, 3, 4_000, false),
+        ] {
+            assert_eq!(
+                json(&TeamUsage::from_snapshots(&before, &after, true)),
+                serde_json::json!({
+                    "status": "partial",
+                    "inputTokens": 7,
+                    "outputTokens": 3
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn complete_round_trips_and_rejects_missing_cost() {
+        let usage = TeamUsage::from_snapshots(
+            &snapshot(0, 0, 0, 0, false),
+            &snapshot(1, 7, 3, 9_000, false),
+            true,
+        );
+        let encoded = serde_json::to_string(&usage).unwrap();
+        let decoded: TeamUsage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(json(&decoded), json(&usage));
+        assert!(serde_json::from_str::<TeamUsage>(
+            r#"{"status":"complete","inputTokens":1,"outputTokens":1}"#
+        )
+        .is_err());
     }
 }

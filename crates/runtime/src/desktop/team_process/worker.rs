@@ -222,6 +222,8 @@ async fn run(
         received_bytes: AtomicUsize::new(0),
         failed: AtomicBool::new(false),
         overflow: AtomicBool::new(false),
+        compaction_failed: AtomicBool::new(false),
+        request_retried: AtomicBool::new(false),
         cancel: cancel.clone(),
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
@@ -346,6 +348,12 @@ async fn run(
         (outcome, text)
     };
     let usage_after = rt.cost().await;
+    let dispatched_requests = dispatch_limit - profile.output_quota().remaining_dispatches();
+    let settled = output.usage_settled(
+        outcome,
+        dispatched_requests,
+        usage_after.api_calls.saturating_sub(usage_before.api_calls),
+    );
     let result = TeamProcessResult {
         version: 3,
         outcome,
@@ -361,8 +369,8 @@ async fn run(
         },
         finished_at,
         cursor,
-        usage: super::TeamUsage::from_snapshots(&usage_before, &usage_after),
-        dispatched_requests: dispatch_limit - profile.output_quota().remaining_dispatches(),
+        usage: super::TeamUsage::from_snapshots(&usage_before, &usage_after, settled),
+        dispatched_requests,
         denied_tools: denied.load(Ordering::Relaxed),
     };
     let saved = super::chat_session::record_result(&rt, &task_id, &result).await;
@@ -388,7 +396,31 @@ struct BoundedOutput {
     received_bytes: AtomicUsize,
     failed: AtomicBool,
     overflow: AtomicBool,
+    compaction_failed: AtomicBool,
+    request_retried: AtomicBool,
     cancel: CancellationToken,
+}
+impl BoundedOutput {
+    /// Whether the task's token accounting can be called complete. Every
+    /// physical provider dispatch (retries, fallbacks, failovers and the
+    /// compaction summary all spend the shared dispatch quota, never refunded)
+    /// must have produced exactly one recorded cost response, and the task must
+    /// have ended normally. A failed or aborted request, a failed compaction
+    /// summary, or a retried/fallen-back request may have consumed tokens that
+    /// never reached the cost tracker, so those stay Partial.
+    fn usage_settled(
+        &self,
+        outcome: TeamProcessOutcome,
+        dispatched_requests: u32,
+        recorded_responses: u32,
+    ) -> bool {
+        matches!(
+            outcome,
+            TeamProcessOutcome::Completed | TeamProcessOutcome::MaxTurns
+        ) && dispatched_requests == recorded_responses
+            && !self.compaction_failed.load(Ordering::Acquire)
+            && !self.request_retried.load(Ordering::Acquire)
+    }
 }
 #[async_trait::async_trait]
 impl OutputStream for BoundedOutput {
@@ -402,6 +434,33 @@ impl OutputStream for BoundedOutput {
                 self.overflow.store(true, Ordering::Release);
                 self.cancel.cancel();
             }
+        }
+    }
+    // Retry backoff, model fallback and abandoned fallback rows all mean an
+    // earlier request of this task was re-dispatched; its own usage may be
+    // missing or cut short.
+    async fn emit_api_retry(&self, _: &str, _: u32, _: u32, _: u64) {
+        self.request_retried.store(true, Ordering::Release);
+    }
+    async fn emit_model_fallback(
+        &self,
+        _: &lingxi_core::types::MessageId,
+        _: &lingxi_core::types::SessionId,
+        _: &Json,
+        _: &lingxi_core::types::ModelFallbackMetadata,
+    ) {
+        self.request_retried.store(true, Ordering::Release);
+    }
+    async fn emit_server_fallback_tombstone(
+        &self,
+        _: &lingxi_core::host::ServerFallbackTombstoneMessage,
+        _: bool,
+    ) {
+        self.request_retried.store(true, Ordering::Release);
+    }
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        if error.is_some() {
+            self.compaction_failed.store(true, Ordering::Release);
         }
     }
     async fn emit_terminal_api_error(&self, _: Option<u16>, _: &str, _: &str) {
@@ -421,5 +480,49 @@ mod unsupported_platform_tests {
             super::main(),
             Err(super::TeamProcessError::Environment)
         ));
+    }
+}
+
+#[cfg(test)]
+mod usage_settlement_tests {
+    use super::*;
+
+    fn output() -> BoundedOutput {
+        BoundedOutput {
+            received_bytes: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+            overflow: AtomicBool::new(false),
+            compaction_failed: AtomicBool::new(false),
+            request_retried: AtomicBool::new(false),
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_clean_fully_recorded_normal_end_is_settled() {
+        let clean = output();
+        assert!(clean.usage_settled(TeamProcessOutcome::Completed, 2, 2));
+        assert!(clean.usage_settled(TeamProcessOutcome::MaxTurns, 1, 1));
+        assert!(!clean.usage_settled(TeamProcessOutcome::ModelFailed, 1, 1));
+        assert!(!clean.usage_settled(TeamProcessOutcome::OutputLimit, 1, 1));
+        // A dispatch whose response never reached the cost tracker.
+        assert!(!clean.usage_settled(TeamProcessOutcome::Completed, 2, 1));
+    }
+
+    #[tokio::test]
+    async fn retry_fallback_and_failed_compaction_unsettle_usage() {
+        let retried = output();
+        retried.emit_api_retry("overloaded", 1, 10, 500).await;
+        assert!(!retried.usage_settled(TeamProcessOutcome::Completed, 1, 1));
+
+        let failed_compaction = output();
+        failed_compaction
+            .emit_compaction_finished(Some("summary failed"))
+            .await;
+        assert!(!failed_compaction.usage_settled(TeamProcessOutcome::Completed, 1, 1));
+
+        let succeeded_compaction = output();
+        succeeded_compaction.emit_compaction_finished(None).await;
+        assert!(succeeded_compaction.usage_settled(TeamProcessOutcome::Completed, 1, 1));
     }
 }

@@ -131,6 +131,11 @@ pub(super) fn validate_result(result: &TeamProcessResult) -> Result<(), TeamProc
     if result.version != 3 || result.text.len() > 8192 || result.finished_at == 0 {
         return Err(TeamProcessError::Protocol);
     }
+    if let super::TeamUsage::Complete { currency, .. } = &result.usage {
+        if currency != "USD" {
+            return Err(TeamProcessError::Protocol);
+        }
+    }
     match (&result.outcome, &result.document) {
         (super::TeamProcessOutcome::Completed, Some(document))
             if !document.markdown.trim().is_empty()

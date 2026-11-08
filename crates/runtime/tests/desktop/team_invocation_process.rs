@@ -788,6 +788,12 @@ async fn provider_errors_and_oversized_output_never_become_shared_documents() {
         assert!(!serde_json::to_string(&result)
             .unwrap()
             .contains("SYNTHETIC_PROVIDER_ERROR"));
+        // The aborted/failed request's usage may be unrecorded, so such a task
+        // can never claim complete accounting.
+        assert_ne!(
+            serde_json::to_value(&result.usage).unwrap()["status"],
+            "complete"
+        );
     }
 }
 #[tokio::test]
@@ -804,9 +810,13 @@ async fn accepted_provider_text_keeps_observed_task_usage_and_exact_terminal_rec
     let result = run(&root, req).await.unwrap();
     assert_eq!(result.text, "Accepted result");
     let usage = serde_json::to_value(&result.usage).unwrap();
-    assert_eq!(usage["status"], "partial");
+    // MODEL is in the built-in price table and the task ended normally, so the
+    // accounting is complete and cost is always present.
+    assert_eq!(usage["status"], "complete");
     assert!(usage["inputTokens"].as_u64().unwrap() > 0);
     assert!(usage["outputTokens"].as_u64().unwrap() > 0);
+    assert!(usage["costMicros"].as_u64().is_some());
+    assert_eq!(usage["currency"], "USD");
     let recovered = harness_runtime::desktop::team_process::recover_result(&root, &scope(), &task)
         .unwrap()
         .unwrap();
@@ -885,6 +895,11 @@ async fn preflight_compacts_only_consumed_history_and_counts_authorized_summary_
     let result = attempt.unwrap();
     assert_eq!(result.outcome, TeamProcessOutcome::Completed);
     assert_eq!(result.dispatched_requests, 2);
+    // The preflight compaction summary is billed to the same session tracker.
+    assert_eq!(
+        serde_json::to_value(&result.usage).unwrap()["status"],
+        "complete"
+    );
     assert!(broker.authorizations.load(Ordering::Acquire) >= 3);
     assert_eq!(result.cursor.last_message_seq, 201);
     {
