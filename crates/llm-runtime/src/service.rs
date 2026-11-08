@@ -4641,6 +4641,11 @@ impl ApiService {
         if !is_deepseek {
             return;
         }
+        // The message walk exists only for this debug event. A disabled
+        // target must not scan every prepared message.
+        if !tracing::enabled!(target: "llm_runtime::service", tracing::Level::DEBUG) {
+            return;
+        }
 
         let message_count = body.array_len("/messages").unwrap_or_default();
         let messages_with_reasoning_content = (0..message_count)

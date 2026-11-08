@@ -29,10 +29,16 @@ pub(crate) async fn preflight(raw: &str) -> Result<Vec<std::net::SocketAddr>, Ht
     let port = url
         .port_or_known_default()
         .ok_or_else(|| HttpError::InvalidRequest("socket URL needs a port".into()))?;
-    let addresses: Vec<_> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| HttpError::Connection(e.to_string()))?
-        .collect();
+    let addresses: Vec<_> = match tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    {
+        Ok(found) => found.map_err(|e| HttpError::Connection(e.to_string()))?,
+        Err(_elapsed) => return Err(HttpError::Timeout(Duration::from_secs(5))),
+    }
+    .collect();
     if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
         return Err(HttpError::InvalidRequest(format!(
             "{host} resolves to a private, link-local, or cloud-metadata range"

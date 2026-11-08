@@ -70,6 +70,19 @@ fn current_thread_runtime() -> tokio::runtime::Runtime {
         .expect("current-thread tokio runtime")
 }
 
+/// Git, archive, and directory copies are synchronous. Run them off the
+/// runtime worker; the result string stays the caller's error.
+async fn blocking_plugin_work<T>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("plugin install task failed: {error}"))?
+}
+
 /// `<plugins>/installed_plugins.json` path.
 #[cfg(test)]
 fn installed_path(plugins_dir: &Path) -> PathBuf {
@@ -613,8 +626,10 @@ async fn resolve_external_plugin_source_with_bus(
     use plugin::marketplace::MarketplacePluginExternalSource;
 
     let started = Instant::now();
-    let result = (|| -> Result<PathBuf, String> {
-        match source {
+    let source_for_fetch = source.clone();
+    let work = work.to_path_buf();
+    let result = blocking_plugin_work(move || -> Result<PathBuf, String> {
+        match &source_for_fetch {
             MarketplacePluginExternalSource::Github { repo, git_ref, sha } => {
                 let checkout = work.join("checkout");
                 let head = plugin::clone_plugin_git_pinned(
@@ -662,16 +677,16 @@ async fn resolve_external_plugin_source_with_bus(
                 confined_source_subdir(&checkout, Some(path.as_str()))
             }
             MarketplacePluginExternalSource::Archive { url, sha256 } => {
-                download_external_plugin_archive(url, sha256.as_deref(), work)
+                download_external_plugin_archive(url, sha256.as_deref(), &work)
             }
             MarketplacePluginExternalSource::Npm {
                 package,
                 version,
                 registry,
-            } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
+            } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), &work),
             MarketplacePluginExternalSource::Command { command, .. } => {
                 let consented = command_source_is_consented(yes, command);
-                plugin::materialize_command_plugin_source(source, work, consented)
+                plugin::materialize_command_plugin_source(&source_for_fetch, &work, consented)
             }
             MarketplacePluginExternalSource::Unsupported { error } => Err(format!(
                 "plugin source type unsupported{}",
@@ -681,7 +696,8 @@ async fn resolve_external_plugin_source_with_bus(
                     .unwrap_or_default()
             )),
         }
-    })();
+    })
+    .await;
     emit_remote_fetch(analytics_bus, source, started, &result).await;
     result
 }
@@ -716,42 +732,71 @@ async fn materialize_external_plugin_source_with_bus(
         .join(sanitize(marketplace, false))
         .join(sanitize(name, false))
         .join(cache_key);
-    if destination.is_dir() {
-        plugin::ensure_plugin_manifest(&destination)?;
-        return std::fs::canonicalize(&destination)
-            .map_err(|error| format!("failed to resolve cached plugin source: {error}"));
+    if let Some(cached) = blocking_plugin_work({
+        let destination = destination.clone();
+        move || {
+            if !destination.is_dir() {
+                return Ok(None);
+            }
+            plugin::ensure_plugin_manifest(&destination)?;
+            std::fs::canonicalize(&destination)
+                .map(Some)
+                .map_err(|error| format!("failed to resolve cached plugin source: {error}"))
+        }
+    })
+    .await?
+    {
+        return Ok(cached);
     }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "invalid plugin source cache destination".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create plugin source cache: {error}"))?;
-    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    let staging = parent.join(format!(".source-{}-{nonce}", std::process::id()));
-    let payload = staging.join("payload");
-    let work = staging.join("work");
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&work)
-        .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
+    let (staging, work) = blocking_plugin_work({
+        let destination = destination.clone();
+        move || {
+            let parent = destination.parent().ok_or_else(|| {
+                "invalid plugin source cache destination".to_string()
+            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create plugin source cache: {error}"))?;
+            let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+            let staging = parent.join(format!(".source-{}-{nonce}", std::process::id()));
+            let work = staging.join("work");
+            let _ = std::fs::remove_dir_all(&staging);
+            std::fs::create_dir_all(&work)
+                .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
+            Ok((staging, work))
+        }
+    })
+    .await?;
 
     let resolved = resolve_external_plugin_source_with_bus(source, &work, analytics_bus, yes).await;
-    let result = (|| -> Result<(), String> {
-        let resolved = resolved?;
-        copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
-        plugin::ensure_plugin_manifest(&payload)?;
-        if let Err(error) = std::fs::rename(&payload, &destination) {
-            // Another installer may have won the deterministic cache race.
-            // Accept only a complete, validated winner.
-            if !destination.is_dir() || plugin::ensure_plugin_manifest(&destination).is_err() {
-                return Err(format!("failed to publish plugin source cache: {error}"));
-            }
+    blocking_plugin_work({
+        let destination = destination.clone();
+        let payload = staging.join("payload");
+        let staging = staging.clone();
+        move || {
+            let published = (|| -> Result<(), String> {
+                let resolved = resolved?;
+                copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
+                plugin::ensure_plugin_manifest(&payload)?;
+                if let Err(error) = std::fs::rename(&payload, &destination) {
+                    // Another installer may have won the deterministic cache race.
+                    // Accept only a complete, validated winner.
+                    if !destination.is_dir() || plugin::ensure_plugin_manifest(&destination).is_err()
+                    {
+                        return Err(format!("failed to publish plugin source cache: {error}"));
+                    }
+                }
+                Ok(())
+            })();
+            let _ = std::fs::remove_dir_all(&staging);
+            published
         }
-        Ok(())
-    })();
-    let _ = std::fs::remove_dir_all(&staging);
-    result?;
-    std::fs::canonicalize(&destination)
-        .map_err(|error| format!("failed to resolve materialized plugin source: {error}"))
+    })
+    .await?;
+    blocking_plugin_work(move || {
+        std::fs::canonicalize(&destination)
+            .map_err(|error| format!("failed to resolve materialized plugin source: {error}"))
+    })
+    .await
 }
 
 fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {

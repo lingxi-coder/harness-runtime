@@ -7,7 +7,6 @@ use lingxi_llm_client::protocol::{
     UsageState,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
 
 #[derive(Serialize, Deserialize)]
 struct TokenBuckets {
@@ -44,6 +43,15 @@ struct CanonicalHistoryUsage {
     inference: InferenceReport,
 }
 
+/// Same field order as [`CanonicalHistoryUsage`]. Serializing references keeps
+/// the persisted JSON without cloning the reports into a `serde_json::Value`.
+#[derive(Serialize)]
+struct CanonicalHistoryUsageRef<'a> {
+    schema: u8,
+    report: &'a UsageReport,
+    inference: &'a InferenceReport,
+}
+
 fn empty_source_object() -> JsonPayload {
     JsonPayload::parse("{}").expect("empty object is valid JSON")
 }
@@ -61,8 +69,10 @@ fn source_object_or_native(
     empty_source_object().with_object_field("native", value)
 }
 
-fn generated_payload(value: Value) -> Result<JsonPayload, serde_json::Error> {
-    JsonPayload::from_generated_value(&value)
+fn generated_payload(value: &impl Serialize) -> Result<JsonPayload, serde_json::Error> {
+    // Same JSON `serde_json::to_string` emits for these types. Skip the
+    // intermediate `Value` tree; `JsonPayload` keeps the source text.
+    JsonPayload::parse(&serde_json::to_string(value)?)
 }
 
 fn ser_source_error<E: serde::ser::Error>(error: impl std::fmt::Display) -> E {
@@ -74,7 +84,7 @@ impl Serialize for ExecutionUsage {
         let counts = self.counts();
         let mut provider_metadata = source_object_or_native(&self.provider_metadata, true)
             .map_err(ser_source_error::<S::Error>)?;
-        let upstream_state = generated_payload(serde_json::json!(self.report.state))
+        let upstream_state = generated_payload(&self.report.state)
             .map_err(ser_source_error::<S::Error>)?;
         provider_metadata = provider_metadata
             .with_object_field("upstreamUsageState", &upstream_state)
@@ -87,9 +97,8 @@ impl Serialize for ExecutionUsage {
                 .payload_at("/cache_creation")
                 .filter(JsonPayload::is_root_object)
                 .unwrap_or_else(empty_source_object);
-            let one_hour_tokens =
-                generated_payload(serde_json::json!(counts.cache_write_1h_tokens))
-                    .map_err(ser_source_error::<S::Error>)?;
+            let one_hour_tokens = generated_payload(&counts.cache_write_1h_tokens)
+                .map_err(ser_source_error::<S::Error>)?;
             cache_creation = cache_creation
                 .with_object_field("ephemeral_1h_input_tokens", &one_hour_tokens)
                 .map_err(ser_source_error::<S::Error>)?;
@@ -104,11 +113,11 @@ impl Serialize for ExecutionUsage {
             }
             None => empty_source_object(),
         };
-        let history_usage = generated_payload(serde_json::json!({
-            "schema": 1,
-            "report": &self.report,
-            "inference": &self.inference,
-        }))
+        let history_usage = generated_payload(&CanonicalHistoryUsageRef {
+            schema: 1,
+            report: &self.report,
+            inference: &self.inference,
+        })
         .map_err(ser_source_error::<S::Error>)?;
         llm_client = llm_client
             .with_object_field("history_usage", &history_usage)

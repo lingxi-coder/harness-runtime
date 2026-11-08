@@ -60,8 +60,7 @@ impl MessageProjectionCache {
             true,
         )?;
         if index == self.entries.len() && index < Self::MAX_MESSAGES {
-            let bytes = serde_json::to_vec(message).map_err(invalid)?.len()
-                + serde_json::to_vec(&projected).map_err(invalid)?.len();
+            let bytes = serialized_len(message)? + serialized_len(&projected)?;
             if bytes <= Self::MAX_BYTES.saturating_sub(self.bytes) {
                 self.entries
                     .push((message.clone(), projected.clone(), bytes));
@@ -70,6 +69,23 @@ impl MessageProjectionCache {
         }
         Ok(projected)
     }
+}
+
+fn serialized_len(value: &impl serde::Serialize) -> Result<usize, LlmError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(invalid)?;
+    Ok(counter.0)
 }
 
 fn computer_marker(block: &ContentBlock) -> Option<(&str, &wire::JsonPayload, &str)> {

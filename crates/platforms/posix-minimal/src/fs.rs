@@ -493,26 +493,39 @@ impl FileSystem for PosixFileSystem {
     }
 
     async fn flock_exclusive(&self, path: &str) -> Result<Box<dyn FlockGuard>, FsError> {
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        f.lock_exclusive().map_err(|e| FsError::Io(e.to_string()))?;
-        Ok(Box::new(PosixFlockGuard {
-            _file: f,
-            path: path.to_string(),
-        }))
+        let path = path.to_owned();
+        match tokio::task::spawn_blocking(move || {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|e| FsError::Io(e.to_string()))?;
+            f.lock_exclusive().map_err(|e| FsError::Io(e.to_string()))?;
+            Ok(Box::new(PosixFlockGuard { _file: f, path }) as Box<dyn FlockGuard>)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(FsError::Io(error.to_string())),
+        }
     }
 
     async fn fsync(&self, path: &str) -> Result<(), FsError> {
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        f.sync_all().map_err(|e| FsError::Io(e.to_string()))
+        let path = path.to_owned();
+        match tokio::task::spawn_blocking(move || {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .open(path)
+                .map_err(|e| FsError::Io(e.to_string()))?;
+            f.sync_all().map_err(|e| FsError::Io(e.to_string()))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(FsError::Io(error.to_string())),
+        }
     }
 
     fn is_within_workspace(&self, path: &str) -> bool {

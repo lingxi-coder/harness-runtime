@@ -10,15 +10,40 @@
 
 use super::McpRegistry;
 use crate::connection::{McpConnectionState, McpServerConfig};
-use std::sync::{Arc, PoisonError};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 use tokio::sync::watch;
+
+/// How many startup dials run at once. Every enabled server is still published
+/// as `Connecting` and still dialed; the rest wait in this queue.
+const MAX_BACKGROUND_CONNECTS: usize = 4;
 
 /// The open flag and the dial tasks started while it was set.
 #[derive(Default)]
 pub(super) struct BackgroundConnects {
     open: bool,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// Servers published as `Connecting` and not yet handed to a dial task.
+struct PendingDials {
+    configs: Mutex<VecDeque<McpServerConfig>>,
+    inflight: Arc<watch::Sender<usize>>,
+}
+
+impl Drop for PendingDials {
+    fn drop(&mut self) {
+        let left = self
+            .configs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        if left > 0 {
+            self.inflight
+                .send_modify(|inflight| *inflight = inflight.saturating_sub(left));
+        }
+    }
 }
 
 /// Releases one in-flight slot when its dial ends, including when shutdown
@@ -89,9 +114,11 @@ impl McpRegistry {
     }
 
     /// The window's [`Self::connect_all`]: record every server under its
-    /// lifecycle lock, then dial each enabled one on a detached task.
+    /// lifecycle lock, then dial enabled ones on a bounded set of tasks.
+    /// Each dial still takes that server's lifecycle lock for the handshake.
     pub(super) async fn connect_all_in_background(&self, configs: Vec<McpServerConfig>) {
         self.freeze_configuration();
+        let mut pending = Vec::new();
         for config in configs {
             let name = config.name.clone();
             {
@@ -117,13 +144,39 @@ impl McpRegistry {
                     },
                 );
             }
-            self.background_inflight
-                .send_modify(|inflight| *inflight += 1);
-            let slot = InflightSlot(Arc::clone(&self.background_inflight));
+            pending.push(config);
+        }
+        let count = pending.len();
+        if count == 0 {
+            return;
+        }
+        // Count every published dial before returning. Watchers must not
+        // observe an empty window while servers are still queued.
+        self.background_inflight
+            .send_modify(|inflight| *inflight += count);
+        let queue = Arc::new(PendingDials {
+            configs: Mutex::new(VecDeque::from(pending)),
+            inflight: Arc::clone(&self.background_inflight),
+        });
+        let workers = count.min(MAX_BACKGROUND_CONNECTS);
+        for _ in 0..workers {
+            let queue = Arc::clone(&queue);
             let registry = self.clone_for_background();
             let task = tokio::spawn(async move {
-                let _slot = slot;
-                registry.connect_published_server(config).await;
+                loop {
+                    let config = {
+                        let mut queued = queue
+                            .configs
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        queued.pop_front()
+                    };
+                    let Some(config) = config else {
+                        break;
+                    };
+                    let _slot = InflightSlot(Arc::clone(&queue.inflight));
+                    registry.connect_published_server(config).await;
+                }
             });
             self.background_connects
                 .lock()

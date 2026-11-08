@@ -1880,15 +1880,22 @@ pub(crate) fn attach(messages: &mut Vec<ConversationMessage>) {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
+        // `find` is first-match. Insert only the first row for each id.
+        let mut context_rows_by_id = std::collections::HashMap::new();
+        for row in context.rows.iter() {
+            context_rows_by_id.entry(row.id()).or_insert(row);
+        }
+        let mut message_rows_by_id = std::collections::HashMap::new();
+        for row in messages.iter() {
+            message_rows_by_id.entry(row.id()).or_insert(row);
+        }
         let ordered_rows = ordered_ids
             .iter()
             .filter_map(|id| {
-                context
-                    .rows
-                    .iter()
-                    .find(|row| row.id() == *id)
-                    .cloned()
-                    .or_else(|| messages.iter().find(|row| row.id() == *id).cloned())
+                context_rows_by_id
+                    .get(id)
+                    .or_else(|| message_rows_by_id.get(id))
+                    .map(|row| (*row).clone())
             })
             .collect::<Vec<_>>();
         messages.retain(|row| !ids.contains(&row.id()));

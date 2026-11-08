@@ -1127,11 +1127,13 @@ impl StreamingTurnDriver<'_> {
             .await;
         let tool_declarations = llm_runtime::convert::to_tool_declarations(wire_tools.clone())
             .map_err(OrchestratorError::ApiCall)?;
-        let mut query_history = snapshot.clone();
 
+        // The scheduler keeps this pre-fence snapshot. The dispatch history is
+        // taken after the last async-hook fence below, so this clone is the
+        // only pre-fence copy.
         let mut exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
             orch,
-            query_history.clone(),
+            snapshot.clone(),
             loop_state.native_query_depth,
             user_cancel.clone(),
             available_tool_names.clone(),
@@ -1184,7 +1186,7 @@ impl StreamingTurnDriver<'_> {
         // This is the last async-hook generation fence before the physical
         // request; cache persistence and later tool dispatch use this exact
         // projection rather than the earlier pre-fence clone.
-        query_history.clone_from(&snapshot);
+        let mut query_history = snapshot.clone();
         let typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&snapshot);
         let task_deliveries = orch.task_deliveries_for_snapshot(&snapshot).await;
         let turn_step_hook_active = mod_host.is_some();
@@ -2978,7 +2980,7 @@ impl StreamingTurnDriver<'_> {
                     Some(OpenedStreamingIteration {
                         opened: OpenedModelStream::Stream(stream),
                         exec,
-                        query_history: query_history.clone(),
+                        query_history,
                         retry_scope: retry_scope.clone(),
                         model: model.clone(),
                         model_profile: model_profile.clone(),
