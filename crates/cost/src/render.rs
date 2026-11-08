@@ -178,12 +178,13 @@ pub fn usage_by_account_block(rows: &[lingxi_core::host::orchestrator::AccountUs
     if rows.is_empty() {
         return String::new();
     }
-    let mut rows = rows.to_vec();
-    rows.sort_by(|left, right| account_row_key(left).cmp(&account_row_key(right)));
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_cached_key(|&index| account_row_key(&rows[index]));
     let mut out = String::from("Usage by provider account:");
     let mut provider: Option<String> = None;
     let mut account: Option<String> = None;
-    for row in &rows {
+    for &index in &order {
+        let row = &rows[index];
         match &row.attribution {
             Some(item) => {
                 if provider.as_deref() != Some(item.provider_id.as_str()) {
@@ -471,9 +472,7 @@ mod tests {
     #[test]
     fn account_block_is_empty_without_rows_and_keeps_keys_apart() {
         use lingxi_core::host::orchestrator::AccountUsageRow;
-        use lingxi_core::host::provider_accounts::{
-            AccountAuthKind, AccountUsageAttribution,
-        };
+        use lingxi_core::host::provider_accounts::{AccountAuthKind, AccountUsageAttribution};
         assert_eq!(usage_by_account_block(&[]), "");
         let row = |id: &str, generation: u64, kind: AccountAuthKind| AccountUsageRow {
             attribution: Some(AccountUsageAttribution {

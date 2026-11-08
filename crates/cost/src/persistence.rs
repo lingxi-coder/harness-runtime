@@ -122,7 +122,7 @@ pub struct CostMutationRecord {
 impl From<&CostState> for CostStateVector {
     fn from(state: &CostState) -> Self {
         let mut per_model_usage = state.per_model_usage.values().cloned().collect::<Vec<_>>();
-        per_model_usage.sort_by_key(|entry| {
+        per_model_usage.sort_by_cached_key(|entry| {
             format!(
                 "{}:{}",
                 serde_json::to_string(&entry.model_ref.provider).unwrap_or_default(),
@@ -130,11 +130,9 @@ impl From<&CostState> for CostStateVector {
             )
         });
         let mut per_account_usage = state.per_account_usage.clone();
-        per_account_usage.sort_by(|left, right| {
-            crate::account_usage::identity_key(left).cmp(&crate::account_usage::identity_key(right))
-        });
+        per_account_usage.sort_by_cached_key(crate::account_usage::identity_key);
         let mut unpriced_models = state.unpriced_models.iter().cloned().collect::<Vec<_>>();
-        unpriced_models.sort_by_key(|model| {
+        unpriced_models.sort_by_cached_key(|model| {
             format!(
                 "{}:{}",
                 serde_json::to_string(&model.provider).unwrap_or_default(),

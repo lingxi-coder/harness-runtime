@@ -28,6 +28,8 @@ const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// Cap on buffered (non-SSE) HTTP response bodies. Matches JSON-RPC/MCP
 /// `DEFAULT_MAX_FRAME_SIZE` so a runaway peer cannot exhaust memory.
 const MAX_HTTP_RESPONSE_BODY: usize = 16 * 1024 * 1024;
+/// Prefix kept from a non-success body. The status is preserved either way.
+const MAX_HTTP_ERROR_BODY: usize = 64 * 1024;
 
 /// Production HTTP transport using `reqwest::Client`.
 ///
@@ -352,7 +354,7 @@ impl HttpTransport for ReqwestHttp {
             // an error event on the same stream, but we keep them separate
             // because the trait promises `Result<SseStream, HttpError>` at the
             // open boundary, not after the first event.
-            let body = resp.text().await.unwrap_or_default();
+            let body = capped_error_text(resp).await;
             return Err(HttpError::Status { status, body });
         }
 
@@ -410,8 +412,7 @@ impl HttpTransport for ReqwestHttp {
             // The body is delivered as a single raw SSE data frame so the
             // bridge's drain loop (which calls `next_frame()` until `None`)
             // accumulates it into the JSON body handed to `decode_response`.
-            let body = resp.bytes().await.unwrap_or_default();
-            let body_bytes = body.to_vec();
+            let body_bytes = capped_error_bytes(resp).await;
             let stream = body_error_stream(body_bytes);
             return Ok(SseStreamWithMeta {
                 status,
@@ -439,7 +440,7 @@ impl HttpTransport for ReqwestHttp {
         .await?;
         let status = resp.status().as_u16();
         if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
+            let body = capped_error_text(resp).await;
             return Err(HttpError::Status { status, body });
         }
         // Map reqwest's `Bytes` chunks to owned `Vec<u8>` for true incremental
@@ -491,7 +492,7 @@ impl HttpTransport for ReqwestHttp {
 
         if status >= 400 {
             // Return Ok so the bridge can receive real headers alongside the body.
-            let body_bytes = resp.bytes().await.unwrap_or_default().to_vec();
+            let body_bytes = capped_error_bytes(resp).await;
             let stream: RawByteStream = Box::pin(futures_util::stream::once(async move {
                 Ok::<Vec<u8>, HttpError>(body_bytes)
             }));
@@ -622,6 +623,29 @@ fn parse_sse_chunks(raw: &str) -> Vec<SseEvent> {
     events
 }
 
+/// Read a non-success body until `MAX_HTTP_ERROR_BODY`, then stop.
+async fn capped_error_bytes(resp: reqwest::Response) -> Vec<u8> {
+    let mut stream = resp.bytes_stream();
+    let mut out = Vec::new();
+    while out.len() < MAX_HTTP_ERROR_BODY {
+        let Some(Ok(bytes)) = stream.next().await else {
+            break;
+        };
+        let room = MAX_HTTP_ERROR_BODY - out.len();
+        if bytes.len() <= room {
+            out.extend_from_slice(&bytes);
+        } else {
+            out.extend_from_slice(&bytes[..room]);
+            break;
+        }
+    }
+    out
+}
+
+async fn capped_error_text(resp: reqwest::Response) -> String {
+    String::from_utf8_lossy(&capped_error_bytes(resp).await).into_owned()
+}
+
 /// Adapt a byte stream into a stream of complete `SseEvent`s.
 ///
 /// Buffers raw bytes until an event boundary (`\n\n` or `\r\n\r\n`) is found,
@@ -654,7 +678,17 @@ where
                 }
                 // Otherwise pull more bytes.
                 match s.next().await {
-                    Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
+                    Some(Ok(bytes)) => {
+                        if buf.len().saturating_add(bytes.len()) > MAX_HTTP_RESPONSE_BODY {
+                            return Some((
+                                Err(HttpError::InvalidResponse(
+                                    "sse event exceeded the 16 MiB response limit".into(),
+                                )),
+                                (s, buf),
+                            ));
+                        }
+                        buf.extend_from_slice(&bytes);
+                    }
                     Some(Err(e)) => {
                         return Some((
                             Err(map_reqwest_connection_error(e, detailed_connection_errors)),
