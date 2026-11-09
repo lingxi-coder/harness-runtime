@@ -1739,6 +1739,26 @@ pub trait PermissionGate: Send + Sync {
         Ok(())
     }
 
+    /// Complete an approved plan after its edited contents have been saved.
+    /// Policy-backed gates restore the mode retained on entry. A mode selected
+    /// explicitly by the approval transport takes precedence over that return.
+    /// Prompt-only gates have no mode state and keep their existing behavior.
+    async fn exit_plan_mode(&self) -> Result<(), String> {
+        if self.permission_mode().as_deref() == Some("plan") {
+            self.set_permission_mode("default").await?;
+        }
+        Ok(())
+    }
+
+    /// Commit an approval's optional Auto selection after its plan has been
+    /// saved and its entry generation has been checked by the owning session.
+    async fn exit_plan_mode_after_approval(&self, auto_requested: bool) -> Result<(), String> {
+        if auto_requested && self.permission_mode().as_deref() == Some("plan") {
+            self.set_permission_mode("auto").await?;
+        }
+        self.exit_plan_mode().await
+    }
+
     /// Apply Native's proactivity-level permission-mode selection against this
     /// gate's live auto/bypass availability. `baseline_mode` is the ordinary
     /// mode retained before a level-driven transition; `selector_gate_ever_on`

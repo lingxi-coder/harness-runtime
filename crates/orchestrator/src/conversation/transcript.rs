@@ -2964,11 +2964,14 @@ impl ConversationOrchestrator {
             user_type: Some("external".to_string()),
             git_branch,
             entrypoint,
-            // Plan-slug cache is not wired in this engine — TS reads
-            // `getPlanSlugCache().get(sessionId)`, which is `undefined` for any
-            // session without a stored plan slug. We have no such cache, so this
-            // is always omitted (matches the common TS path).
-            slug: None,
+            // The reminder, permissions and resume must name the same file.
+            // Hosts without a published identity retain the omitted field.
+            slug: self
+                .config
+                .plan_files
+                .as_ref()
+                .and_then(|files| files.identity())
+                .map(|identity| identity.slug),
             prompt_id: prompt_id.filter(|_| kind == "user"),
             // Always `None` from this append path — see the doc comment above and
             // the `persist_message_to_jsonl` note.

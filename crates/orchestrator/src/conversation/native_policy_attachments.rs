@@ -475,6 +475,9 @@ impl NativeThinkingResumptionHostFacts {
 /// the Native default or omits an active announcement rather than guessing.
 #[derive(Debug, Clone, Default)]
 pub struct NativePolicyHostFacts {
+    /// Explicit launch-list opt-in to Glob/Grep (`searchToolsOptIn`). This
+    /// controls their hybrid-search prompt wording independently of Auto Mode.
+    pub search_tools_opt_in: Option<bool>,
     /// Native `jK(HJ(mainLoopModel))` result for the model facing this request.
     pub simple_system_prompt: Option<bool>,
     /// Native `S(We(HJ(et())))` model classification used by `Igs` fallback.
@@ -582,6 +585,15 @@ fn latest_auto_mode<'a>(
         }
     }
     None
+}
+
+fn native_plan_mode_hybrid_search_for_host(
+    search_tools_opt_in: bool,
+    entrypoint: Option<&str>,
+    windows: bool,
+    git_bash_available: bool,
+) -> bool {
+    !search_tools_opt_in && entrypoint != Some("local-agent") && (!windows || git_bash_available)
 }
 
 fn has_native_auto_mode_toolset(tools: &[String]) -> bool {
@@ -1052,6 +1064,24 @@ fn render_auto_mode_exit(payload: &Source) -> String {
 }
 
 impl ConversationOrchestrator {
+    /// 319 `wx() && Ll()` for EnterPlanMode's hybrid-search wording. The baked
+    /// `wx` feature is enabled; explicit dedicated-tool opt-in or local-agent
+    /// entrypoint disables it. `Ll` is true off Windows, otherwise Git Bash
+    /// discovery determines support. Auto Mode's `thrifty_sonic` is separate.
+    pub(crate) fn native_plan_mode_hybrid_search(&self) -> bool {
+        let facts = self
+            .native_policy_host_facts_provider
+            .as_ref()
+            .map(|provider| provider())
+            .unwrap_or_default();
+        native_plan_mode_hybrid_search_for_host(
+            facts.search_tools_opt_in.unwrap_or(false),
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref(),
+            cfg!(windows),
+            !cfg!(windows) || lingxi_core::host::shell_support::git_bash_path().is_some(),
+        )
+    }
+
     /// Native uses the same bare/simple/attachments-disabled gate for its
     /// model-facing policy announcements and settings deltas.
     #[must_use]
@@ -1291,6 +1321,26 @@ impl ConversationOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_hybrid_search_matches_319_artifact_host_matrix() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/claude_2_1_319_plan_hybrid_context.json"
+        ))
+        .expect("319 native host fixture is valid JSON");
+        for case in fixture["cases"].as_array().unwrap() {
+            assert_eq!(
+                native_plan_mode_hybrid_search_for_host(
+                    case["searchToolsOptIn"].as_bool().unwrap(),
+                    case["entrypoint"].as_str(),
+                    case["platform"].as_str() == Some("windows"),
+                    case["gitBashAvailable"].as_bool().unwrap(),
+                ),
+                case["expected"].as_bool().unwrap(),
+                "319 host case: {case}"
+            );
+        }
+    }
 
     #[test]
     fn remount_retains_exact_session_choices_and_metadata_with_live_target_gates() {

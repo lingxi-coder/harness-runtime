@@ -1824,6 +1824,20 @@ impl ConversationOrchestrator {
         self.config.output_style.clone()
     }
 
+    /// The style predicate shared by the plan tool prompts and reminders.
+    /// Read the live selection so a watched `/output-style` change applies to
+    /// the next request instead of retaining its boot configuration.
+    pub(crate) async fn active_output_style_is_default(&self) -> bool {
+        self.active_output_style_setting()
+            .await
+            .as_ref()
+            .is_none_or(|style| {
+                style
+                    .string_units("")
+                    .is_some_and(|units| units == "default".encode_utf16().collect::<Vec<_>>())
+            })
+    }
+
     /// Current model-facing response-language setting, retained as the exact
     /// source value used by `SettingsJson`.
     pub(crate) async fn active_response_language(

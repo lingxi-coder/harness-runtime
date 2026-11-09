@@ -884,6 +884,9 @@ pub struct ResumeRuntimeSnapshot {
     pub current_usage: Option<CurrentUsageSnapshot>,
     /// Native Plan threshold usage paired with its actual latest assistant row.
     pub main_loop_latest_assistant_usage: Option<MainLoopAssistantUsageSnapshot>,
+    /// Last valid main-thread plan filename stem captured from the transcript.
+    /// The shared plan-file matcher validates it before restoring the identity.
+    pub plan_slug: Option<String>,
     /// Resolved session model to adopt on in-place resume. Empty means "leave
     /// the current live model unchanged" for legacy/default callers.
     pub model: String,

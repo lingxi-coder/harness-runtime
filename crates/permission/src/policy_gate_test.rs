@@ -3204,6 +3204,126 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     // ── set_permission_mode (live mode override) ─────────────────────────────
 
     #[tokio::test]
+    async fn approved_plan_exit_restores_each_entry_mode_without_overwriting_on_repeat() {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
+        ] {
+            let policy = Arc::new(
+                PermissionPolicy::from_rules(mode, Vec::new()).with_bypass_available(true),
+            );
+            let gate =
+                PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+            gate.set_permission_mode("plan").await.unwrap();
+            gate.set_permission_mode("plan").await.unwrap();
+            gate.exit_plan_mode().await.unwrap();
+            assert_eq!(gate.permission_mode().as_deref(), Some(mode.wire_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_exit_preserves_a_mode_selected_during_approval() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        gate.apply_permission_updates(&[json!({
+            "type": "setMode", "mode": "acceptEdits", "destination": "session"
+        })]);
+        gate.exit_plan_mode().await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+    }
+
+    #[tokio::test]
+    async fn plan_started_at_boot_returns_to_default_without_an_entry_mode() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Plan,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        gate.exit_plan_mode().await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn headless_plan_exit_only_inherits_previously_authorized_bypass() {
+        for mode in [PermissionMode::Default, PermissionMode::BypassPermissions] {
+            let gate = PolicyPermissionGate::new(
+                Arc::new(PermissionPolicy::from_rules(mode, Vec::new())),
+                RecordingInner::new(PermissionDecision::Deny {
+                    reason: "no interactive transport".into(),
+                }),
+            );
+            gate.set_permission_mode("plan").await.unwrap();
+            let outcome = gate
+                .check_exit_plan_mode(
+                    "PLAN",
+                    &PermissionCheckContext {
+                        is_non_interactive_session: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if mode == PermissionMode::BypassPermissions {
+                assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+                gate.exit_plan_mode().await.unwrap();
+                assert_eq!(gate.permission_mode().as_deref(), Some("bypassPermissions"));
+            } else {
+                assert!(matches!(outcome, PermissionOutcome::Deny { .. }));
+                assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_auto_during_plan_cannot_return_after_a_later_reenable() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Auto,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        gate.update_auto_mode_disabled(true);
+        gate.update_auto_mode_disabled(false);
+        gate.exit_plan_mode().await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn rejected_plan_keeps_plan_and_the_original_return_mode() {
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::AcceptEdits,
+                Vec::new(),
+            )),
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "keep planning".into(),
+            }),
+        );
+        gate.set_permission_mode("plan").await.unwrap();
+        assert!(matches!(
+            gate.check_exit_plan_mode("PLAN", &PermissionCheckContext::default())
+                .await,
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        // A subsequent approval must still know how the rejected plan began.
+        gate.exit_plan_mode().await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+    }
+
+    #[tokio::test]
     async fn native_proactivity_level_selects_modes_from_live_auto_and_bypass_gates() {
         let policy = Arc::new(
             PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
@@ -3630,7 +3750,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     }
 
     #[tokio::test]
-    async fn exit_plan_approval_computes_auto_eligibility_and_consumes_it() {
+    async fn exit_plan_approval_defers_auto_until_the_saved_plan_is_committed() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let inner = Arc::new(PlanApprovalInner {
             seen: seen.clone(),
@@ -3645,10 +3765,13 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             )),
             inner,
         );
+        gate.set_permission_mode("plan").await.unwrap();
         let outcome = gate
             .check_exit_plan_mode("1. Ship it", &PermissionCheckContext::default())
             .await;
         assert!(matches!(outcome, PermissionOutcome::AllowAuto { .. }));
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        gate.exit_plan_mode_after_approval(true).await.unwrap();
         assert_eq!(gate.permission_mode().as_deref(), Some("auto"));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1);

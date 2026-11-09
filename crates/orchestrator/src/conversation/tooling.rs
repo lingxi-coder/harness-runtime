@@ -701,12 +701,16 @@ impl ConversationOrchestrator {
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
             };
         let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
+        let output_style_is_default = self.active_output_style_is_default().await;
+        let plan_mode_hybrid_search = self.native_plan_mode_hybrid_search();
         let prompt_options = PromptOptions {
             include_examples: true,
             session_id: Some(session_id),
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             model: Some(model.clone()),
             model_profile: model_profile.clone(),
+            output_style_is_default: Some(output_style_is_default),
+            plan_mode_hybrid_search: Some(plan_mode_hybrid_search),
             workflow_authoring_available,
             bash_precommit_skills,
             bash_precommit_session_generation,
@@ -735,6 +739,8 @@ impl ConversationOrchestrator {
             is_scheduled_turn: prompt_options.is_scheduled_turn,
             model: model.clone(),
             model_profile: model_profile.clone(),
+            output_style_is_default,
+            plan_mode_hybrid_search,
             workflow_authoring_available,
             bash_precommit_skills,
             bash_precommit_session_generation,

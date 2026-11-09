@@ -374,7 +374,15 @@ impl Tool for SkillListingGateTool {
         String::new()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
+        if self.name == "PlanPromptContextProbe" {
+            return format!(
+                "default_style={} hybrid_search={}",
+                opts.output_style_is_default.unwrap(),
+                opts.plan_mode_hybrid_search.unwrap()
+            )
+            .into();
+        }
         String::new().into()
     }
 
@@ -394,6 +402,68 @@ impl Tool for SkillListingGateTool {
             subagent_hooks_fired: false,
         })
     }
+}
+
+#[test]
+fn plan_prompt_cache_follows_live_style_and_launch_search_opt_in() {
+    run_with_large_stack(|| async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SkillListingGateTool {
+            name: "PlanPromptContextProbe",
+        }));
+        let search_opt_in = Arc::new(AtomicBool::new(false));
+        let mut orch = orchestrator_with_api_and_tools(
+            root.path(),
+            &root.path().join("transcript.jsonl"),
+            Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tools),
+        );
+        let host_search_opt_in = search_opt_in.clone();
+        orch.native_policy_host_facts_provider = Some(Arc::new(move || {
+            crate::conversation::NativePolicyHostFacts {
+                search_tools_opt_in: Some(host_search_opt_in.load(Ordering::Acquire)),
+                ..Default::default()
+            }
+        }));
+        orch.refresh_native_output_style(Some("Explanatory".into()))
+            .await;
+        let expected_hybrid = orch.native_plan_mode_hybrid_search();
+        let (wire, _) = orch.build_wire_tools().await.unwrap();
+        let description = |wire: &[lingxi_core::host::SourceToolWireDefinition]| {
+            wire.iter()
+                .find(|tool| tool.name == "PlanPromptContextProbe")
+                .unwrap()
+                .description
+                .string_at("")
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            description(&wire),
+            format!("default_style=false hybrid_search={expected_hybrid}")
+        );
+
+        // The registry/model are unchanged; a live style clear must invalidate
+        // their cached tool prompt and reach tool invocations as well.
+        orch.refresh_native_output_style(None).await;
+        let (wire, _) = orch.build_wire_tools().await.unwrap();
+        assert_eq!(
+            description(&wire),
+            format!("default_style=true hybrid_search={expected_hybrid}")
+        );
+        let context =
+            crate::turn_loop::tool_dispatch::streaming_tool_context_base(&orch, Vec::new()).await;
+        assert_eq!(context.options.output_style_is_default, Some(true));
+
+        // No Bash tool is advertised. Launching with a dedicated-search opt-in
+        // changes the next prompt independently of the tool pool/model.
+        search_opt_in.store(true, Ordering::Release);
+        let (wire, _) = orch.build_wire_tools().await.unwrap();
+        assert_eq!(description(&wire), "default_style=true hybrid_search=false");
+    });
 }
 
 fn orchestrator_with_skill_listing(

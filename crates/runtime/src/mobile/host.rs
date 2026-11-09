@@ -693,11 +693,6 @@ pub struct MobileRuntime {
     /// The live current-session uuid. Updated by `retarget_session_writer` on
     /// every session change.
     pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
-    /// 2.1.266 `Zl`/`ay`: the session's plan-file identity, shared with the boot
-    /// permission policy. Re-published by `retarget_session_writer` on every
-    /// session change, so the carve-out and `ExitPlanMode` always name the
-    /// CURRENT session's plan file rather than the one this host booted on.
-    pub(crate) plan_files: Arc<permission::plan_files::PlanFileMatcher>,
     pub(crate) parked_agent_restore_inheritance: lingxi_core::host::SubagentInheritance,
     pub(crate) agent_resume_gate: Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
     pub(crate) main_report_waker: Arc<crate::main_report_waker::MainReportWakeRouter>,
@@ -1781,6 +1776,10 @@ impl MobileRuntime {
             .map_err(|error| ClientError::Internal {
                 message: format!("session transcript authority: {error}"),
             })?;
+        // New/Resume may activate another project. Resolve against that real
+        // root (not a Bash-mutated cwd), keeping the slug restored at commit.
+        self.orchestrator
+            .rebind_plan_directory_to_project_root(&self.session_cwd.project_root());
         // Keep the live session uuid in lockstep with the session on every
         // retarget (New/Resume/Clear).
         let session_uuid = next_session_id;
@@ -1790,18 +1789,9 @@ impl MobileRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = session_uuid.clone();
-            // Re-point the plan-file carve-out at the new session, with a fresh
-            // slug — a retarget is a new plan file, not a rename of the old one.
-            if let Some(identity) = self.plan_files.identity() {
-                let plans_dir = identity.plans_dir.clone();
-                self.plan_files
-                    .publish(permission::plan_files::PlanFileIdentity {
-                        slug: lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
-                            lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
-                        }),
-                        ..identity
-                    });
-            }
+            // The orchestrator installed this session's plan identity at its
+            // durable commit. Keep that restored slug while host state follows
+            // the switch; minting another here would split permission/tool paths.
             self.permission_gate
                 .set_session_id(Some(session_uuid.clone()));
             self.task_registry

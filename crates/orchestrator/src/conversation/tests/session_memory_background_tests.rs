@@ -70,6 +70,7 @@ fn cache_safe_params() -> sidequery::CacheSafeParams {
         system_context: std::collections::HashMap::new(),
         user_context_message: None,
         tool_use_options: ToolUseOptions {
+            output_style_is_default: None,
             debug: false,
             verbose: false,
             main_loop_model: "haiku".to_string(),

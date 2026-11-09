@@ -568,6 +568,7 @@ mod tests {
 
     fn tool_use_options() -> ToolUseOptions {
         ToolUseOptions {
+            output_style_is_default: None,
             debug: false,
             verbose: false,
             main_loop_model: "test".into(),

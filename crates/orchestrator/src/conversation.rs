@@ -1491,6 +1491,8 @@ struct WireToolSchemaCacheKey {
     is_scheduled_turn: bool,
     model: String,
     model_profile: Option<String>,
+    output_style_is_default: bool,
+    plan_mode_hybrid_search: bool,
     /// Whether this request can load `workflow-authoring`, matching the value
     /// passed to each tool's PromptOptions during construction of this entry.
     workflow_authoring_available: bool,

@@ -652,6 +652,9 @@ pub struct DesktopConfig {
     /// An empty selection disables ordinary built-ins. Explicit schema capture
     /// remains available so `--json-schema` can complete its execution contract.
     pub restricted_tools: Option<Vec<String>>,
+    /// Explicit CLI opt-in to Glob/Grep through `--tools` or `--allowedTools`.
+    /// Native uses this launch fact to retain dedicated search prompt wording.
+    pub search_tools_opt_in: bool,
     /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
     /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
     /// per-machine env block out of the (cacheable) system prompt and into the
@@ -1321,6 +1324,7 @@ impl Default for DesktopConfig {
             strict_mcp_config: false,
             restricted: false,
             restricted_tools: None,
+            search_tools_opt_in: false,
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),

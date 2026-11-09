@@ -52,6 +52,7 @@ mod deferred_authority_tests;
 mod file_state;
 #[cfg(test)]
 mod file_state_tests;
+mod plan_files;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
 #[derive(Debug, thiserror::Error)]
@@ -572,6 +573,7 @@ impl ReplayedSession {
                 .runtime_metadata
                 .main_loop_latest_assistant_usage
                 .clone(),
+            plan_slug: self.runtime_metadata.plan_slug.clone(),
             user_model_setting: None,
             user_model_setting_provenance: None,
             user_model_setting_source: None,
@@ -661,6 +663,8 @@ pub struct ResumeRuntimeMetadata {
     pub current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
     /// Native Mge threshold usage paired with the exact latest assistant row.
     pub main_loop_latest_assistant_usage: Option<lingxi_core::host::MainLoopAssistantUsageSnapshot>,
+    /// Last valid main-thread plan filename stem recorded in the transcript.
+    pub plan_slug: Option<String>,
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
     /// Structured reasoning selection persisted by newer runtimes.
@@ -2983,6 +2987,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     ResumeRuntimeMetadata {
         current_usage: current_usage_from_messages(messages),
         main_loop_latest_assistant_usage: main_loop_latest_assistant_usage_from_messages(messages),
+        plan_slug: plan_files::plan_slug_from_messages(messages),
         effort,
         reasoning_selection,
         main_thread_agent_type: None,
@@ -3576,6 +3581,7 @@ impl ConversationOrchestrator {
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
         let metadata = resume_runtime_metadata(messages);
+        self.restore_plan_file_slug(metadata.plan_slug.as_deref());
         restore_deferred_tool_state_from_messages(self.tools.deferral(), messages);
         self.session.lock().await.native_request_history =
             native_request_history_from_messages(messages);
@@ -3623,6 +3629,7 @@ impl ConversationOrchestrator {
     /// full runtime projection on that raw stream would let preserved
     /// pre-compaction assistant rows overwrite the normalized current usage.
     pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        self.restore_plan_file_slug(plan_files::plan_slug_from_messages(messages).as_deref());
         *self.prompt_runtime.context_rendering_hint.lock().await =
             context_rendering_hint_from_messages(messages);
         if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
@@ -3844,6 +3851,7 @@ impl ConversationOrchestrator {
         }
         orch.main_reports
             .reset_for_builder(orch.session.lock().await.session_id);
+        orch.restore_plan_file_slug(replayed.runtime_metadata.plan_slug.as_deref());
         orch.restore_response_usage(replayed.runtime_metadata.current_usage);
         orch.restore_main_loop_latest_assistant_usage(
             replayed

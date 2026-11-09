@@ -149,6 +149,7 @@ impl ToolInvoker for RegistryToolInvoker {
             is_scheduled_turn: false,
             available_tool_names: None,
             options: crate::context::ToolUseOptions {
+                output_style_is_default: None,
                 debug: false,
                 verbose: false,
                 main_loop_model: "subagent".into(),
@@ -365,6 +366,7 @@ impl RegistryToolInvoker {
                 is_scheduled_turn: false,
                 available_tool_names: ctx.available_tool_names.clone(),
                 options: crate::context::ToolUseOptions {
+                    output_style_is_default: None,
                     debug: false,
                     verbose: false,
                     main_loop_model: ctx
@@ -544,12 +546,14 @@ impl RegistryToolInvoker {
                 pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
-                requires_user_interaction: tool.requires_user_interaction(),
+                requires_user_interaction: tool
+                    .requires_user_interaction_for_context(&tool_use_ctx),
                 // A tool-owned interaction is always per-call. Carry the
                 // persistence guard alongside the transport metadata so TUI,
                 // adapter, and stdio hosts cannot offer or honor a stale
                 // AllowAlways response for subagent dispatches.
-                suppress_always_allow_rule: tool.requires_user_interaction()
+                suppress_always_allow_rule: tool
+                    .requires_user_interaction_for_context(&tool_use_ctx)
                     || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 request_source: ctx.request_source,
                 // Per-call permission-mode override (claude-code 2.1.207 Agent

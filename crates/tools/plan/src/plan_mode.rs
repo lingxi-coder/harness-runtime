@@ -1,30 +1,8 @@
-//! `EnterPlanModeTool` + `ExitPlanModeTool` — flip `SessionState.plan_mode`
-//! and emit the byte-locked markers `[PLAN MODE]` / `[EXIT PLAN MODE]`
-//! (spec §7 line 487).
+//! File-backed Plan Mode tools, checked against Claude Code 2.1.319.
 //!
-//! ## Divergence from TS (parity Batch MISC.11 — close-parity, flag prominently)
-//!
-//! The TS reference (`EnterPlanModeTool.ts`, `ExitPlanModeV2Tool.ts`) implements
-//! plan mode on top of a real permission-mode substrate: it sets
-//! `toolPermissionContext.mode = 'plan'` via `applyPermissionUpdate`, runs the
-//! classifier activation in `prepareContextForPlanMode`, reads the plan from disk
-//! (`getPlan`/`getPlanFilePath`), and performs a plan-approval handoff
-//! (`setAwaitingPlanApproval`, teammate mailbox). LingXi's `SessionState` has only
-//! a `plan_mode: bool`, **not** a permission-mode enum — none of that machinery
-//! has a Rust home. This batch lands only the guardable, headless-meaningful
-//! pieces faithful to TS:
-//!   * the agent-context guard (`EnterPlanMode` rejects when `ctx.agent_id` is set;
-//!     TS throws at `EnterPlanModeTool.ts:78-80`),
-//!   * the `Entered plan mode...` instruction block reaching the model
-//!     (port of `mapToolResultToToolResultBlockParam` `:103-125`),
-//!   * the `ExitPlanMode` `{allowedPrompts?:[{tool:"Bash", prompt}]}` input schema
-//!     (`ExitPlanModeV2Tool.ts:64-89`) and the `{plan, isAgent, allowedPrompts}`
-//!     output passthrough (`:110-120`). Rust has no on-disk plan store, so `plan`
-//!     is whatever the model passed (or `null`).
-//!
-//! TS uses prose, not literal markers; LingXi keeps the byte-locked
-//! `[PLAN MODE]` / `[EXIT PLAN MODE]` markers (LingXi fixture lock) **and** adds
-//! the TS instruction prose alongside them.
+//! Model prompts, input schemas and result text have artifact-derived byte
+//! locks. The host owns the shared plan-file identity, enforcing approval gate
+//! and teammate review transport; model input cannot replace those capabilities.
 
 use std::time::Instant;
 
@@ -50,6 +28,9 @@ use tool_api::tool_trait::{
 };
 use tool_api::BuiltinToolContext;
 
+/// Structured confirmation returned by the native EnterPlanMode call.
+pub const ENTER_PLAN_MODE_CONFIRMATION: &str = "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.";
+
 /// Instruction block surfaced to the model on entering plan mode. Byte-faithful
 /// port of the non-interview-phase branch of `EnterPlanModeTool.ts`
 /// `mapToolResultToToolResultBlockParam` (`:108-118`). LingXi has no
@@ -67,17 +48,8 @@ In plan mode, you should:
 
 Remember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.";
 
-/// Full model-facing tool prompt for `EnterPlanMode` — 2.1.266 `N8o()`
-/// (`src_162329786.js` @3898812), with `${D8o()}` (@3898366) spliced in at
-/// `## What Happens in Plan Mode`.
-///
-/// Interpolations resolved as LingXi renders them: `${As}` → `AskUserQuestion`,
-/// `${iy}` → `ExitPlanMode`, `${fo}, ${eo}, and ${tt}` → `Glob, Grep, and Read`,
-/// and `${e}` → `O8o()` = `" (use the Agent tool instead)"` (the default output
-/// style). `D8o`'s `oS()&&ei()` bash-first fork takes the NON-bash-first branch,
-/// the same choice `tools/shell/src/prompt.rs` already makes for the search
-/// tools. Generated from the executable, not retyped:
-/// `~/.claude/oracle-chunks/notes/plan-goal-2.1.266/resolve_enter_prompt.py`.
+/// Claude Code 2.1.319 `en()`/`Ze()` with default output style and hybrid search
+/// guidance. The two session-dependent substitutions are rendered below.
 pub const ENTER_PLAN_MODE_TOOL_PROMPT: &str = r#"Use this tool proactively when you're about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort and ensures alignment. This tool transitions you into plan mode where you can explore the codebase and design an implementation approach for user approval.
 
 ## When to Use This Tool
@@ -123,7 +95,7 @@ Only skip EnterPlanMode for simple tasks:
 ## What Happens in Plan Mode
 
 In plan mode, you'll:
-1. Thoroughly explore the codebase using Glob, Grep, and Read
+1. Thoroughly explore the codebase using `find`/Glob, `grep`/Grep, and Read
 2. Understand existing patterns and architecture
 3. Design an implementation approach
 4. Present your plan to the user for approval
@@ -164,6 +136,26 @@ User: "What files handle routing?"
 - If unsure whether to use it, err on the side of planning - it's better to get alignment upfront than to redo work
 - Users appreciate being consulted before significant changes are made to their codebase
 "#;
+
+/// Resolve the original prompt's output-style and hybrid search branches from
+/// trusted per-request host facts, without changing any other prompt bytes.
+#[must_use]
+pub fn render_enter_plan_mode_prompt(output_style_is_default: bool, hybrid_search: bool) -> String {
+    let mut prompt = ENTER_PLAN_MODE_TOOL_PROMPT.to_owned();
+    if !output_style_is_default {
+        prompt = prompt.replace(
+            "- Pure research/exploration tasks (use the Agent tool instead)",
+            "- Pure research/exploration tasks",
+        );
+    }
+    if !hybrid_search {
+        prompt = prompt.replace(
+            "using `find`/Glob, `grep`/Grep, and Read",
+            "using Glob, Grep, and Read",
+        );
+    }
+    prompt
+}
 
 /// Locked rejection string for using `EnterPlanMode` inside an agent context.
 /// Byte-faithful to the TS throw at `EnterPlanModeTool.ts:79`.
@@ -207,18 +199,8 @@ const EXIT_PLAN_SAVED_TO_PREFIX: &str = "Your plan has been saved to: ";
 /// Second half of the same pair.
 const EXIT_PLAN_REFER_BACK_LINE: &str = "You can refer back to it if needed during implementation.";
 
-/// `SSt(hasTaskTool)` (`src_162329786.js` @3509271) — appended to the approved
-/// text when the Agent tool is available and the output style is `default`.
-///
-/// ## Divergence (reason)
-///
-/// Upstream computes `hasTaskTool = Kr() && tools.some(isAgentTool)`: the
-/// teammates gate AND the Agent tool being in the advertised pool. In LingXi the
-/// Agent tool's `is_enabled` is unconditionally `true` and implicit teammates
-/// are always available, so both terms hold — the suffix is emitted
-/// unconditionally. The `zx()==="default"` output-style term has no Rust home in
-/// the tool layer; the default output style is assumed, the same assumption the
-/// ported `EnterPlanMode` prompt already makes for `O8o()`.
+/// 2.1.319 `uer(hasTaskTool)` — used only when Agent is available and the
+/// request uses the default output style.
 const EXIT_PLAN_TEAMMATE_SUFFIX: &str = "\n\nIf this plan can be broken down into multiple independent tasks, consider spawning named teammates with the Agent tool (pass a `name`) to parallelize the work.";
 
 /// Heading for the echoed plan — `## ${planWasEdited?"Approved Plan (edited by
@@ -259,8 +241,60 @@ pub const ENTER_TOOL_NAME: &str = "EnterPlanMode";
 /// Canonical tool name in the registry for `ExitPlanModeTool`.
 pub const EXIT_TOOL_NAME: &str = "ExitPlanMode";
 
+const PLAN_MODE_MAX_RESULT_SIZE_CHARS: usize = 100_000;
+
+/// Model-facing Exit result. Keep the plan's original UTF-16 units when
+/// appending it; the display projection is used only for the JS trim guard.
+#[must_use]
+pub fn render_exit_plan_mode_result(
+    plan: Option<&Utf16JsonProjection>,
+    is_agent: bool,
+    file_path: Option<&str>,
+    has_task_tool: bool,
+    output_style_is_default: bool,
+    plan_was_edited: bool,
+) -> Utf16JsonProjection {
+    if is_agent {
+        return Utf16JsonProjection::from(EXIT_PLAN_APPROVED_AGENT_MSG);
+    }
+    let plan_body = plan.and_then(|source| source.string_at("")).unwrap_or("");
+    if lingxi_core::host::effort::trim_js_whitespace(plan_body).is_empty() {
+        return Utf16JsonProjection::from(EXIT_PLAN_APPROVED_EMPTY_MSG);
+    }
+    let heading = if plan_was_edited {
+        EXIT_PLAN_APPROVED_HEADING_EDITED
+    } else {
+        EXIT_PLAN_APPROVED_HEADING
+    };
+    let saved_to = file_path.map_or_else(String::new, |path| {
+        format!("\n\n{EXIT_PLAN_SAVED_TO_PREFIX}{path}\n{EXIT_PLAN_REFER_BACK_LINE}")
+    });
+    let teammate_suffix = if has_task_tool && output_style_is_default {
+        EXIT_PLAN_TEAMMATE_SUFFIX
+    } else {
+        ""
+    };
+    let prefix =
+        format!("{EXIT_PLAN_APPROVED_PREFIX}{saved_to}{teammate_suffix}\n\n## {heading}:\n");
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    units.extend(
+        plan.and_then(|source| source.string_units(""))
+            .unwrap_or_default(),
+    );
+    tool_api::tool_trait::source_text_projection_units(&units)
+}
+
+fn agent_tool_available(ctx: &ToolUseContext) -> bool {
+    ctx.available_tool_names.as_ref().is_some_and(|names| {
+        names
+            .iter()
+            .any(|name| matches!(name.string_at(""), Some("Agent" | "Task")))
+    })
+}
+
 static EMPTY_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     tool_api::tool_trait::generated_builtin_schema(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {},
         "additionalProperties": false
@@ -274,7 +308,7 @@ static EMPTY_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 /// used." — was the old prompt-based-permission array); its `Poy()` item shape
 /// `{tool:"Bash", prompt:string}` is retained byte-exact. The `.passthrough()`
 /// (extra keys allowed so `normalizeToolInput` can inject `plan`/`planFilePath`)
-/// maps to `additionalProperties: true` here.
+/// maps to the native 2.1.319 `additionalProperties: {}` here.
 // Mirrors the pre-existing `EMPTY_INPUT_SCHEMA` `once_cell::Lazy` style above;
 // `allow` keeps this batch from adding a net-new pedantic warning while staying
 // consistent with the surrounding code (a `LazyLock` migration is out of scope).
@@ -284,22 +318,23 @@ static EMPTY_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 #[allow(unknown_lints, clippy::non_std_lazy_statics)]
 static EXIT_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     tool_api::tool_trait::generated_builtin_schema(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "allowedPrompts": {
-                "type": "array",
                 "description": "Deprecated: no longer used.",
+                "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
                         "tool": {
+                            "description": "The tool this prompt applies to",
                             "type": "string",
-                            "enum": ["Bash"],
-                            "description": "The tool this prompt applies to"
+                            "enum": ["Bash"]
                         },
                         "prompt": {
-                            "type": "string",
-                            "description": "Semantic description of the action, e.g. \"run tests\", \"install dependencies\""
+                            "description": "Semantic description of the action, e.g. \"run tests\", \"install dependencies\"",
+                            "type": "string"
                         }
                     },
                     "required": ["tool", "prompt"],
@@ -307,7 +342,7 @@ static EXIT_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
                 }
             }
         },
-        "additionalProperties": true
+        "additionalProperties": {}
     }))
 });
 
@@ -376,8 +411,7 @@ fn verified(s: impl Into<String>) -> AnalyticsValue {
     AnalyticsValue::String(Verified::assert_safe(s.into()).into_inner())
 }
 
-/// `EnterPlanModeTool` — flips `session.plan_mode` from `false` → `true`.
-/// Emits `[PLAN MODE]` in the result.
+/// `EnterPlanModeTool` — enters plan mode and returns native confirmation text.
 pub struct EnterPlanModeTool {
     ctx: BuiltinToolContext,
 }
@@ -425,6 +459,9 @@ impl Tool for EnterPlanModeTool {
     fn name(&self) -> &str {
         ENTER_TOOL_NAME
     }
+    fn should_defer(&self) -> bool {
+        true
+    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
     fn search_hint(&self) -> Option<Utf16JsonProjection> {
         Some("switch to plan mode to design an approach before coding".into())
@@ -446,13 +483,13 @@ impl Tool for EnterPlanModeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        PLAN_MODE_MAX_RESULT_SIZE_CHARS
     }
     fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
-        false
+        true
     }
     fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
-        false
+        true
     }
     fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
@@ -481,8 +518,12 @@ impl Tool for EnterPlanModeTool {
         "Requests permission to enter plan mode for complex tasks requiring exploration and design"
             .into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
-        ENTER_PLAN_MODE_TOOL_PROMPT.into()
+    async fn prompt(&self, options: &PromptOptions) -> Utf16JsonProjection {
+        render_enter_plan_mode_prompt(
+            options.output_style_is_default.unwrap_or(true),
+            options.plan_mode_hybrid_search.unwrap_or(true),
+        )
+        .into()
     }
 
     async fn call(
@@ -511,24 +552,25 @@ impl Tool for EnterPlanModeTool {
                 "EnterPlanMode: session not wired into ToolUseContext (M4-04 contract)".into(),
             )
         })?;
+        let transition = session.lock().await.plan_mode_transition.clone();
+        let transition_guard = transition.lock().await;
+        if let Some(gate) = self.ctx.permission_gate.as_ref() {
+            gate.set_permission_mode("plan")
+                .await
+                .map_err(|error| ToolError::PermissionDenied(error.into()))?;
+        }
         {
             let mut guard = session.lock().await;
-            if guard.plan_mode {
-                drop(guard);
-                let dur = started_at.elapsed().as_millis() as u64;
-                self.emit_failed(&invocation_id, "already_in_plan_mode", dur)
-                    .await;
-                return Err(ToolError::InvalidInput(
-                    "EnterPlanMode: session is already in plan mode".into(),
-                ));
+            if !guard.plan_mode {
+                guard.plan_mode = true;
+                guard.plan_mode_generation = guard.plan_mode_generation.wrapping_add(1);
+                // A repeated Enter is successful but does not reset reminder
+                // cadence or replace the session's saved pre-plan mode.
+                guard.plan_reminder_shown = false;
+                guard.plan_mode_exit_pending = false;
             }
-            guard.plan_mode = true;
-            // Replay the FULL (206 `LU_`) plan-mode reminder on this fresh entry:
-            // reset the full-vs-sparse tracker so the next turn injects `full`
-            // before switching to `sparse`. Mirrors 206 `reminderType` being
-            // "full" on the first plan-mode reminder after entry.
-            guard.plan_reminder_shown = false;
         }
+        drop(transition_guard);
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
         Ok(ToolCallResult {
@@ -539,7 +581,7 @@ impl Tool for EnterPlanModeTool {
             // `tool_result_to_model_text` fallback chain). Plan mode is entered via
             // the session lock above — the marker/plan_mode flags were vestigial.
             data: tool_api::tool_trait::generated_builtin_result(
-                &json!({ "message": ENTER_PLAN_MODE_INSTRUCTIONS }),
+                &json!({ "message": ENTER_PLAN_MODE_CONFIRMATION }),
             ),
             model_content: Some(ENTER_PLAN_MODE_INSTRUCTIONS.into()),
             new_messages: Vec::new(),
@@ -551,8 +593,7 @@ impl Tool for EnterPlanModeTool {
     }
 }
 
-/// `ExitPlanModeTool` — flips `session.plan_mode` from `true` → `false`.
-/// Emits `[EXIT PLAN MODE]` in the result.
+/// `ExitPlanModeTool` — leaves plan mode after the enforcing approval gate.
 pub struct ExitPlanModeTool {
     ctx: BuiltinToolContext,
 }
@@ -600,6 +641,18 @@ impl Tool for ExitPlanModeTool {
     fn name(&self) -> &str {
         EXIT_TOOL_NAME
     }
+    fn should_defer(&self) -> bool {
+        true
+    }
+    fn requires_user_interaction(&self) -> bool {
+        true
+    }
+    fn requires_user_interaction_for_context(&self, ctx: &ToolUseContext) -> bool {
+        ctx.agent_id
+            .as_ref()
+            .and_then(lingxi_core::host::teammate_plan::requester)
+            .is_none()
+    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
     fn search_hint(&self) -> Option<Utf16JsonProjection> {
         Some("present plan for approval and start coding (plan mode only)".into())
@@ -621,10 +674,10 @@ impl Tool for ExitPlanModeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        PLAN_MODE_MAX_RESULT_SIZE_CHARS
     }
     fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
-        false
+        true
     }
     fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
@@ -707,14 +760,20 @@ impl Tool for ExitPlanModeTool {
         // Validate the live plan-mode state before opening an approval dialog.
         // The second check below closes the small race where another operation
         // exits plan mode while this approval is waiting for the user.
-        if !session.lock().await.plan_mode {
+        let plan_entry = {
+            let guard = session.lock().await;
+            guard
+                .plan_mode
+                .then_some((guard.session_id, guard.plan_mode_generation))
+        };
+        let Some(plan_entry) = plan_entry else {
             let dur = started_at.elapsed().as_millis() as u64;
             self.emit_failed(&invocation_id, "not_in_plan_mode", dur)
                 .await;
             return Err(ToolError::InvalidInput(
                 EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG.into(),
             ));
-        }
+        };
 
         // ExitPlanMode owns a user-facing approval round-trip. The ordinary
         // dispatcher permission check cannot carry the plan body (and this
@@ -757,11 +816,21 @@ impl Tool for ExitPlanModeTool {
             ..Default::default()
         };
         let outcome = gate.check_exit_plan_mode(plan, &permission_ctx).await;
+        let mut approved_permission_updates = Vec::new();
+        let mut auto_requested = false;
         match outcome {
             lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                updated_input, ..
+                updated_input,
+                permission_updates,
+                ..
+            } => {
+                approved_permission_updates = permission_updates;
+                if let Some(updated) = updated_input {
+                    input = updated;
+                }
             }
-            | lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+            lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                auto_requested = true;
                 if let Some(updated) = updated_input {
                     input = updated;
                 }
@@ -774,31 +843,67 @@ impl Tool for ExitPlanModeTool {
             }
         }
 
+        let transition = session.lock().await.plan_mode_transition.clone();
+        let transition_guard = transition.lock().await;
+        {
+            let guard = session.lock().await;
+            if !guard.plan_mode {
+                return Err(ToolError::InvalidInput(
+                    EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG.into(),
+                ));
+            }
+            if (guard.session_id, guard.plan_mode_generation) != plan_entry {
+                return Err(ToolError::InvalidInput(
+                    "This planning session changed while approval was pending. Review the current plan and call ExitPlanMode again.".into(),
+                ));
+            }
+        }
         // Re-read AFTER the gate: `updated_input` may carry an edited plan, and
         // `planWasEdited` is precisely "an inline plan was present at call time"
         // (`I !== void 0`). An inline plan is persisted to the plan file first
         // (`Ykn`), so the echoed plan and the file on disk cannot disagree.
-        let injected_plan_source = input.subprojection("/plan").ok();
+        let injected_plan_source = input
+            .subprojection("/plan")
+            .ok()
+            .filter(|source| source.string_units("").is_some());
         let injected_plan = injected_plan_source
             .as_ref()
             .and_then(|source| source.string_at("").map(str::to_owned));
         if let (Some(text), Some(path)) = (injected_plan.as_deref(), plan_file.as_ref()) {
             if let Some(parent) = path.parent() {
-                if let Err(error) = std::fs::create_dir_all(parent) {
-                    tracing::warn!(%error, path = %parent.display(), "failed to create plans directory");
-                }
+                tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                    ToolError::Internal(
+                        format!(
+                            "Could not save the approved plan to {}: {error}",
+                            path.display()
+                        )
+                        .into(),
+                    )
+                })?;
             }
-            if let Err(error) = std::fs::write(path, text) {
-                tracing::error!(%error, path = %path.display(), "failed to persist plan");
-            }
+            tokio::fs::write(path, text).await.map_err(|error| {
+                ToolError::Internal(
+                    format!(
+                        "Could not save the approved plan to {}: {error}",
+                        path.display()
+                    )
+                    .into(),
+                )
+            })?;
         }
         let plan_text_source = injected_plan_source
             .clone()
             .or_else(|| plan_on_disk.as_deref().map(Utf16JsonProjection::from));
-        let plan_text = plan_text_source
-            .as_ref()
-            .and_then(|source| source.string_at("").map(str::to_owned));
-
+        if ctx.agent_id.is_none() {
+            if !approved_permission_updates.is_empty() {
+                gate.apply_permission_updates(&approved_permission_updates);
+                gate.persist_permission_updates(&approved_permission_updates)
+                    .await;
+            }
+            gate.exit_plan_mode_after_approval(auto_requested)
+                .await
+                .map_err(|error| ToolError::PermissionDenied(error.into()))?;
+        }
         {
             let mut guard = session.lock().await;
             if !guard.plan_mode {
@@ -817,6 +922,7 @@ impl Tool for ExitPlanModeTool {
             guard.plan_mode_exited = true;
             guard.plan_mode_exit_pending = true;
         }
+        drop(transition_guard);
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
 
@@ -827,74 +933,49 @@ impl Tool for ExitPlanModeTool {
         let plan_was_edited = injected_plan.is_some();
         let file_path = plan_file.as_ref().map(|p| p.to_string_lossy().into_owned());
 
-        // Model-facing prose, mirroring `mapToolResultToToolResultBlockParam`
-        // (@3516500). Without this the orchestrator (`turn_loop.rs`
-        // `tool_result_to_model_text`) would JSON-dump the whole `data` object to
-        // the model. Branch order matches upstream: awaiting-leader (handled in
-        // the teammate path above) → agent context → empty plan → approved plan.
-        let model_content = if is_agent {
-            Utf16JsonProjection::from(EXIT_PLAN_APPROVED_AGENT_MSG)
-        } else {
-            let plan_body = plan_text.as_deref().unwrap_or("");
-            if plan_body.trim().is_empty() {
-                Utf16JsonProjection::from(EXIT_PLAN_APPROVED_EMPTY_MSG)
-            } else {
-                let heading = if plan_was_edited {
-                    EXIT_PLAN_APPROVED_HEADING_EDITED
-                } else {
-                    EXIT_PLAN_APPROVED_HEADING
-                };
-                // Upstream always has a file path; when no plan-file identity has
-                // been published (tests, and hosts that never wired one) the two
-                // saved-to lines are dropped rather than inventing a path.
-                let saved_to = match file_path.as_deref() {
-                    Some(path) => format!(
-                        "\n\n{EXIT_PLAN_SAVED_TO_PREFIX}{path}\n{EXIT_PLAN_REFER_BACK_LINE}"
-                    ),
-                    None => String::new(),
-                };
-                let prefix = format!(
-                    "{EXIT_PLAN_APPROVED_PREFIX}{saved_to}{EXIT_PLAN_TEAMMATE_SUFFIX}\n\n## {heading}:\n"
-                );
-                let mut units: Vec<u16> = prefix.encode_utf16().collect();
-                units.extend(
-                    plan_text_source
-                        .as_ref()
-                        .and_then(|source| source.string_units(""))
-                        .unwrap_or_default(),
-                );
-                tool_api::tool_trait::source_text_projection_units(&units)
-            }
-        };
+        let has_task_tool = agent_tool_available(&ctx);
+        let model_content = render_exit_plan_mode_result(
+            plan_text_source.as_ref(),
+            is_agent,
+            file_path.as_deref(),
+            has_task_tool,
+            ctx.options.output_style_is_default.unwrap_or(true),
+            plan_was_edited,
+        );
+        let mut data = vec![
+            (
+                "plan".to_string(),
+                plan_text_source.unwrap_or_else(|| {
+                    tool_api::tool_trait::generated_builtin_result(&Value::Null)
+                }),
+            ),
+            (
+                "isAgent".to_string(),
+                tool_api::tool_trait::generated_builtin_result(&json!(is_agent)),
+            ),
+        ];
+        if let Some(path) = file_path {
+            data.push(("filePath".to_string(), Utf16JsonProjection::from(path)));
+        }
+        if has_task_tool {
+            data.push((
+                "hasTaskTool".to_string(),
+                tool_api::tool_trait::generated_builtin_result(&json!(true)),
+            ));
+        }
+        if plan_was_edited {
+            data.push((
+                "planWasEdited".to_string(),
+                tool_api::tool_trait::generated_builtin_result(&json!(true)),
+            ));
+        }
+        // Internal dispatch compatibility: source_tool_result_text extracts
+        // this field before forwarding the result text to the provider.
+        data.push(("model_content".to_string(), model_content));
 
         Ok(ToolCallResult {
-            data: Utf16JsonProjection::object(vec![
-                (
-                    "plan".to_string(),
-                    plan_text_source.unwrap_or_else(|| {
-                        tool_api::tool_trait::generated_builtin_result(&Value::Null)
-                    }),
-                ),
-                (
-                    "isAgent".to_string(),
-                    tool_api::tool_trait::generated_builtin_result(&json!(is_agent)),
-                ),
-                (
-                    "filePath".to_string(),
-                    tool_api::tool_trait::generated_builtin_result(&json!(file_path)),
-                ),
-                (
-                    "hasTaskTool".to_string(),
-                    tool_api::tool_trait::generated_builtin_result(&json!(true)),
-                ),
-                (
-                    "planWasEdited".to_string(),
-                    tool_api::tool_trait::generated_builtin_result(&json!(plan_was_edited)),
-                ),
-                // Model-facing prose remains the exact UTF-16 source.
-                ("model_content".to_string(), model_content),
-            ])
-            .expect("ExitPlanMode result is a valid JSON object"),
+            data: Utf16JsonProjection::object(data)
+                .expect("ExitPlanMode result is a valid JSON object"),
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
@@ -908,6 +989,225 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_319_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/claude_2_1_319_plan.json"
+        ))
+        .expect("hash-pinned native Plan Mode oracle")
+    }
+
+    #[test]
+    fn native_319_input_schema_wire_bytes() {
+        let fixture = native_319_fixture();
+        for (name, actual) in [
+            ("EnterPlanMode", &*EMPTY_INPUT_SCHEMA),
+            ("ExitPlanMode", &*EXIT_INPUT_SCHEMA),
+        ] {
+            assert_eq!(
+                actual.to_json_string().unwrap(),
+                serde_json::to_string(&fixture["inputSchemas"][name]).unwrap(),
+                "{name}: preserve native schema field order and empty-object vocabulary"
+            );
+        }
+    }
+
+    #[test]
+    fn native_319_prompt_branches_and_enter_result() {
+        let fixture = native_319_fixture();
+        for case in fixture["enterPrompts"].as_array().unwrap() {
+            assert_eq!(
+                render_enter_plan_mode_prompt(
+                    case["outputStyleIsDefault"].as_bool().unwrap(),
+                    case["hybridSearch"].as_bool().unwrap(),
+                ),
+                case["expected"].as_str().unwrap()
+            );
+        }
+        assert_eq!(
+            EXIT_PLAN_MODE_V2_TOOL_PROMPT,
+            fixture["exitPrompt"].as_str().unwrap()
+        );
+        assert_eq!(
+            ENTER_PLAN_MODE_INSTRUCTIONS,
+            fixture["enterResult"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn native_319_exit_result_utf16_bytes() {
+        let fixture = native_319_fixture();
+        for case in fixture["exitResults"].as_array().unwrap() {
+            let input = &case["input"];
+            let plan = input["planUnits"].as_array().map(|units| {
+                tool_api::tool_trait::source_text_projection_units(
+                    &units
+                        .iter()
+                        .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let actual = render_exit_plan_mode_result(
+                plan.as_ref(),
+                input["isAgent"].as_bool().unwrap(),
+                input["filePath"].as_str(),
+                input["hasTaskTool"].as_bool().unwrap_or(false),
+                case["outputStyleIsDefault"].as_bool().unwrap(),
+                input["planWasEdited"].as_bool().unwrap_or(false),
+            );
+            let expected = case["expectedUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual.string_units("").unwrap(),
+                expected,
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn agent_guidance_uses_the_effective_tool_pool() {
+        let mut ctx = fresh_ctx();
+        assert!(!agent_tool_available(&ctx));
+        ctx.available_tool_names = Some(Vec::new());
+        assert!(!agent_tool_available(&ctx));
+        ctx.available_tool_names = Some(vec!["mcp__Agent".into()]);
+        assert!(!agent_tool_available(&ctx));
+        for name in ["Agent", "Task"] {
+            ctx.available_tool_names = Some(vec![name.into()]);
+            assert!(agent_tool_available(&ctx));
+        }
+    }
+
+    #[test]
+    fn native_319_tool_metadata() {
+        let (ctx, _, _, _) = make_ctx();
+        let enter = EnterPlanModeTool::new(ctx.clone());
+        let exit = ExitPlanModeTool::new(ctx);
+        let input = source(json!({}));
+        let fixture = native_319_fixture();
+        for (name, tool) in [("enter", &enter as &dyn Tool), ("exit", &exit as &dyn Tool)] {
+            assert_eq!(
+                tool.is_read_only(&input),
+                fixture["metadata"][name]["isReadOnly"].as_bool().unwrap()
+            );
+            assert_eq!(
+                tool.is_concurrency_safe(&input),
+                fixture["metadata"][name]["isConcurrencySafe"]
+                    .as_bool()
+                    .unwrap()
+            );
+            assert_eq!(
+                tool.max_result_size_chars(),
+                fixture["metadata"][name]["maxResultSizeChars"]
+                    .as_u64()
+                    .unwrap() as usize
+            );
+            assert_eq!(
+                tool.should_defer(),
+                fixture["metadata"][name]["shouldDefer"].as_bool().unwrap()
+            );
+            assert_eq!(
+                tool.requires_user_interaction(),
+                fixture["metadata"][name]["requiresUserInteraction"]
+                    .as_bool()
+                    .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_tools_follow_standard_undiscovered_and_discovered_wire_states() {
+        use tool_api::defer::{DeferralState, ToolSearchMode};
+        use tool_api::wire::{apply_defer_loading, tools_to_wire};
+
+        let (ctx, _, _, _) = make_ctx();
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(EnterPlanModeTool::new(ctx.clone())),
+            Arc::new(ExitPlanModeTool::new(ctx)),
+        ];
+        let baseline = tools_to_wire(&tools, &PromptOptions::default()).await;
+        assert_eq!(baseline.len(), 2);
+        assert!(baseline.iter().all(|definition| !definition.defer_loading));
+
+        let mut standard = baseline.clone();
+        apply_defer_loading(&mut standard, &tools, &DeferralState::disabled());
+        assert_eq!(standard, baseline);
+
+        let enabled = DeferralState::new(ToolSearchMode::Enabled, false);
+        let mut undiscovered = baseline.clone();
+        apply_defer_loading(&mut undiscovered, &tools, &enabled);
+        assert!(undiscovered.is_empty());
+
+        enabled.mark_loaded([ENTER_TOOL_NAME, EXIT_TOOL_NAME]);
+        let mut discovered = baseline.clone();
+        apply_defer_loading(&mut discovered, &tools, &enabled);
+        assert_eq!(discovered.len(), 2);
+        for (definition, original) in discovered.iter().zip(&baseline) {
+            assert!(definition.defer_loading);
+            assert_eq!(definition.name, original.name);
+            assert_eq!(definition.input_schema, original.input_schema);
+            assert_eq!(definition.description, original.description);
+        }
+    }
+
+    struct MetadataOnlyTeammatePlanRequester;
+
+    #[async_trait]
+    impl lingxi_core::host::teammate_plan::TeammatePlanRequester for MetadataOnlyTeammatePlanRequester {
+        async fn submit(
+            &self,
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+            unreachable!("metadata checks never submit a plan")
+        }
+    }
+
+    #[test]
+    fn exit_interaction_metadata_tracks_the_invocation_teammate_requester() {
+        let (ctx, _, _, mut use_ctx) = make_ctx();
+        let tool = ExitPlanModeTool::new(ctx);
+        let fixture = native_319_fixture();
+        assert_eq!(
+            tool.requires_user_interaction_for_context(&use_ctx),
+            fixture["metadata"]["exit"]["requiresUserInteraction"]
+                .as_bool()
+                .unwrap()
+        );
+        use_ctx.agent_id = Some(AgentId::new());
+        assert!(
+            tool.requires_user_interaction_for_context(&use_ctx),
+            "ordinary agents do not gain a teammate review transport"
+        );
+
+        let teammate_id = AgentId::new();
+        let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
+            Arc::new(MetadataOnlyTeammatePlanRequester);
+        lingxi_core::host::teammate_plan::register(teammate_id, &requester);
+        use_ctx.agent_id = Some(teammate_id);
+        assert_eq!(
+            tool.requires_user_interaction_for_context(&use_ctx),
+            fixture["metadata"]["exit"]["requiresUserInteractionAsTeammate"]
+                .as_bool()
+                .unwrap()
+        );
+        use_ctx.agent_id = None;
+        assert!(
+            tool.requires_user_interaction_for_context(&use_ctx),
+            "the same tool instance still requires main-session approval"
+        );
+        drop(requester);
+        use_ctx.agent_id = Some(teammate_id);
+        assert!(
+            tool.requires_user_interaction_for_context(&use_ctx),
+            "expired transports are not treated as registered capabilities"
+        );
+    }
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {
@@ -926,6 +1226,9 @@ mod tests {
         checked_source(source).0
     }
 
+    use lingxi_core::host::permission_gate::{
+        PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
+    };
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{AgentId, SessionId};
     use lingxi_core::SessionState;
@@ -1010,11 +1313,441 @@ mod tests {
         )));
         let mut use_ctx = fresh_ctx();
         use_ctx.session = Some(session.clone());
+        use_ctx.available_tool_names = Some(vec![Utf16JsonProjection::from("Agent")]);
         (bctx, sink, session, use_ctx)
     }
 
+    /// A prompt transport with no policy shortcuts. The production policy gate
+    /// still computes Auto eligibility, stages its return mode and restores it.
+    struct PlanApprovalTransport {
+        outcome: StdMutex<PermissionOutcome>,
+    }
+
+    impl PlanApprovalTransport {
+        fn new(outcome: PermissionOutcome) -> Arc<Self> {
+            Arc::new(Self {
+                outcome: StdMutex::new(outcome),
+            })
+        }
+
+        fn ordinary_allow() -> PermissionOutcome {
+            PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PermissionGate for PlanApprovalTransport {
+        async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        async fn check_with_context(
+            &self,
+            name: &str,
+            _: &Utf16JsonProjection,
+            _: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            assert_eq!(name, EXIT_TOOL_NAME);
+            self.outcome.lock().unwrap().clone()
+        }
+    }
+
+    struct PauseAfterPlanExitGate {
+        inner: Arc<permission::PolicyPermissionGate>,
+        restored: tokio::sync::Notify,
+        continue_exit: tokio::sync::Notify,
+        mode_updates: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PermissionGate for PauseAfterPlanExitGate {
+        async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision {
+            self.inner.check(name, input).await
+        }
+
+        async fn check_exit_plan_mode(
+            &self,
+            plan: &str,
+            ctx: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            self.inner.check_exit_plan_mode(plan, ctx).await
+        }
+
+        async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+            self.mode_updates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.set_permission_mode(mode).await
+        }
+
+        async fn exit_plan_mode_after_approval(&self, auto_requested: bool) -> Result<(), String> {
+            self.inner
+                .exit_plan_mode_after_approval(auto_requested)
+                .await?;
+            self.restored.notify_one();
+            self.continue_exit.notified().await;
+            Ok(())
+        }
+
+        fn permission_mode(&self) -> Option<String> {
+            self.inner.permission_mode()
+        }
+    }
+
     #[tokio::test]
-    async fn enter_flips_flag_and_returns_marker() {
+    async fn production_policy_gate_restores_pre_plan_mode_and_keeps_denial_in_plan() {
+        let (mut bctx, _, session, mut use_ctx) = make_ctx();
+        use_ctx.options.is_non_interactive_session = false;
+        let transport = PlanApprovalTransport::new(PlanApprovalTransport::ordinary_allow());
+        let policy = Arc::new(permission::PermissionPolicy::new(
+            permission::PermissionMode::AcceptEdits,
+        ));
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            policy.clone(),
+            transport.clone(),
+        ));
+        bctx.permission_policy = policy;
+        bctx.permission_gate = Some(gate.clone());
+        let enter = EnterPlanModeTool::new(bctx.clone());
+        let exit = ExitPlanModeTool::new(bctx);
+
+        enter
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        assert!(session.lock().await.plan_mode);
+        exit.call(
+            source(json!({"plan":"Approved work"})),
+            use_ctx.clone(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+        assert!(!session.lock().await.plan_mode);
+
+        *transport.outcome.lock().unwrap() = PermissionOutcome::Deny {
+            reason: "Revise the plan first".into(),
+        };
+        enter
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+        let error = exit
+            .call(
+                source(json!({"plan":"Unapproved work"})),
+                use_ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ToolError::PermissionDenied(_)));
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        assert!(session.lock().await.plan_mode);
+    }
+
+    #[tokio::test]
+    async fn failed_edited_plan_save_keeps_live_plan_until_auto_retry_succeeds() {
+        let plans_dir = std::env::temp_dir().join(format!(
+            "lingxi-plan-save-retry-{}",
+            tool_api::util::ids::ulid_or_uuid()
+        ));
+        let slug = "blocked-save";
+        let plan_path = plans_dir.join(format!("{slug}.md"));
+        // A directory is a deterministic write failure on every supported host.
+        std::fs::create_dir_all(&plan_path).unwrap();
+        let (mut bctx, _, session, mut use_ctx) = make_ctx();
+        use_ctx.options.is_non_interactive_session = false;
+        let transport = PlanApprovalTransport::new(PermissionOutcome::AllowAuto {
+            updated_input: Some(source(json!({"plan":"The user-edited approved plan"}))),
+        });
+        let policy = Arc::new(
+            permission::PermissionPolicy::new(permission::PermissionMode::AcceptEdits)
+                .with_plan_files(Arc::new(
+                    permission::plan_files::PlanFileMatcher::with_identity(
+                        permission::plan_files::PlanFileIdentity {
+                            plans_dir: plans_dir.clone(),
+                            slug: slug.to_owned(),
+                            workshop_enabled: false,
+                        },
+                    ),
+                )),
+        );
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            policy.clone(),
+            transport,
+        ));
+        assert!(gate.can_request_auto_mode());
+        bctx.permission_policy = policy;
+        bctx.permission_gate = Some(gate.clone());
+        let enter = EnterPlanModeTool::new(bctx.clone());
+        let exit = ExitPlanModeTool::new(bctx);
+        enter
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+
+        let error = exit
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Internal(_)));
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        assert!(session.lock().await.plan_mode);
+        assert!(plan_path.is_dir());
+
+        std::fs::remove_dir(&plan_path).unwrap();
+        exit.call(source(json!({})), use_ctx, fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("auto"));
+        assert!(!session.lock().await.plan_mode);
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).unwrap(),
+            "The user-edited approved plan"
+        );
+        std::fs::remove_dir_all(plans_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_enter_waits_for_the_complete_exit_transition() {
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+
+        let (mut bctx, _, session, mut use_ctx) = make_ctx();
+        use_ctx.options.is_non_interactive_session = false;
+        let policy = Arc::new(permission::PermissionPolicy::new(
+            permission::PermissionMode::AcceptEdits,
+        ));
+        let gate = Arc::new(PauseAfterPlanExitGate {
+            inner: Arc::new(permission::PolicyPermissionGate::new(
+                policy.clone(),
+                PlanApprovalTransport::new(PlanApprovalTransport::ordinary_allow()),
+            )),
+            restored: tokio::sync::Notify::new(),
+            continue_exit: tokio::sync::Notify::new(),
+            mode_updates: std::sync::atomic::AtomicUsize::new(0),
+        });
+        bctx.permission_policy = policy;
+        bctx.permission_gate = Some(gate.clone());
+        let enter = EnterPlanModeTool::new(bctx.clone());
+        let exit = ExitPlanModeTool::new(bctx);
+        enter
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+        let exit_ctx = use_ctx.clone();
+        let exiting = tokio::spawn(async move {
+            exit.call(
+                source(json!({"plan":"Approved work"})),
+                exit_ctx,
+                fresh_tx(),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.restored.notified())
+            .await
+            .unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+        assert!(session.lock().await.plan_mode);
+        let transition = session.lock().await.plan_mode_transition.clone();
+        assert!(
+            transition.try_lock().is_err(),
+            "the gate-to-session transition is still owned by Exit"
+        );
+
+        let entering = enter.call(source(json!({})), use_ctx, fresh_tx());
+        tokio::pin!(entering);
+        // Poll Enter into the known gate/bool window. With the lock it parks
+        // before setMode; without it the native idempotent Enter completes here
+        // and the resumed Exit would leave a Plan gate with plan_mode=false.
+        std::future::poll_fn(|cx| {
+            assert!(entering.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(gate.mode_updates.load(Ordering::SeqCst), 1);
+        gate.continue_exit.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), exiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        entering.await.unwrap();
+        assert_eq!(gate.mode_updates.load(Ordering::SeqCst), 2);
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        assert!(session.lock().await.plan_mode);
+        assert!(!session.lock().await.plan_mode_exit_pending);
+    }
+
+    #[tokio::test]
+    async fn ordinary_agent_exit_does_not_update_or_exit_the_root_permission_gate() {
+        let (mut bctx, _, root_session, mut use_ctx) = make_ctx();
+        use_ctx.options.is_non_interactive_session = false;
+        let transport = PlanApprovalTransport::new(PermissionOutcome::Allow {
+            updated_input: None,
+            permission_updates: vec![source(json!({
+                "type":"setMode", "mode":"acceptEdits", "destination":"session"
+            }))],
+            decision_classification: None,
+        });
+        let policy = Arc::new(permission::PermissionPolicy::new(
+            permission::PermissionMode::AcceptEdits,
+        ));
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            policy.clone(),
+            transport,
+        ));
+        bctx.permission_policy = policy;
+        bctx.permission_gate = Some(gate.clone());
+        EnterPlanModeTool::new(bctx.clone())
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+        let child_session = Arc::new(Mutex::new(SessionState::empty(
+            SessionId::new(),
+            "claude-opus-4-7".to_owned(),
+        )));
+        child_session.lock().await.plan_mode = true;
+        use_ctx.session = Some(child_session.clone());
+        use_ctx.agent_id = Some(AgentId::new());
+        let result = ExitPlanModeTool::new(bctx)
+            .call(source(json!({"plan":"Child report"})), use_ctx, fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(as_value(&result.data)["isAgent"], true);
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+        assert!(root_session.lock().await.plan_mode);
+        assert!(!child_session.lock().await.plan_mode);
+    }
+
+    struct PendingPlanApprovalTransport {
+        requested: tokio::sync::Notify,
+        continue_review: tokio::sync::Notify,
+        pause_next: std::sync::atomic::AtomicBool,
+        outcome: StdMutex<PermissionOutcome>,
+    }
+
+    #[async_trait]
+    impl PermissionGate for PendingPlanApprovalTransport {
+        async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        async fn check_with_context(
+            &self,
+            name: &str,
+            _: &Utf16JsonProjection,
+            _: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            assert_eq!(name, EXIT_TOOL_NAME);
+            if self
+                .pause_next
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.requested.notify_one();
+                self.continue_review.notified().await;
+            }
+            self.outcome.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_approval_cannot_save_or_leave_a_new_plan_generation() {
+        let plans_dir = std::env::temp_dir().join(format!(
+            "lingxi-stale-plan-approval-{}",
+            tool_api::util::ids::ulid_or_uuid()
+        ));
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let slug = "new-planning-cycle";
+        let plan_path = plans_dir.join(format!("{slug}.md"));
+        let (mut bctx, _, session, mut use_ctx) = make_ctx();
+        use_ctx.options.is_non_interactive_session = false;
+        let transport = Arc::new(PendingPlanApprovalTransport {
+            requested: tokio::sync::Notify::new(),
+            continue_review: tokio::sync::Notify::new(),
+            pause_next: std::sync::atomic::AtomicBool::new(true),
+            outcome: StdMutex::new(PermissionOutcome::AllowAuto {
+                updated_input: Some(source(json!({"plan":"Old approved plan"}))),
+            }),
+        });
+        let policy = Arc::new(
+            permission::PermissionPolicy::new(permission::PermissionMode::AcceptEdits)
+                .with_plan_files(Arc::new(
+                    permission::plan_files::PlanFileMatcher::with_identity(
+                        permission::plan_files::PlanFileIdentity {
+                            plans_dir: plans_dir.clone(),
+                            slug: slug.to_owned(),
+                            workshop_enabled: false,
+                        },
+                    ),
+                )),
+        );
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            policy.clone(),
+            transport.clone(),
+        ));
+        bctx.permission_policy = policy;
+        bctx.permission_gate = Some(gate.clone());
+        EnterPlanModeTool::new(bctx.clone())
+            .call(source(json!({})), use_ctx.clone(), fresh_tx())
+            .await
+            .unwrap();
+        let old_exit = ExitPlanModeTool::new(bctx.clone());
+        let old_context = use_ctx.clone();
+        let old_approval = tokio::spawn(async move {
+            old_exit
+                .call(source(json!({})), old_context, fresh_tx())
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            transport.requested.notified(),
+        )
+        .await
+        .unwrap();
+        // Model the trusted host leaving and re-entering Plan while an older
+        // approval card is open: the boolean is true in both generations.
+        session.lock().await.plan_mode_generation += 1;
+        transport.continue_review.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), old_approval)
+            .await
+            .unwrap()
+            .unwrap();
+        result.expect_err("an older approval cannot commit the new planning cycle");
+        assert!(
+            !plan_path.exists(),
+            "reject the stale approval before saving its plan"
+        );
+        assert!(session.lock().await.plan_mode);
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
+
+        // Its old Auto choice must not alter the new cycle's return mode.
+        *transport.outcome.lock().unwrap() = PlanApprovalTransport::ordinary_allow();
+        ExitPlanModeTool::new(bctx)
+            .call(
+                source(json!({"plan":"Current approved plan"})),
+                use_ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(!session.lock().await.plan_mode);
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).unwrap(),
+            "Current approved plan"
+        );
+        std::fs::remove_dir_all(plans_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_enters_mode_and_returns_native_result() {
         let (bctx, sink, session, use_ctx) = make_ctx();
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterPlanModeTool::new(bctx);
@@ -1026,14 +1759,14 @@ mod tests {
         // binary EnterPlanModeTool result = {message}; the model reads it via the
         // model_content channel. The marker/plan_mode flags are gone (plan mode is
         // entered via the session lock, asserted below).
-        assert_eq!(as_value(&res.data)["message"], ENTER_PLAN_MODE_INSTRUCTIONS);
+        assert_eq!(as_value(&res.data)["message"], ENTER_PLAN_MODE_CONFIRMATION);
         assert!(as_value(&res.data).get("marker").is_none());
         assert!(as_value(&res.data).get("plan_mode").is_none());
         assert_eq!(
             model_content(res.model_content.as_ref()).as_deref(),
             Some(ENTER_PLAN_MODE_INSTRUCTIONS)
         );
-        let instructions = res.data.string_at("/message").unwrap();
+        let instructions = res.model_content.as_ref().unwrap().string_at("").unwrap();
         assert!(instructions.starts_with("Entered plan mode."));
         assert!(instructions
             .contains("6. When ready, use ExitPlanMode to present your plan for approval"));
@@ -1066,27 +1799,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_twice_rejects_with_locked_string() {
-        let (bctx, sink, _session, use_ctx) = make_ctx();
+    async fn enter_twice_is_idempotent_and_keeps_reminder_cadence() {
+        let (bctx, sink, session, use_ctx) = make_ctx();
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterPlanModeTool::new(bctx);
         tool.call(source(json!({})), use_ctx.clone(), fresh_tx())
             .await
             .expect("first enter must succeed");
-        let err = tool
+        session.lock().await.plan_reminder_shown = true;
+        let result = tool
             .call(source(json!({})), use_ctx, fresh_tx())
             .await
-            .expect_err("second enter must fail");
+            .expect("second enter succeeds as in the native executable");
         assert_eq!(
-            source_text(&err.model_facing_message()),
-            "EnterPlanMode: session is already in plan mode"
+            as_value(&result.data)["message"],
+            ENTER_PLAN_MODE_CONFIRMATION
         );
+        assert!(session.lock().await.plan_reminder_shown);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains(&ENTER_PLAN_MODE_FAILED.to_string()));
+        assert!(!names.contains(&ENTER_PLAN_MODE_FAILED.to_string()));
     }
 
     #[tokio::test]
-    async fn exit_flips_flag_and_returns_marker() {
+    async fn exit_leaves_mode_and_returns_native_result() {
         let (bctx, sink, session, use_ctx) = make_ctx();
         bctx.bus.attach_sink(sink.clone()).await;
         session.lock().await.plan_mode = true; // pre-arm
@@ -1102,7 +1837,7 @@ mod tests {
         // No plan file and no inline plan → null plan, isAgent false.
         assert_eq!(as_value(&res.data)["plan"], Value::Null);
         assert_eq!(as_value(&res.data)["isAgent"], false);
-        assert_eq!(as_value(&res.data)["planWasEdited"], false);
+        assert!(as_value(&res.data).get("planWasEdited").is_none());
         // Empty-plan branch (TS `ExitPlanModeV2Tool.ts:461-468`).
         assert_eq!(
             as_value(&res.data)["model_content"],
@@ -1155,7 +1890,7 @@ mod tests {
             as_value(&res.data)["filePath"],
             plan_path.to_string_lossy().as_ref()
         );
-        assert_eq!(as_value(&res.data)["planWasEdited"], false);
+        assert!(as_value(&res.data).get("planWasEdited").is_none());
         let expected = format!(
             "User has approved your plan. You can now start coding. Start with updating your todo list if applicable\n\nYour plan has been saved to: {}\nYou can refer back to it if needed during implementation.\n\nIf this plan can be broken down into multiple independent tasks, consider spawning named teammates with the Agent tool (pass a `name`) to parallelize the work.\n\n## Approved Plan:\n## Context\nShip the port.",
             plan_path.to_string_lossy()
@@ -1209,6 +1944,67 @@ mod tests {
             .expect("model content")
             .ends_with("## Approved Plan (edited by user):\nfresh plan"));
         std::fs::remove_dir_all(&plans_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn exit_ignores_non_string_inline_plans_and_preserves_the_disk_plan() {
+        let plans_dir = std::env::temp_dir().join(format!(
+            "lingxi-plan-type-{}",
+            tool_api::util::ids::ulid_or_uuid()
+        ));
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let slug = "typed-inline-plan";
+        let plan_path = plans_dir.join(format!("{slug}.md"));
+        let disk_plan = "The existing disk plan survives unchanged";
+        std::fs::write(&plan_path, disk_plan).unwrap();
+        let (mut bctx, _, session, use_ctx) = make_ctx();
+        bctx.permission_policy = Arc::new(
+            permission::PermissionPolicy::new(permission::PermissionMode::Plan).with_plan_files(
+                Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
+                    permission::plan_files::PlanFileIdentity {
+                        plans_dir: plans_dir.clone(),
+                        slug: slug.to_owned(),
+                        workshop_enabled: false,
+                    },
+                )),
+            ),
+        );
+        let exit = ExitPlanModeTool::new(bctx);
+        for extra_plan in [
+            json!(null),
+            json!(false),
+            json!(17),
+            json!({"content":"ignored"}),
+        ] {
+            session.lock().await.plan_mode = true;
+            let result = exit
+                .call(
+                    source(json!({"plan":extra_plan})),
+                    use_ctx.clone(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(as_value(&result.data)["plan"], disk_plan);
+            assert!(as_value(&result.data).get("planWasEdited").is_none());
+            assert!(result
+                .data
+                .string_at("/model_content")
+                .unwrap()
+                .ends_with(&format!("## Approved Plan:\n{disk_plan}")));
+            assert_eq!(std::fs::read_to_string(&plan_path).unwrap(), disk_plan);
+        }
+
+        // Empty text is still a real inline edit, unlike a null or non-string.
+        session.lock().await.plan_mode = true;
+        let result = exit
+            .call(source(json!({"plan":""})), use_ctx, fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(as_value(&result.data)["plan"], "");
+        assert_eq!(as_value(&result.data)["planWasEdited"], true);
+        assert_eq!(std::fs::read_to_string(&plan_path).unwrap(), "");
+        std::fs::remove_dir_all(plans_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1271,7 +2067,7 @@ mod tests {
         assert_eq!(item["properties"]["prompt"]["type"], "string");
         assert_eq!(item["required"], json!(["tool", "prompt"]));
         // passthrough() in TS → extra keys (plan/planFilePath) allowed.
-        assert_eq!(schema["additionalProperties"], true);
+        assert_eq!(schema["additionalProperties"], json!({}));
     }
 
     #[tokio::test]

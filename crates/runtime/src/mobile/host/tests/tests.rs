@@ -12782,6 +12782,101 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
     assert_eq!(after.project_root, after.cwd);
 }
 
+#[test]
+fn mobile_cross_project_resume_keeps_each_plan_and_shell_cd_does_not_rebase_it() {
+    fn seed_plan_session(
+        home: &Path,
+        project: &Path,
+        slug: &str,
+    ) -> (String, std::path::PathBuf, std::path::PathBuf) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let user = uuid::Uuid::new_v4().to_string();
+        let assistant = uuid::Uuid::new_v4().to_string();
+        let path = session::jsonl::session_path(home, &project.to_string_lossy(), &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows = [
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0}),
+            serde_json::json!({
+                "type":"user", "uuid":user, "parentUuid":null,
+                "sessionId":id, "cwd":project, "isSidechain":false, "slug":slug,
+                "timestamp":"2026-11-09T00:00:00.000Z",
+                "message":{"role":"user", "content":"continue this plan"}
+            }),
+            serde_json::json!({
+                "type":"assistant", "uuid":assistant, "parentUuid":user,
+                "sessionId":id, "cwd":project, "isSidechain":false, "slug":slug,
+                "timestamp":"2026-11-09T00:00:01.000Z",
+                "message":{"role":"assistant", "content":[{"type":"text", "text":"ready"}]}
+            }),
+        ];
+        let source = rows
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, source).unwrap();
+        let plan = orchestrator::ConversationOrchestrator::plans_dir(project, None)
+            .join(format!("{slug}.md"));
+        std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+        std::fs::write(&plan, slug).unwrap();
+        (id, path, plan)
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().canonicalize().unwrap();
+    let second = first.join("another-worktree");
+    std::fs::create_dir_all(&second).unwrap();
+    let home = test_config(&first).lingxi_home;
+    let (first_id, first_source, first_plan) = seed_plan_session(&home, &first, "first-plan");
+    let (second_id, second_source, second_plan) = seed_plan_session(&home, &second, "second-plan");
+    let (handle, _) = build_submit_handle(&first);
+    handle.runtime().block_on(async {
+        handle
+            .resume_workspace_session(second_id, second_source.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        let snapshot = handle
+            .inner
+            .orchestrator
+            .current_plan()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.path, second_plan);
+        assert_eq!(snapshot.content, "second-plan");
+        let nested = second.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        // Bash updates this shared cwd cell, leaving project_root unchanged.
+        handle.inner.session_cwd.change_cwd(nested);
+        assert_eq!(
+            handle
+                .inner
+                .orchestrator
+                .current_plan()
+                .await
+                .unwrap()
+                .unwrap()
+                .path,
+            second_plan
+        );
+        handle
+            .resume_workspace_session(first_id, first_source.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        let snapshot = handle
+            .inner
+            .orchestrator
+            .current_plan()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.path, first_plan);
+        assert_eq!(snapshot.content, "first-plan");
+        assert_eq!(handle.inner.session_cwd.project_root(), first);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn mobile_prompt_rejects_foreign_transcript_symlink_without_mutation() {

@@ -1,4 +1,5 @@
 //! Byte-locked "plan-mode reminder" assembler — the BODY only.
+//! Revalidated against the Claude Code 2.1.319 artifact-derived reminder matrix.
 //!
 //! Port of the Claude Code 2.1.206 per-turn plan-mode system-reminder text.
 //! The 206 dispatch is:
@@ -155,7 +156,10 @@ pub fn render_subagent(p: &PlanReminderParams<'_>) -> String {
 /// 206 `MU_(e)` — sparse per-turn plan-mode reminder.
 #[must_use]
 pub fn render_sparse(p: &PlanReminderParams<'_>) -> String {
-    let t = if p.custom_instructions.is_some() {
+    let t = if p
+        .custom_instructions
+        .is_some_and(|custom| !custom.is_empty())
+    {
         "Follow the plan workflow described earlier."
     } else {
         "Follow 5-phase workflow."
@@ -184,7 +188,7 @@ pub fn render_full(p: &PlanReminderParams<'_>) -> String {
     };
 
     // Custom-instructions branch (`e.customInstructions`).
-    if let Some(custom) = p.custom_instructions {
+    if let Some(custom) = p.custom_instructions.filter(|custom| !custom.is_empty()) {
         return format!(
             "{AIP_BANNER}\n\n## Plan File Info:\n{t}\n{INCREMENTAL_LINE}\n\n## Plan Workflow\n\n{custom}\n\n### Call ExitPlanMode\n{LIP_EXIT_TAIL}"
         );
@@ -293,6 +297,60 @@ mod tests {
             is_subagent: false,
             reminder_type_sparse: false,
             output_style_is_default: true,
+        }
+    }
+
+    #[test]
+    fn native_319_reminder_byte_matrix() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/claude_2_1_319_plan.json"
+        ))
+        .expect("hash-pinned native reminder fixture");
+        let keys = [
+            branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV,
+            branding::PLAN_AGENT_COUNT_ENV,
+            branding::PLAN_EXPLORE_AGENT_COUNT_ENV,
+        ];
+        let previous: Vec<_> = keys.iter().map(std::env::var_os).collect();
+        for case in fixture["reminders"].as_array().unwrap() {
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            let input = &case["input"];
+            if input["agents"].as_bool() == Some(false) {
+                std::env::set_var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV, "1");
+            }
+            for (key, field) in [
+                (branding::PLAN_AGENT_COUNT_ENV, "planCount"),
+                (branding::PLAN_EXPLORE_AGENT_COUNT_ENV, "exploreCount"),
+            ] {
+                if let Some(count) = input[field].as_u64() {
+                    std::env::set_var(key, count.to_string());
+                }
+            }
+            let params = PlanReminderParams {
+                plan_file_path: input["planFilePath"].as_str().unwrap(),
+                plan_exists: input["planExists"].as_bool().unwrap_or(false),
+                custom_instructions: input["customInstructions"].as_str(),
+                is_subagent: input["isSubAgent"].as_bool().unwrap_or(false),
+                reminder_type_sparse: input["reminderType"].as_str() == Some("sparse"),
+                output_style_is_default: input["outputStyle"]
+                    .as_str()
+                    .is_none_or(|style| style == "default"),
+            };
+            assert_eq!(
+                render_plan_mode_reminder(&params),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+        for (key, value) in keys.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 

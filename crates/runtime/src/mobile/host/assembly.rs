@@ -724,8 +724,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // so the directory is the project-local default (`<cwd>/.lingxi/plans/`).
     // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
     // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
-    // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
-    // seed source, so it takes the unseeded form.
+    // A new session takes the unseeded form. Captured-session restore replaces
+    // this shared identity with the persisted slug before startup hooks run.
     let plans_dir = orchestrator::ConversationOrchestrator::plans_dir(&cwd, None);
     let plan_files = Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
         permission::plan_files::PlanFileIdentity {
@@ -1144,6 +1144,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             &cfg.lingxi_home.join("settings.json"),
         );
     let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.plan_files = Some(plan_files.clone());
     orch_cfg.model_catalog_restriction =
         llm_runtime::model::allowlist::catalog_restriction_from_settings(
             true,
@@ -3775,7 +3776,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         workflow_status_sink: local_workflow_status_sink,
         workflow_launcher,
         active_session_uuid,
-        plan_files,
         parked_agent_restore_inheritance,
         agent_resume_gate,
         main_report_waker,

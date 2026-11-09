@@ -331,6 +331,7 @@ impl ToolUseContext {
     pub fn model_seed(main_loop_model: String) -> Self {
         Self {
             options: ToolUseOptions {
+                output_style_is_default: None,
                 debug: false,
                 verbose: false,
                 main_loop_model,
@@ -404,6 +405,9 @@ pub struct ToolUseOptions {
     /// (e.g. `github-copilot`). Tools that need provider-aware behavior should
     /// use this instead of unrelated host-specific request builders.
     pub model_profile: Option<String>,
+    /// Owning request's live output style. `None` preserves the default style
+    /// for hosts that do not provide a style selection.
+    pub output_style_is_default: Option<bool>,
     /// Optional cost budget for this call, in nano-USD.
     pub max_budget_nano_usd: Option<u64>,
     /// MCP server connections available for this call.

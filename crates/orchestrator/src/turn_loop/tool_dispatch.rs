@@ -2324,6 +2324,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             available_tool_names: None,
             options: ToolUseOptions {
+                output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
                 main_loop_model: model,
@@ -3880,6 +3881,7 @@ pub(crate) async fn streaming_tool_context_base(
         is_scheduled_turn: crate::scheduled_turn::current().is_some(),
         available_tool_names: None,
         options: ToolUseOptions {
+            output_style_is_default: Some(orch.active_output_style_is_default().await),
             debug: false,
             verbose: false,
             main_loop_model,

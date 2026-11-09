@@ -1,0 +1,103 @@
+{
+  "version": "2.1.319",
+  "binarySha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "ranges": [
+    {
+      "name": "Pe",
+      "start": 259274651,
+      "end": 259274793,
+      "sha256": "1b7e9726f9e78f09082ab6b72c8d72aeb63a5b45b3253676232f160babf21f27"
+    },
+    {
+      "name": "wx",
+      "start": 269545746,
+      "end": 269545850,
+      "sha256": "90d8f7661ac352e627b16a8d354fb90014b83fd7d6e5e5674fbb12cd809c12e4"
+    },
+    {
+      "name": "Ll",
+      "start": 267179950,
+      "end": 267180012,
+      "sha256": "01669695c43b3a9685a3f3e7e486c89ee45032151eebdfa19f32178d37c04c70"
+    },
+    {
+      "name": "gzs",
+      "start": 259432706,
+      "end": 259432770,
+      "sha256": "82cf70a8a3b1e59fcb76905e4a73cf93d94f84a21dfd8caaecb9b37bee5e2eed"
+    }
+  ],
+  "hostDependencies": "Pe and wx execute the artifact's enabled build constant; searchToolsOptIn, entrypoint, OS, and Git Bash availability are isolated imported host facts. No Auto Mode/model predicate or advertised tool-pool predicate is involved.",
+  "cases": [
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": null,
+      "platform": "darwin",
+      "gitBashAvailable": false,
+      "expected": true
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": null,
+      "platform": "linux",
+      "gitBashAvailable": false,
+      "expected": true
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": null,
+      "platform": "windows",
+      "gitBashAvailable": false,
+      "expected": false
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": null,
+      "platform": "windows",
+      "gitBashAvailable": true,
+      "expected": true
+    },
+    {
+      "searchToolsOptIn": true,
+      "entrypoint": null,
+      "platform": "darwin",
+      "gitBashAvailable": true,
+      "expected": false
+    },
+    {
+      "searchToolsOptIn": true,
+      "entrypoint": null,
+      "platform": "windows",
+      "gitBashAvailable": true,
+      "expected": false
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": "local-agent",
+      "platform": "darwin",
+      "gitBashAvailable": true,
+      "expected": false
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": "local-agent",
+      "platform": "windows",
+      "gitBashAvailable": true,
+      "expected": false
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": "local_agent",
+      "platform": "darwin",
+      "gitBashAvailable": true,
+      "expected": true
+    },
+    {
+      "searchToolsOptIn": false,
+      "entrypoint": "sdk-py",
+      "platform": "darwin",
+      "gitBashAvailable": true,
+      "expected": true
+    }
+  ]
+}

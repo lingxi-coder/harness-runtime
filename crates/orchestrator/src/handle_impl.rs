@@ -1421,6 +1421,7 @@ impl ConversationOrchestrator {
             None,
         )?;
         prepared_transcript.prepare_legacy().await;
+        let prepared_plan_files = self.prepare_plan_file_identity(None);
         self.compaction_runtime.roll_over_total_tokens_context();
         self.reset_session_scoped_runtime().await;
         let mut reports = self.main_reports.state.lock().await;
@@ -1435,6 +1436,7 @@ impl ConversationOrchestrator {
         // transcript authority, cost scope, and conversation state in one
         // synchronous critical section so caller cancellation cannot split it.
         prepared_transcript.activate()?;
+        self.install_plan_file_identity(prepared_plan_files);
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history.clear();
@@ -1658,6 +1660,7 @@ impl ConversationOrchestrator {
             .import_resume_identity(runtime.transcript_path.is_some())
             .await?;
         prepared_transcript.prepare_legacy().await;
+        let prepared_plan_files = self.prepare_plan_file_identity(runtime.plan_slug.as_deref());
         self.reset_session_scoped_runtime().await;
         self.restore_prompt_suggestion_api_errors(runtime.api_error_message_ids.iter().copied());
         self.restore_response_usage(runtime.current_usage);
@@ -1675,6 +1678,7 @@ impl ConversationOrchestrator {
             registry.reset_agent_session_statistics(session_id, None);
         }
         prepared_transcript.activate()?;
+        self.install_plan_file_identity(prepared_plan_files);
         if let Some(cwd) = resumed_cwd {
             self.session_cwd.change_cwd(cwd.clone());
             *self
@@ -3016,25 +3020,31 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn set_plan_mode(&self, on: bool) -> Result<(), HandleError> {
-        let mut s = self.session.lock().await;
-        s.plan_mode = on;
-        // Entering plan mode replays the FULL (206 `LU_`) reminder: reset the
-        // full-vs-sparse tracker so the next turn injects `full` before
-        // switching to `sparse` (206 `reminderType`). Leaving plan mode need not
-        // touch it (it's re-armed on the next entry).
+        let transition = self.session.lock().await.plan_mode_transition.clone();
+        let _transition_guard = transition.lock().await;
         if on {
+            self.perms.set_permission_mode("plan").await
+        } else {
+            self.perms.exit_plan_mode().await
+        }
+        .map_err(HandleError::ActionFailed)?;
+        let mut s = self.session.lock().await;
+        let changed = s.plan_mode != on;
+        s.plan_mode = on;
+        if changed && on {
+            s.plan_mode_generation = s.plan_mode_generation.wrapping_add(1);
             s.plan_reminder_shown = false;
+            s.plan_mode_exit_pending = false;
+        } else if changed {
+            s.plan_mode_exited = true;
+            s.plan_mode_exit_pending = true;
         }
         Ok(())
     }
 
     async fn current_plan(&self) -> Result<Option<lingxi_core::host::PlanSnapshot>, HandleError> {
         let session_id = self.session.lock().await.session_id;
-        let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
-            &session_id,
-            &self.cwd,
-            self.config.plans_directory.as_deref(),
-        ));
+        let path = std::path::PathBuf::from(self.session_plan_file_path(&session_id));
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => Ok(Some(lingxi_core::host::PlanSnapshot { path, content })),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -3047,11 +3057,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn open_plan_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
         let session_id = self.session.lock().await.session_id;
-        let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
-            &session_id,
-            &self.cwd,
-            self.config.plans_directory.as_deref(),
-        ));
+        let path = std::path::PathBuf::from(self.session_plan_file_path(&session_id));
         spawn_editor_on(path, "").await
     }
 
@@ -6462,6 +6468,7 @@ mod tests {
                     cache_creation_input_tokens: 300,
                 }),
                 main_loop_latest_assistant_usage: None,
+                plan_slug: None,
                 model: "claude-opus-4-8".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 user_model_setting: None,
@@ -7687,6 +7694,141 @@ mod tests {
             Some("xhigh")
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn shared_plan_file_survives_persistence_cold_and_hot_resume() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_core::host::OrchestratorHandle;
+        use permission::plan_files::{PlanFileIdentity, PlanFileMatcher};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().expect("plan root");
+        let files = |slug: &str| {
+            Arc::new(PlanFileMatcher::with_identity(PlanFileIdentity {
+                plans_dir: root.path().to_owned(),
+                slug: slug.into(),
+                workshop_enabled: false,
+            }))
+        };
+        let make_orchestrator = |plan_files: Arc<PlanFileMatcher>| {
+            ConversationOrchestrator::new(
+                crate::OrchestratorConfig {
+                    plans_directory: Some(root.path().to_string_lossy().into_owned()),
+                    plan_files: Some(plan_files),
+                    ..Default::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_owned(),
+            )
+        };
+        let live_files = files("live-session-plan");
+        let live = make_orchestrator(live_files.clone());
+        let session_id = live.current_session_id().await;
+        let shared_path = live_files.plan_file(None).unwrap();
+        let fallback = ConversationOrchestrator::plan_file_path(
+            &session_id,
+            &live.cwd,
+            live.config.plans_directory.as_deref(),
+        );
+        std::fs::write(&fallback, "wrong UUID plan").unwrap();
+        std::fs::write(&shared_path, "# Shared plan").unwrap();
+        let snapshot = live.current_plan().await.unwrap().unwrap();
+        assert_eq!(snapshot.path, shared_path);
+        assert_eq!(snapshot.content, "# Shared plan");
+        // Both the query and editor resolve this one session path.
+        assert_eq!(
+            live.session_plan_file_path(&session_id),
+            snapshot.path.to_string_lossy().into_owned()
+        );
+
+        let row = live.to_jsonl_message(
+            &lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "continue the plan".into(),
+            ),
+            &session_id.as_uuid().to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(row.slug.as_deref(), Some("live-session-plan"));
+        let row_source = serde_json::to_string(&row).unwrap();
+        let reloaded: session::JsonlMessage = serde_json::from_str(&row_source).unwrap();
+        let source = format!(
+            "{}\n{row_source}\n",
+            serde_json::json!({
+                "type": "fixed-session-mode",
+                "sessionId": session_id.as_uuid().to_string(),
+                "sessionMode": "code",
+                "instructionEpoch": 0,
+            })
+        );
+        let cold_files = files("fresh-boot-plan");
+        let cold = make_orchestrator(cold_files.clone());
+        cold.restore_captured_session_history(
+            session_id.as_uuid(),
+            std::slice::from_ref(&reloaded),
+            std::slice::from_ref(&reloaded),
+            true,
+            permission::PermissionMode::Default,
+            lingxi_core::host::session_context::ConversationMode::Code,
+            &source,
+        )
+        .await
+        .expect("cold resume");
+        assert_eq!(cold_files.plan_file(None), Some(shared_path.clone()));
+        assert_eq!(
+            cold.current_plan().await.unwrap().unwrap().content,
+            "# Shared plan"
+        );
+
+        let resumed_id = lingxi_core::types::SessionId::new();
+        let mut resumed_row = reloaded;
+        resumed_row.session_id = resumed_id.as_uuid().to_string();
+        resumed_row.slug = Some("resumed-session-plan".into());
+        let metadata = crate::resume::runtime_metadata_from_messages(&[resumed_row]);
+        let resumed_path = root.path().join("resumed-session-plan.md");
+        std::fs::write(&resumed_path, "# Resumed plan").unwrap();
+        cold.resume_session(
+            resumed_id,
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                plan_slug: metadata.plan_slug,
+                transcript_metadata: Some(vec![
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({
+                            "type": "fixed-session-mode",
+                            "sessionId": resumed_id.as_uuid().to_string(),
+                            "sessionMode": "code",
+                            "instructionEpoch": 0,
+                        }),
+                    )
+                    .unwrap(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hot resume");
+        assert_eq!(cold_files.plan_file(None), Some(resumed_path.clone()));
+        let snapshot = cold.current_plan().await.unwrap().unwrap();
+        assert_eq!(snapshot.path, resumed_path);
+        assert_eq!(snapshot.content, "# Resumed plan");
+        cold.clear_session().await.expect("clear session");
+        assert_ne!(cold_files.plan_file(None), Some(resumed_path));
+        assert!(cold.current_plan().await.unwrap().is_none());
     }
 
     struct BlockingSessionPreparer {

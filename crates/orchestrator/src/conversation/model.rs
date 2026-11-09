@@ -1786,6 +1786,7 @@ impl ConversationOrchestrator {
             system_context: Default::default(),
             user_context_message: None,
             tool_use_options: tool_api::ToolUseOptions {
+                output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
                 main_loop_model: model,
@@ -2255,6 +2256,7 @@ impl ConversationOrchestrator {
             system_context: std::collections::HashMap::new(),
             user_context_message,
             tool_use_options: tool_api::ToolUseOptions {
+                output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
                 main_loop_model: model.to_string(),
@@ -4376,6 +4378,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `PolicyPermissionGate` actually mutates (other gates no-op). Returns the
     /// gate's validation error string on an invalid / disallowed mode.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+        let transition = self.session.lock().await.plan_mode_transition.clone();
+        let _transition_guard = transition.lock().await;
         self.perms.set_permission_mode(mode).await?;
         // Tool dispatch and plan reminders also consult session.plan_mode.
         // Synchronize it with the accepted live gate mode so a user can leave
@@ -4386,6 +4390,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if session.plan_mode != plan_mode {
                 session.plan_mode = plan_mode;
                 if plan_mode {
+                    session.plan_mode_generation = session.plan_mode_generation.wrapping_add(1);
                     session.plan_reminder_shown = false;
                     session.plan_mode_exit_pending = false;
                 } else {

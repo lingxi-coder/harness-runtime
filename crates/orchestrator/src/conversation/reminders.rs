@@ -1145,11 +1145,7 @@ impl ConversationOrchestrator {
             is_subagent: false,
             reminder_type_sparse: sparse,
             // `zx()==="default"` — an unset `output_style` IS the default style.
-            output_style_is_default: self.config.output_style.as_ref().is_none_or(|style| {
-                style
-                    .string_units("")
-                    .is_some_and(|units| units == "default".encode_utf16().collect::<Vec<_>>())
-            }),
+            output_style_is_default: self.active_output_style_is_default().await,
         };
         // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
         // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),

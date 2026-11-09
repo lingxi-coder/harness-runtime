@@ -360,6 +360,7 @@ mod tests {
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
+                output_style_is_default: None,
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
@@ -7638,6 +7639,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 workflow_authoring_available: false,
                 bash_precommit_skills: Default::default(),
                 bash_precommit_session_generation: 0,
+                ..Default::default()
             })
             .await,
         );

@@ -251,6 +251,14 @@ pub struct SessionState {
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Serialize the gate transition with its session flag, without holding the
+    /// session mutex while a live Auto availability check reads the model.
+    /// This is runtime coordination only and is never written to a transcript.
+    #[serde(skip)]
+    pub plan_mode_transition: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// An approval belongs to the Plan entry in which it was requested.
+    #[serde(skip)]
+    pub plan_mode_generation: u64,
     /// Full-vs-sparse plan-mode reminder tracking — the per-turn plan-mode
     /// reminder is `full` (206 `LU_`) on the FIRST plan-mode turn and `sparse`
     /// (206 `MU_`) after (206 `reminderType`). Reset to `false` on plan-mode
@@ -358,6 +366,8 @@ impl SessionState {
             ultracode_active: false,
             ultracode_non_meta_turns_since_reminder: 0,
             plan_mode: false,
+            plan_mode_transition: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            plan_mode_generation: 0,
             plan_reminder_shown: false,
             plan_mode_exited: false,
             plan_mode_exit_pending: false,

@@ -396,8 +396,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    /// Whether the dispatcher should defer this tool until later in the
-    /// schedule (e.g. heavyweight tools queued behind quick ones).
+    /// Invocation-scoped interaction metadata for tools shared with teammates.
+    /// Ordinary tools retain their static contract; a leader-reviewed plan can
+    /// distinguish its teammate requester without replacing the shared tool.
+    fn requires_user_interaction_for_context(&self, _ctx: &ToolUseContext) -> bool {
+        self.requires_user_interaction()
+    }
+
+    /// Whether ToolSearch may defer this tool's schema until it is discovered.
     fn should_defer(&self) -> bool {
         false
     }
@@ -682,6 +688,13 @@ pub struct PromptOptions {
     /// Tool prompts that need provider-specific wording should use this instead
     /// of request-builder internals.
     pub model_profile: Option<String>,
+    /// Whether the owning request uses the default output style. Older hosts
+    /// omit this value; tools retain the Native default in that case.
+    pub output_style_is_default: Option<bool>,
+    /// Native hybrid-search prompt policy for this request, based on explicit
+    /// search-tool opt-in, entrypoint, and host Bash support. It is independent
+    /// of the advertised Bash tool and Auto Mode's model-specific policy.
+    pub plan_mode_hybrid_search: Option<bool>,
     /// Whether this exact request can load the bundled `workflow-authoring` skill.
     /// This is captured per request so concurrent queries cannot observe another
     /// request's Skill-tool availability.

@@ -5162,6 +5162,7 @@ mod larger_compact_model_tests {
             system_context: Default::default(),
             user_context_message: None,
             tool_use_options: tool_api::context::ToolUseOptions {
+                output_style_is_default: None,
                 debug: false,
                 verbose: false,
                 main_loop_model: "small".into(),

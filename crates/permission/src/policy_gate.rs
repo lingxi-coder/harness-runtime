@@ -765,6 +765,9 @@ pub struct PolicyPermissionGate {
     /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
     /// Read briefly per check (the value is `Copy`, never held across an `await`).
     mode_override: std::sync::RwLock<Option<PermissionMode>>,
+    /// Native `prePlanMode`. Access while holding `mode_override`, so repeated
+    /// Plan entry cannot overwrite the return mode or race a live selection.
+    pre_plan_mode: std::sync::Mutex<Option<PermissionMode>>,
     /// Native's session AutoMode latch. Auto sets it, Plan preserves it, and
     /// leaving Auto/Plan clears it. This distinguishes a Plan session entered
     /// directly from a Plan session reached from Auto.
@@ -1013,6 +1016,7 @@ impl PolicyPermissionGate {
             policy,
             inner,
             mode_override: std::sync::RwLock::new(None),
+            pre_plan_mode: std::sync::Mutex::new(None),
             active_auto_mode: std::sync::atomic::AtomicBool::new(active_auto_mode),
             needs_native_auto_mode_exit_attachment: std::sync::atomic::AtomicBool::new(false),
             native_auto_mode_circuit_broken: std::sync::atomic::AtomicBool::new(false),
@@ -1176,19 +1180,28 @@ impl PolicyPermissionGate {
                 // channel on PermissionGate. Keep the oracle's exact reason
                 // in the permission log for hosts to surface.
                 tracing::warn!(target: "permission", "auto mode disabled by settings");
-            } else if active_mode == PermissionMode::Plan
-                && self
+            } else if active_mode == PermissionMode::Plan {
+                let was_active = self
                     .active_auto_mode
-                    .swap(false, std::sync::atomic::Ordering::AcqRel)
-            {
+                    .swap(false, std::sync::atomic::Ordering::AcqRel);
+                let mut pre_plan = self
+                    .pre_plan_mode
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let was_returning_to_auto = *pre_plan == Some(PermissionMode::Auto);
+                if was_returning_to_auto {
+                    *pre_plan = Some(PermissionMode::Default);
+                }
                 // Native `NQn` handles a disabled auto gate while the visible
                 // mode is Plan but its `prePlanMode` is Auto: it keeps Plan,
                 // restores the pre-plan mode to Default, and directly calls
                 // `ED(true)` to queue the same exit attachment. `active_auto_mode`
                 // is this host's source for that hidden pre-plan Auto state.
-                self.needs_native_auto_mode_exit_attachment
-                    .store(true, std::sync::atomic::Ordering::Release);
-                tracing::warn!(target: "permission", "auto mode disabled by settings while session is in plan mode");
+                if was_active || was_returning_to_auto {
+                    self.needs_native_auto_mode_exit_attachment
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    tracing::warn!(target: "permission", "auto mode disabled by settings while session is in plan mode");
+                }
             }
             drop(mode);
 
@@ -1353,12 +1366,69 @@ impl PolicyPermissionGate {
             .unwrap_or(self.policy.mode)
     }
 
+    fn plan_inherits_bypass(&self) -> bool {
+        let mode = self
+            .mode_override
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        mode.unwrap_or(self.policy.mode) == PermissionMode::Plan
+            && *self
+                .pre_plan_mode
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                == Some(PermissionMode::BypassPermissions)
+    }
+
+    fn commit_plan_exit(&self, auto_requested: bool) {
+        let mut mode_override = self
+            .mode_override
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if mode_override.unwrap_or(self.policy.mode) != PermissionMode::Plan {
+            return;
+        }
+        let mut target = if auto_requested {
+            PermissionMode::Auto
+        } else {
+            self.pre_plan_mode
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .unwrap_or(PermissionMode::Default)
+        };
+        if target == PermissionMode::Auto
+            && (self.auto_mode_denial_reason().is_some()
+                || self
+                    .auto_mode_disabled_from_settings
+                    .load(std::sync::atomic::Ordering::Acquire))
+        {
+            tracing::warn!(target: "permission", "auto mode unavailable on plan exit; returning to default");
+            target = PermissionMode::Default;
+        }
+        if target == PermissionMode::BypassPermissions
+            && (self.policy.restricted || self.policy.bypass_killswitch_active)
+        {
+            target = PermissionMode::Default;
+        }
+        self.active_auto_mode_for_transition(target, &mut mode_override);
+    }
+
     fn active_auto_mode_for_transition(
         &self,
         mode: PermissionMode,
         mode_override: &mut Option<PermissionMode>,
     ) {
         let previous_mode = mode_override.unwrap_or(self.policy.mode);
+        if previous_mode != mode {
+            let mut pre_plan = self
+                .pre_plan_mode
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if mode == PermissionMode::Plan {
+                *pre_plan = Some(previous_mode);
+            } else if previous_mode == PermissionMode::Plan {
+                *pre_plan = None;
+            }
+        }
         if !matches!(
             (previous_mode, mode),
             (PermissionMode::Auto, PermissionMode::Plan)
@@ -1377,6 +1447,13 @@ impl PolicyPermissionGate {
         let was_active = self
             .active_auto_mode
             .load(std::sync::atomic::Ordering::Acquire);
+        if previous_mode == PermissionMode::Plan
+            && !matches!(mode, PermissionMode::Plan | PermissionMode::Auto)
+            && was_active
+        {
+            self.needs_native_auto_mode_exit_attachment
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         let native_auto_mode_circuit_broken = self
             .native_auto_mode_circuit_broken
             .load(std::sync::atomic::Ordering::Acquire);
@@ -3441,7 +3518,12 @@ impl PermissionGate for PolicyPermissionGate {
             // Headless has no dialog to show, so the mode still decides:
             // BypassPermissions means "never block me" and keeps its allow;
             // every other mode fails closed exactly as before.
-            if self.effective_mode_for_tool("ExitPlanMode") == PermissionMode::BypassPermissions {
+            if !self.policy.restricted
+                && !self.policy.bypass_killswitch_active
+                && (self.effective_mode_for_tool("ExitPlanMode")
+                    == PermissionMode::BypassPermissions
+                    || self.plan_inherits_bypass())
+            {
                 return PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: Vec::new(),
@@ -3459,13 +3541,35 @@ impl PermissionGate for PolicyPermissionGate {
         .expect("one unique plan field is a valid object");
         let mut ctx2 = ctx.clone();
         ctx2.auto_mode_prompt = self.auto_prompt_for_exit_plan(ctx);
-        self.consume_auto_outcome(
-            self.inner
-                .check_with_context("ExitPlanMode", &input, &ctx2)
-                .await,
-            &ctx2,
-        )
-        .await
+        let outcome = self
+            .inner
+            .check_with_context("ExitPlanMode", &input, &ctx2)
+            .await;
+        let PermissionOutcome::AllowAuto { updated_input } = outcome else {
+            return outcome;
+        };
+        if ctx2.auto_mode_prompt.is_none() || ctx2.suppress_always_allow_rule {
+            return PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: Vec::new(),
+                decision_classification: Some(
+                    core_permission::ToolDecisionClassification::UserTemporary,
+                ),
+            };
+        }
+        // Only validate here. Retain the selection in the returned outcome,
+        // not prePlanMode: an old approval may belong to an earlier Plan entry.
+        // The tool saves and verifies its generation before committing Auto.
+        let _mode = self
+            .mode_override
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = self.auto_mode_denial_reason() {
+            return PermissionOutcome::Deny {
+                reason: crate::auto_gate::cannot_set_auto_message(reason).into(),
+            };
+        }
+        PermissionOutcome::AllowAuto { updated_input }
     }
 
     /// BASH-10 substrate — resolve a TOOL-originated ask straight through the
@@ -4008,6 +4112,16 @@ impl PermissionGate for PolicyPermissionGate {
             ));
         }
         self.active_auto_mode_for_transition(parsed, &mut mode_override);
+        Ok(())
+    }
+
+    async fn exit_plan_mode(&self) -> Result<(), String> {
+        self.commit_plan_exit(false);
+        Ok(())
+    }
+
+    async fn exit_plan_mode_after_approval(&self, auto_requested: bool) -> Result<(), String> {
+        self.commit_plan_exit(auto_requested);
         Ok(())
     }
 

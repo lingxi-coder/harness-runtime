@@ -60,6 +60,22 @@ pub struct PlanFileIdentity {
 }
 
 impl PlanFileIdentity {
+    /// Prepare the identity for another session without publishing it yet.
+    /// A captured slug refers to an existing file and must not be re-rolled
+    /// merely because that file exists. New sessions get collision-checked slugs.
+    #[must_use]
+    pub fn for_session(mut self, slug: Option<&str>) -> Self {
+        self.slug = slug
+            .filter(|slug| is_valid_plan_slug(slug))
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                super::plan_slug::generate_slug(None, &|candidate| {
+                    super::plan_slug::slug_taken_in(&self.plans_dir, candidate)
+                })
+            });
+        self
+    }
+
     /// `ay(void 0)` — `<plansDir>/<slug>.md`, the main session's plan file.
     #[must_use]
     pub fn plan_file(&self) -> PathBuf {
@@ -72,6 +88,17 @@ impl PlanFileIdentity {
         self.plans_dir
             .join(format!("{}-agent-{agent_id}.md", self.slug))
     }
+}
+
+/// A transcript slug is a generated filename stem, never an arbitrary path.
+/// Validate it before using a persisted value in either a file lookup or the
+/// plan-mode write carve-out, including when replaying a foreign transcript.
+#[must_use]
+pub fn is_valid_plan_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// Session-scoped holder for [`PlanFileIdentity`], shared (behind an `Arc`)
@@ -201,6 +228,48 @@ mod tests {
             slug: "abc-123".into(),
             workshop_enabled: false,
         })
+    }
+
+    #[test]
+    fn a_restored_slug_keeps_the_existing_plan_identity() {
+        let identity = matcher().identity().unwrap();
+        let restored = identity.for_session(Some("previous-plan-123"));
+        assert_eq!(restored.slug, "previous-plan-123");
+        assert_eq!(
+            restored.plan_file(),
+            PathBuf::from("/home/u/.claude/plans/previous-plan-123.md")
+        );
+        assert!(!restored.workshop_enabled);
+    }
+
+    #[test]
+    fn a_slug_cannot_change_the_plan_directory() {
+        for slug in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/plan",
+            r"nested\plan",
+            "a:b",
+            "a\0b",
+        ] {
+            assert!(!is_valid_plan_slug(slug), "rejected slug: {slug:?}");
+        }
+        assert!(is_valid_plan_slug("quiet-editing-otter"));
+        assert!(is_valid_plan_slug("plan_123"));
+    }
+
+    #[test]
+    fn a_session_without_a_valid_slug_gets_a_new_identity() {
+        let mut previous = matcher().identity().unwrap();
+        previous.slug = "previous-session-owned-plan".into();
+        for slug in [None, Some("../outside")] {
+            let next = previous.clone().for_session(slug);
+            assert_eq!(next.plans_dir, previous.plans_dir);
+            assert_ne!(next.slug, previous.slug);
+            assert!(is_valid_plan_slug(&next.slug));
+        }
     }
 
     #[test]
