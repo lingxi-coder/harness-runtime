@@ -1,0 +1,3315 @@
+{
+  "version": "2.1.319",
+  "binary_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "source_byte_ranges": [
+    {
+      "label": "media placeholder and unsent prefix",
+      "start": 269653231,
+      "end_exclusive": 269653281,
+      "sha256": "1cd34ba64f57bfb51c3f8d28c26601f240ef48c5f1c69c7d7b0e4a09dea3713b"
+    },
+    {
+      "label": "native media limits",
+      "start": 260615397,
+      "end_exclusive": 260615553,
+      "sha256": "f390dcff0aeadbfbb86fbb42bb3d8c1dcc6261ccdb01de92827c31e9fcc60e4a"
+    },
+    {
+      "label": "project document context prefix",
+      "start": 269307711,
+      "end_exclusive": 269307737,
+      "sha256": "7d17ced03739892631933d17db2e6ec20cdf4b751c294b03cf5b14177d1f55de"
+    },
+    {
+      "label": "fdo",
+      "start": 269307956,
+      "end_exclusive": 269308141,
+      "sha256": "8f121b17e71bedadbf74706231001316de622c6cd1410fdfd411cc6a429041c0"
+    },
+    {
+      "label": "cue",
+      "start": 265110240,
+      "end_exclusive": 265110412,
+      "sha256": "b3fe10885b78a4f1d22d9d045feed679b01bab07671e7198020c6b96ada13e0b"
+    },
+    {
+      "label": "the",
+      "start": 269653282,
+      "end_exclusive": 269653343,
+      "sha256": "1a49713295b331ad0c35ca59a97307f5b2189f8bcc36c930aa28f23800b94db6"
+    },
+    {
+      "label": "v9e",
+      "start": 270947194,
+      "end_exclusive": 270947325,
+      "sha256": "d97e92038993a7ebf5c50809637df0f0d88ac953012aa0aed8f1abdbbc1a1f79"
+    },
+    {
+      "label": "P6",
+      "start": 272172598,
+      "end_exclusive": 272172676,
+      "sha256": "bb073554e82585984c3dc0d76ca60cdb7a6d1ea0edb198c5b9409ccb55445b57"
+    },
+    {
+      "label": "xvn",
+      "start": 272172676,
+      "end_exclusive": 272172729,
+      "sha256": "7d3bc9b9c9b6e8113f959d3fed0ed6496f1b72d48d647307c88d7132239770be"
+    },
+    {
+      "label": "nit",
+      "start": 272172729,
+      "end_exclusive": 272172782,
+      "sha256": "7fddf5e3529180c0171545ebc61cca2111b153f09b8792aee4cd791ef7ffe724"
+    },
+    {
+      "label": "Pvn",
+      "start": 272172782,
+      "end_exclusive": 272172826,
+      "sha256": "aa7016f60037b2bb3fbcca8e194cdc26f203c792557a0d08f59c6d17c868dc44"
+    },
+    {
+      "label": "Kvn",
+      "start": 272173025,
+      "end_exclusive": 272174889,
+      "sha256": "a6d5ad777b5111c1146b7c036e6004fbc17d689acc47749ff0fd441015ce66e2"
+    },
+    {
+      "label": "jLr",
+      "start": 272175011,
+      "end_exclusive": 272175153,
+      "sha256": "1ef8ea12fec9b9e3027ce2e8613e30a6b6393f428730ce7b5fe5161c968d34b0"
+    },
+    {
+      "label": "WLr",
+      "start": 272175153,
+      "end_exclusive": 272175256,
+      "sha256": "93acddae10e9c651bb2afd8b819f217527c14c3823a186530f1c479b99a257b1"
+    },
+    {
+      "label": "native model catalog",
+      "start": 260742015,
+      "end_exclusive": 260762295,
+      "sha256": "01b4e542e4f1fe6628d108757a1e510a89645abd1620c6af888f6c50922cee82"
+    },
+    {
+      "label": "xR",
+      "start": 263095569,
+      "end_exclusive": 263095638,
+      "sha256": "e469f71fd31914fe16c5a5eac9c1e6055543d42440c4a8744549e292808a0b76"
+    },
+    {
+      "label": "Yh",
+      "start": 263095638,
+      "end_exclusive": 263095684,
+      "sha256": "a48802eb75540f1e968b9fb3aad84efff299b2ad70f6af8b7631572580484874"
+    },
+    {
+      "label": "uyt",
+      "start": 263095684,
+      "end_exclusive": 263095724,
+      "sha256": "2ef8479ac253eba2f009a70d0b0c54a29eea02616b5fecb92e0195c18200f559"
+    },
+    {
+      "label": "ZOr",
+      "start": 263095724,
+      "end_exclusive": 263095806,
+      "sha256": "930462f20539cde274d6958945fc04aea8765db1ce7213ca4b6efded30333c64"
+    },
+    {
+      "label": "m$",
+      "start": 263095806,
+      "end_exclusive": 263095982,
+      "sha256": "f58b484faef3a0f5b89587178a1344a665397d007efca40baf44fbe7d3596e72"
+    },
+    {
+      "label": "jr",
+      "start": 263095982,
+      "end_exclusive": 263096042,
+      "sha256": "17e3aadef5c669436b0c658c9461ce82d5d6d8f9a87b915f32c7e8504cb4aa5c"
+    },
+    {
+      "label": "SA",
+      "start": 263096042,
+      "end_exclusive": 263096102,
+      "sha256": "db6b24fe6c5c1fc1b785c2790e059d3b5924deb1e49b4f9f6573de98d54ef705"
+    },
+    {
+      "label": "kA",
+      "start": 263096102,
+      "end_exclusive": 263096181,
+      "sha256": "42b05cb1e0e335c05c346487bc9ffd1516b83c79d27993ecbcf079e387ceecd9"
+    },
+    {
+      "label": "fT",
+      "start": 263096398,
+      "end_exclusive": 263096460,
+      "sha256": "4c137b9105a9d469ac46d342cd5ccb9278395abe3cbf0ca6c3f3e82f1f1bd64a"
+    },
+    {
+      "label": "bm",
+      "start": 263096460,
+      "end_exclusive": 263096558,
+      "sha256": "d8cc2e2564c6e12bc6a61d9a5860abd5112217f41a3b41769044c36436c47f40"
+    },
+    {
+      "label": "b$t",
+      "start": 263098520,
+      "end_exclusive": 263098787,
+      "sha256": "0149b28de30e55975f657db5129f6b4567027793d33dbde20d14f2360984b6ef"
+    },
+    {
+      "label": "jOr",
+      "start": 263060961,
+      "end_exclusive": 263060986,
+      "sha256": "d95201c3f8e56b3194965db77538b754d1a637c234578cab947b620929ae032a"
+    },
+    {
+      "label": "Ovn media-count gate",
+      "start": 272178100,
+      "end_exclusive": 272178165,
+      "sha256": "a1e4a10a554e2db9740aeaeaf34d82cf969ea89374e838c7b923e8ff1a9b1ae7"
+    }
+  ],
+  "host_stubs": [
+    "object predicate",
+    "no live unsent source WeakSet",
+    "telemetry sink",
+    "no served model aliases/catalog experiments/unavailable latches",
+    "canonical model IDs",
+    "default media feature flags"
+  ],
+  "production_scope": "LingXi does not produce Native private rejected/unsent source state. host_rejected_media_indices is explicit TEST-ONLY host-fact input; production always uses an empty set and never infers rejection from source text.",
+  "policies": [
+    {
+      "model": "claude-3-5-haiku",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-0",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-0",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-0",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-0",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-1",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-1",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-1",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-1",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-6",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-6",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-6",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-6",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-7",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-7",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-7",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-7",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-8",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-8",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-4-8",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-4-8",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-opus-5-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-opus-5-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-fable-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5-1",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5-1",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-fable-5-1",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-fable-5-1",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-mythos-5",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-6[1m]",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-6[1m]",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "claude-sonnet-4-6[1m]",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "claude-sonnet-4-6[1m]",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "custom-model[1m]",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 600
+    },
+    {
+      "model": "custom-model[1m]",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "custom-model[1m]",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "custom-model[1m]",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "custom-model",
+      "disabled": false,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "custom-model",
+      "disabled": false,
+      "context_beta": true,
+      "expected_count": 600
+    },
+    {
+      "model": "custom-model",
+      "disabled": true,
+      "context_beta": false,
+      "expected_count": 100
+    },
+    {
+      "model": "custom-model",
+      "disabled": true,
+      "context_beta": true,
+      "expected_count": 600
+    }
+  ],
+  "defaults": [
+    {
+      "constrained_endpoint": false,
+      "bytes": 78643200,
+      "document_bytes": 0,
+      "count_headroom": 20,
+      "byte_headroom": 10485760
+    },
+    {
+      "constrained_endpoint": true,
+      "bytes": 25165824,
+      "document_bytes": 25165824,
+      "count_headroom": 20,
+      "byte_headroom": 10485760
+    }
+  ],
+  "cases": [
+    {
+      "name": "within_limits_is_identity",
+      "args": [
+        2,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "b"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "b"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_level_before_nested_is_removed_first",
+      "args": [
+        1,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "old"
+                }
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "new"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "new"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "nested_before_top_level_gets_placeholder",
+      "args": [
+        1,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "old"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "new"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "[media removed: request limit]"
+                  }
+                ]
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "new"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "nested_count_preserves_placeholder_slots",
+      "args": [
+        1,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "a"
+                    }
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "b"
+                    }
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "c"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "[media removed: request limit]"
+                  },
+                  {
+                    "type": "text",
+                    "text": "[media removed: request limit]"
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "c"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty_top_level_gets_placeholder",
+      "args": [
+        0,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "count_overflow_reserves_headroom",
+      "args": [
+        3,
+        2,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "b"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "c"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "d"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "d"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "count_headroom_larger_than_limit_clears_batch",
+      "args": [
+        1,
+        20,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "b"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "native_default_count_headroom_at_first_overflow",
+      "args": [
+        100,
+        20,
+        25165824,
+        10485760,
+        25165824
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "YQ=="
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "url_images_have_zero_byte_cost",
+      "args": [
+        3,
+        0,
+        5,
+        2,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "123456"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "url": "https://example.test/image"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "url": "https://example.test/image"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "byte_overflow_reserves_headroom",
+      "args": [
+        100,
+        20,
+        10,
+        3,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "11111"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "22222"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "33333"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "33333"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "document_budget_removes_only_documents",
+      "args": [
+        100,
+        20,
+        20,
+        2,
+        6
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": "1111"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "2222"
+                }
+              },
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": "3333"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "2222"
+                }
+              },
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": "3333"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "disabled_byte_budget_does_not_strip",
+      "args": [
+        100,
+        20,
+        0,
+        0,
+        6
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": "123456789"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": "123456789"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "unsent_payload_is_always_replaced",
+      "host_rejected_media_indices": [
+        0
+      ],
+      "args": [
+        100,
+        20,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "unsent:12"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "[media removed: request limit]"
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "unsent_cost_participates_before_removal",
+      "host_rejected_media_indices": [
+        1
+      ],
+      "args": [
+        100,
+        20,
+        5,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "abc"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "unsent:10"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "project_text_document_is_not_media",
+      "args": [
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "text",
+                  "media_type": "text/plain",
+                  "data": "project"
+                },
+                "context": "A doc of this project. version: x"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "text",
+                  "media_type": "text/plain",
+                  "data": "project"
+                },
+                "context": "A doc of this project. version: x"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ordinary_text_document_counts_as_media",
+      "args": [
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "text",
+                  "media_type": "text/plain",
+                  "data": "ordinary"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "unrelated_empty_row_stays_empty",
+      "args": [
+        0,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": []
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "a"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": []
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[media removed: request limit]"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "raw_nested_result_preserves_unknown_fields",
+      "raw_blocks": [
+        [
+          0,
+          0
+        ]
+      ],
+      "args": [
+        0,
+        0,
+        100,
+        0,
+        0
+      ],
+      "input": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "media_type": "image/png",
+                      "data": "a"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ],
+                "vendor_field": "preserved"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "[media removed: request limit]"
+                  },
+                  {
+                    "type": "text",
+                    "text": "keep"
+                  }
+                ],
+                "vendor_field": "preserved"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,9 +1,9 @@
-//! Current Native 2.1.293 tool-result persistence source/file contract.
+//! Current Native 2.1.319 tool-result persistence source/file contract.
 //!
-//! The companion Native fixture returns the same fixed source through a real
-//! registered Mod tool. This test calls the production persistence and wrapper
-//! entry points, keeping source preview units, final file bytes, and the model
-//! envelope as separate assertions.
+//! The historical 2.1.293 live fixtures retain their original unsafe preview
+//! boundary. The current source-locked 2.1.319 oracle establishes the safe
+//! preview used here. This test separately checks production persistence,
+//! wrapper source units, file bytes, and the final SDK request.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_llm_client::protocol::{
@@ -12,7 +12,7 @@ use lingxi_llm_client::protocol::{
 use llm_runtime::model::{thinking::ThinkingConfig, user_agent::UserAgentEnv};
 use llm_runtime::{ApiService, ClientConfig, LlmRequest, ModelRuntime, SubscriberState, Transport};
 use orchestrator::tool_result_persistence::{
-    persist, resolve_threshold, wrap_utf16, MAX_PERSIST_UTF16_UNITS, PREVIEW_CHARS,
+    persist, resolve_threshold, wrap_utf16, MAX_PERSIST_BYTES, PREVIEW_CHARS,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -97,8 +97,8 @@ async fn native_tool_result_lone_preview_and_utf8_file_boundary() {
     // This test enters `persist` directly to isolate its file/preview contract;
     // it does not test threshold dispatch or the separate JSON-string coercion
     // helper in `tool_result_text`.
-    assert_eq!(resolve_threshold(MAX_PERSIST_UTF16_UNITS, None), 50_000);
-    assert!(source_units.len() > resolve_threshold(MAX_PERSIST_UTF16_UNITS, None));
+    assert_eq!(resolve_threshold(MAX_PERSIST_BYTES, None), 50_000);
+    assert!(source_units.len() > resolve_threshold(MAX_PERSIST_BYTES, None));
 
     let config_home = tempfile::tempdir().expect("isolated config home");
     let tool_results_dir = config_home
@@ -113,7 +113,7 @@ async fn native_tool_result_lone_preview_and_utf8_file_boundary() {
         TOOL_USE_ID,
         &source,
         false,
-        MAX_PERSIST_UTF16_UNITS,
+        MAX_PERSIST_BYTES,
     )
     .await
     .expect("persist Native-sized result through production entry point");
@@ -197,19 +197,19 @@ async fn native_tool_result_unicode_preview_boundary_reaches_sdk_request_and_fil
         BOUNDARY_TOOL_USE_ID,
         &source,
         false,
-        MAX_PERSIST_UTF16_UNITS,
+        MAX_PERSIST_BYTES,
     )
     .await
     .expect("persist Native Unicode-boundary result through production entry point");
 
     assert_eq!(persisted.original_size, 50_007);
-    assert_eq!(persisted.preview_utf16.len(), PREVIEW_CHARS);
+    assert_eq!(persisted.preview_utf16.len(), PREVIEW_CHARS - 1);
     assert_eq!(
         persisted.preview_utf16,
-        source_units[..PREVIEW_CHARS],
-        "the 2KB preview is a JavaScript UTF-16 slice and splits the pair"
+        source_units[..PREVIEW_CHARS - 1],
+        "the current native preview drops the high surrogate at the cut edge"
     );
-    assert_eq!(persisted.preview_utf16[PREVIEW_CHARS - 1], 0xd83d);
+    assert_eq!(persisted.preview_utf16.last(), Some(&u16::from(b'a')));
     assert!(persisted.has_more);
     assert_eq!(
         persisted.filepath,
@@ -245,9 +245,9 @@ async fn native_tool_result_unicode_preview_boundary_reaches_sdk_request_and_fil
         .expect("wrapped model content has preview marker")
         + preview_marker.len();
     assert_eq!(
-        &envelope[preview_start..preview_start + PREVIEW_CHARS],
+        &envelope[preview_start..preview_start + persisted.preview_utf16.len()],
         persisted.preview_utf16,
-        "the production wrapper carries the split high surrogate exactly"
+        "the production wrapper carries the current native safe preview exactly"
     );
     let ordinary_ellipsis = "\n...\n</persisted-output>"
         .encode_utf16()
@@ -327,13 +327,14 @@ async fn native_tool_result_unicode_preview_boundary_reaches_sdk_request_and_fil
     let wire_preview_start = utf16_contains(&model_text, &preview_marker)
         .expect("SDK request retained the preview marker")
         + preview_marker.len();
-    let mut expected_wire_preview = source_units[..PREVIEW_CHARS].to_vec();
-    expected_wire_preview[PREVIEW_CHARS - 1] = 0xfffd;
+    let expected_wire_preview = &source_units[..PREVIEW_CHARS - 1];
     assert_eq!(
-        &model_text[wire_preview_start..wire_preview_start + PREVIEW_CHARS],
+        &model_text[wire_preview_start..wire_preview_start + persisted.preview_utf16.len()],
         expected_wire_preview,
-        "SDK's final Claude request projection replaces the split high surrogate"
+        "SDK's final Claude request projection retains the safe native preview"
     );
+    assert!(!model_text.contains(&0xfffd));
+    assert!(model_text.ends_with(&ordinary_ellipsis));
 
     println!(
         "CURRENT_ALIGNMENT_TOOL_RESULT_PERSIST_BOUNDARY={}",
@@ -342,8 +343,8 @@ async fn native_tool_result_unicode_preview_boundary_reaches_sdk_request_and_fil
             "source_pair_at_1999": [format!("U+{:04X}", source_units[1999]), format!("U+{:04X}", source_units[2000])],
             "tail_pair_at_2005": [format!("U+{:04X}", source_units[2005]), format!("U+{:04X}", source_units[2006])],
             "source_preview_units": persisted.preview_utf16.len(),
-            "source_preview_last_unit": format!("U+{:04X}", persisted.preview_utf16[PREVIEW_CHARS - 1]),
-            "sdk_request_preview_last_unit": format!("U+{:04X}", model_text[wire_preview_start + PREVIEW_CHARS - 1]),
+            "source_preview_last_unit": format!("U+{:04X}", persisted.preview_utf16.last().unwrap()),
+            "sdk_request_preview_last_unit": format!("U+{:04X}", model_text[wire_preview_start + persisted.preview_utf16.len() - 1]),
             "persisted_file_bytes": file_bytes.len(),
             "persisted_file_replacement_count": 0,
             "request_status_after_capture": error.http_status(),

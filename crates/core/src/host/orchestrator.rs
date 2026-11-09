@@ -4276,6 +4276,43 @@ pub enum ResponseTimingEvent {
     AssistantMessage,
 }
 
+/// Source-backed identity and optional presentation facts for one partial frame.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartialStreamEventMetadata {
+    /// Exact provider string identity, including unpaired UTF-16 units.
+    pub api_message_id: Option<Utf16JsonProjection>,
+    pub abandoned_blocks: Option<AbandonedStreamBlocks>,
+    pub ttft_ms: Option<u64>,
+    pub thinking_display: Option<String>,
+    pub text_runs_joined: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbandonedStreamBlocks {
+    pub api_message_id: Utf16JsonProjection,
+    pub from_block_index: u64,
+}
+
+/// A complete synthetic API-error row, independent of rendered error wording.
+#[derive(Debug, Clone)]
+pub struct TerminalApiErrorMessage {
+    pub uuid: crate::types::MessageId,
+    pub timestamp: String,
+    pub message: Utf16JsonProjection,
+    pub api_error: Option<String>,
+    pub error: Option<String>,
+    pub api_error_status: Option<u16>,
+    /// Captured provider request identifier, when present.
+    pub request_id: Option<String>,
+    /// Native-validated refused response identifier, when present.
+    pub refused_message_id: Option<String>,
+    pub terminal_reason: String,
+    pub stop_reason: String,
+    /// Host-only compatibility policy. Recoverable notices still publish the
+    /// native assistant row, but must not latch a legacy sink into failure.
+    pub notify_terminal_error: bool,
+}
+
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// Observe selected accounts and sanitized aggregate routing failures.
@@ -4406,6 +4443,23 @@ pub trait OutputStream: Send + Sync {
         _terminal_reason: &str,
         _stop_reason: &str,
     ) {
+    }
+
+    /// Publish a typed synthetic assistant row. Legacy sinks retain their
+    /// existing text callback; terminal errors also invoke the legacy failure
+    /// callback. Native stream-json exports the same full row for notices.
+    async fn emit_terminal_api_error_message(&self, message: &TerminalApiErrorMessage) {
+        if let Ok(text) = message.message.subprojection("/content/0/text") {
+            self.emit_text(&text).await;
+        }
+        if message.notify_terminal_error {
+            self.emit_terminal_api_error(
+                message.api_error_status,
+                &message.terminal_reason,
+                &message.stop_reason,
+            )
+            .await;
+        }
     }
 
     /// Display the model-fallback notice. SDK sinks override this callback and
@@ -4863,15 +4917,25 @@ pub trait OutputStream: Send + Sync {
     /// Emit a raw SSE stream event frame (`stream_event`) for
     /// `--include-partial-messages`.
     ///
-    /// `event_json` is a JSON string reconstructed from the parsed `HistoryEvent`
-    /// (semantically equivalent to the original Anthropic SSE event, but NOT
-    /// byte-for-byte identical since LingXi already parsed the raw bytes).
+    /// Source-backed events retain their exact provider JSON in `event_json`.
+    /// Legacy typed events reconstruct that JSON from `HistoryEvent`; the SSE
+    /// transport framing itself is outside this JSON carrier.
     /// `is_message_start` is `true` only for the `message_start` event, which
     /// is the only event that carries `ttft_ms` in the GROUND-TRUTH output.
     ///
     /// **Default no-op**: every pre-existing `OutputStream` impl keeps
     /// compiling unchanged. Only `StreamJsonStream` overrides this.
     async fn emit_stream_event(&self, _event_json: &str, _is_message_start: bool) {}
+
+    /// Preserve Native partial-event metadata without changing legacy sinks.
+    async fn emit_stream_event_with_metadata(
+        &self,
+        event_json: &str,
+        is_message_start: bool,
+        _metadata: &PartialStreamEventMetadata,
+    ) {
+        self.emit_stream_event(event_json, is_message_start).await;
+    }
 
     /// Whether [`Self::emit_stream_event`] will actually consume reconstructed
     /// SSE JSON. Default `false` so the streaming loop can skip serialize work

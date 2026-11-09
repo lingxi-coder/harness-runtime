@@ -449,170 +449,115 @@ pub(crate) fn terminal_api_error_text(
             Some("API Error: The model has reached its context window limit.".to_string())
         }
         "refusal" => {
-            // Faithful port of the binary's `U2e` (@197278360): the message is
-            // category-aware via `rnt(cat) = cat ∈ {"cyber","bio"}` and
-            // `pd() = firstParty` (always true for LingXi's Anthropic path).
-            let category = stop_details.and_then(llm_runtime::HistoryStopDetails::category);
-            // Public Native 2.1.293 print-mode captures pin these labeled
-            // surfaces. The provider message ID is not the HTTP request ID.
-            if !interactive && (category.is_none() || category.as_deref() == Some("cyber")) {
-                if let Some(label) = crate::prompt::env_meta::marketing_name_for_model(model) {
-                    let mut notice = if category.as_deref() == Some("cyber") {
-                        format!(
-                            "API Error: {label}'s safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`"
-                        )
-                    } else {
-                        format!(
-                            "API Error: {label} can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup"
-                        )
-                    };
-                    if let Some(id) = response_message_id.filter(|id| !id.is_empty()) {
-                        notice.push_str(&format!("\n\nMessage ID: {id}"));
-                    }
-                    return Some(notice.into());
-                }
-            }
-            let cyber_or_bio = matches!(category.as_deref(), Some("cyber" | "bio"));
-            let is_cyber = matches!(category.as_deref(), Some("cyber"));
-            let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
-                Some(label) => {
-                    // LABEL branch. `m`/`f` are the interactive suffixes.
-                    let m = if interactive {
-                        "Double press esc to edit your last message, or try a different model with /model."
-                    } else {
-                        "Try rephrasing the request in a new session or change your model."
-                    };
-                    let f = if interactive {
-                        "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
-                    } else {
-                        "Learn more: https://support.claude.com/en/articles/15363606"
-                    };
-                    // `h` (binary `U2e`): the cyber/bio variant (`Jct(cat)=cat∈
-                    // {cyber,bio}`) appends `Saa`, the generic one a fixed tail.
-                    //   Saa = `They may flag safe, normal content as well. ${elp}`
-                    //   elp = `These measures let us bring you Mythos-level
-                    //          capabilities sooner, and we're working to refine them.`
-                    let a = if cyber_or_bio {
-                        format!(
-                            "{label}'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well. These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them."
-                        )
-                    } else {
-                        format!(
-                            "{label}'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
-                        )
-                    };
-                    // Frame `c = `${bT}: ${h} <brand> can't respond … with ${l}.\n\n${m}\n\n${f}``
-                    // — DOUBLE `\n` separators (od -c verified on 2.1.195 @206804081;
-                    // the `strings` dump misled an earlier pass into single `\n`).
-                    // `<brand>` is the LingXi rebrand.
-                    format!(
-                        "API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}"
-                    )
-                }
-                None => {
-                    // NO-LABEL branch.
-                    let m = if interactive {
-                        "Please double press esc to edit your last message or start a new session for LingXi to assist with a different task."
-                    } else {
-                        "Try rephrasing the request in a new session or change your model."
-                    };
-                    if is_cyber {
-                        // 2.1.206 (JS @217943553) replaced the old "apply for an
-                        // exemption" message with the Cyber Verification Program
-                        // interstitial (`t?.category==="cyber" && Xf()`; Xf() =
-                        // the first-party cyber-safeguards gate, always on for the
-                        // Anthropic path — the 195 code used the analogous
-                        // `pd()`=firstParty). `m2 = n!=null ? Mf(n) : "This model"`
-                        // = "This model" here (this is the no-marketing-name
-                        // branch). The feedback tail is interactive-only (binary
-                        // `g = p ? "" : "\n\nIf you were not…"`); there is NO
-                        // `\n\n{m}\n\n{f}` tail — it was dropped in 206.
-                        // Byte-verified: 'apply for an exemption' = 0 hits in 206;
-                        // help-center URL and interstitial = 2 hits each.
-                        let feedback_tail = if interactive {
-                            "\n\nIf you were not engaging in a cybersecurity topic, please send feedback via /feedback."
-                        } else {
-                            ""
-                        };
-                        format!(
-                            "API Error: This model has safety measures that flagged this message for a cybersecurity topic. To learn about the Cyber Verification Program and apply for access, visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude.{feedback_tail}"
-                        )
-                    } else {
-                        // Binary final `else`: `${bT}: <brand> is unable to respond
-                        // … aup).${a} `+f` — `${a}` is the optional explanation
-                        // clause (`a=i?` ${i}${punct}`:""`). Empty ⇒ `). {m}`;
-                        // present ⇒ `). <explanation>[.] {m}`. (`f` == the port's
-                        // `m` rephrase message.) 2.1.206 REMOVED the
-                        // `military_weapons` arm entirely — 0 hits for
-                        // 'weapons-related content' / 'military_weapons' in 206.
-                        let explanation =
-                            stop_details.and_then(llm_runtime::HistoryStopDetails::explanation);
-                        let clause = refusal_explanation_clause(explanation.as_ref());
-                        let suffix = request_id
-                            .filter(|id| !id.is_empty())
-                            .map_or_else(String::new, |id| format!("\n\nRequest ID: {id}"));
-                        return Some(source_error_affixes(
-                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).",
-                            &clause.string_units("").expect("source explanation clause"),
-                            &format!(" {m}{suffix}"),
-                        ));
-                    }
-                }
-            };
-            // Binary `u = n ? `\n\nRequest ID: ${n}` : ""` — DOUBLE `\n`, appended to
-            // `base` only when a request id is present (REFUSAL-ONLY surface).
-            // (od -c verified on 2.1.195 @206805081; strings dump misled an earlier
-            // pass into single `\n`.)
-            let suffix = match request_id {
-                Some(id) if !id.is_empty() => format!("\n\nRequest ID: {id}"),
-                _ => String::new(),
-            };
-            Some(format!("{base}{suffix}"))
+            let snapshot = crate::server_fallback::refusal_text_snapshot(model);
+            return Some(terminal_refusal_api_error_text(
+                model, interactive, request_id, stop_details, response_message_id,
+                snapshot.as_ref(),
+            ));
         }
         _ => None,
     };
     scalar.map(Into::into)
 }
 
-/// The binary `U2e` explanation clause `${a}`:
-///   `let s=400, i = o && o.length>s ? o.slice(0,s).trimEnd()+"…" : o,
-///    a = i ? ` ${i}${/[.!?…]$/.test(i)?"":"."}` : ""`
-/// where `o` is the refusal explanation. Returns `""` when absent/empty; else a
-/// LEADING-space clause ` <explanation>` plus a terminal `.` when it does not
-/// already end with `.`/`!`/`?`/`…`. The explanation is truncated (+ `…`) past
-/// 400 chars — only then is its tail trimmed (matching `o.length>s` gating the
-/// `trimEnd`). The cap is by `char` count (the port's truncation convention; JS
-/// uses UTF-16 units — identical for the typical ASCII refusal text).
-pub(super) fn refusal_explanation_clause(
-    explanation: Option<&Utf16JsonProjection>,
+/// Native 2.1.319 `e9t`, with route facts captured before the physical request.
+/// A missing host snapshot remains unresolved: a marketing label alone never
+/// establishes Native `fmt`/`Xp` eligibility or first-party provider identity.
+fn terminal_refusal_api_error_text(
+    model: &str,
+    interactive: bool,
+    request_id: Option<&str>,
+    stop_details: Option<&llm_runtime::HistoryStopDetails>,
+    response_message_id: Option<&str>,
+    snapshot: Option<&lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
 ) -> Utf16JsonProjection {
-    let Some(mut units) = explanation.and_then(|text| text.string_units("")) else {
-        return "".into();
+    use lingxi_core::host::refusal_api_text::{
+        CyberVerificationStatus, RefusalApiTextEvent, RefusalApiTextSnapshot,
+        RefusalBrandCopyOwned, RefusalProviderKind,
     };
-    if units.is_empty() {
-        return "".into();
-    }
-    if units.len() > 400 {
-        units.truncate(400);
-        while units.last().is_some_and(|unit| {
-            matches!(unit,
-                0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a |
-                0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
-            )
-        }) {
-            units.pop();
+    let source = stop_details
+        .and_then(|details| Utf16JsonProjection::parse(details.source().as_json_source()).ok());
+    let category_units = source
+        .as_ref()
+        .and_then(|source| source.string_units("/category"));
+    let category = category_units
+        .as_deref()
+        .and_then(|units| String::from_utf16(units).ok());
+    let source_text = |pointer: &str| {
+        source
+            .as_ref()
+            .and_then(|source| source.string_units(pointer))
+            .and_then(|units| String::from_utf16(&units).ok())
+    };
+    let cyber_verification = if category.as_deref() == Some("cyber") {
+        match source_text("/cyber_verification/type").as_deref() {
+            Some("active") => match source_text("/cyber_verification/tier").as_deref() {
+                Some("a") => Some(CyberVerificationStatus::SpecializedAccess),
+                Some("b") => Some(CyberVerificationStatus::RedTeamAccess),
+                Some("c") => Some(CyberVerificationStatus::DefenseAccess),
+                _ => None,
+            },
+            Some("inactive") => match source_text("/cyber_verification/reason").as_deref() {
+                Some("not_assigned_but_organization_approved") => {
+                    Some(CyberVerificationStatus::NotAssignedButOrganizationApproved)
+                }
+                Some("organization_not_approved") => {
+                    Some(CyberVerificationStatus::OrganizationNotApproved)
+                }
+                _ => None,
+            },
+            _ => None,
         }
-        units.push(0x2026);
-    }
-    let suffix = if units
-        .last()
-        .is_some_and(|unit| matches!(*unit, 46 | 33 | 63 | 0x2026))
-    {
-        ""
     } else {
-        "."
+        None
     };
-    source_error_affixes(" ", &units, suffix)
+    let mut facts = snapshot.cloned().unwrap_or_else(|| RefusalApiTextSnapshot {
+        serving_model: Some(model.to_owned()),
+        model_eligible: false,
+        display_label: Some(
+            crate::prompt::env_meta::marketing_name_for_model(model)
+                .unwrap_or(model)
+                .to_owned(),
+        ),
+        model_family: None,
+        fable_copy_suppressed: false,
+        opus_5_5_exception: false,
+        help_url: None,
+        provider: RefusalProviderKind::Other,
+        interactive,
+        feedback_eligible: false,
+        brand: RefusalBrandCopyOwned {
+            api_error_prefix: "API Error".to_owned(),
+            product_name: branding::PRODUCT_NAME.to_owned(),
+            generic_model_label: branding::PRODUCT_NAME.to_owned(),
+        },
+    });
+    // Rebrand product identity only; model labels and provider/legal URLs are
+    // resolved route facts and retain their original identity.
+    facts.brand.product_name = branding::PRODUCT_NAME.to_owned();
+    facts.brand.generic_model_label = branding::PRODUCT_NAME.to_owned();
+    let event = RefusalApiTextEvent {
+        category_utf16: category_units.as_deref(),
+        message_id: response_message_id,
+        cyber_verification,
+        ..RefusalApiTextEvent::default()
+    };
+    match facts.format_with_event(category.as_deref(), request_id, event) {
+        Ok(text) => text.into(),
+        Err(error) => {
+            tracing::warn!(%error, "resolved refusal facts could not render native text");
+            // Missing host help facts must not turn a refusal into a panic or
+            // erase the event's validated identifiers.
+            facts.model_eligible = false;
+            facts
+                .format_with_event(category.as_deref(), request_id, event)
+                .unwrap_or_else(|_| {
+                    "API Error: LingXi can't help with this. Start a new session to continue."
+                        .to_owned()
+                })
+                .into()
+        }
+    }
 }
 
 /// Surface the terminal `API Error: …` assistant message on the BATCHED path
@@ -674,6 +619,8 @@ pub(crate) async fn surface_terminal_api_error(
     //   on-disk refusal line: `stop_reason:"refusal", error:"invalid_request"`).
     let env = match stop_reason {
         "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+            request_id: None,
+            api_error: Some("max_output_tokens"),
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
@@ -683,11 +630,16 @@ pub(crate) async fn surface_terminal_api_error(
             terminal_reason: None,
         },
         "refusal" => ApiErrorEnvelope {
+            request_id,
+            api_error: None,
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
-            inner_stop_details: None,
-            refused_message_id: None,
+            inner_stop_details: stop_details.cloned(),
+            refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
+                response_message_id,
+            )
+            .map(str::to_owned),
             truncated_after_output: false,
             terminal_reason: None,
         },
@@ -695,14 +647,15 @@ pub(crate) async fn surface_terminal_api_error(
         // above; any other value can't reach here.
         _ => ApiErrorEnvelope::default(),
     };
-    orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
+    orch.persist_api_error_message_to_jsonl(&assistant_msg, env.clone())
         .await;
-    if stop_reason == "refusal" {
-        orch.output
-            .emit_terminal_api_error(None, "api_error", "refusal")
-            .await;
-    }
-    orch.output.emit_text(&text).await;
+    let terminal_reason = if stop_reason == "refusal" {
+        "api_error"
+    } else {
+        stop_reason
+    };
+    orch.emit_synthetic_api_error_message(&assistant_msg, &env, terminal_reason, true)
+        .await;
     Some(assistant_id)
 }
 
@@ -817,13 +770,9 @@ pub(crate) async fn surface_model_error(
         metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
         bus.log_event("tengu_query_error", metadata).await;
     }
-    let status = env.api_error_status;
     let reason = env.terminal_reason.unwrap_or("api_error");
-    let id = surface_api_error_notice(orch, error_text, env).await;
+    let id = surface_api_error_notice_with_terminal_notification(orch, error_text, env, true).await;
     orch.note_turn_api_error_terminal_reason(reason);
-    orch.output
-        .emit_terminal_api_error(status, reason, "stop_sequence")
-        .await;
     orch.note_turn_api_error_status(provider_status);
     id
 }
@@ -837,6 +786,15 @@ pub(crate) async fn surface_api_error_notice(
     orch: &ConversationOrchestrator,
     error_text: Utf16JsonProjection,
     env: ApiErrorEnvelope,
+) -> MessageId {
+    surface_api_error_notice_with_terminal_notification(orch, error_text, env, false).await
+}
+
+async fn surface_api_error_notice_with_terminal_notification(
+    orch: &ConversationOrchestrator,
+    error_text: Utf16JsonProjection,
+    env: ApiErrorEnvelope,
+    notify_terminal_error: bool,
 ) -> MessageId {
     orch.note_turn_api_error_status(env.api_error_status);
     // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
@@ -884,9 +842,15 @@ pub(crate) async fn surface_api_error_notice(
     // per-request classifier (`Flp`/`KNn`, ported as
     // [`crate::conversation::classify_api_error`]) at the call site from the
     // TYPED error and passed in here (the classifier deferral is now CLOSED).
-    orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
+    orch.persist_api_error_message_to_jsonl(&assistant_msg, env.clone())
         .await;
-    orch.output.emit_text(&error_text).await;
+    orch.emit_synthetic_api_error_message(
+        &assistant_msg,
+        &env,
+        env.terminal_reason.unwrap_or("api_error"),
+        notify_terminal_error,
+    )
+    .await;
     assistant_id
 }
 
@@ -1028,38 +992,91 @@ mod source_error_tests {
     };
 
     #[test]
-    fn native_293_noninteractive_refusal_matches_captured_result_text() {
-        let captures = [
-            (
-                Some("cyber"),
-                "msg_fixed_stop_details_cyber_293",
-                include_str!(
-                    "../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-cyber/native.stdout.raw"
-                ),
-            ),
-            (
-                None,
-                "msg_fixed_stop_details_generic_293",
-                include_str!(
-                    "../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-generic/native.stdout.raw"
-                ),
-            ),
-        ];
-        for (category, message_id, capture) in captures {
-            let native = Utf16JsonProjection::parse(capture.trim()).unwrap();
-            let explanation = Utf16JsonProjection::parse(r#""source \ud800 explanation""#).unwrap();
-            let details =
-                llm_runtime::HistoryStopDetails::from_parts(category, Some(&explanation)).unwrap();
+    fn native_319_noninteractive_refusal_uses_the_frozen_provider_facts() {
+        use lingxi_core::host::refusal_api_text::{
+            RefusalApiTextSnapshot, RefusalBrandCopyOwned, RefusalProviderKind,
+        };
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../core/tests/fixtures/refusal_api_text_2_1_319.json"
+        ))
+        .unwrap();
+        for row in fixture["cases"].as_array().unwrap().iter().take(2) {
+            let input = &row["input"];
+            let snapshot = RefusalApiTextSnapshot {
+                serving_model: Some("claude-sonnet-4-5".into()),
+                model_eligible: false,
+                display_label: Some("Sonnet 4.5".into()),
+                model_family: Some("sonnet".into()),
+                fable_copy_suppressed: false,
+                opus_5_5_exception: false,
+                help_url: None,
+                provider: RefusalProviderKind::FirstParty,
+                interactive: false,
+                feedback_eligible: true,
+                brand: RefusalBrandCopyOwned {
+                    api_error_prefix: "API Error".into(),
+                    product_name: "LingXi".into(),
+                    generic_model_label: "LingXi".into(),
+                },
+            };
+            let details = input["details"].as_object().map(|_| {
+                llm_runtime::HistoryStopDetails::parse(&input["details"].to_string()).unwrap()
+            });
+            let text = terminal_refusal_api_error_text(
+                "claude-sonnet-4-5",
+                false,
+                input["requestId"].as_str(),
+                details.as_ref(),
+                input["messageId"].as_str(),
+                Some(&snapshot),
+            );
+            assert_eq!(text.string_at(""), row["expected"]["content"].as_str());
+        }
+    }
+
+    #[test]
+    fn native_319_source_category_units_reach_visible_text_and_json_without_a_lossy_view() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../core/tests/fixtures/refusal_api_text_2_1_319.json"
+        ))
+        .unwrap();
+        for row in fixture["cases"].as_array().unwrap() {
+            let input = &row["input"];
+            let Some(raw) = input["sourceStopDetails"].as_str() else {
+                continue;
+            };
+            let details = llm_runtime::HistoryStopDetails::parse(raw).unwrap();
+            let expected_category = input["categoryUtf16"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| unit.as_u64().unwrap() as u16)
+                .collect::<Vec<_>>();
+            let preserved = Utf16JsonProjection::parse(details.source().as_json_source()).unwrap();
+            assert_eq!(preserved.string_units("/category"), Some(expected_category));
             let text = terminal_api_error_text(
                 "claude-sonnet-4-5",
                 false,
                 "refusal",
-                None,
+                input["requestId"].as_str(),
                 Some(&details),
-                Some(message_id),
+                input["messageId"].as_str(),
             )
             .unwrap();
-            assert_eq!(text.string_units(""), native.string_units("/result"));
+            let expected = row["expected"]["contentUtf16"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| unit.as_u64().unwrap() as u16)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                text.string_units(""),
+                Some(expected.clone()),
+                "{}",
+                row["name"]
+            );
+            let encoded = Utf16JsonProjection::parse(&text.to_json_string().unwrap()).unwrap();
+            assert_eq!(encoded.string_units(""), Some(expected), "{}", row["name"]);
         }
     }
 
@@ -1073,14 +1090,6 @@ mod source_error_tests {
             .chain("\". Run /goal again to continue.".encode_utf16())
             .collect::<Vec<_>>();
         assert_eq!(result.string_units(""), Some(expected));
-    }
-
-    #[test]
-    fn explanation_slice_uses_utf16_units_and_preserves_a_split_pair() {
-        let explanation: Utf16JsonProjection = format!("{}😀tail", "a".repeat(399)).into();
-        let clause = refusal_explanation_clause(Some(&explanation));
-        let units = clause.string_units("").unwrap();
-        assert_eq!(&units[400..], &[0xd83d, 0x2026]);
     }
 
     fn error(units: Vec<u16>, native: bool) -> OrchestratorError {
@@ -1193,5 +1202,373 @@ mod model_error_kind_regression {
         assert_eq!(model_error_kind(&error), "invalid_request");
         let error = OrchestratorError::Internal("private path and request".into());
         assert_eq!(model_error_kind(&error), "internal_error");
+    }
+}
+
+#[cfg(test)]
+mod api_error_publication_tests {
+    use super::*;
+    use lingxi_core::host::orchestrator::{CostSnapshot, OutputStream, TerminalApiErrorMessage};
+    use lingxi_core::host::OutputEvent;
+    use lingxi_core::types::ToolUseId;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct RequestApi;
+    #[async_trait::async_trait]
+    impl crate::conversation::OrchestratorApiClient for RequestApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, LlmError> {
+            unreachable!()
+        }
+        fn last_request_id(&self) -> Option<String> {
+            Some("req_publication_319".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct TypedOnlySink {
+        rows: tokio::sync::Mutex<Vec<TerminalApiErrorMessage>>,
+        text_callbacks: AtomicUsize,
+        legacy_callbacks: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl OutputStream for TypedOnlySink {
+        async fn emit_text(&self, _text: &Utf16JsonProjection) {
+            self.text_callbacks.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &Utf16JsonProjection) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _id: &ToolUseId,
+            _tool: &str,
+            _text: &Utf16JsonProjection,
+            _result: &Utf16JsonProjection,
+            _meta: Option<&Utf16JsonProjection>,
+        ) {
+        }
+        async fn emit_end_turn(&self, _reason: &str, _cost: &CostSnapshot) {}
+        async fn emit_terminal_api_error(
+            &self,
+            _status: Option<u16>,
+            _terminal: &str,
+            _stop: &str,
+        ) {
+            self.legacy_callbacks.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn emit_terminal_api_error_message(&self, row: &TerminalApiErrorMessage) {
+            self.rows.lock().await.push(row.clone());
+        }
+    }
+
+    fn orchestrator(output: Arc<dyn OutputStream>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(RequestApi),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            output,
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    async fn publish_cases(orch: &ConversationOrchestrator) {
+        let details = llm_runtime::HistoryStopDetails::parse(
+            r#"{"category":"A\ud800B","explanation":"\udc00"}"#,
+        )
+        .unwrap();
+        surface_terminal_api_error(
+            orch,
+            "claude-sonnet-4-5",
+            "refusal",
+            Some(&details),
+            Some("msg_publication_319"),
+        )
+        .await
+        .unwrap();
+        for stop in ["max_tokens", "model_context_window_exceeded"] {
+            surface_terminal_api_error(orch, "claude-sonnet-4-5", stop, None, None)
+                .await
+                .unwrap();
+        }
+        surface_model_error(
+            orch,
+            Utf16JsonProjection::parse(r#""model \ud800 failure""#).unwrap(),
+            ApiErrorEnvelope {
+                error: Some("server_error"),
+                api_error_status: Some(500),
+                ..Default::default()
+            },
+            Some(500),
+        )
+        .await;
+        surface_api_error_notice(
+            orch,
+            "partial response notice".into(),
+            ApiErrorEnvelope {
+                error: Some("server_error"),
+                truncated_after_output: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        orch.stage_refusal_api_error_row(
+            "claude-sonnet-4-5",
+            Some(&details),
+            Some("msg_staged_319"),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_model_partial_and_staged_errors_publish_one_typed_row_each() {
+        let sink = Arc::new(TypedOnlySink::default());
+        let orch = orchestrator(sink.clone());
+        publish_cases(&orch).await;
+        let rows = sink.rows.lock().await;
+        assert_eq!(rows.len(), 6);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.notify_terminal_error)
+                .collect::<Vec<_>>(),
+            vec![true, true, true, true, false, true]
+        );
+        assert_eq!(sink.text_callbacks.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            sink.legacy_callbacks.load(Ordering::SeqCst),
+            0,
+            "typed consumers must not also receive legacy terminal callbacks"
+        );
+        let refusal = &rows[0];
+        assert_eq!(refusal.request_id.as_deref(), Some("req_publication_319"));
+        assert_eq!(
+            refusal.refused_message_id.as_deref(),
+            Some("msg_publication_319")
+        );
+        assert_eq!(refusal.error.as_deref(), Some("invalid_request"));
+        assert!(refusal.api_error.is_none());
+        assert_eq!(refusal.terminal_reason, "api_error");
+        assert_eq!(refusal.stop_reason, "refusal");
+        assert_eq!(
+            refusal.message.string_units("/stop_details/category"),
+            Some(vec![65, 0xd800, 66])
+        );
+        for row in &rows[1..3] {
+            assert_eq!(row.api_error.as_deref(), Some("max_output_tokens"));
+            assert_eq!(row.error.as_deref(), Some("max_output_tokens"));
+            assert_eq!(row.stop_reason, "stop_sequence");
+            assert!(row.request_id.is_none());
+        }
+        assert_eq!(rows[3].api_error_status, Some(500));
+        assert_eq!(
+            rows[3].message.string_units("/content/0/text"),
+            Some(
+                "model "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" failure".encode_utf16())
+                    .collect()
+            )
+        );
+        assert_eq!(rows[4].error.as_deref(), Some("server_error"));
+        assert_eq!(
+            rows[5].refused_message_id.as_deref(),
+            Some("msg_staged_319")
+        );
+        for row in rows.iter() {
+            assert_ne!(
+                row.message.string_units("/id"),
+                Some(row.uuid.as_uuid().to_string().encode_utf16().collect())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_inner_id_and_creation_time_match_durable_and_public_projections() {
+        let native: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/synthetic_api_error_identity_2_1_319.json"
+        ))
+        .unwrap();
+        for row in native["cases"].as_array().unwrap() {
+            assert_ne!(row["expected"]["outer_uuid"], row["expected"]["inner_id"]);
+            assert_eq!(row["expected"]["allocations"].as_array().unwrap().len(), 2);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let session_id = lingxi_core::types::SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", session_id.as_uuid()));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        ));
+        let sink = Arc::new(TypedOnlySink::default());
+        let orch = orchestrator(sink.clone())
+            .with_session_id(session_id)
+            .with_jsonl_writer(writer);
+        orch.initialize_conversation_mode().await.unwrap();
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            per_turn_effort: None,
+            content: vec![ContentBlock::Text {
+                text: "synthetic".into(),
+                citations: None,
+            }],
+            stop_reason: Some("refusal".into()),
+            resumable: None,
+        };
+        let env = ApiErrorEnvelope {
+            error: Some("invalid_request"),
+            inner_stop_reason: Some("refusal"),
+            inner_stop_details: Some(
+                llm_runtime::HistoryStopDetails::parse(r#"{"category":"A\ud800B"}"#).unwrap(),
+            ),
+            ..Default::default()
+        };
+        orch.persist_api_error_message_to_jsonl(&message, env.clone())
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        orch.emit_synthetic_api_error_message(&message, &env, "api_error", true)
+            .await;
+        let rows = sink.rows.lock().await;
+        let public = &rows[0];
+        let persisted = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+            .find(|row| {
+                row.string_units("/uuid")
+                    == Some(message.id().as_uuid().to_string().encode_utf16().collect())
+            })
+            .unwrap();
+        assert_ne!(
+            public.message.string_units("/id"),
+            Some(public.uuid.as_uuid().to_string().encode_utf16().collect())
+        );
+        assert_eq!(
+            persisted.string_units("/timestamp"),
+            Some(public.timestamp.encode_utf16().collect())
+        );
+        assert_eq!(
+            persisted
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            public.message.to_json_string().unwrap()
+        );
+        let repeated = orch.to_jsonl_message_with_inner_id(
+            &message,
+            &session_id.as_uuid().to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&env),
+        );
+        assert_eq!(
+            repeated.message.string_units("/id"),
+            public.message.string_units("/id")
+        );
+        assert_eq!(repeated.timestamp, public.timestamp);
+        let explicit = orch.to_jsonl_message_with_inner_id(
+            &message,
+            &session_id.as_uuid().to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("explicit-provider-id"),
+            None,
+            None,
+            None,
+            Some(&env),
+        );
+        assert_eq!(
+            explicit.message.string_units("/id"),
+            Some("explicit-provider-id".encode_utf16().collect())
+        );
+        let provider = orch.to_jsonl_message_with_inner_id(
+            &message,
+            &session_id.as_uuid().to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("actual-provider-id"),
+            Some("provider-model"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            provider.message.string_units("/id"),
+            Some("actual-provider-id".encode_utf16().collect())
+        );
+    }
+
+    #[tokio::test]
+    async fn default_tui_keeps_recoverable_partial_notice_text_only() {
+        let sink = Arc::new(crate::test_support::MockOutputStream::new());
+        let orch = orchestrator(sink.clone());
+        publish_cases(&orch).await;
+        let events = sink.snapshot().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, OutputEvent::Text { .. }))
+                .count(),
+            6
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, OutputEvent::TerminalApiError { .. }))
+                .count(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn recoverable_notice_followed_by_success_never_notifies_legacy_terminal_error() {
+        let sink = Arc::new(crate::test_support::MockOutputStream::new());
+        let orch = orchestrator(sink.clone());
+        surface_api_error_notice(
+            &orch,
+            "partial response notice".into(),
+            ApiErrorEnvelope {
+                error: Some("server_error"),
+                truncated_after_output: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        sink.emit_text(&"recovered response".into()).await;
+        sink.emit_end_turn("end_turn", &CostSnapshot::default())
+            .await;
+        let events = sink.snapshot().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, OutputEvent::Text { .. }))
+                .count(),
+            2
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, OutputEvent::TerminalApiError { .. })));
+        assert!(events.iter().any(|event| matches!(event, OutputEvent::EndTurn {stop_reason, ..} if stop_reason == "end_turn")));
     }
 }

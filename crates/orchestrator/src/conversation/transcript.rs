@@ -2395,6 +2395,11 @@ impl ConversationOrchestrator {
         // (every non-api-error line) leaves the shape exactly as before.
         api_error: Option<&ApiErrorEnvelope>,
     ) -> session::JsonlMessage {
+        let synthetic_identity = (matches!(msg, ConversationMessage::Assistant { .. })
+            && assistant_model.is_none()
+            && api_error.is_some()
+            && inner_message_id.is_none())
+        .then(|| self.transcript.synthetic_api_error_identity(msg.id()));
         let (mut kind, mut inner_message) = match msg {
             ConversationMessage::User { .. } => {
                 ("user", serde_json::json!({ "role": "user", "content": [] }))
@@ -2462,7 +2467,15 @@ impl ConversationOrchestrator {
                         "id".to_string(),
                         serde_json::Value::String(
                             inner_message_id
-                                .map_or_else(|| msg.id().as_uuid().to_string(), str::to_string),
+                                .map_or_else(
+                                    || {
+                                        synthetic_identity.as_ref().map_or_else(
+                                            || msg.id().as_uuid().to_string(),
+                                            |(inner_id, _)| inner_id.to_string(),
+                                        )
+                                    },
+                                    str::to_string,
+                                ),
                         ),
                     );
                     m.insert("container".to_string(), serde_json::Value::Null);
@@ -2517,7 +2530,8 @@ impl ConversationOrchestrator {
                             },
                             "inference_geo": serde_json::Value::Null,
                             "iterations": serde_json::Value::Null,
-                            "speed": serde_json::Value::Null
+                            "speed": serde_json::Value::Null,
+                            "fallback_credit": serde_json::Value::Null
                         }),
                     );
                     m.insert("content".to_string(), serde_json::json!([]));
@@ -2694,6 +2708,15 @@ impl ConversationOrchestrator {
         // apiErrorStatus?) — presence + values + ORDER are 1:1. See
         // [`ApiErrorEnvelope`].
         if let Some(ae) = api_error {
+            if let Some(request_id) = &ae.request_id {
+                extra.insert("requestId".to_owned(), serde_json::Value::String(request_id.clone()));
+            }
+            if let Some(kind) = ae.api_error {
+                extra.insert(
+                    "apiError".to_string(),
+                    serde_json::Value::String(kind.to_string()),
+                );
+            }
             if let Some(cat) = ae.error {
                 extra.insert(
                     "error".to_string(),
@@ -2937,6 +2960,11 @@ impl ConversationOrchestrator {
                 } => metadata.notice_timestamp.clone(),
                 _ => None,
             }
+            .or_else(|| {
+                synthetic_identity
+                    .as_ref()
+                    .map(|(_, timestamp)| timestamp.clone())
+            })
             .unwrap_or_else(|| {
                 chrono::Utc::now()
                     .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -3752,6 +3780,40 @@ impl ConversationOrchestrator {
         env: ApiErrorEnvelope,
     ) {
         self.persist_message_to_jsonl_inner(msg, None, Some(env), false)
+            .await;
+    }
+
+    /// Publish the same native synthetic message body used by durable history.
+    pub(crate) async fn emit_synthetic_api_error_message(
+        &self,
+        msg: &ConversationMessage,
+        env: &ApiErrorEnvelope,
+        terminal_reason: &str,
+        notify_terminal_error: bool,
+    ) {
+        let session_id = self.session.lock().await.session_id.to_string();
+        let mut row = self.to_jsonl_message_with_inner_id(
+            msg, &session_id, None, None, None, None, None, None, None, None, Some(env),
+        );
+        if let Some(details) = &env.inner_stop_details {
+            row.message.set_field("stop_details", Source::parse(details.source().as_json_source())
+                .expect("refusal stop details are source JSON"))
+                .expect("synthetic API-error message is an object");
+        }
+        self.output
+            .emit_terminal_api_error_message(&lingxi_core::host::orchestrator::TerminalApiErrorMessage {
+                uuid: msg.id(),
+                timestamp: row.timestamp,
+                message: row.message,
+                api_error: env.api_error.map(str::to_owned),
+                error: env.error.map(str::to_owned),
+                api_error_status: env.api_error_status,
+                request_id: env.request_id.clone(),
+                refused_message_id: env.refused_message_id.clone(),
+                terminal_reason: terminal_reason.to_owned(),
+                stop_reason: env.inner_stop_reason.unwrap_or("stop_sequence").to_owned(),
+                notify_terminal_error,
+            })
             .await;
     }
 
@@ -4777,6 +4839,14 @@ impl ConversationOrchestrator {
                             Source::from_serde_value(&serde_json::Value::from(request_id.clone()))
                                 .expect("generated transcript metadata is valid JSON"),
                         )
+                        .expect("extra metadata is an object");
+                }
+                jmsg.extra
+                    .remove_field("refusedMessageId")
+                    .expect("extra metadata is an object");
+                if let Some(message_id) = &row.refused_message_id {
+                    jmsg.extra
+                        .set_field("refusedMessageId", Source::from(message_id.as_str()))
                         .expect("extra metadata is an object");
                 }
             }

@@ -408,6 +408,7 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "origin",
     "isMeta",
     "requestId",
+    "apiError",
     "error",
     "errorDetails",
     "truncatedAfterOutput",
@@ -647,6 +648,7 @@ impl Serialize for JsonlMessage {
             push_projection(&mut fields, "message", self.message.clone());
             for key in [
                 "requestId",
+                "apiError",
                 "error",
                 "errorDetails",
                 "truncatedAfterOutput",
@@ -1546,6 +1548,29 @@ mod shutdown_interruption_tests {
         let absent =
             serde_json::to_string(&user_row(Utf16JsonProjection::parse("{}").unwrap())).unwrap();
         assert!(!absent.contains("refusedMessageId"));
+    }
+
+    #[test]
+    fn api_error_subtype_uses_native_head_order_and_omits_absence() {
+        let mut row = user_row(
+            Utf16JsonProjection::parse(
+                r#"{"isApiErrorMessage":true,"apiError":"malformed_tool_use_exhausted","error":"unknown"}"#,
+            )
+            .unwrap(),
+        );
+        row.message_type = "assistant".into();
+        row.message = Utf16JsonProjection::parse(r#"{"role":"assistant","content":[]}"#).unwrap();
+        let line = serde_json::to_string(&row).unwrap();
+        let message = line.find("\"message\":").unwrap();
+        let subtype = line.find("\"apiError\":\"malformed_tool_use_exhausted\"").unwrap();
+        let category = line.find("\"error\":\"unknown\"").unwrap();
+        let marker = line.find("\"isApiErrorMessage\":true").unwrap();
+        assert!(message < subtype && subtype < category && category < marker, "{line}");
+        assert_eq!(line.matches("\"apiError\":").count(), 1);
+        let cold: JsonlMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(cold.extra.string_at("/apiError"), Some("malformed_tool_use_exhausted"));
+        row.extra = Utf16JsonProjection::parse(r#"{"isApiErrorMessage":true}"#).unwrap();
+        assert!(!serde_json::to_string(&row).unwrap().contains("\"apiError\":"));
     }
 
     #[test]

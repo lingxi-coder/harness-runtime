@@ -1,0 +1,58 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "sourceByteRanges": [
+    {
+      "name": "Native Lpo/el/Ys assistant factories",
+      "start": 274523190,
+      "endExclusive": 274524732,
+      "sha256": "38166d4038c0101fefd74314e87dc14493718021c00072c41668a41db1604065"
+    }
+  ],
+  "scope": "Verbatim Native Ys/Lpo evaluation with a fresh deterministic UUID for every actual allocator call. Pins two independent allocations in order: outer uuid, then inner message.id. No provider, live CLI, or constant-UUID substitution is asserted.",
+  "cases": [
+    {
+      "name": "generic API error",
+      "fields": {},
+      "expected": {
+        "outer_uuid": "00000000-0000-4000-8000-000000000001",
+        "inner_id": "00000000-0000-4000-8000-000000000002",
+        "allocations": [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002"
+        ],
+        "isApiErrorMessage": true
+      }
+    },
+    {
+      "name": "refusal error category",
+      "fields": {
+        "error": "invalid_request"
+      },
+      "expected": {
+        "outer_uuid": "00000000-0000-4000-8000-000000000001",
+        "inner_id": "00000000-0000-4000-8000-000000000002",
+        "allocations": [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002"
+        ],
+        "isApiErrorMessage": true
+      }
+    },
+    {
+      "name": "malformed-tool terminal subtype",
+      "fields": {
+        "apiError": "malformed_tool_use_exhausted"
+      },
+      "expected": {
+        "outer_uuid": "00000000-0000-4000-8000-000000000001",
+        "inner_id": "00000000-0000-4000-8000-000000000002",
+        "allocations": [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002"
+        ],
+        "isApiErrorMessage": true
+      }
+    }
+  ]
+}

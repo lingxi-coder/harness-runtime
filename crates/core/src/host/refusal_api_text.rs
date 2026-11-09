@@ -1,9 +1,9 @@
-//! Pure text projection for Native's 2.1.289 server-fallback refusal API row.
+//! Pure text projection for Native's 2.1.319 refusal API row.
 //!
 //! The formatter consumes resolved host facts. In particular, callers must
-//! supply the refusal-policy (`eYe`) result, display label (`$o`), catalog
+//! supply the refusal-policy (`fmt`/`Xp`) result, display label (`Os`), catalog
 //! family, Fable-copy suppression (`Dw`), model-specific first-time exception,
-//! help URL (`b1r`), actual provider kind, and feedback eligibility (`QA`).
+//! help URL (`zpo`), actual provider kind, and feedback eligibility (`tO`).
 //! Organization `availableModels` membership is not a substitute for the
 //! refusal-policy result.
 
@@ -22,12 +22,35 @@ pub enum RefusalProviderKind {
 }
 
 impl RefusalProviderKind {
-    fn has_cyber_verification_copy(self) -> bool {
+    pub fn has_cyber_verification_copy(self) -> bool {
         matches!(
             self,
             Self::FirstParty | Self::AnthropicAws | Self::AnthropicGoogleCloud | Self::Gateway
         )
     }
+}
+
+/// Validated `stop_details.cyber_verification` facts consumed by Native `BQe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CyberVerificationStatus {
+    SpecializedAccess,
+    RedTeamAccess,
+    DefenseAccess,
+    NotAssignedButOrganizationApproved,
+    OrganizationNotApproved,
+}
+
+/// Event-specific facts never retained in a model/provider snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefusalApiTextEvent<'a> {
+    /// Exact source category. This overrides the UTF-8 convenience view for
+    /// both category gates and Details sanitization, including lone units.
+    pub category_utf16: Option<&'a [u16]>,
+    pub message_id: Option<&'a str>,
+    pub cyber_verification: Option<CyberVerificationStatus>,
+    /// Native `Up(category)` from the owning host's resolved Life Sciences
+    /// facts. Absent host facts must not be replaced by an invented use case.
+    pub life_sciences_suffix: Option<&'a str>,
 }
 
 /// User-visible brand strings interpolated by the Native formatter.
@@ -73,10 +96,10 @@ pub struct RefusalApiTextInput<'a> {
     pub request_id: Option<&'a str>,
     /// The model serving the refused request; absent means Native had no model.
     pub serving_model: Option<&'a str>,
-    /// Result of Native's `eYe(serving_model)` policy decision. This is not an
+    /// Result of Native's `fmt(serving_model)` policy decision. This is not an
     /// organization allowlist-membership test.
     pub model_eligible: bool,
-    /// The independently resolved `$o(serving_model)` display label.
+    /// The independently resolved `Os(serving_model)` display label.
     pub display_label: Option<&'a str>,
     /// The current catalog family (`La(Nm(model))?.family`), if known.
     pub model_family: Option<&'a str>,
@@ -84,7 +107,7 @@ pub struct RefusalApiTextInput<'a> {
     pub fable_copy_suppressed: bool,
     /// Resolved Native `v7(model)` explicit first-time-model exception.
     pub opus_5_5_exception: bool,
-    /// The current `b1r(serving_model)` result. Required only when the
+    /// The current `zpo(serving_model)` result. Required only when the
     /// model-labelled branch is selected.
     pub help_url: Option<&'a str>,
     /// Actual resolved provider kind; custom endpoint URLs are not enough to
@@ -125,21 +148,34 @@ impl RefusalApiTextSnapshot {
         category: Option<&str>,
         request_id: Option<&str>,
     ) -> Result<String, RefusalApiTextError> {
-        format_refusal_api_error_text(&RefusalApiTextInput {
-            category,
-            request_id,
-            serving_model: self.serving_model.as_deref(),
-            model_eligible: self.model_eligible,
-            display_label: self.display_label.as_deref(),
-            model_family: self.model_family.as_deref(),
-            fable_copy_suppressed: self.fable_copy_suppressed,
-            opus_5_5_exception: self.opus_5_5_exception,
-            help_url: self.help_url.as_deref(),
-            provider: self.provider,
-            interactive: self.interactive,
-            feedback_eligible: self.feedback_eligible,
-            brand: self.brand.as_borrowed(),
-        })
+        self.format_with_event(category, request_id, RefusalApiTextEvent::default())
+    }
+
+    /// Render one response using frozen route facts and this event's IDs.
+    pub fn format_with_event(
+        &self,
+        category: Option<&str>,
+        request_id: Option<&str>,
+        event: RefusalApiTextEvent<'_>,
+    ) -> Result<String, RefusalApiTextError> {
+        format_refusal_api_error_text_with_event(
+            &RefusalApiTextInput {
+                category,
+                request_id,
+                serving_model: self.serving_model.as_deref(),
+                model_eligible: self.model_eligible,
+                display_label: self.display_label.as_deref(),
+                model_family: self.model_family.as_deref(),
+                fable_copy_suppressed: self.fable_copy_suppressed,
+                opus_5_5_exception: self.opus_5_5_exception,
+                help_url: self.help_url.as_deref(),
+                provider: self.provider,
+                interactive: self.interactive,
+                feedback_eligible: self.feedback_eligible,
+                brand: self.brand.as_borrowed(),
+            },
+            event,
+        )
     }
 }
 
@@ -160,23 +196,54 @@ pub enum RefusalApiTextError {
 pub fn format_refusal_api_error_text(
     input: &RefusalApiTextInput<'_>,
 ) -> Result<String, RefusalApiTextError> {
+    format_refusal_api_error_text_with_event(input, RefusalApiTextEvent::default())
+}
+
+/// Native `e9t`: category details precede the independently validated IDs.
+pub fn format_refusal_api_error_text_with_event(
+    input: &RefusalApiTextInput<'_>,
+    event: RefusalApiTextEvent<'_>,
+) -> Result<String, RefusalApiTextError> {
+    let source_category = event.category_utf16.map(String::from_utf16);
+    let resolved = RefusalApiTextInput {
+        category: match &source_category {
+            Some(Ok(category)) => Some(category.as_str()),
+            Some(Err(_)) => None,
+            None => input.category,
+        },
+        ..*input
+    };
+    let input = &resolved;
     let body = match (
         input.serving_model,
         input.model_eligible,
         input.display_label,
     ) {
-        (Some(_), true, Some(label)) => format_model_labelled_body(input, label)?,
-        _ => format_no_displayable_model_body(input),
+        (Some(_), true, Some(label)) => format_model_labelled_body(input, label, event)?,
+        _ => format_no_displayable_model_body(input, event),
     };
 
-    let details = details_suffix(input.category)?;
+    let details = match event.category_utf16 {
+        Some(category) => render_details_suffix(sanitize_details_category_utf16(category)?),
+        None => details_suffix(input.category)?,
+    };
     let request_id = request_id_suffix(input.request_id);
-    Ok(format!("{body}{details}{request_id}"))
+    let message_id = sanitized_refusal_id(event.message_id)
+        .map_or_else(String::new, |id| format!("\n\nMessage ID: {id}"));
+    let life_sciences = if input.category == Some("bio") {
+        event.life_sciences_suffix.unwrap_or("")
+    } else {
+        ""
+    };
+    Ok(format!(
+        "{body}{details}{life_sciences}{request_id}{message_id}"
+    ))
 }
 
 fn format_model_labelled_body(
     input: &RefusalApiTextInput<'_>,
     label: &str,
+    event: RefusalApiTextEvent<'_>,
 ) -> Result<String, RefusalApiTextError> {
     let help_url = input
         .help_url
@@ -217,6 +284,7 @@ fn format_model_labelled_body(
     } else {
         format!("You can learn more: {help_url}")
     };
+    let help_action = cyber_verification_action(input, event, help_action, help_url);
 
     Ok(format!(
         "{}: {lead} {recovery}\n\n{recovery_action}\n\n{help_action}",
@@ -224,7 +292,10 @@ fn format_model_labelled_body(
     ))
 }
 
-fn format_no_displayable_model_body(input: &RefusalApiTextInput<'_>) -> String {
+fn format_no_displayable_model_body(
+    input: &RefusalApiTextInput<'_>,
+    event: RefusalApiTextEvent<'_>,
+) -> String {
     let cyber_label = match input.serving_model {
         Some(_) => input.display_label.unwrap_or("undefined"),
         None => "This model",
@@ -235,12 +306,17 @@ fn format_no_displayable_model_body(input: &RefusalApiTextInput<'_>) -> String {
         } else {
             "Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude"
         };
+        let link_action = cyber_verification_action(
+            input,
+            event,
+            link_action.to_owned(),
+            "https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude",
+        );
         return format!(
-            "{}: {}'s safeguards flagged this message. {} {} {link_action}",
+            "{}: {}'s safeguards flagged this message. {} {link_action}",
             input.brand.api_error_prefix,
             cyber_label,
-            "Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work.",
-            "Apply to the Cyber Verification Program to reduce these interruptions."
+            "Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work."
         );
     }
 
@@ -257,6 +333,35 @@ fn format_no_displayable_model_body(input: &RefusalApiTextInput<'_>) -> String {
         "{}: {label} can't help with this. Start a new session to continue.\n\n{help_action}",
         input.brand.api_error_prefix
     )
+}
+
+fn cyber_verification_action(
+    input: &RefusalApiTextInput<'_>,
+    event: RefusalApiTextEvent<'_>,
+    action: String,
+    help_url: &str,
+) -> String {
+    if input.category != Some("cyber") || !input.provider.has_cyber_verification_copy() {
+        return action;
+    }
+    match event.cyber_verification {
+        Some(CyberVerificationStatus::SpecializedAccess | CyberVerificationStatus::RedTeamAccess | CyberVerificationStatus::DefenseAccess) => {
+            let tier = match event.cyber_verification {
+                Some(CyberVerificationStatus::SpecializedAccess) => "Specialized Access",
+                Some(CyberVerificationStatus::RedTeamAccess) => "Red Team Access",
+                _ => "Defense Access",
+            };
+            let lead = format!("You have {tier} in the Cyber Verification Program, and your last message was still flagged.");
+            if !input.interactive || !input.feedback_eligible {
+                format!("{lead} {action}")
+            } else {
+                format!("{lead} If it's legitimate security work, send feedback with /feedback so we can improve. It won't unblock your last message. Learn more: {help_url}")
+            }
+        }
+        Some(CyberVerificationStatus::NotAssignedButOrganizationApproved) => format!("Ask your admin for Defense Access in the Cyber Verification Program to reduce these interruptions. An admin can check your role in Organization settings. {action}"),
+        Some(CyberVerificationStatus::OrganizationNotApproved) => format!("Your organization doesn't have Cyber Verification Program access in effect for this model. Your admin can check your organization's status in the Verification Portal (https://portal.anthropic.com). {action}"),
+        None => action,
+    }
 }
 
 fn category_copy(category: Option<&str>) -> &'static str {
@@ -305,11 +410,14 @@ fn details_suffix(category: Option<&str>) -> Result<String, RefusalApiTextError>
     let Some(category) = category else {
         return Ok(String::new());
     };
-    let cleaned = sanitize_details_category(category)?;
+    Ok(render_details_suffix(sanitize_details_category(category)?))
+}
+
+fn render_details_suffix(cleaned: String) -> String {
     if cleaned.is_empty() {
-        Ok(String::new())
+        String::new()
     } else {
-        Ok(format!("\n\nDetails: `[{}]`", cleaned))
+        format!("\n\nDetails: `[{}]`", cleaned)
     }
 }
 
@@ -319,7 +427,68 @@ fn sanitize_details_category(category: &str) -> Result<String, RefusalApiTextErr
     // with one space. A Rust `str` is already well-formed UTF-8, so the Native
     // OV lone-surrogate cleanup has no input-side work to do here.
     let without_ansi = crate::host::display::strip_ansi_text(category);
-    let replaced = replace_native_category_controls(&without_ansi);
+    sanitize_details_category_controls(&without_ansi)
+}
+
+fn sanitize_details_category_utf16(category: &[u16]) -> Result<String, RefusalApiTextError> {
+    // Keep source units through ANSI removal, then Native `Cy` deletes lone
+    // surrogates. A literal U+FFFD must survive as a distinct source value.
+    let without_ansi = strip_category_ansi_utf16(category);
+    let well_formed = char::decode_utf16(without_ansi)
+        .filter_map(Result::ok)
+        .collect::<String>();
+    sanitize_details_category_controls(&well_formed)
+}
+
+fn strip_category_ansi_utf16(value: &[u16]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut units = value.iter().copied().peekable();
+    while let Some(unit) = units.next() {
+        let marker = match unit {
+            0x1b => units.next(),
+            0x9b => Some(0x5b),
+            0x9d => Some(0x5d),
+            _ => {
+                out.push(unit);
+                continue;
+            }
+        };
+        match marker {
+            Some(0x5b) => {
+                for next in units.by_ref() {
+                    if (0x40..=0x7e).contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(0x5d) => {
+                while let Some(next) = units.next() {
+                    if matches!(next, 0x7 | 0x9c) {
+                        break;
+                    }
+                    if next == 0x1b && units.peek() == Some(&0x5c) {
+                        units.next();
+                        break;
+                    }
+                }
+            }
+            Some(0x20..=0x2f) => {
+                while units
+                    .peek()
+                    .is_some_and(|unit| (0x20..=0x2f).contains(unit))
+                {
+                    units.next();
+                }
+                units.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn sanitize_details_category_controls(category: &str) -> Result<String, RefusalApiTextError> {
+    let replaced = replace_native_category_controls(category);
 
     // Native `fi` (`179180145..179180367`) removes backticks/brackets,
     // collapses ECMAScript whitespace, trims, slices 255 UTF-16 code units,
@@ -331,7 +500,15 @@ fn sanitize_details_category(category: &str) -> Result<String, RefusalApiTextErr
         }
     }
     let collapsed = collapse_ecmascript_whitespace(&without_delimiters);
-    let units = collapsed.encode_utf16().take(255).collect::<Vec<_>>();
+    let mut units = collapsed.encode_utf16().take(255).collect::<Vec<_>>();
+    // Native 2.1.319 `Q` drops a high surrogate left at the cap boundary.
+    if collapsed.encode_utf16().count() > 255
+        && units
+            .last()
+            .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+    {
+        units.pop();
+    }
     let truncated = String::from_utf16(&units)
         .map_err(|_| RefusalApiTextError::UnrepresentableCategoryUtf16)?;
     Ok(trim_ecmascript_whitespace(&truncated).to_owned())
@@ -448,18 +625,21 @@ fn is_ecmascript_whitespace(ch: char) -> bool {
 }
 
 fn request_id_suffix(request_id: Option<&str>) -> String {
-    let Some(request_id) = request_id else {
+    let Some(request_id) = sanitized_refusal_id(request_id) else {
         return String::new();
     };
-    if request_id.is_empty()
-        || request_id.len() > 255
-        || !request_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return String::new();
-    }
     format!("\n\nRequest ID: {request_id}")
+}
+
+/// Native `Nln`, shared by rendered suffixes and `refusedMessageId` metadata.
+pub fn sanitized_refusal_id(id: Option<&str>) -> Option<&str> {
+    id.filter(|id| {
+        !id.is_empty()
+            && id.len() <= 255
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
 }
 
 #[cfg(test)]
@@ -518,103 +698,91 @@ mod tests {
     }
 
     #[test]
-    fn six_native_formatter_vectors_match_the_pinned_fixture() {
-        let fixtures: Value = serde_json::from_str(include_str!(
-            "../../../../docs/parity/mods-refusal-fallback-text-2.1.289.json"
+    fn native_319_terminal_refusal_vectors_match_the_actual_source_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/refusal_api_text_2_1_319.json"
         ))
-        .expect("refusal formatter fixture is valid JSON");
-        let outputs = fixtures["outputs"]
-            .as_array()
-            .expect("fixture outputs are present");
-        let vectors = [
-            (
-                "first-party interactive sonnet cyber refusal",
-                RefusalApiTextInput {
-                    category: Some("cyber"),
-                    request_id: Some("req_289"),
-                    serving_model: Some("claude-sonnet-5"),
-                    model_eligible: true,
-                    display_label: Some("Claude Sonnet 5"),
-                    model_family: Some("sonnet"),
-                    help_url: Some("https://support.claude.com/en/articles/8106465"),
-                    provider: RefusalProviderKind::FirstParty,
-                    interactive: true,
-                    feedback_eligible: true,
-                    ..base_input()
+        .unwrap();
+        for row in fixture["cases"].as_array().unwrap() {
+            let input = &row["input"];
+            let details = &input["details"];
+            let model = input["model"].as_str();
+            let category = details["category"].as_str();
+            let category_utf16 = input["categoryUtf16"].as_array().map(|units| {
+                units
+                    .iter()
+                    .map(|unit| unit.as_u64().unwrap() as u16)
+                    .collect::<Vec<_>>()
+            });
+            let verification = &details["cyber_verification"];
+            let status = match verification["type"].as_str() {
+                Some("active") => match verification["tier"].as_str() {
+                    Some("a") => Some(CyberVerificationStatus::SpecializedAccess),
+                    Some("b") => Some(CyberVerificationStatus::RedTeamAccess),
+                    Some("c") => Some(CyberVerificationStatus::DefenseAccess),
+                    _ => None,
                 },
-            ),
-            (
-                "non-interactive first-party cyber with no displayable model",
-                RefusalApiTextInput {
-                    category: Some("cyber"),
-                    request_id: Some("req_289"),
-                    serving_model: Some("claude-sonnet-5"),
-                    display_label: Some("Claude Sonnet 5"),
-                    model_family: Some("sonnet"),
-                    help_url: Some("https://support.claude.com/en/articles/8106465"),
-                    provider: RefusalProviderKind::FirstParty,
-                    feedback_eligible: true,
-                    ..base_input()
+                Some("inactive") => match verification["reason"].as_str() {
+                    Some("not_assigned_but_organization_approved") => {
+                        Some(CyberVerificationStatus::NotAssignedButOrganizationApproved)
+                    }
+                    Some("organization_not_approved") => {
+                        Some(CyberVerificationStatus::OrganizationNotApproved)
+                    }
+                    _ => None,
                 },
-            ),
-            (
-                "non-interactive Bedrock bio with feedback disabled and no model",
-                RefusalApiTextInput {
-                    category: Some("bio"),
-                    request_id: Some("bad id"),
-                    provider: RefusalProviderKind::Bedrock,
-                    ..base_input()
-                },
-            ),
-            (
-                "interactive mode with nonessential traffic disabled suppresses feedback CTA",
-                RefusalApiTextInput {
-                    interactive: true,
-                    ..base_input()
-                },
-            ),
-            (
-                "eligible Fable model uses the Fable help page",
-                RefusalApiTextInput {
-                    category: Some("bio"),
-                    serving_model: Some("claude-fable-5-1"),
-                    model_eligible: true,
-                    display_label: Some("Claude Fable 5.1"),
-                    model_family: Some("fable"),
-                    fable_copy_suppressed: true,
-                    help_url: Some("https://support.claude.com/en/articles/15363606"),
-                    provider: RefusalProviderKind::Foundry,
-                    interactive: true,
-                    ..base_input()
-                },
-            ),
-            (
-                "eligible Opus 5 effort alias uses the Opus help page",
-                RefusalApiTextInput {
-                    category: Some("bio"),
-                    request_id: Some("req_opus"),
-                    serving_model: Some("claude-opus-5[1m]"),
-                    model_eligible: true,
-                    display_label: Some("Claude Opus 5"),
-                    opus_5_5_exception: false,
-                    help_url: Some("https://support.claude.com/en/articles/16049681"),
-                    provider: RefusalProviderKind::FirstParty,
-                    feedback_eligible: true,
-                    ..base_input()
-                },
-            ),
-        ];
-
-        assert_eq!(vectors.len(), outputs.len());
-        for (name, facts) in vectors {
-            let expected = outputs
-                .iter()
-                .find(|entry| entry["name"] == name)
-                .unwrap_or_else(|| panic!("missing native fixture vector {name}"));
+                _ => None,
+            };
+            let provider = match input["provider"].as_str().unwrap() {
+                "FirstParty" => RefusalProviderKind::FirstParty,
+                "Bedrock" => RefusalProviderKind::Bedrock,
+                other => panic!("unhandled fixture provider {other}"),
+            };
+            let facts = RefusalApiTextInput {
+                category,
+                request_id: input["requestId"].as_str(),
+                serving_model: model,
+                model_eligible: row["modelEligible"].as_bool().unwrap(),
+                display_label: input["label"].as_str(),
+                model_family: model
+                    .filter(|model| model.starts_with("claude-sonnet-"))
+                    .map(|_| "sonnet"),
+                fable_copy_suppressed: input["fableCopySuppressed"].as_bool().unwrap(),
+                opus_5_5_exception: model == Some("claude-opus-5-5"),
+                help_url: input["helpUrl"].as_str(),
+                provider,
+                interactive: input["interactive"].as_bool().unwrap(),
+                feedback_eligible: input["feedbackEligible"].as_bool().unwrap(),
+                brand: CLAUDE,
+            };
+            let event = RefusalApiTextEvent {
+                category_utf16: category_utf16.as_deref(),
+                message_id: input["messageId"].as_str(),
+                cyber_verification: status,
+                ..RefusalApiTextEvent::default()
+            };
+            let text = format_refusal_api_error_text_with_event(&facts, event).unwrap();
             assert_eq!(
-                format_refusal_api_error_text(&facts).unwrap(),
-                expected["content"].as_str().unwrap(),
-                "{name}"
+                text,
+                row["expected"]["content"].as_str().unwrap(),
+                "{}",
+                row["name"]
+            );
+            if let Some(expected) = row["expected"]["contentUtf16"].as_array() {
+                let expected = expected
+                    .iter()
+                    .map(|unit| unit.as_u64().unwrap() as u16)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    text.encode_utf16().collect::<Vec<_>>(),
+                    expected,
+                    "{}",
+                    row["name"]
+                );
+            }
+            assert_eq!(
+                sanitized_refusal_id(event.message_id),
+                row["expected"]["refusedMessageId"].as_str()
             );
         }
     }
@@ -692,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn details_cap_is_utf16_and_split_surrogate_is_reported() {
+    fn details_cap_is_utf16_and_split_surrogate_is_dropped() {
         assert_eq!(
             sanitize_details_category(&"x".repeat(256)).unwrap(),
             "x".repeat(255)
@@ -708,10 +876,9 @@ mod tests {
 
         let split = format!("{}😀", "x".repeat(254));
         facts.category = Some(&split);
-        assert_eq!(
-            format_refusal_api_error_text(&facts),
-            Err(RefusalApiTextError::UnrepresentableCategoryUtf16)
-        );
+        assert!(format_refusal_api_error_text(&facts)
+            .unwrap()
+            .ends_with(&format!("\n\nDetails: `[{}]`", "x".repeat(254))));
     }
 
     #[test]
@@ -772,7 +939,7 @@ mod tests {
             };
             assert!(format_refusal_api_error_text(&facts)
                 .unwrap()
-                .contains("Cyber Verification Program"));
+                .contains("legitimate cybersecurity work."));
         }
 
         let ineligible = [
@@ -790,7 +957,7 @@ mod tests {
             };
             assert!(!format_refusal_api_error_text(&facts)
                 .unwrap()
-                .contains("Cyber Verification Program"));
+                .contains("legitimate cybersecurity work."));
         }
     }
 }

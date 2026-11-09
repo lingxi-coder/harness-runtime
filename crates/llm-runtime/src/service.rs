@@ -37,6 +37,10 @@ use crate::{
 
 const NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL: &str = "https://api.anthropic.com";
 
+#[path = "service_native_media.rs"]
+mod native_media;
+use native_media::{strip_native_media_with_sources, NativeMediaLimits};
+
 fn native_custom_beta_provider_route(
     provider_id: &crate::ProviderId,
     protocol: crate::ProtocolFamily,
@@ -1158,6 +1162,7 @@ struct StreamState {
     attempt: crate::model_attempt::WireAttempt,
     decoder: crate::history_projection::HistoryProjector,
     frames: lingxi_llm_client::ModelStream,
+    native_stream_capture: Option<crate::native_stream_capture::AttemptCapture>,
     native_thinking_resumption_refused: Arc<NativeThinkingResumptionRefusalLatch>,
     pricing: Option<lingxi_llm_client::FrozenPricing>,
     pricing_model: crate::PricingModelRef,
@@ -6795,7 +6800,7 @@ impl ApiService {
             lingxi_llm_client::protocol::JsonPayload::parse("{}")
                 .expect("empty object is valid JSON")
         });
-        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
+        let policy = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
             protocol: prepared.route.protocol,
             request_kind: prepared.anthropic_request_kind,
             plain_text_message_content: prepared.plain_text_message_content,
@@ -6824,8 +6829,14 @@ impl ApiService {
                     | crate::ProtocolFamily::VertexClaude
             ),
             ..Default::default()
-        }
-        .apply(
+        };
+        crate::native_request_layout::reserve_native_request_properties(
+            &mut prepared.provider_request.body_json,
+            &policy.extra_body,
+            policy.request_kind,
+        )
+        .map_err(crate::upstream::error)?;
+        policy.apply(
             &mut prepared.provider_request.body_json,
             &mut prepared.provider_request.headers,
             &mut prepared.provider_request.json_string_overrides,
@@ -10415,6 +10426,7 @@ impl ApiService {
         &self,
         mut req: LlmRequest,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let retain_native_stream_frames = crate::native_stream_capture::requested();
         if req.execution.thinking_recovery_scope.is_none() {
             req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
         }
@@ -10621,7 +10633,11 @@ impl ApiService {
             // attempt takes the same path: the opener marks dispatch
             // immediately before whichever transport call carries it, so a
             // WebSocket send is metered exactly like an HTTP one.
-            let opened = async {
+            let native_stream_capture = (retain_native_stream_frames
+                && prepared.route.protocol == crate::ProtocolFamily::AnthropicMessages
+                && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty)
+                .then(crate::native_stream_capture::AttemptCapture::default);
+            let opened = crate::native_stream_capture::AttemptCapture::scope(native_stream_capture.as_ref(), async {
                 let responses_ws_session = conversation_lease.as_mut().expect("conversation lease").session();
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::classifier_attempt_bound(classifier_attempt_deadline, crate::execution::first_byte_bound(
@@ -10705,8 +10721,7 @@ impl ApiService {
                         .await
                 }))
                 .await
-            }
-            .await;
+            }).await;
             match opened {
                 Err(mut transport_err) => {
                     Self::classify_native_invalid_request_413(&mut transport_err);
@@ -11451,6 +11466,12 @@ impl ApiService {
                             &response_headers,
                         ),
                     )?;
+                    if native_stream_capture.is_some() {
+                        crate::history_projection::attach_prepared_thinking_display(
+                            &mut decoder.metadata,
+                            &prepared.provider_request,
+                        )?;
+                    }
                     let mut frames = streaming
                         .into_stream()
                         .map_err(|_| LlmError::ProviderInternal)?;
@@ -11499,7 +11520,7 @@ impl ApiService {
                                         let wall = std::time::SystemTime::now();
                                         match tokio::time::timeout(
                                             t,
-                                            crate::execution::next_batch(&mut frames),
+                                            crate::execution::next_batch_with_capture(&mut frames, native_stream_capture.as_ref()),
                                         )
                                         .await
                                         {
@@ -11512,7 +11533,7 @@ impl ApiService {
                                             ),
                                         }
                                     }
-                                    None => crate::execution::next_batch(&mut frames).await,
+                                    None => crate::execution::next_batch_with_capture(&mut frames, native_stream_capture.as_ref()).await,
                                 }
                             },
                         )
@@ -11693,6 +11714,7 @@ impl ApiService {
                         attempt,
                         decoder,
                         frames,
+                        native_stream_capture,
                         native_thinking_resumption_refused: self
                             .native_thinking_resumption_refused
                             .clone(),
@@ -11823,7 +11845,7 @@ impl ApiService {
                                     None => crate::execution::classifier_attempt_bound(s.classifier_attempt_deadline, async { match s.idle_timeout {
                                         Some(timeout) => tokio::time::timeout(
                                             timeout,
-                                            crate::execution::next_batch(&mut s.frames),
+                                            crate::execution::next_batch_with_capture(&mut s.frames, s.native_stream_capture.as_ref()),
                                         )
                                         .await
                                         .unwrap_or_else(|_elapsed| {
@@ -11831,7 +11853,7 @@ impl ApiService {
                                                 timeout,
                                             ))
                                         }),
-                                        None => crate::execution::next_batch(&mut s.frames).await,
+                                        None => crate::execution::next_batch_with_capture(&mut s.frames, s.native_stream_capture.as_ref()).await,
                                     }}).await,
                                 };
                                 match frame {
@@ -12594,6 +12616,47 @@ impl ApiService {
         self.drive_stream(req).await
     }
 
+    fn native_media_limits_for_request(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        protocol: crate::ProtocolFamily,
+    ) -> Option<NativeMediaLimits> {
+        let route = self.client().resolve_media_route(model, profile).ok()?.main;
+        if !is_native_main_anthropic_route(&route.provider_id, protocol) {
+            return None;
+        }
+        let constrained_endpoint = match route.provider_id {
+            crate::ProviderId::AnthropicFirstParty => self
+                .client()
+                .prompt_cache_profile(model, Some(&route.profile_name))
+                .is_some_and(|profile| {
+                    native_tbc_first_party_tf(Some(std::ffi::OsStr::new(&profile.base_url)))
+                }),
+            crate::ProviderId::BedrockClaude => {
+                std::env::var_os("ANTHROPIC_AWS_BASE_URL").is_none()
+            }
+            _ => false,
+        };
+        let context_1m_disabled = std::env::var_os("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+            .is_some_and(|value| !value.is_empty());
+        let context_1m_beta = self
+            .custom_cli_betas
+            .iter()
+            .any(|beta| beta == crate::model::betas::CONTEXT_1M);
+        let native_model = if model.to_ascii_lowercase().contains("[1m]") {
+            model
+        } else {
+            &route.request_model
+        };
+        Some(NativeMediaLimits::for_model(
+            native_model,
+            context_1m_disabled,
+            context_1m_beta,
+            constrained_endpoint,
+        ))
+    }
+
     fn build_main_request(
         &self,
         model: &str,
@@ -12613,10 +12676,8 @@ impl ApiService {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
     ) -> Result<LlmRequest, LlmError> {
-        // Pre-wire pipeline (claude-code order): strip_excess_media →
-        // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
-        // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
-        // resumed/interrupted transcripts; strict no-op on a clean turn).
+        // Native Ovn normalizes and pairs tools before Kvn applies the media
+        // count/byte budgets. Other providers retain their existing cap policy.
         // Session-scoped tool-search gate (Claude Code `$U()`), published by the
         // orchestrator. NOT inferred from whether THIS request's toolset carries
         // a `ToolSearch` declaration: `$U()` reads only the session mode +
@@ -12753,18 +12814,27 @@ impl ApiService {
             .load(std::sync::atomic::Ordering::Relaxed);
         let available_tool_names: std::collections::HashSet<String> =
             tools.iter().map(|tool| tool.name.clone()).collect();
+        let native_media_limits = self.native_media_limits_for_request(model, profile, family);
+        let messages = ConversationMessagesWithSources::new(msgs);
+        let messages = if native_media_limits.is_some() {
+            messages
+        } else {
+            strip_excess_media_with_sources(messages, MAX_MEDIA_PER_REQUEST)
+        };
         let messages = ensure_tool_result_pairing_with_sources(
             normalize_messages_for_api_with_tool_search_and_sources(
-                strip_excess_media_with_sources(
-                    ConversationMessagesWithSources::new(msgs),
-                    MAX_MEDIA_PER_REQUEST,
-                ),
+                messages,
                 typed_attachment_ids,
                 task_deliveries,
                 tool_search_enabled,
                 Some(&available_tool_names),
             ),
         );
+        let messages = if let Some(limits) = native_media_limits {
+            strip_native_media_with_sources(messages, limits)
+        } else {
+            messages
+        };
         let request_message_source_ids = messages.contributing_message_ids();
         let request_message_source_indices = messages
             .block_sources

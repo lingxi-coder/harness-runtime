@@ -528,7 +528,7 @@ impl ResponseAccumulator {
         event: HistoryEvent,
     ) -> Result<ResponseAccumulatorUpdate, (Vec<ContentBlock>, LlmError)> {
         match event {
-            HistoryEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
+            HistoryEvent::WebSearch { .. } | HistoryEvent::NativeStreamFrame { .. } => {} // Presentation observations never alter model content.
             HistoryEvent::ResponseObserved {
                 model: observed,
                 response_id,

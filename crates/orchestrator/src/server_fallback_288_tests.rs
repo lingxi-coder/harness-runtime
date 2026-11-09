@@ -54,6 +54,16 @@ fn model_allowlist(entries: &[&str]) -> Utf16JsonProjection {
         .expect("test model allowlist is an array of strings")
 }
 
+fn fixed_session_mode_header(session_id: uuid::Uuid) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&json!({
+        "type": "fixed-session-mode",
+        "sessionId": session_id,
+        "sessionMode": "code",
+        "instructionEpoch": 0,
+    }))
+    .expect("valid host fixed-session header")
+}
+
 fn attach_fallback(response: &mut HistoryResponse, info: &HistoryServerFallback) {
     response.provider_metadata =
         lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({
@@ -513,6 +523,7 @@ async fn hot_resume_restores_native_session_latch_and_host_profile_snapshot() {
         ResumeRuntimeSnapshot {
             model: fallback.into(),
             model_profile: Some(fallback_profile.into()),
+            transcript_metadata: Some(vec![fixed_session_mode_header(session_id.as_uuid())]),
             ..Default::default()
         },
     )
@@ -587,13 +598,17 @@ async fn hot_resume_with_empty_snapshot_keeps_live_server_route_and_rehydrates_l
     .await;
     let history = orch.session.lock().await.history.clone();
 
+    let session_id = SessionId::from_uuid(uuid::Uuid::new_v4());
     OrchestratorHandle::resume_session(
         orch.as_ref(),
-        SessionId::from_uuid(uuid::Uuid::new_v4()),
+        session_id,
         history,
         None,
         None,
-        ResumeRuntimeSnapshot::default(),
+        ResumeRuntimeSnapshot {
+            transcript_metadata: Some(vec![fixed_session_mode_header(session_id.as_uuid())]),
+            ..Default::default()
+        },
     )
     .await
     .expect("hot resume without a model snapshot");
@@ -689,9 +704,13 @@ async fn cold_resume_uses_assistant_model_and_matching_notice_profiles_for_serve
         .unwrap();
     tokio::fs::write(
         &transcript_path,
-        rows.iter()
-            .map(|row| serde_json::to_string(row).unwrap() + "\n")
-            .collect::<String>(),
+        format!(
+            "{}\n{}",
+            fixed_session_mode_header(session_uuid).to_json_string().unwrap(),
+            rows.iter()
+                .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                .collect::<String>()
+        ),
     )
     .await
     .unwrap();
@@ -811,9 +830,13 @@ async fn cold_resume_notice_without_fallback_assistant_does_not_select_model_or_
         .unwrap();
     tokio::fs::write(
         &transcript_path,
-        rows.iter()
-            .map(|row| serde_json::to_string(row).unwrap() + "\n")
-            .collect::<String>(),
+        format!(
+            "{}\n{}",
+            fixed_session_mode_header(session_uuid).to_json_string().unwrap(),
+            rows.iter()
+                .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                .collect::<String>()
+        ),
     )
     .await
     .unwrap();

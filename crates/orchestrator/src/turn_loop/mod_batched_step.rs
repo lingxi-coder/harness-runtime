@@ -375,7 +375,7 @@ pub(super) async fn dispatch(
                     Some(context) => context,
                     None => crate::query_model::fallback_target_context(orch, &model, None).await,
                 };
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+            crate::server_fallback::record_request_route_with_refusal_text(orch, crate::query_model::ModelRoute {
                 model: model.clone(),
                 profile: profile.clone(),
             });
@@ -524,7 +524,7 @@ pub(super) async fn dispatch(
                         crate::query_model::fallback_target_context(orch, &params.model, None).await
                     }
                 };
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+            crate::server_fallback::record_request_route_with_refusal_text(orch, crate::query_model::ModelRoute {
                 model: params.model.clone(),
                 profile: params.profile.clone(),
             });

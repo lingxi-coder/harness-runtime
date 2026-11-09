@@ -85,8 +85,6 @@ use error_reporting::goal_cleared_after_error_message;
 pub(crate) use error_reporting::is_carveout_propagated;
 use error_reporting::maybe_checkpoint_on_rate_limit;
 pub(crate) use error_reporting::orchestrator_error_text_source;
-#[cfg(test)]
-use error_reporting::refusal_explanation_clause;
 pub(crate) use error_reporting::surface_api_error_notice;
 pub(crate) use error_reporting::surface_model_error;
 pub(crate) use error_reporting::surface_prompt_too_long;
@@ -204,6 +202,9 @@ mod turn_loop_test;
 /// `query.ts:164` `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3`.
 pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 
+/// Native 2.1.319 retries a malformed tool-use response twice before failing.
+pub(crate) const MALFORMED_TOOL_USE_RETRY_LIMIT: u32 = 2;
+
 #[cfg(test)]
 pub(crate) const TEST_RECOVERY_OUTPUT_BUDGET: u32 = 77_777;
 
@@ -315,7 +316,7 @@ pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
 pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
     "The previous response failed to produce a valid tool call. Please retry the tool call now.";
 
-/// Byte-exact NON-meta message emitted on the SECOND malformed-tool-use failure
+/// Byte-exact NON-meta message emitted on the THIRD malformed-tool-use failure
 /// (the retry also produced no `tool_use` block): the turn terminates as
 /// completed. 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
 /// ~202946360, the `tc({content:...})` terminal branch).
@@ -372,14 +373,11 @@ pub(crate) struct RecoveryState {
     /// separate flag because the override is TAKEN per call). Reset alongside
     /// [`Self::max_output_tokens_recovery_count`].
     pub(crate) max_output_tokens_escalated: bool,
-    /// #77: whether a malformed-tool-use retry (`stop_reason == "tool_use"` with
-    /// zero `tool_use` blocks) has already fired this turn. Mirrors claude-code's
-    /// `transition.reason === "malformed_tool_use_retry"` guard so the SECOND
-    /// such failure terminates instead of looping. NOT reset by
-    /// [`Self::reset_max_output_tokens_recovery`] — it is a per-turn one-shot
-    /// independent of the max-output-tokens escalation episode.
+    /// Native `malformedToolUseRetryCount`: two malformed-tool repairs per
+    /// tool round. Output-limit and thinking-only retries preserve the count;
+    /// a normal tool round or blocking Stop hook resets it.
     #[allow(clippy::struct_field_names)]
-    pub(crate) malformed_tool_use_retried: bool,
+    pub(crate) malformed_tool_use_retry_count: u32,
     /// #78: whether the thinking-only nudge (an `end_turn`/`stop_sequence`
     /// response with no visible text) has already fired this turn. Mirrors
     /// claude-code's `thinkingOnlyNudged` loop-state flag.
@@ -729,10 +727,13 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                             crate::query_model::fallback_target_context(orch, &model, None).await
                         }
                     };
-                crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-                    model: model.clone(),
-                    profile: model_profile.clone(),
-                });
+                crate::server_fallback::record_request_route_with_refusal_text(
+                    orch,
+                    crate::query_model::ModelRoute {
+                        model: model.clone(),
+                        profile: model_profile.clone(),
+                    },
+                );
                 crate::prompt::async_hook_response::retain_current_async_hook_reminders(
                     &mut history_snapshot,
                     &mut turn_reminders,

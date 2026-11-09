@@ -171,6 +171,14 @@ impl HistoryResponse {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HistoryEvent {
+    /// Exact validated native SSE payload for opt-in partial-frame consumers.
+    /// Presentation only: SDK-decoded events still own content and execution.
+    NativeStreamFrame {
+        #[serde(rename = "payload")]
+        event: JsonPayload,
+        /// Host-owned snapshot of the prepared request's thinking.display.
+        thinking_display: Option<String>,
+    },
     /// SDK-decoded server routing event, admitted outside provider input.
     ServerFallback {
         event: Box<lingxi_llm_client::providers::anthropic::fallback_response::ServerFallbackEvent>,
@@ -260,6 +268,8 @@ struct RawHistoryEvent {
     #[serde(default, deserialize_with = "deserialize_present_nullable_payload")]
     delta: Option<Option<JsonPayload>>,
     usage: Option<ExecutionUsage>,
+    payload: Option<JsonPayload>,
+    thinking_display: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for HistoryEvent {
@@ -271,6 +281,10 @@ impl<'de> Deserialize<'de> for HistoryEvent {
         // nested history payloads use source-backed SDK newtypes.
         let event = RawHistoryEvent::deserialize(deserializer)?;
         match event.kind.as_str() {
+            "native_stream_frame" => Ok(Self::NativeStreamFrame {
+                event: required_field(event.payload, "payload")?,
+                thinking_display: event.thinking_display,
+            }),
             "server_fallback" => Ok(Self::ServerFallback {
                 event: Box::new(required_field(event.event, "event")?),
                 profile: required_field(event.profile, "profile")?,
@@ -316,6 +330,7 @@ impl<'de> Deserialize<'de> for HistoryEvent {
             other => Err(serde::de::Error::unknown_variant(
                 other,
                 &[
+                    "native_stream_frame",
                     "server_fallback",
                     "response_observed",
                     "cost_quote_observed",

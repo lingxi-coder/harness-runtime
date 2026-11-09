@@ -993,6 +993,88 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
     ensure_tool_result_pairing_with_sources(ConversationMessagesWithSources::new(messages)).messages
 }
 
+fn pairing_provider_content(block: &ProtoBlock) -> Option<&Utf16JsonProjection> {
+    match block {
+        ProtoBlock::ProviderContent { protocol, value } if protocol == "anthropic_messages" => {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+// Provider content can carry lone UTF-16 units in IDs. Display strings are
+// never identity keys: distinct source strings may share the same U+FFFD view.
+type PairingId = Vec<u16>;
+
+fn pairing_tool_use_id(block: &ProtoBlock) -> Option<PairingId> {
+    match block {
+        ProtoBlock::ToolUse { id, .. } => Some(id.as_str().encode_utf16().collect()),
+        _ => pairing_provider_content(block)
+            .filter(|value| value.string_at("/type") == Some("tool_use"))
+            .and_then(|value| value.string_units("/id")),
+    }
+}
+
+fn pairing_is_tool_result(block: &ProtoBlock) -> bool {
+    matches!(block, ProtoBlock::ToolResult { .. })
+        || pairing_provider_content(block)
+            .is_some_and(|value| value.string_at("/type") == Some("tool_result"))
+}
+
+fn pairing_tool_result_id(block: &ProtoBlock) -> Option<PairingId> {
+    match block {
+        ProtoBlock::ToolResult { tool_use_id, .. } => {
+            Some(tool_use_id.as_str().encode_utf16().collect())
+        }
+        _ => pairing_provider_content(block)
+            .filter(|value| value.string_at("/type") == Some("tool_result"))
+            .and_then(|value| value.string_units("/tool_use_id")),
+    }
+}
+
+fn pairing_missing_tool_result(id: &[u16], message: &str) -> ProtoBlock {
+    if let Ok(id) = String::from_utf16(id) {
+        return ProtoBlock::ToolResult {
+            tool_use_id: ToolUseId::from(id),
+            content: Utf16JsonProjection::from(message),
+            is_error: Some(true),
+            provider_tool_use_id: None,
+            content_blocks: None,
+        };
+    }
+    // The typed ToolUseId owns a UTF-8 String. Retain an unrepresentable ID
+    // in canonical provider content instead of manufacturing a replacement ID.
+    ProtoBlock::ProviderContent {
+        protocol: "anthropic_messages".into(),
+        value: Utf16JsonProjection::object(vec![
+            ("type".into(), "tool_result".into()),
+            (
+                "tool_use_id".into(),
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(id), id.to_vec())
+                    .expect("source ID display matches its exact units"),
+            ),
+            ("content".into(), message.into()),
+            (
+                "is_error".into(),
+                Utf16JsonProjection::parse("true").expect("generated boolean is valid JSON"),
+            ),
+        ])
+        .expect("generated missing-result fields are valid source JSON"),
+    }
+}
+
+fn pairing_is_thinking(block: &ProtoBlock) -> bool {
+    matches!(
+        block,
+        ProtoBlock::Thinking { .. } | ProtoBlock::RedactedThinking { .. }
+    ) || pairing_provider_content(block).is_some_and(|value| {
+        matches!(
+            value.string_at("/type"),
+            Some("thinking" | "redacted_thinking")
+        )
+    })
+}
+
 pub(crate) fn ensure_tool_result_pairing_with_sources(
     messages: ConversationMessagesWithSources,
 ) -> ConversationMessagesWithSources {
@@ -1005,7 +1087,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
         messages: Vec::with_capacity(messages.messages.len()),
         block_sources: Vec::with_capacity(messages.messages.len()),
     };
-    let mut all_seen_tool_use_ids: HashSet<String> = HashSet::new();
+    let mut all_seen_tool_use_ids: HashSet<PairingId> = HashSet::new();
     let mut i = 0usize;
     while i < messages.messages.len() {
         let msg = &messages.messages[i];
@@ -1031,7 +1113,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 turn_origin,
                 interrupted_by_shutdown,
                 refused_message_id,
-                api_message_override,
+                api_message_override: _,
                 ..
             } = msg
             {
@@ -1039,20 +1121,23 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                     result.messages.last(),
                     Some(ConversationMessage::Assistant { .. })
                 );
-                if !prev_is_assistant && content.iter().any(|b| matches!(b, B::ToolResult { .. })) {
+                if !prev_is_assistant && content.iter().any(pairing_is_tool_result) {
                     let mut stripped = Vec::new();
                     let mut stripped_sources = Vec::new();
                     for (block, sources) in
                         content.iter().cloned().zip(block_sources.iter().cloned())
                     {
-                        if !matches!(&block, B::ToolResult { .. }) {
+                        if !pairing_is_tool_result(&block) {
                             stripped.push(block);
                             stripped_sources.push(sources);
                         }
                     }
                     if !stripped.is_empty() {
                         result.messages.push(ConversationMessage::User {
-                            api_message_override: api_message_override.clone(),
+                            // A repaired canonical user body is now the source
+                            // of truth; an older API-system projection must not
+                            // reintroduce the discarded result blocks.
+                            api_message_override: None,
                             id: *id,
                             content: stripped,
                             is_meta: *is_meta,
@@ -1087,41 +1172,73 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             continue;
         };
 
-        let server_result_ids: HashSet<String> = content
+        let server_result_ids: HashSet<PairingId> = content
             .iter()
             .filter_map(|b| match b {
-                B::AdvisorToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-                _ => None,
+                B::AdvisorToolResult { tool_use_id, .. } => {
+                    Some(tool_use_id.encode_utf16().collect())
+                }
+                // Native tCn accepts every same-assistant string tool_use_id
+                // except a misplaced client tool_result. Hosted web/MCP
+                // result families are retained as provider content.
+                _ => pairing_provider_content(b)
+                    .filter(|value| value.string_at("/type") != Some("tool_result"))
+                    .and_then(|value| value.string_units("/tool_use_id")),
             })
             .collect();
 
-        let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
+        let mut seen_tool_use_ids: HashSet<PairingId> = HashSet::new();
+        let mut tool_use_order = Vec::new();
         let mut final_content: Vec<B> = Vec::with_capacity(content.len());
         let mut final_sources = Vec::with_capacity(block_sources.len());
         let mut tool_use_sources = HashMap::new();
-        for (block, sources) in content.iter().zip(block_sources) {
-            match block {
-                B::ToolUse { id, .. } => {
-                    let s = id.as_str().to_string();
-                    if all_seen_tool_use_ids.contains(&s) {
-                        continue;
-                    }
-                    all_seen_tool_use_ids.insert(s.clone());
-                    seen_tool_use_ids.insert(s.clone());
-                    tool_use_sources.insert(s, sources.clone());
-                    final_content.push(block.clone());
+        for (index, (block, sources)) in content.iter().zip(block_sources).enumerate() {
+            let remove = if let Some(id) = pairing_tool_use_id(block) {
+                if !all_seen_tool_use_ids.insert(id.clone()) {
+                    true
+                } else {
+                    seen_tool_use_ids.insert(id.clone());
+                    tool_use_order.push(id.clone());
+                    tool_use_sources.insert(id, sources.clone());
+                    false
+                }
+            } else if let B::ServerToolUse { id, .. } = block {
+                !server_result_ids.contains(&id.encode_utf16().collect::<PairingId>())
+            } else if let Some(value) = pairing_provider_content(block).filter(|value| {
+                matches!(
+                    value.string_at("/type"),
+                    Some("server_tool_use" | "mcp_tool_use")
+                )
+            }) {
+                value
+                    .string_units("/id")
+                    .is_none_or(|id| !server_result_ids.contains(&id))
+            } else {
+                pairing_is_tool_result(block)
+            };
+            if remove {
+                // Compare the ORIGINAL neighbors, exactly like tCn's
+                // flatMap callback. Removing a block must not join signed
+                // thinking blocks which were separated in the response.
+                if index > 0
+                    && pairing_is_thinking(&content[index - 1])
+                    && content.get(index + 1).is_some_and(pairing_is_thinking)
+                {
+                    final_content.push(B::Text {
+                        text: "[Tool use removed]".into(),
+                        citations: Some(Some(
+                            Utf16JsonProjection::parse("[]")
+                                .expect("generated empty citation array is valid JSON"),
+                        )),
+                    });
                     final_sources.push(sources.clone());
                 }
-                B::ServerToolUse { id, .. } if !server_result_ids.contains(id) => {
-                    continue;
-                }
-                _ => {
-                    final_content.push(block.clone());
-                    final_sources.push(sources.clone());
-                }
+                continue;
             }
+            final_content.push(block.clone());
+            final_sources.push(sources.clone());
         }
-        if final_content.is_empty() {
+        if final_content.is_empty() && !content.is_empty() {
             let sources = block_sources
                 .iter()
                 .flat_map(|ids| ids.iter().copied())
@@ -1146,30 +1263,34 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
 
         let next = messages.messages.get(i + 1);
         let next_sources = messages.block_sources.get(i + 1);
-        let mut existing_tr_ids: HashSet<String> = HashSet::new();
+        let mut existing_tr_ids: HashSet<PairingId> = HashSet::new();
         let mut has_dup_tr = false;
+        let mut has_unidentified_tr = false;
         if let Some(ConversationMessage::User { content, .. }) = next {
             for b in content {
-                if let B::ToolResult { tool_use_id, .. } = b {
-                    let t = tool_use_id.as_str().to_string();
-                    if !existing_tr_ids.insert(t) {
-                        has_dup_tr = true;
+                if pairing_is_tool_result(b) {
+                    if let Some(id) = pairing_tool_result_id(b) {
+                        if !existing_tr_ids.insert(id) {
+                            has_dup_tr = true;
+                        }
+                    } else {
+                        has_unidentified_tr = true;
                     }
                 }
             }
         }
-        let missing: Vec<String> = seen_tool_use_ids
+        let missing: Vec<PairingId> = tool_use_order
             .iter()
             .filter(|id| !existing_tr_ids.contains(*id))
             .cloned()
             .collect();
-        let orphaned: HashSet<String> = existing_tr_ids
+        let orphaned: HashSet<PairingId> = existing_tr_ids
             .iter()
             .filter(|id| !seen_tool_use_ids.contains(*id))
             .cloned()
             .collect();
 
-        if missing.is_empty() && orphaned.is_empty() && !has_dup_tr {
+        if missing.is_empty() && orphaned.is_empty() && !has_dup_tr && !has_unidentified_tr {
             i += 1;
             continue;
         }
@@ -1178,13 +1299,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             .iter()
             .map(|id| {
                 let sources = tool_use_sources.get(id).cloned().unwrap_or_default();
-                let block = B::ToolResult {
-                    tool_use_id: lingxi_core::types::ToolUseId::from(id.clone()),
-                    content: Utf16JsonProjection::from(SYNTH),
-                    is_error: Some(true),
-                    provider_tool_use_id: None,
-                    content_blocks: None,
-                };
+                let block = pairing_missing_tool_result(id, SYNTH);
                 (block, sources)
             })
             .collect();
@@ -1199,6 +1314,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             usage_limit_note,
             origin,
             turn_origin,
+            interrupted_by_shutdown,
             refused_message_id,
             api_message_override: _,
             ..
@@ -1209,17 +1325,16 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 .cloned()
                 .zip(next_sources.into_iter().flatten().cloned())
                 .collect::<Vec<_>>();
-            if !orphaned.is_empty() || has_dup_tr {
-                let mut seen: HashSet<String> = HashSet::new();
-                c.retain(|(b, _)| match b {
-                    B::ToolResult { tool_use_id, .. } => {
-                        let t = tool_use_id.as_str().to_string();
-                        if orphaned.contains(&t) {
-                            return false;
-                        }
-                        seen.insert(t)
+            if !orphaned.is_empty() || has_dup_tr || has_unidentified_tr {
+                let mut seen: HashSet<PairingId> = HashSet::new();
+                c.retain(|(b, _)| {
+                    if !pairing_is_tool_result(b) {
+                        return true;
                     }
-                    _ => true,
+                    let Some(id) = pairing_tool_result_id(b) else {
+                        return false;
+                    };
+                    !orphaned.contains(&id) && seen.insert(id)
                 });
             }
             let mut patched = synth;
@@ -1227,7 +1342,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             if !patched.is_empty() {
                 result.messages.push(ConversationMessage::User {
                     api_message_override: None,
-                    interrupted_by_shutdown: None,
+                    interrupted_by_shutdown: *interrupted_by_shutdown,
                     refused_message_id: refused_message_id.clone(),
                     id: *uid,
                     content: patched.iter().map(|(block, _)| block.clone()).collect(),
@@ -1575,6 +1690,10 @@ mod convert_test;
 #[cfg(test)]
 #[path = "convert_tool_result_reminder_tests.rs"]
 mod tool_result_reminder_tests;
+
+#[cfg(test)]
+#[path = "convert_pairing_319_test.rs"]
+mod pairing_319_tests;
 
 /// Consume normalized durable history once into canonical SDK model input.
 /// Exact JavaScript UTF-16 strings are retained outside model input for sealing.

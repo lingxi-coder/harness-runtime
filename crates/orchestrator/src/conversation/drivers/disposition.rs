@@ -117,6 +117,7 @@ impl ConversationOrchestrator {
                     // `maxOutputTokensOverride: undefined` on the
                     // stop-hook-blocking continuation).
                     state.recovery.reset_max_output_tokens_recovery();
+                    state.recovery.malformed_tool_use_retry_count = 0;
                     return TurnEndVerdict::Continue;
                 }
                 StopHookFlow::FallThrough => {}

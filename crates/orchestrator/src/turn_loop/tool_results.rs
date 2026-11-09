@@ -1,4 +1,5 @@
 use crate::conversation::ConversationOrchestrator;
+use lingxi_core::host::effort::trim_js_whitespace;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, ToolUseId};
 
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
@@ -29,7 +30,7 @@ pub(super) fn tool_result_is_blank(
     match content_blocks {
         None => content
             .string_at("")
-            .is_some_and(|text| text.trim().is_empty()),
+            .is_some_and(|text| trim_js_whitespace(text).is_empty()),
         Some(blocks) => {
             let Some(count) = blocks.array_len("") else {
                 return false;
@@ -41,7 +42,7 @@ pub(super) fn tool_result_is_blank(
                         && blocks.at_pointer(&format!("{item}/text")).is_some()
                         && blocks
                             .string_at(&format!("{item}/text"))
-                            .is_none_or(|text| text.trim().is_empty())
+                            .is_none_or(|text| trim_js_whitespace(text).is_empty())
                 })
         }
     }
@@ -154,17 +155,8 @@ fn source_text_from_units(units: &[u16]) -> Utf16JsonProjection {
 }
 
 fn preview_source_text(content: &Utf16JsonProjection, limit: usize) -> (Vec<u16>, bool) {
-    let mut units = content.string_units("").unwrap_or_default();
-    if units.len() <= limit {
-        return (units, false);
-    }
-    units.truncate(limit);
-    if let Some(index) = units.iter().rposition(|unit| *unit == u16::from(b'\n')) {
-        if index > limit / 2 {
-            units.truncate(index);
-        }
-    }
-    (units, true)
+    let units = content.string_units("").unwrap_or_default();
+    crate::tool_result_persistence::preview_utf16(&units, limit)
 }
 
 /// Reuse a process runner's rooted output file when building the model-facing
@@ -321,7 +313,7 @@ pub(super) async fn persist_keep_recent_clears(
                     tool_use_id.as_str(),
                     &content,
                     false,
-                    trp::MAX_PERSIST_UTF16_UNITS,
+                    trp::MAX_PERSIST_BYTES,
                 )
                 .await;
                 results.push((tool_use_id.clone(), result));
@@ -409,7 +401,18 @@ pub(super) async fn apply_tool_result_persistence(
         };
     };
 
-    // `x2e` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
+    // `LK` rejects every non-text array item before serializing the body.
+    if content_blocks.is_some_and(|blocks| {
+        (0..blocks.array_len("").unwrap_or_default())
+            .any(|index| blocks.string_at(&format!("/{index}/type")) != Some("text"))
+    }) {
+        return PersistenceOutcome {
+            content,
+            replaced: false,
+        };
+    }
+
+    // `LK` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
     // string body verbatim; the extension follows (`kKr`).
     let (body, is_json) = match content_blocks {
         Some(blocks) => match blocks.to_pretty_json_string() {
@@ -440,7 +443,7 @@ pub(super) async fn apply_tool_result_persistence(
         tool_use_id.as_str(),
         &body,
         is_json,
-        trp::MAX_PERSIST_UTF16_UNITS,
+        trp::MAX_PERSIST_BYTES,
     )
     .await
     {
@@ -461,15 +464,11 @@ pub(super) async fn apply_tool_result_persistence(
         "Persisted tool result to {path_display} ({})",
         trp::format_bytes(persisted.original_size)
     );
-    let (preview, has_more) = match content_blocks {
-        Some(_) => (persisted.preview_utf16.clone(), persisted.has_more),
-        None => preview_source_text(&content, trp::PREVIEW_CHARS),
-    };
     let exact_replacement = trp::wrap_utf16(
         persisted.original_size,
         &path_display,
-        &preview,
-        has_more,
+        &persisted.preview_utf16,
+        persisted.has_more,
         persisted.truncated_at,
     );
     let replacement = source_text_from_units(&exact_replacement);

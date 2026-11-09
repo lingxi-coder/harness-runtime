@@ -1908,7 +1908,7 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
         pinner.subprojection("/context_management").unwrap(),
         source_literal!(null)
     );
-    // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
+    // Native 2.1.319 `Lpo` retains the zeroed usage and trailing fallback credit.
     assert_eq!(
         pinner.subprojection("/diagnostics").unwrap(),
         source_literal!(null)
@@ -1934,9 +1934,14 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
             "cache_creation",
             "inference_geo",
             "iterations",
-            "speed"
+            "speed",
+            "fallback_credit"
         ],
-        "Mqm default usage key order"
+        "native 2.1.319 synthetic default usage key order"
+    );
+    assert_eq!(
+        pusage.subprojection("/fallback_credit").unwrap(),
+        source_literal!(null)
     );
     assert_eq!(
         pusage.subprojection("/output_tokens_details").unwrap(),
@@ -2011,6 +2016,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         "isApiErrorMessage is always stamped"
     );
     assert!(!bare.extra.contains_property("error"), "no error category");
+    assert!(!bare.extra.contains_property("apiError"), "no API-error subtype");
     assert!(
         !bare.extra.contains_property("apiErrorStatus"),
         "no apiErrorStatus"
@@ -2020,6 +2026,30 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         source_literal!("stop_sequence"),
         "no-override keeps the synthetic stop_sequence"
     );
+
+    let malformed = orch.to_jsonl_message_with_inner_id(
+        &msg,
+        "sess",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&ApiErrorEnvelope {
+            api_error: Some("malformed_tool_use_exhausted"),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        malformed.extra.string_at("/apiError"),
+        Some("malformed_tool_use_exhausted")
+    );
+    assert!(!malformed.extra.contains_property("error"));
+    let encoded = serde_json::to_string(&malformed).unwrap();
+    assert!(encoded.find("\"apiError\"").unwrap() < encoded.find("\"isApiErrorMessage\"").unwrap());
 
     // 2. `max_output_tokens` category (max_tokens / context-window cap).
     let cap = orch.to_jsonl_message_with_inner_id(
@@ -2034,6 +2064,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         None,
         None,
         Some(&ApiErrorEnvelope {
+            request_id: None,
+            api_error: None,
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
@@ -2067,6 +2099,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         None,
         None,
         Some(&ApiErrorEnvelope {
+            request_id: None,
+            api_error: None,
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
@@ -2099,6 +2133,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         None,
         None,
         Some(&ApiErrorEnvelope {
+            request_id: None,
+            api_error: None,
             error: Some("rate_limit"),
             api_error_status: Some(429),
             inner_stop_reason: None,
@@ -2133,6 +2169,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         None,
         None,
         Some(&ApiErrorEnvelope {
+            request_id: None,
+            api_error: None,
             error: Some("server_error"),
             api_error_status: None,
             inner_stop_reason: None,

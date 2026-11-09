@@ -4,15 +4,14 @@
 //! `<config_home>/projects/<project>/<session>/tool-results/<id>.txt`
 //! (or `.json` for content arrays) and replaced by a preview envelope.
 //!
-//! Oracle: Claude Code 2.1.263, `src_160701526.js`, `tG` at character
-//! offset 5118 (exclusive persistence), `_7e` at 7648 (preview), and `Vpe`
-//! (envelope). Imported `PIn` / `OIn` / `_L` in `src_157669121.js` supply
-//! directory checking, leaf symlink removal, and checked directory creation.
+//! Oracle: Claude Code 2.1.319, binary offsets 267397971..267414315:
+//! `LK` persists exclusively, `LCe` builds the preview, and `Zye` wraps it.
+//! The source-locked `tool_result_persistence_319_oracle.mjs` executes these
+//! functions and the imported `Q` / `v4` Unicode helpers.
 //!
-//! `tG` returns `originalSize:l.length` and `_7e` slices JavaScript UTF-16
-//! code units. The envelope labels these values as bytes, but they are not
-//! UTF-8 file sizes. Externally persisted Bash output has a separate byte-size
-//! path and must not be used to infer these semantics.
+//! `LK` returns `originalSize:h.length`, measured in JavaScript UTF-16 units,
+//! while its `v4` cap limits encoded UTF-8 bytes. `LCe` measures its preview in
+//! UTF-16 units and drops a trailing high surrogate when cutting the source.
 
 use std::path::{Path, PathBuf};
 
@@ -35,35 +34,33 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// `was = "tool-results"` — the per-session subdirectory name.
 pub const TOOL_RESULTS_DIR: &str = "tool-results";
 
-/// `fAr = 1073741824` — `E2`'s default persist cap (TL-6, 2.1.266).
-///
-/// ⚠️ The name says BYTES because upstream's envelope does, but the value is
-/// compared against `p.length` — JavaScript UTF-16 code units — exactly like
-/// [`Persisted::original_size`] and [`PREVIEW_CHARS`]. A 1 GiB cap over UTF-16
-/// units is up to 3 GiB of UTF-8 on disk for CJK text; that is upstream's
-/// behaviour, inherited deliberately rather than "fixed" into a byte cap that
-/// would truncate a non-ASCII result earlier than the oracle does.
-///
-/// ⛔ Do NOT confuse this with the background-task spool caps in
-/// `tasks::output_manager` (5 GB write / 8 MiB read). Those are `diskOutput.ts`
-/// — a different upstream file guarding a different surface.
-pub const MAX_PERSIST_UTF16_UNITS: usize = 1_073_741_824;
+/// `xJi = 1073741824` — `LK`'s UTF-8 byte cap in Claude Code 2.1.319.
+pub const MAX_PERSIST_BYTES: usize = 1_073_741_824;
 
-/// Truncate to at most `limit` UTF-16 code units without splitting a surrogate
-/// pair — the slice half of upstream's cap helper, WITHOUT the newline-midpoint
-/// trim [`preview_utf16`] applies. A preview may end on a tidy line; a
-/// truncated persisted body must keep every unit that fits.
+/// Compatibility name retained for callers of the earlier UTF-16 cap API.
+/// The limit is now applied to encoded UTF-8 bytes, matching 2.1.319 `v4`.
+pub const MAX_PERSIST_UTF16_UNITS: usize = MAX_PERSIST_BYTES;
+
+/// Source-preserving equivalent of native `v4` / `TextEncoder.encodeInto`.
+/// Lone units consume three UTF-8 bytes at the file boundary, while valid
+/// surrogate pairs consume four bytes and are never divided by the cap.
 #[must_use]
-fn truncate_utf16_units(source: &[u16], limit: usize) -> &[u16] {
-    if source.len() <= limit {
+fn truncate_utf8_bytes(source: &[u16], limit: usize) -> &[u16] {
+    if source.len() <= limit / 3 {
         return source;
     }
-    let mut end = limit;
-    if source[..end]
-        .last()
-        .is_some_and(|u| (0xd800..=0xdbff).contains(u))
-    {
-        end -= 1;
+    let mut bytes = 0;
+    let mut end = 0;
+    for decoded in char::decode_utf16(source.iter().copied()) {
+        let (unit_count, byte_count) = match decoded {
+            Ok(character) => (character.len_utf16(), character.len_utf8()),
+            Err(_) => (1, char::REPLACEMENT_CHARACTER.len_utf8()),
+        };
+        if byte_count > limit - bytes {
+            break;
+        }
+        bytes += byte_count;
+        end += unit_count;
     }
     &source[..end]
 }
@@ -104,7 +101,7 @@ pub struct Persisted {
     pub is_json: bool,
     /// The leading slice echoed back to the model.
     pub preview: String,
-    /// Exact JavaScript preview, including a split surrogate at the slice boundary.
+    /// Exact JavaScript preview, retaining interior lone units.
     pub preview_utf16: Vec<u16>,
     /// Whether the body was longer than the preview.
     pub has_more: bool,
@@ -141,12 +138,12 @@ pub fn format_bytes(n: usize) -> String {
     format!("{}GB", fixed1(mb / 1024.0))
 }
 
-/// Port of claude-code `xKr` (2.1.220 @ 230270990):
+/// Display view of native `LCe` (2.1.319) with its UTF-16-safe `Q` prefix.
 ///
 /// ```text
 /// if(e.length<=t)return{preview:e,hasMore:!1};
 /// let n=e.slice(0,t).lastIndexOf("\n"),o=n>t*0.5?n:t;
-/// return{preview:e.slice(0,o),hasMore:!0}
+/// return{preview:Q(e,o),hasMore:!0}
 /// ```
 ///
 /// Display view of the exact JavaScript preview. Use `preview_utf16` for wire data.
@@ -156,19 +153,28 @@ pub fn preview(s: &str, limit: usize) -> (String, bool) {
     (String::from_utf16_lossy(&units), more)
 }
 
-/// JavaScript `slice` and newline midpoint measured in UTF-16 code units.
+/// Native `LCe` / `Q`: UTF-16 newline midpoint and a safe high-surrogate edge.
 #[must_use]
 pub fn preview_utf16(source: &[u16], limit: usize) -> (Vec<u16>, bool) {
     if source.len() <= limit {
         return (source.to_vec(), false);
     }
-    let mut units = source[..limit].to_vec();
-    if let Some(index) = units.iter().rposition(|unit| *unit == u16::from(b'\n')) {
+    let mut end = limit;
+    if let Some(index) = source[..limit]
+        .iter()
+        .rposition(|unit| *unit == u16::from(b'\n'))
+    {
         if index > limit / 2 {
-            units.truncate(index);
+            end = index;
         }
     }
-    (units, true)
+    if source[..end]
+        .last()
+        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+    {
+        end -= 1;
+    }
+    (source[..end].to_vec(), true)
 }
 
 /// Compose the envelope without converting a lone surrogate into UTF-8.
@@ -417,9 +423,9 @@ pub async fn persist(
     id: &str,
     body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     is_json: bool,
-    cap_utf16_units: usize,
+    cap_bytes: usize,
 ) -> Result<Persisted, String> {
-    // `c = hFt(p, l)` — cut the body to the cap BEFORE anything is written, so
+    // `y = v4(h, a)` — cut the body to the byte cap BEFORE anything is written, so
     // a runaway tool result cannot fill the disk. `originalSize` still reports
     // the FULL length (`p.length`), which is what makes the envelope able to
     // say how much was dropped.
@@ -427,8 +433,8 @@ pub async fn persist(
         .at_pointer("")
         .and_then(|value| value.code_units())
         .ok_or_else(|| "persisted tool body must be a JSON string".to_owned())?;
-    let capped = truncate_utf16_units(units, cap_utf16_units);
-    let truncated_at = (capped.len() != units.len()).then_some(cap_utf16_units);
+    let capped = truncate_utf8_bytes(units, cap_bytes);
+    let truncated_at = (capped.len() != units.len()).then_some(cap_bytes);
     let original_size = units.len();
     // The OS byte boundary follows JS UTF-8 encoding; preview and lengths
     // remain based on the source string before this conversion.
@@ -567,11 +573,8 @@ mod tests {
         let s = "→".repeat(700);
         assert_eq!(preview(&s, PREVIEW_CHARS), (s.clone(), false));
         assert_eq!(preview("😀ab", 2), ("😀".to_string(), true));
-        assert_eq!(preview("😀ab", 1), ("\u{fffd}".to_string(), true));
-        assert_eq!(
-            preview_utf16(&[0xd83d, 0xde00, 97, 98], 1),
-            (vec![0xd83d], true)
-        );
+        assert_eq!(preview("😀ab", 1), ("".to_string(), true));
+        assert_eq!(preview_utf16(&[0xd83d, 0xde00, 97, 98], 1), (vec![], true));
         assert_eq!(preview("→→→\nabcd", 6), ("→→→\nab".to_string(), true));
         assert_eq!(preview("→→→→\nabcd", 6), ("→→→→".to_string(), true));
         assert_eq!(preview("", 0), ("".to_string(), false));
@@ -974,43 +977,122 @@ mod tests {
         );
     }
 
-    // ---- TL-6: the persist cap (oracle `fAr`, 2.1.266) --------------------
+    // ---- Current byte cap (`xJi` / `v4`, 2.1.319) ----------------------
 
     #[test]
     fn the_cap_is_the_oracle_constant_and_is_not_the_spool_cap() {
-        assert_eq!(MAX_PERSIST_UTF16_UNITS, 1_073_741_824);
+        assert_eq!(MAX_PERSIST_BYTES, 1_073_741_824);
+        assert_eq!(MAX_PERSIST_UTF16_UNITS, MAX_PERSIST_BYTES);
         // ⛔ 1 GiB, NOT the background-task spool's 5 GB write cap. The two
         // guard different surfaces and live in different upstream files; the
         // backlog conflated them, which is how this constant went missing.
-        assert_ne!(MAX_PERSIST_UTF16_UNITS, 5 * 1024 * 1024 * 1024);
+        assert_ne!(MAX_PERSIST_BYTES, 5 * 1024 * 1024 * 1024);
     }
 
     #[test]
-    fn truncation_counts_utf16_units_and_never_splits_a_surrogate() {
-        // An astral char is ONE `char` but TWO UTF-16 units, so a cap of 3 over
-        // "a😀b" must keep "a😀" — cutting at 3 would leave a lone high
-        // surrogate, which is how a persisted file ends in a replacement char.
+    fn truncation_counts_utf8_bytes_and_never_splits_a_surrogate() {
         assert_eq!(
-            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 3),
+            truncate_utf8_bytes(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 5),
             "a\u{1F600}".encode_utf16().collect::<Vec<_>>()
         );
         assert_eq!(
-            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 2),
+            truncate_utf8_bytes(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 4),
             "a".encode_utf16().collect::<Vec<_>>()
         );
         assert_eq!(
-            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 4),
+            truncate_utf8_bytes(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 6),
             "a\u{1F600}b".encode_utf16().collect::<Vec<_>>()
         );
         assert_eq!(
-            truncate_utf16_units(&"abc".encode_utf16().collect::<Vec<_>>(), 0),
+            truncate_utf8_bytes(&"abc".encode_utf16().collect::<Vec<_>>(), 0),
             "".encode_utf16().collect::<Vec<_>>()
         );
         // Under the cap is returned untouched.
         assert_eq!(
-            truncate_utf16_units(&"abc".encode_utf16().collect::<Vec<_>>(), 99),
+            truncate_utf8_bytes(&"abc".encode_utf16().collect::<Vec<_>>(), 99),
             "abc".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    fn native_319_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/tool_result_persistence_319.json"
+        ))
+        .unwrap()
+    }
+
+    fn fixture_units(value: &serde_json::Value) -> Vec<u16> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn native_319_preview_unicode_and_newline_boundaries() {
+        for case in native_319_fixture()["previewCases"].as_array().unwrap() {
+            let input = fixture_units(&case["inputUnits"]);
+            let limit = usize::try_from(case["limit"].as_u64().unwrap()).unwrap();
+            assert_eq!(
+                preview_utf16(&input, limit),
+                (
+                    fixture_units(&case["expectedPreviewUnits"]),
+                    case["hasMore"].as_bool().unwrap()
+                ),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_319_caps_keep_source_units_and_write_exact_utf8_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(TOOL_RESULTS_DIR);
+        for case in native_319_fixture()["capCases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let units = fixture_units(&case["inputUnits"]);
+            let source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units,
+            )
+            .unwrap();
+            let cap = usize::try_from(case["capBytes"].as_u64().unwrap()).unwrap();
+            let persisted = persist(root.path(), &dir, name, &source, false, cap)
+                .await
+                .unwrap();
+            let written = std::fs::read(&persisted.filepath).unwrap();
+            let hex = written
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(hex, case["expectedFileHex"].as_str().unwrap(), "{name}");
+            assert!(written.len() <= cap, "{name}");
+            assert_eq!(
+                persisted.original_size,
+                usize::try_from(case["originalSize"].as_u64().unwrap()).unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                persisted.truncated_at,
+                case["truncatedAtBytes"]
+                    .as_u64()
+                    .map(|value| usize::try_from(value).unwrap()),
+                "{name}"
+            );
+            assert_eq!(
+                persisted.preview_utf16,
+                fixture_units(&case["expectedPreviewUnits"]),
+                "{name}"
+            );
+            assert_eq!(
+                persisted.has_more,
+                case["hasMore"].as_bool().unwrap(),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

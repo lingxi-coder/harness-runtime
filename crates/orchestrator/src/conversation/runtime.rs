@@ -1,5 +1,32 @@
 //! Cohesive session-memory runtime state and bounded persistence helpers.
 
+#[cfg(test)]
+mod synthetic_api_error_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn synthetic_identity_is_atomic_and_cleared_on_session_reset() {
+        let store = Arc::new(TranscriptStore::new());
+        let outer = MessageId::new();
+        let identities = std::thread::scope(|scope| {
+            let threads = (0..8)
+                .map(|_| {
+                    let store = store.clone();
+                    scope.spawn(move || store.synthetic_api_error_identity(outer))
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+        assert_ne!(identities[0].0, outer.as_uuid());
+        store.reset_session_scoped().await;
+        assert_ne!(store.synthetic_api_error_identity(outer).0, identities[0].0);
+    }
+}
+
 use super::*;
 
 /// Session owner for tool-hook publication generations. A normal per-turn
@@ -77,6 +104,10 @@ impl Drop for SessionToolHookGeneration {
 
 /// Transcript persistence and the side tables consumed while serializing a turn.
 pub(crate) struct TranscriptStore {
+    /// One Native synthetic construction per outer UUID: independent inner
+    /// message id and creation time, reused by persistence/public projections.
+    synthetic_api_error_identities:
+        std::sync::Mutex<std::collections::HashMap<MessageId, (uuid::Uuid, String)>>,
     /// Per-session provider recovery ownership, replaced when switching sessions.
     pub(crate) thinking_recovery:
         std::sync::RwLock<llm_runtime::thinking_scope::ThinkingRecoveryScope>,
@@ -243,6 +274,7 @@ pub(crate) struct TranscriptStore {
 impl TranscriptStore {
     pub(crate) fn new() -> Self {
         Self {
+            synthetic_api_error_identities: std::sync::Mutex::new(std::collections::HashMap::new()),
             thinking_recovery: std::sync::RwLock::new(Default::default()),
             jsonl_writer: None,
             storage_pauses: Mutex::new(std::collections::HashMap::new()),
@@ -266,7 +298,27 @@ impl TranscriptStore {
         }
     }
 
+    pub(crate) fn synthetic_api_error_identity(&self, outer_id: MessageId) -> (uuid::Uuid, String) {
+        self.synthetic_api_error_identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(outer_id)
+            .or_insert_with(|| {
+                (
+                    uuid::Uuid::new_v4(),
+                    chrono::Utc::now()
+                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                        .to_string(),
+                )
+            })
+            .clone()
+    }
+
     pub(crate) async fn reset_session_scoped(&self) {
+        self.synthetic_api_error_identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         *self
             .thinking_recovery
             .write()

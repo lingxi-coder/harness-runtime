@@ -42,7 +42,9 @@ fn observe_mod_stream_response(
         *accumulator = Some(ResponseAccumulator::default());
         return None;
     }
-    let result = accumulator.as_mut().map(|value| value.observe(event.clone()));
+    let result = accumulator
+        .as_mut()
+        .map(|value| value.observe(event.clone()));
     let response = match result {
         Some(Ok(ResponseAccumulatorUpdate::Completed(response))) => Some(response),
         Some(Err(_)) => {
@@ -204,7 +206,7 @@ struct OpenedStreamingIteration<'a> {
     turn_id: String,
     display_hook_active: bool,
     turn_step_hook_active: bool,
-    mod_model_state: Option<Arc<StdMutex<Option<(String, Option<String>)>>>>,
+    mod_model_state: Option<Arc<StdMutex<Option<CapturedModRequest>>>>,
     api_call_started: std::time::Instant,
     stream_started: tokio::time::Instant,
     api_success_message_count: u32,
@@ -306,6 +308,35 @@ async fn send_mod_step_output(
     Ok(())
 }
 
+/// Facts captured by the Mod worker before polling the physical provider.
+/// The worker is spawned, so its task-local state is not the parent query's.
+#[derive(Clone)]
+struct CapturedModRequest {
+    route: crate::query_model::ModelRoute,
+    refusal_text: Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
+}
+
+impl CapturedModRequest {
+    fn capture(
+        api: &dyn crate::conversation::OrchestratorApiClient,
+        route: crate::query_model::ModelRoute,
+    ) -> Self {
+        let refusal_text = crate::server_fallback::resolve_refusal_text_for_api(api, &route);
+        Self {
+            route,
+            refusal_text,
+        }
+    }
+
+    fn publish(self) -> crate::query_model::ModelRoute {
+        crate::server_fallback::record_request_route_with_frozen_refusal_text(
+            self.route.clone(),
+            self.refusal_text,
+        );
+        self.route
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mod_turn_step_stream(
     host: Arc<hooks::mods::ModHost>,
@@ -344,7 +375,7 @@ fn mod_turn_step_stream(
     >,
 ) -> (
     futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
-    Arc<StdMutex<Option<(String, Option<String>)>>>,
+    Arc<StdMutex<Option<CapturedModRequest>>>,
 ) {
     let wire = Arc::new(StdMutex::new(TurnStepEncoder::default()));
     let input_projection = Utf16JsonProjection::from_serde_value(&input)
@@ -396,6 +427,8 @@ fn mod_turn_step_stream(
             let source_chat_dispatch_check = chat_dispatch_check.clone();
             let source_output = output.clone();
             let source_model_source = configured_model_source.clone();
+            let fallback_main_api = main_api.clone();
+            let fallback_model_state = worker_model.clone();
             let source = move |forwarded: Utf16JsonProjection| {
                 let api = api.clone();
                 let main_api = main_api.clone();
@@ -420,6 +453,7 @@ fn mod_turn_step_stream(
                 let request_capture = source_request_capture.clone();
                 let request_dispatch_observer =
                     observe_main_dispatch(source_dispatch_observer.clone(), &source_output);
+                let capture_native_frames = source_output.wants_partial_stream_events();
                 let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
                 let native_anthropic_request_context =
                     source_native_anthropic_request_context.clone();
@@ -515,7 +549,13 @@ fn mod_turn_step_stream(
                     let effort_override = forwarded
                         .string_at("/effort")
                         .filter(|effort| Some(*effort) != original_effort.as_deref());
-                    *effective_model.lock().unwrap() = Some((model.clone(), profile.clone()));
+                    *effective_model.lock().unwrap() = Some(CapturedModRequest::capture(
+                        main_api.as_ref(),
+                        crate::query_model::ModelRoute {
+                            model: model.clone(),
+                            profile: profile.clone(),
+                        },
+                    ));
                     requested_model.store(true, std::sync::atomic::Ordering::Release);
                     let mut snapshot = snapshot;
                     let mut turn_reminders = Vec::new();
@@ -546,24 +586,29 @@ fn mod_turn_step_stream(
                             configured_model_source.clone(),
                         );
                     let stream = retry_scope
-                        .run(request_capture.scope(api.stream_with_effort_override(
-                            &model,
-                            profile.as_deref(),
-                            system_prompt.as_ref(),
-                            snapshot,
-                            tools,
-                            None,
-                            effort_override,
-                            tool_result_reminder_suffixes,
-                            &query_source,
-                            skip_global_cache_for_system_prompt,
-                            request_dispatch_admission,
-                            request_dispatch_observer.clone(),
-                            native_anthropic_request_context,
-                            typed_attachment_ids,
-                            task_deliveries,
-                            model_source,
-                        )))
+                        .run(request_capture.scope(
+                            llm_runtime::native_stream_capture::scope_requested(
+                                capture_native_frames,
+                                api.stream_with_effort_override(
+                                    &model,
+                                    profile.as_deref(),
+                                    system_prompt.as_ref(),
+                                    snapshot,
+                                    tools,
+                                    None,
+                                    effort_override,
+                                    tool_result_reminder_suffixes,
+                                    &query_source,
+                                    skip_global_cache_for_system_prompt,
+                                    request_dispatch_admission,
+                                    request_dispatch_observer.clone(),
+                                    native_anthropic_request_context,
+                                    typed_attachment_ids,
+                                    task_deliveries,
+                                    model_source,
+                                ),
+                            ),
+                        ))
                         .await
                         .map_err(|error| {
                             *physical_error.lock().unwrap() = Some(error.clone());
@@ -583,35 +628,35 @@ fn mod_turn_step_stream(
                         llm_runtime::stream_accumulator::ResponseAccumulator::default(),
                     )));
                     let stream = stream.then(move |item| {
-                    let response_accumulator = response_accumulator.clone();
-                    let chunk_wire = chunk_wire.clone();
-                    let chunk_refs = chunk_refs.clone();
-                    let physical_error = physical_error.clone();
-                    async move {
-                        match item {
-                            Ok(event) => {
-                                let streamed_response = observe_mod_stream_response(
-                                    &mut response_accumulator.lock().unwrap(),
-                                    &event,
-                                );
-                                let held = {
-                                    let mut wire = chunk_wire.lock().unwrap();
-                                    let held = wire.push(event).clone();
-                                    if let Some(response) = streamed_response {
-                                        wire.note_stream_response(held.reference, response);
-                                    }
-                                    held
-                                };
-                                chunk_refs.lock().unwrap().push(held.reference);
-                                Ok(held.chunk)
-                            }
-                            Err(error) => {
-                                *physical_error.lock().unwrap() = Some(error.clone());
-                                Err(hooks::mods::ModError::Hook(error.to_string()))
+                        let response_accumulator = response_accumulator.clone();
+                        let chunk_wire = chunk_wire.clone();
+                        let chunk_refs = chunk_refs.clone();
+                        let physical_error = physical_error.clone();
+                        async move {
+                            match item {
+                                Ok(event) => {
+                                    let streamed_response = observe_mod_stream_response(
+                                        &mut response_accumulator.lock().unwrap(),
+                                        &event,
+                                    );
+                                    let held = {
+                                        let mut wire = chunk_wire.lock().unwrap();
+                                        let held = wire.push(event).clone();
+                                        if let Some(response) = streamed_response {
+                                            wire.note_stream_response(held.reference, response);
+                                        }
+                                        held
+                                    };
+                                    chunk_refs.lock().unwrap().push(held.reference);
+                                    Ok(held.chunk)
+                                }
+                                Err(error) => {
+                                    *physical_error.lock().unwrap() = Some(error.clone());
+                                    Err(hooks::mods::ModError::Hook(error.to_string()))
+                                }
                             }
                         }
-                    }
-                });
+                    });
                     let turn_id = forwarded
                         .string_at("/turnId")
                         .unwrap_or_default()
@@ -715,28 +760,38 @@ fn mod_turn_step_stream(
                                 ),
                                 chat_dispatch_check.clone(),
                             );
+                        *fallback_model_state.lock().unwrap() = Some(CapturedModRequest::capture(
+                            fallback_main_api.as_ref(),
+                            crate::query_model::ModelRoute {
+                                model: fallback_model.clone(),
+                                profile: fallback_profile.clone(),
+                            },
+                        ));
                         let stream = fallback_retry_scope
                             .run(fallback_request_capture.scope(
-                                fallback_api.stream_with_effort_override(
-                                    &fallback_model,
-                                    fallback_profile.as_deref(),
-                                    fallback_system.as_ref(),
-                                    fallback_snapshot,
-                                    fallback_tools,
-                                    None,
-                                    None,
-                                    fallback_tool_result_reminder_suffixes,
-                                    &fallback_query_source,
-                                    skip_global_cache_for_system_prompt,
-                                    request_dispatch_admission,
-                                    observe_main_dispatch(
-                                        request_dispatch_observer.clone(),
-                                        &fallback_output,
+                                llm_runtime::native_stream_capture::scope_requested(
+                                    fallback_output.wants_partial_stream_events(),
+                                    fallback_api.stream_with_effort_override(
+                                        &fallback_model,
+                                        fallback_profile.as_deref(),
+                                        fallback_system.as_ref(),
+                                        fallback_snapshot,
+                                        fallback_tools,
+                                        None,
+                                        None,
+                                        fallback_tool_result_reminder_suffixes,
+                                        &fallback_query_source,
+                                        skip_global_cache_for_system_prompt,
+                                        request_dispatch_admission,
+                                        observe_main_dispatch(
+                                            request_dispatch_observer.clone(),
+                                            &fallback_output,
+                                        ),
+                                        fallback_native_anthropic_request_context.clone(),
+                                        fallback_typed_attachment_ids,
+                                        fallback_task_deliveries,
+                                        fallback_model_source,
                                     ),
-                                    fallback_native_anthropic_request_context.clone(),
-                                    fallback_typed_attachment_ids,
-                                    fallback_task_deliveries,
-                                    fallback_model_source,
                                 ),
                             ))
                             .await;
@@ -1296,16 +1351,15 @@ impl StreamingTurnDriver<'_> {
             // Poll one item before returning so connect-phase provider errors
             // still reach prompt-too-long and model-fallback handling below.
             let first = stream.next().await;
-            if let Some((forwarded_model, forwarded_profile)) =
-                effective_model.lock().unwrap().clone()
-            {
-                model = forwarded_model;
-                model_profile = forwarded_profile;
+            let physical_route = effective_model
+                .lock()
+                .unwrap()
+                .clone()
+                .map(CapturedModRequest::publish);
+            if let Some(route) = physical_route {
+                model = route.model;
+                model_profile = route.profile;
             }
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-                model: model.clone(),
-                profile: model_profile.clone(),
-            });
             match first {
                 Some(Ok(event)) => Ok(futures::stream::once(async move { Ok(event) })
                     .chain(stream)
@@ -1314,10 +1368,13 @@ impl StreamingTurnDriver<'_> {
                 None => Ok(stream),
             }
         } else {
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-                model: model.clone(),
-                profile: model_profile.clone(),
-            });
+            crate::server_fallback::record_request_route_with_refusal_text(
+                orch,
+                crate::query_model::ModelRoute {
+                    model: model.clone(),
+                    profile: model_profile.clone(),
+                },
+            );
             crate::prompt::async_hook_response::retain_current_async_hook_reminders(
                 &mut snapshot,
                 &mut turn_reminders,
@@ -1336,27 +1393,30 @@ impl StreamingTurnDriver<'_> {
                 Box::pin(
                     retry_scope.run(
                         orch.model_runtime.prompt_cache_capture.scope(
-                            orch.streaming_api.stream_with_effort_override(
-                                &model,
-                                model_profile.as_deref(),
-                                system_prompt.as_ref(),
-                                snapshot,
-                                tool_declarations.clone(),
-                                max_output_budget,
-                                None,
-                                tool_result_reminder_suffixes.clone(),
-                                crate::config::sanitize_query_source(&orch.config.query_source),
-                                skip_global_cache_for_system_prompt,
-                                request_dispatch_admission,
-                                request_dispatch_observer,
-                                native_anthropic_request_context.clone(),
-                                typed_attachment_ids,
-                                task_deliveries,
-                                orch.main_model_source_for_request(
+                            llm_runtime::native_stream_capture::scope_requested(
+                                orch.output.wants_partial_stream_events(),
+                                orch.streaming_api.stream_with_effort_override(
                                     &model,
                                     model_profile.as_deref(),
-                                )
-                                .await,
+                                    system_prompt.as_ref(),
+                                    snapshot,
+                                    tool_declarations.clone(),
+                                    max_output_budget,
+                                    None,
+                                    tool_result_reminder_suffixes.clone(),
+                                    crate::config::sanitize_query_source(&orch.config.query_source),
+                                    skip_global_cache_for_system_prompt,
+                                    request_dispatch_admission,
+                                    request_dispatch_observer,
+                                    native_anthropic_request_context.clone(),
+                                    typed_attachment_ids,
+                                    task_deliveries,
+                                    orch.main_model_source_for_request(
+                                        &model,
+                                        model_profile.as_deref(),
+                                    )
+                                    .await,
+                                ),
                             ),
                         ),
                     ),
@@ -1539,10 +1599,13 @@ impl StreamingTurnDriver<'_> {
                     false,
                 )
                 .await;
-                crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-                    model: recov_model.clone(),
-                    profile: recov_profile.clone(),
-                });
+                crate::server_fallback::record_request_route_with_refusal_text(
+                    orch,
+                    crate::query_model::ModelRoute {
+                        model: recov_model.clone(),
+                        profile: recov_profile.clone(),
+                    },
+                );
                 let recovered_result = call_api_with_ptl_recovery(
                     orch,
                     system_prompt.as_ref(),
@@ -1885,10 +1948,13 @@ impl StreamingTurnDriver<'_> {
             guarded_async_hook_reminders,
             user_cancel.as_ref(),
         );
-        crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-            model: non_stream_model.clone(),
-            profile: non_stream_profile.clone(),
-        });
+        crate::server_fallback::record_request_route_with_refusal_text(
+            orch,
+            crate::query_model::ModelRoute {
+                model: non_stream_model.clone(),
+                profile: non_stream_profile.clone(),
+            },
+        );
         let request_history = non_stream_snapshot.clone();
         let resp = side_model_request(
             orch,
@@ -2524,32 +2590,35 @@ impl StreamingTurnDriver<'_> {
                                 Box::pin(
                                     retry_scope.run(
                                         orch.model_runtime.prompt_cache_capture.scope(
-                                            orch.streaming_api.stream_with_effort_override(
-                                                &re_model,
-                                                re_profile.as_deref(),
-                                                system_prompt.as_ref(),
-                                                re_snapshot,
-                                                llm_runtime::convert::to_tool_declarations(
-                                                    wire_tools.clone(),
-                                                )
-                                                .map_err(OrchestratorError::ApiCall)?,
-                                                None,
-                                                None,
-                                                tool_result_reminder_suffixes.clone(),
-                                                crate::config::sanitize_query_source(
-                                                    &orch.config.query_source,
-                                                ),
-                                                skip_global_cache_for_system_prompt,
-                                                request_dispatch_admission,
-                                                request_dispatch_observer,
-                                                native_anthropic_request_context.clone(),
-                                                typed_attachment_ids,
-                                                task_deliveries,
-                                                orch.main_model_source_for_request(
+                                            llm_runtime::native_stream_capture::scope_requested(
+                                                orch.output.wants_partial_stream_events(),
+                                                orch.streaming_api.stream_with_effort_override(
                                                     &re_model,
                                                     re_profile.as_deref(),
-                                                )
-                                                .await,
+                                                    system_prompt.as_ref(),
+                                                    re_snapshot,
+                                                    llm_runtime::convert::to_tool_declarations(
+                                                        wire_tools.clone(),
+                                                    )
+                                                    .map_err(OrchestratorError::ApiCall)?,
+                                                    None,
+                                                    None,
+                                                    tool_result_reminder_suffixes.clone(),
+                                                    crate::config::sanitize_query_source(
+                                                        &orch.config.query_source,
+                                                    ),
+                                                    skip_global_cache_for_system_prompt,
+                                                    request_dispatch_admission,
+                                                    request_dispatch_observer,
+                                                    native_anthropic_request_context.clone(),
+                                                    typed_attachment_ids,
+                                                    task_deliveries,
+                                                    orch.main_model_source_for_request(
+                                                        &re_model,
+                                                        re_profile.as_deref(),
+                                                    )
+                                                    .await,
+                                                ),
                                             ),
                                         ),
                                     ),
@@ -3390,6 +3459,8 @@ impl StreamingTurnDriver<'_> {
         // top-level `model_error` catch, not this finalize path).
         if let Some(cause) = partial_finalize {
             let env = ApiErrorEnvelope {
+                request_id: None,
+                api_error: None,
                 error: Some("server_error"),
                 api_error_status: None,
                 terminal_reason: None,
@@ -3492,13 +3563,14 @@ impl StreamingTurnDriver<'_> {
             unreachable!("a Mod continuation always owns a stream")
         };
         let first = tail.next().await?;
-        if let Some((model, profile)) = opened
+        if let Some(route) = opened
             .mod_model_state
             .as_ref()
             .and_then(|state| state.lock().unwrap().clone())
+            .map(CapturedModRequest::publish)
         {
-            opened.model = model;
-            opened.model_profile = profile;
+            opened.model = route.model;
+            opened.model_profile = route.profile;
         }
         if let Ok(HistoryEvent::MessageStart { response }) = &first {
             opened.model = response.model.clone();
@@ -4000,9 +4072,6 @@ impl StreamingTurnDriver<'_> {
                     )
                 {
                     orch.turn_span.note_assistant_response(0);
-                    if pumped.stop_reason.as_deref() != Some("tool_use") {
-                        loop_state.malformed_tool_use_retried = false;
-                    }
                     continuation = next_mod_response;
                     continue;
                 }
@@ -4776,6 +4845,98 @@ mod mod_response_accumulator_tests {
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta,
     };
+
+    struct RefusalFactsApi {
+        snapshot: StdMutex<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::conversation::OrchestratorApiClient for RefusalFactsApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, LlmError> {
+            unreachable!("the freeze regression does not dispatch a provider request")
+        }
+
+        fn refusal_api_text_snapshot(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError>
+        {
+            assert_eq!(model, "claude-sonnet-5-5");
+            assert_eq!(profile, Some("provider-a"));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(self.snapshot.lock().unwrap().clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_request_publishes_facts_captured_before_the_first_provider_poll() {
+        use lingxi_core::host::refusal_api_text::{
+            RefusalApiTextSnapshot, RefusalBrandCopyOwned, RefusalProviderKind,
+        };
+        let before = RefusalApiTextSnapshot {
+            serving_model: Some("claude-sonnet-5-5".into()),
+            model_eligible: true,
+            display_label: Some("Original model label".into()),
+            model_family: Some("sonnet".into()),
+            fable_copy_suppressed: false,
+            opus_5_5_exception: false,
+            help_url: Some("https://support.claude.com/en/articles/8106465".into()),
+            provider: RefusalProviderKind::FirstParty,
+            interactive: true,
+            feedback_eligible: true,
+            brand: RefusalBrandCopyOwned {
+                api_error_prefix: "API Error".into(),
+                product_name: "LingXi".into(),
+                generic_model_label: "LingXi".into(),
+            },
+        };
+        let api = Arc::new(RefusalFactsApi {
+            snapshot: StdMutex::new(before.clone()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let root = tempfile::tempdir().unwrap();
+        let owner = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+        let route = crate::query_model::ModelRoute {
+            model: "claude-sonnet-5-5".into(),
+            profile: Some("provider-a".into()),
+        };
+        let captured = CapturedModRequest::capture(owner.api.as_ref(), route);
+        let mut provider = futures::stream::once(async {
+            let mut current = api.snapshot.lock().unwrap();
+            current.display_label = Some("Changed after provider poll".into());
+            current.model_eligible = false;
+            current.feedback_eligible = false;
+        })
+        .boxed();
+        provider.next().await;
+        crate::server_fallback::scope_query(async {
+            captured.publish();
+            assert_eq!(
+                crate::server_fallback::refusal_text_snapshot("claude-sonnet-5-5"),
+                Some(before)
+            );
+        })
+        .await;
+        assert_eq!(
+            api.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "publishing a spawned worker's snapshot must not resolve current host facts again"
+        );
+    }
 
     fn text_response(id: &str, text: &str) -> Vec<HistoryEvent> {
         vec![

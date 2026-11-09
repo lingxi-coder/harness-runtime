@@ -10,7 +10,7 @@ use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
     execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
-    MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE,
+    MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_LIMIT, MALFORMED_TOOL_USE_RETRY_NUDGE,
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
@@ -949,6 +949,10 @@ fn entrypoint_value() -> String {
 ///   carries `stop_reason:"refusal", error:"invalid_request"`).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ApiErrorEnvelope {
+    /// Original refused request id; display suffix validation is independent.
+    pub request_id: Option<String>,
+    /// Native API-error subtype, independent of the broad error category.
+    pub api_error: Option<&'static str>,
     pub error: Option<&'static str>,
     pub api_error_status: Option<u16>,
     /// Native terminal reason when the classified API failure has a specialized exit.
@@ -1112,6 +1116,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::ContextState(_) => (Some("unknown"), None),
     };
     ApiErrorEnvelope {
+        request_id: None,
+        api_error: None,
         error,
         api_error_status: parsed_status.or(api_error_status),
         terminal_reason,
