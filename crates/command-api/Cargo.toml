@@ -62,6 +62,7 @@ builtin-handlers = [
 ]
 
 [dev-dependencies]
+tempfile = "3"
 orchestrator = { path = "../orchestrator" }
 tool-api = { path = "../tool-api" }
 llm-runtime = { path = "../llm-runtime" }

@@ -77,6 +77,7 @@ fn model_supports_1m(model: &str) -> bool {
             canonical.as_str(),
             "claude-sonnet-5"
                 | "claude-sonnet-5-5"
+                | "claude-haiku-5-5"
                 | "claude-opus-5-5"
                 | "claude-opus-4-6"
                 | "claude-opus-4-7"
@@ -103,6 +104,7 @@ pub fn model_native_1m(model: &str) -> bool {
         canonical.as_str(),
         "claude-sonnet-5"
             | "claude-sonnet-5-5"
+            | "claude-haiku-5-5"
             | "claude-opus-5-5"
             | "claude-opus-4-7"
             | "claude-opus-4-8"
@@ -118,7 +120,10 @@ pub fn model_native_1m(model: &str) -> bool {
 /// Ports `firstPartyNameToCanonical` (`utils/model/model.ts:217-270`). The
 /// Bedrock-ARN `resolveOverriddenModel` indirection in `getCanonicalName` is a
 /// no-op for the substring checks we perform, so it is folded in here.
-fn canonical_name(model: &str) -> String {
+/// Canonical identity for the Native window/output table. Unlike the older
+/// thinking-family aliases, this preserves distinct 5.5 model versions.
+#[must_use]
+pub fn canonical_name(model: &str) -> String {
     let name = model.to_lowercase();
     if name.contains("claude-fable-5-1") {
         return "claude-fable-5-1".to_string();
@@ -132,6 +137,9 @@ fn canonical_name(model: &str) -> String {
     }
     if name.contains("claude-sonnet-5-5") {
         return "claude-sonnet-5-5".to_string();
+    }
+    if name.contains("claude-haiku-5-5") {
+        return "claude-haiku-5-5".to_string();
     }
     if name.contains("claude-opus-5") {
         return "claude-opus-5".to_string();
@@ -296,6 +304,7 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
             | "claude-opus-5-5"
             | "claude-sonnet-5"
             | "claude-sonnet-5-5"
+            | "claude-haiku-5-5"
             | "claude-fable-5-1"
             | "claude-mythos-5-1"
     ) {
@@ -406,6 +415,30 @@ mod tests {
             model_max_output_tokens("claude-sonnet-5-5"),
             (128_000, 128_000)
         );
+    }
+
+    #[test]
+    fn native_319_haiku_5_5_retains_identity_and_limits_on_hosted_routes() {
+        // 2.1.319 catalog @260744821: native_1m/supports_1m_beta=true,
+        // max_output_tokens.default/upper=128000. Hosted names must retain
+        // that identity rather than falling through to the old 200k/32k table.
+        for model in [
+            "claude-haiku-5-5",
+            "us.anthropic.claude-haiku-5-5",
+            "anthropic.claude-haiku-5-5",
+            "publishers/anthropic/models/claude-haiku-5-5",
+            "claude-haiku-5-5@20261007",
+        ] {
+            assert_eq!(canonical_name(model), "claude-haiku-5-5", "{model}");
+            assert!(model_native_1m(model), "{model}");
+            assert!(model_supports_1m(model), "{model}");
+            assert_eq!(context_window_for_model(model, &[]), 1_000_000, "{model}");
+            assert_eq!(
+                model_max_output_tokens(model),
+                (128_000, 128_000),
+                "{model}"
+            );
+        }
     }
 
     #[test]

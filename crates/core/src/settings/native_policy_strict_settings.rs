@@ -586,7 +586,9 @@ static MODEL_SETTINGS_ROW_FIELDS: &[ObjectFieldRule] = &[
         "maxEffortLevel",
         ValueRule::Enum(&["low", "medium", "high", "xhigh", "max"]),
     ),
-    required_field("autoCompactWindow", ValueRule::AutoCompactWindow),
+    // 2.1.319 `pd()` is optional().catch(undefined), including inside the
+    // auto/number union. Missing or invalid windows retain effort siblings.
+    optional_catch_field("autoCompactWindow", ValueRule::AutoCompactWindow),
 ];
 static MODEL_SETTINGS_ROW_RULE: ObjectRule =
     object_rule(MODEL_SETTINGS_ROW_FIELDS, UnknownFields::Preserve, false);
@@ -3043,6 +3045,14 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_window_is_optional_and_invalid_windows_retain_effort_siblings() {
+        let result = validate(&parse(r#"{"modelSettings":{"missing":{"effortLevel":"high"},"invalid":{"effortLevel":"low","autoCompactWindow":17}}}"#));
+        assert_eq!(result.status, NativeStrictSettingsStatus::Valid);
+        assert_eq!(result.projection.string_at("/modelSettings/missing/effortLevel"), Some("high"));
+        assert_eq!(result.projection.string_at("/modelSettings/invalid/effortLevel"), Some("low"));
+        assert!(result.projection.at_pointer("/modelSettings/invalid/autoCompactWindow").is_none());
+    }
     #[cfg(windows)]
     #[test]
     fn windows_absolute_paths_require_ascii_drive_letters() {
@@ -3346,7 +3356,8 @@ mod tests {
                 .string_at("/modelSettings/claude-sonnet-4-6/effortLevel"),
             Some("high")
         );
-        assert!(valid.projection.at_pointer("/modelSettings/bad").is_none());
+        assert!(valid.projection.at_pointer("/modelSettings/bad").is_some());
+        assert!(valid.projection.at_pointer("/modelSettings/bad/autoCompactWindow").is_none());
         assert!(valid
             .projection
             .at_pointer("/pluginConfigs/review@local/unknown")

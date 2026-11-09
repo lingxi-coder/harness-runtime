@@ -837,9 +837,9 @@ mod source_tests {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn continuation_matches_official_318_bytes() {
+    fn continuation_matches_official_319_bytes() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/claude_2_1_318_compact.json"
+            "../tests/fixtures/claude_2_1_319_compact.json"
         ))
         .unwrap();
         for case in fixture["continuations"].as_array().unwrap() {
@@ -1321,12 +1321,12 @@ mod tests {
         );
     }
     #[test]
-    fn compact_prompt_matches_official_318_bytes_plus_explicit_host_provenance() {
+    fn compact_prompt_matches_official_319_bytes_plus_explicit_host_provenance() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/claude_2_1_318_compact.json"
+            "../tests/fixtures/claude_2_1_319_compact.json"
         ))
         .unwrap();
-        assert_eq!(fixture["version"], "2.1.318");
+        assert_eq!(fixture["version"], "2.1.319");
         assert_eq!(
             BASE_COMPACT_PROMPT.as_bytes(),
             fixture["basePrompt"].as_str().unwrap().as_bytes()
@@ -1345,6 +1345,39 @@ mod tests {
             assert_eq!(
                 format_compact_summary(case["raw"].as_str().unwrap()).as_bytes(),
                 case["expected"].as_str().unwrap().as_bytes()
+            );
+        }
+    }
+    #[test]
+    fn partial_prompts_match_official_319_bytes_plus_explicit_host_provenance() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_319_compact.json"
+        ))
+        .unwrap();
+        for case in fixture["partialPrompts"].as_array().unwrap() {
+            let direction = match case["direction"].as_str().unwrap() {
+                "from" => SummarizeDirection::From,
+                "up_to" => SummarizeDirection::UpTo,
+                other => panic!("unknown summarize direction: {other}"),
+            };
+            let native = case["expected"].as_str().unwrap();
+            let native_body = native.strip_suffix(NO_TOOLS_TRAILER).unwrap();
+            let expected =
+                format!("{native_body}{COMPACT_SUMMARY_PROVENANCE_GUIDANCE}{NO_TOOLS_TRAILER}");
+            let custom = case["custom"].as_str();
+            assert_eq!(
+                get_summarize_prompt(custom, direction).as_bytes(),
+                expected.as_bytes(),
+                "direction: {direction:?}, custom: {custom:?}"
+            );
+            let custom_source = custom.map(Utf16JsonProjection::from);
+            assert_eq!(
+                get_summarize_prompt_source(custom_source.as_ref(), direction)
+                    .string_at("")
+                    .unwrap()
+                    .as_bytes(),
+                expected.as_bytes(),
+                "source direction: {direction:?}, custom: {custom:?}"
             );
         }
     }

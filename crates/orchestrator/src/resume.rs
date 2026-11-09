@@ -1764,6 +1764,7 @@ pub(crate) fn native_request_history_from_messages(
         synthetic_closing_ids,
         task_deliveries,
         task_delivery_envelopes,
+        assistant_usage: crate::conversation::context_usage::usage_metadata_from_rows(messages),
     }
 }
 
@@ -2750,6 +2751,28 @@ pub(crate) fn main_loop_latest_assistant_usage_from_messages(
 pub(crate) fn native_usage_context_tokens_from_projection(
     usage: &Utf16JsonProjection,
 ) -> Option<f64> {
+    let [input, cache_creation, cache_read, output] = native_usage_token_counts(usage)?;
+    Some(finite_native_token_sum(
+        input,
+        cache_creation,
+        cache_read,
+        output,
+    ))
+}
+
+pub(crate) fn native_usage_input_tokens_from_projection(
+    usage: &Utf16JsonProjection,
+) -> Option<f64> {
+    let [input, cache_creation, cache_read, _] = native_usage_token_counts(usage)?;
+    Some(finite_native_token_sum(
+        input,
+        cache_creation,
+        cache_read,
+        0.0,
+    ))
+}
+
+fn native_usage_token_counts(usage: &Utf16JsonProjection) -> Option<[f64; 4]> {
     if usage
         .at_pointer("")
         .and_then(JsonValueView::object_entries)
@@ -2763,21 +2786,20 @@ pub(crate) fn native_usage_context_tokens_from_projection(
             .and_then(JsonValueView::as_number)
             .unwrap_or(0.0)
     };
-    let input = number_or_zero("/input_tokens");
-    let cache_creation = number_or_zero("/cache_creation_input_tokens");
-    let cache_read = number_or_zero("/cache_read_input_tokens");
-    let output = number_or_zero("/output_tokens");
-    let aggregate_input = input + cache_creation + cache_read;
-    let aggregate_total = finite_native_token_sum(input, cache_creation, cache_read, output);
-
-    if aggregate_input == 0.0 {
-        return Some(aggregate_total);
+    let aggregate = [
+        number_or_zero("/input_tokens"),
+        number_or_zero("/cache_creation_input_tokens"),
+        number_or_zero("/cache_read_input_tokens"),
+        number_or_zero("/output_tokens"),
+    ];
+    if aggregate[0] + aggregate[1] + aggregate[2] == 0.0 {
+        return Some(aggregate);
     }
     let Some(iterations) = native_usage_iterations_from_projection(usage) else {
-        return Some(aggregate_total);
+        return Some(aggregate);
     };
     let Some(count) = iterations.array_len("") else {
-        return Some(aggregate_total);
+        return Some(aggregate);
     };
     let selected = (0..count).rev().find_map(|index| {
         let source = iterations.subprojection(&format!("/{index}")).ok()?;
@@ -2785,36 +2807,31 @@ pub(crate) fn native_usage_context_tokens_from_projection(
         (!matches!(iteration_type, "advisor_message" | "compaction")).then_some(source)
     });
     let Some(iteration) = selected else {
-        return Some(aggregate_total);
+        return Some(aggregate);
     };
     if !matches!(
         iteration.string_at("/type"),
         Some("message" | "fallback_message")
     ) {
-        return Some(aggregate_total);
+        return Some(aggregate);
     }
-    let Some(input) = native_iteration_counter(&iteration, "/input_tokens") else {
-        return Some(aggregate_total);
-    };
-    let Some(output) = native_iteration_counter(&iteration, "/output_tokens") else {
-        return Some(aggregate_total);
-    };
-    let Some(cache_creation) = native_iteration_counter(&iteration, "/cache_creation_input_tokens")
-    else {
-        return Some(aggregate_total);
-    };
-    let Some(cache_read) = native_iteration_counter(&iteration, "/cache_read_input_tokens") else {
-        return Some(aggregate_total);
-    };
-    if input + cache_creation + cache_read <= 0.0 {
-        return Some(aggregate_total);
+    let fields = [
+        "/input_tokens",
+        "/cache_creation_input_tokens",
+        "/cache_read_input_tokens",
+        "/output_tokens",
+    ];
+    let mut selected = [0.0; 4];
+    for (index, field) in fields.iter().enumerate() {
+        let Some(value) = native_iteration_counter(&iteration, field) else {
+            return Some(aggregate);
+        };
+        selected[index] = value;
     }
-    Some(finite_native_token_sum(
-        input,
-        cache_creation,
-        cache_read,
-        output,
-    ))
+    if selected[0] + selected[1] + selected[2] <= 0.0 {
+        return Some(aggregate);
+    }
+    Some(selected)
 }
 
 pub(crate) fn native_usage_iterations_from_projection(

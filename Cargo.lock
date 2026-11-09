@@ -970,6 +970,7 @@ dependencies = [
  "skill",
  "sys-locale",
  "telemetry",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",

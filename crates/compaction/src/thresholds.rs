@@ -24,13 +24,13 @@ pub const WARNING_THRESHOLD_BUFFER_TOKENS: u64 = 20_000;
 pub const ERROR_THRESHOLD_BUFFER_TOKENS: u64 = 20_000;
 /// Buffer tokens kept available after a manual compact request.
 pub const MANUAL_COMPACT_BUFFER_TOKENS: u64 = 3_000;
-/// Maximum output tokens budgeted for the autocompact summary call.
+/// Maximum output-token reserve deducted from the auto-compact window.
 ///
-/// Deliberately 32_000, above the oracle's `avp = 20_000` cap: the reserve then
-/// covers the full Claude max-output tier, so autocompact keeps the headroom a
-/// summary of a long, tool-heavy context actually needs. Every threshold below
-/// derives from this reserve.
-pub const MAX_OUTPUT_TOKENS_FOR_SUMMARY: u64 = 32_000;
+/// Claude Code 2.1.319 `AZr = 20000` (native artifact @271034337).
+/// `Ure` reserves `min(model.maxOutputTokens, AZr)` before `L4` subtracts
+/// the auto-compact buffer; this cap is independent of the summary request's
+/// own output budget.
+pub const MAX_OUTPUT_TOKENS_FOR_SUMMARY: u64 = 20_000;
 /// Maximum consecutive autocompact failures before the circuit breaker trips.
 ///
 /// claude-code v2.1.183 `jho = 3` (`bin/claude.exe` offset 203009353).
@@ -350,14 +350,10 @@ pub fn resolve_auto_compact_window(
 /// Remote Cowork / local-agent table rows and served clientdata belong to
 /// their hosts; the ordinary CLI uses Sonnet 5's table default of 1M.
 fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -> Option<u64> {
-    let canonical = llm_runtime::model::thinking::canonical(model);
-    // The shared thinking canonicalizer predates Opus 5; preserve the same
-    // provider/date suffix matching that the context-window registry applies.
-    let canonical = if canonical.contains("claude-opus-5") {
-        "claude-opus-5"
-    } else {
-        canonical.as_str()
-    };
+    // Window policy uses the current catalog identity, keeping 5.5 distinct
+    // from 5 and preserving hosted/date suffix matching.
+    let canonical = llm_runtime::model::context_window::canonical_name(model);
+    let canonical = canonical.as_str();
     let restricted_default = matches!(
         canonical,
         "claude-sonnet-4-6" | "claude-opus-4-6" | "claude-opus-4-8" | "claude-opus-5"
@@ -367,6 +363,9 @@ fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -
     let native_1m = matches!(
         canonical,
         "claude-sonnet-5"
+            | "claude-sonnet-5-5"
+            | "claude-haiku-5-5"
+            | "claude-opus-5-5"
             | "claude-opus-4-7"
             | "claude-opus-4-8"
             | "claude-opus-5"
@@ -391,14 +390,12 @@ fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -
     (model_window >= 1_000_000 && native_1m && !disabled_1m).then_some(model_window)
 }
 
-/// Resolve the explicit window knob like Claude Code 2.1.261 `GS` / `kte`:
-/// parse integer env notation, reject nonpositive/NaN, then clamp to 100k–1M.
+/// Resolve the explicit window knob like Claude Code 2.1.319 `Wan` / `MQe`:
+/// native size parsing (including k/m suffixes), then clamp to 100k–1M.
 /// Exposed so the `/autocompact` status uses the same value as the runtime.
 #[must_use]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn resolve_auto_compact_env_window(raw: &str) -> Option<u64> {
-    let value = lingxi_core::host::env::parse_int_env(raw);
-    (!value.is_nan() && value > 0.0).then(|| value.clamp(100_000.0, 1_000_000.0) as u64)
+    lingxi_core::host::auto_compact::resolve_env_window(raw)
 }
 
 /// `Gpe()` — `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
@@ -609,6 +606,15 @@ pub fn threshold_for_input_budget(effective_context_window: u64) -> u64 {
     threshold_with_buffer(effective_context_window, buffer)
 }
 
+/// Claude Code's `L4` threshold for an already-resolved native input window.
+///
+/// Native Claude windows use the exact 13k buffer. Generic provider budgets
+/// retain [`threshold_for_input_budget`]'s bounded buffer for small models.
+#[must_use]
+pub fn native_threshold_for_input_budget(effective_context_window: u64) -> u64 {
+    threshold_with_buffer(effective_context_window, AUTOCOMPACT_BUFFER_TOKENS)
+}
+
 fn threshold_with_buffer(effective_context_window: u64, buffer: u64) -> u64 {
     let autocompact_threshold = effective_context_window.saturating_sub(buffer);
 
@@ -667,11 +673,35 @@ pub fn calculate_token_warning_state(
     betas: &[String],
     auto_compact_enabled: bool,
 ) -> TokenWarningState {
-    let autocompact_threshold = auto_compact_threshold(model, betas);
+    let actual_context_window = context_window_for_model(model, betas)
+        .saturating_sub(max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY));
+    native_warning_for_input_budgets(
+        token_usage,
+        effective_context_window_size(model, betas),
+        actual_context_window,
+        auto_compact_enabled,
+    )
+}
+
+/// Native warning thresholds for selected and full effective input windows.
+///
+/// Both budgets already exclude the native output reserve. The selected
+/// `auto_budget` must be resolved with the current enabled state: Claude's
+/// `Ure` omits a settings window when disabled, while its resolver can still
+/// apply environment and model defaults. Blocking uses `actual_budget`
+/// independently of that selected auto-compact window.
+#[must_use]
+pub fn native_warning_for_input_budgets(
+    token_usage: u64,
+    auto_budget: u64,
+    actual_budget: u64,
+    auto_compact_enabled: bool,
+) -> TokenWarningState {
+    let autocompact_threshold = native_threshold_for_input_budget(auto_budget);
     let threshold = if auto_compact_enabled {
         autocompact_threshold
     } else {
-        effective_context_window_size(model, betas)
+        auto_budget
     };
 
     // Math.max(0, Math.round(((threshold - tokenUsage) / threshold) * 100)).
@@ -688,9 +718,7 @@ pub fn calculate_token_warning_state(
 
     // 2.1.261 `UTn` uses the full model window for the blocking ceiling,
     // independently of a smaller configured auto-compact window.
-    let actual_context_window = context_window_for_model(model, betas)
-        .saturating_sub(max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY));
-    let default_blocking_limit = actual_context_window.saturating_sub(MANUAL_COMPACT_BUFFER_TOKENS);
+    let default_blocking_limit = actual_budget.saturating_sub(MANUAL_COMPACT_BUFFER_TOKENS);
 
     // Allow override for testing (positive integer wins, else the default).
     let blocking_limit = std::env::var("LINGXI_BLOCKING_LIMIT_OVERRIDE")
@@ -832,10 +860,117 @@ mod tests {
 
     // sonnet-4-6, no betas, no env overrides:
     //   context_window = 200_000, max_output = 32_000,
-    //   reserved = min(32_000, 32_000) = 32_000 → effective = 168_000.
+    //   reserved = min(32_000, 20_000) = 20_000 → effective = 180_000.
     const MODEL: &str = "claude-sonnet-4-6-20251001";
-    const EFFECTIVE: u64 = 168_000;
-    const AUTOCOMPACT: u64 = EFFECTIVE - AUTOCOMPACT_BUFFER_TOKENS; // 155_000
+    const EFFECTIVE: u64 = 180_000;
+    const AUTOCOMPACT: u64 = EFFECTIVE - AUTOCOMPACT_BUFFER_TOKENS; // 167_000
+
+    #[test]
+    fn threshold_formulas_and_warning_boundaries_match_official_319_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_319_thresholds.json"
+        ))
+        .unwrap();
+        for (index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
+            with_clean_env(|| {
+                let model = format!("compact-threshold-319-oracle-{index}");
+                llm_runtime::model::model_limits::register(
+                    &model,
+                    llm_runtime::model::model_limits::ModelLimits {
+                        context_window: case["contextWindow"].as_u64().unwrap(),
+                        max_output_tokens: case["maxOutputTokens"].as_u64().unwrap(),
+                    },
+                );
+                let enabled = case["enabled"].as_bool().unwrap_or(true);
+                // These fixtures supply an explicit selected window. For the
+                // enabled cases the env seam selects the same window without
+                // requiring a settings dependency in this pure crate. Ure
+                // omits the explicit settings window when auto is disabled.
+                if enabled {
+                    if let Some(window) = case["autoCompactWindow"].as_u64() {
+                        std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", window.to_string());
+                    }
+                }
+                if case["pctOverride"].is_number() {
+                    std::env::set_var(
+                        "LINGXI_AUTOCOMPACT_PCT_OVERRIDE",
+                        case["pctOverride"].to_string(),
+                    );
+                }
+                if let Some(limit) = case["blockingOverride"].as_u64() {
+                    std::env::set_var("LINGXI_BLOCKING_LIMIT_OVERRIDE", limit.to_string());
+                }
+                let expected = &case["expected"];
+                let effective = effective_context_window_size(&model, &[]);
+                let actual = crate::threshold_calc::effective_context_window(
+                    case["maxOutputTokens"].as_u64().unwrap(),
+                    case["contextWindow"].as_u64().unwrap(),
+                );
+                assert_eq!(
+                    effective,
+                    expected["effectiveWindow"].as_u64().unwrap(),
+                    "{} effective window",
+                    case["name"]
+                );
+                assert_eq!(
+                    auto_compact_threshold(&model, &[]),
+                    expected["threshold"].as_u64().unwrap(),
+                    "{} threshold",
+                    case["name"]
+                );
+                assert_eq!(
+                    native_threshold_for_input_budget(effective),
+                    expected["threshold"].as_u64().unwrap(),
+                    "{} native input-budget threshold",
+                    case["name"]
+                );
+                for level in expected["levels"].as_array().unwrap() {
+                    let tokens = level["tokens"].as_u64().unwrap();
+                    let state =
+                        native_warning_for_input_budgets(tokens, effective, actual, enabled);
+                    assert_eq!(
+                        state,
+                        calculate_token_warning_state(tokens, &model, &[], enabled),
+                        "{} model and input-budget warning paths at {tokens}",
+                        case["name"]
+                    );
+                    let actual_level = if state.is_at_blocking_limit {
+                        "blocked"
+                    } else if state.is_above_auto_compact_threshold {
+                        "compact"
+                    } else if state.is_above_warning_threshold {
+                        "warn"
+                    } else {
+                        "ok"
+                    };
+                    assert_eq!(
+                        actual_level,
+                        level["level"].as_str().unwrap(),
+                        "{} at {tokens}",
+                        case["name"]
+                    );
+                    if let Some(percent_left) = level["pctLeft"].as_u64() {
+                        assert_eq!(
+                            u64::from(state.percent_left),
+                            percent_left,
+                            "{} percent at {tokens}",
+                            case["name"]
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn native_threshold_keeps_full_buffer_for_small_selected_windows() {
+        with_clean_env(|| {
+            assert_eq!(native_threshold_for_input_budget(80_000), 67_000);
+            assert_eq!(threshold_for_input_budget(80_000), 72_000);
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "50percent");
+            assert_eq!(native_threshold_for_input_budget(80_000), 40_000);
+        });
+    }
 
     /// A model this build has no real window for resolves through the
     /// `unknown-model` branch `N8` gained in 2.1.238 — and the window it
@@ -1126,6 +1261,31 @@ mod tests {
     }
 
     #[test]
+    fn current_55_models_keep_model_default_source_with_and_without_1m() {
+        with_clean_env(|| {
+            for model in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] {
+                let resolved = resolve_auto_compact_window(model, &[], None, true);
+                assert_eq!(resolved.window, 1_000_000, "{model}");
+                assert_eq!(
+                    resolved.source,
+                    AutoCompactWindowSource::ModelDefault,
+                    "{model}"
+                );
+            }
+            std::env::set_var("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+            for model in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] {
+                let resolved = resolve_auto_compact_window(model, &[], None, true);
+                assert_eq!(resolved.window, 200_000, "{model}");
+                assert_eq!(
+                    resolved.source,
+                    AutoCompactWindowSource::ModelDefault,
+                    "{model}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn is_auto_compact_enabled_env_gates() {
         with_clean_env(|| {
             assert!(is_auto_compact_enabled(true));
@@ -1146,20 +1306,20 @@ mod tests {
     }
 
     // --- TokenWarningState field boundaries (autocompact enabled) ---------- //
-    // threshold = AUTOCOMPACT = 155_000.
-    //   warning  threshold = 155_000 - 20_000 = 135_000
-    //   error    threshold = 155_000 - 20_000 = 135_000
-    //   autocompact        = 155_000
-    //   blocking limit     = effective(168_000) - 3_000 = 165_000
+    // threshold = AUTOCOMPACT = 167_000.
+    //   warning  threshold = 167_000 - 20_000 = 147_000
+    //   error    threshold = 167_000 - 20_000 = 147_000
+    //   autocompact        = 167_000
+    //   blocking limit     = effective(180_000) - 3_000 = 177_000
 
     #[test]
     fn warning_threshold_boundaries() {
         with_clean_env(|| {
             // just below warning
-            let below = calculate_token_warning_state(134_999, MODEL, &[], true);
+            let below = calculate_token_warning_state(146_999, MODEL, &[], true);
             assert!(!below.is_above_warning_threshold);
             // exactly at warning
-            let at = calculate_token_warning_state(135_000, MODEL, &[], true);
+            let at = calculate_token_warning_state(147_000, MODEL, &[], true);
             assert!(at.is_above_warning_threshold);
             // above
             let above = calculate_token_warning_state(150_000, MODEL, &[], true);
@@ -1171,10 +1331,10 @@ mod tests {
     fn error_threshold_boundaries() {
         with_clean_env(|| {
             assert!(
-                !calculate_token_warning_state(134_999, MODEL, &[], true).is_above_error_threshold
+                !calculate_token_warning_state(146_999, MODEL, &[], true).is_above_error_threshold
             );
             assert!(
-                calculate_token_warning_state(135_000, MODEL, &[], true).is_above_error_threshold
+                calculate_token_warning_state(147_000, MODEL, &[], true).is_above_error_threshold
             );
             assert!(
                 calculate_token_warning_state(160_000, MODEL, &[], true).is_above_error_threshold
@@ -1213,9 +1373,9 @@ mod tests {
     #[test]
     fn blocking_limit_boundaries() {
         with_clean_env(|| {
-            // blocking limit = effective(168_000) - MANUAL_COMPACT_BUFFER(3_000) = 165_000.
+            // blocking limit = effective(180_000) - MANUAL_COMPACT_BUFFER(3_000) = 177_000.
             let limit = EFFECTIVE - MANUAL_COMPACT_BUFFER_TOKENS;
-            assert_eq!(limit, 165_000);
+            assert_eq!(limit, 177_000);
             assert!(
                 !calculate_token_warning_state(limit - 1, MODEL, &[], true).is_at_blocking_limit
             );
@@ -1231,7 +1391,7 @@ mod tests {
     #[test]
     fn percent_left_rounding_and_clamp() {
         // Math.round((threshold - usage)/threshold*100), clamped >= 0.
-        // threshold = 155_000.
+        // threshold = 167_000.
         with_clean_env(|| {
             // usage = 0 → 100%.
             assert_eq!(
@@ -1248,9 +1408,9 @@ mod tests {
                 calculate_token_warning_state(AUTOCOMPACT + 100_000, MODEL, &[], true).percent_left,
                 0
             );
-            // half-way: usage = 77_500 → remaining 77_500/155_000 = 0.5 → round → 50.
+            // half-way: usage = 83_500 → remaining 83_500/167_000 = 0.5 → round → 50.
             assert_eq!(
-                calculate_token_warning_state(77_500, MODEL, &[], true).percent_left,
+                calculate_token_warning_state(83_500, MODEL, &[], true).percent_left,
                 50
             );
         });
@@ -1263,7 +1423,7 @@ mod tests {
         with_clean_env(|| {
             std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "100");
             // pct=100 makes autocompact_threshold = min(floor(effective*1.0), effective-buffer)
-            //   = min(168_000, 155_000) = 155_000. Not what we want for a tiny threshold.
+            //   = min(180_000, 167_000) = 167_000. Not what we want for a tiny threshold.
             // Instead use the helper directly for the rounding invariant.
             std::env::remove_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE");
             assert_eq!(super::percent_left_of(200, 99), 51);
@@ -1294,6 +1454,20 @@ mod tests {
     }
 
     #[test]
+    fn oracle_319_window_env_uses_native_size_suffixes_and_rounding() {
+        for (raw, expected) in [
+            ("200k", Some(200_000)),
+            (".5m", Some(500_000)),
+            ("150.0005k", Some(150_001)),
+            ("200", Some(100_000)),
+            ("Infinitym", Some(1_000_000)),
+            ("Infinity", None),
+        ] {
+            assert_eq!(resolve_auto_compact_env_window(raw), expected, "{raw}");
+        }
+    }
+
+    #[test]
     fn oracle_261_blocking_limit_uses_full_model_window() {
         with_clean_env(|| {
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "100000");
@@ -1308,9 +1482,9 @@ mod tests {
     #[test]
     fn auto_compact_window_clamps_context() {
         with_clean_env(|| {
-            // 50k is floored to the 100k minimum; reserve 32k → effective 68k.
+            // 50k is floored to the 100k minimum; reserve 20k → effective 80k.
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "50000");
-            assert_eq!(effective_context_window_size(MODEL, &[]), 68_000);
+            assert_eq!(effective_context_window_size(MODEL, &[]), 80_000);
             // A clamp larger than the real window is a no-op (min picks the smaller).
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "999999");
             assert_eq!(effective_context_window_size(MODEL, &[]), EFFECTIVE);
@@ -1325,10 +1499,10 @@ mod tests {
     #[test]
     fn autocompact_pct_override() {
         with_clean_env(|| {
-            // pct=10 → floor(168_000 * 0.10) = 16_800; min(16_800, 155_000) = 16_800.
+            // pct=10 → floor(180_000 * 0.10) = 18_000; min(18_000, 167_000) = 18_000.
             std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "10");
-            assert_eq!(auto_compact_threshold(MODEL, &[]), 16_800);
-            // pct=100 → floor(168_000) = 168_000; min(168_000, 155_000) = 155_000.
+            assert_eq!(auto_compact_threshold(MODEL, &[]), 18_000);
+            // pct=100 → floor(180_000) = 180_000; min(180_000, 167_000) = 167_000.
             std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "100");
             assert_eq!(auto_compact_threshold(MODEL, &[]), AUTOCOMPACT);
             // Out of range (>100) ignored.
@@ -1345,10 +1519,10 @@ mod tests {
         with_clean_env(|| {
             for raw in ["10percent", "  +1e1%", "10e+"] {
                 std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", raw);
-                assert_eq!(auto_compact_threshold(MODEL, &[]), 16_800, "{raw}");
+                assert_eq!(auto_compact_threshold(MODEL, &[]), 18_000, "{raw}");
             }
             std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", ".5suffix");
-            assert_eq!(auto_compact_threshold(MODEL, &[]), 840);
+            assert_eq!(auto_compact_threshold(MODEL, &[]), 900);
         });
     }
 
@@ -1360,7 +1534,7 @@ mod tests {
             assert!(!below.is_at_blocking_limit);
             let at = calculate_token_warning_state(100_000, MODEL, &[], true);
             assert!(at.is_at_blocking_limit);
-            // Invalid override falls back to the default (165_000).
+            // Invalid override falls back to the default (177_000).
             std::env::set_var("LINGXI_BLOCKING_LIMIT_OVERRIDE", "notanumber");
             let st = calculate_token_warning_state(100_000, MODEL, &[], true);
             assert!(!st.is_at_blocking_limit);
@@ -1370,8 +1544,8 @@ mod tests {
     #[test]
     fn disabled_autocompact_uses_effective_as_threshold() {
         with_clean_env(|| {
-            // When disabled, threshold = effective(168_000), so percent_left at
-            // usage 0 is 100 and at usage=168_000 is 0.
+            // When disabled, threshold = effective(180_000), so percent_left at
+            // usage 0 is 100 and at usage=180_000 is 0.
             assert_eq!(
                 calculate_token_warning_state(0, MODEL, &[], false).percent_left,
                 100
@@ -1380,13 +1554,13 @@ mod tests {
                 calculate_token_warning_state(EFFECTIVE, MODEL, &[], false).percent_left,
                 0
             );
-            // warning threshold = 168_000 - 20_000 = 148_000.
+            // warning threshold = 180_000 - 20_000 = 160_000.
             assert!(
-                !calculate_token_warning_state(147_999, MODEL, &[], false)
+                !calculate_token_warning_state(159_999, MODEL, &[], false)
                     .is_above_warning_threshold
             );
             assert!(
-                calculate_token_warning_state(148_000, MODEL, &[], false)
+                calculate_token_warning_state(160_000, MODEL, &[], false)
                     .is_above_warning_threshold
             );
         });

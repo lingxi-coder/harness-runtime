@@ -153,6 +153,8 @@ pub fn merge(
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
+        auto_compact_enabled: next.auto_compact_enabled.or(prev.auto_compact_enabled),
+        auto_compact_window: next.auto_compact_window.or(prev.auto_compact_window),
         effort_level: next.effort_level.or(prev.effort_level),
         fast_mode: next.fast_mode.or(prev.fast_mode),
         prompt_suggestion_enabled: next
@@ -294,6 +296,9 @@ fn merge_model_settings(
             for (key, nv) in next {
                 prev.entry(key)
                     .and_modify(|pv| {
+                        if nv.auto_compact_window.is_some() {
+                            pv.auto_compact_window = nv.auto_compact_window;
+                        }
                         if nv.effort_level.is_some() {
                             pv.effort_level.clone_from(&nv.effort_level);
                         }

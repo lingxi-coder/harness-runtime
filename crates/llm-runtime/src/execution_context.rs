@@ -26,6 +26,7 @@ pub struct ClassifierCacheLayout {
 #[derive(Clone)]
 pub struct ApiAttemptsLeft {
     remaining: Arc<AtomicU32>,
+    parent: Option<Arc<ApiAttemptsLeft>>,
 }
 
 impl ApiAttemptsLeft {
@@ -34,19 +35,40 @@ impl ApiAttemptsLeft {
     pub fn new(count: u32) -> Self {
         Self {
             remaining: Arc::new(AtomicU32::new(count)),
+            parent: None,
         }
     }
 
     /// Number of physical dispatches still available to the operation.
     #[must_use]
     pub fn remaining(&self) -> u32 {
-        self.remaining.load(Ordering::Acquire)
+        let remaining = self.remaining.load(Ordering::Acquire);
+        self.parent
+            .as_ref()
+            .map_or(remaining, |parent| remaining.min(parent.remaining()))
+    }
+
+    /// Limit one sub-operation while spending from this same operation budget.
+    /// A pre-dispatch rejection refunds both counters; a physical dispatch
+    /// commits both, so a one-shot fallback cannot add a sixth attempt to five.
+    #[must_use]
+    pub fn capped(&self, count: u32) -> Self {
+        Self {
+            remaining: Arc::new(AtomicU32::new(count.min(self.remaining()))),
+            parent: Some(Arc::new(self.clone())),
+        }
+    }
+
+    fn operation_counter(&self) -> &Arc<AtomicU32> {
+        self.parent
+            .as_ref()
+            .map_or(&self.remaining, |parent| parent.operation_counter())
     }
 
     /// Whether `other` belongs to the same logical operation budget.
     #[must_use]
     pub fn shares_scope_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.remaining, &other.remaining)
+        Arc::ptr_eq(self.operation_counter(), other.operation_counter())
     }
 
     pub(crate) fn reserve(&self) -> Option<ApiAttemptReservation> {
@@ -59,9 +81,21 @@ impl ApiAttemptsLeft {
                 }
             })
             .ok()?;
+        let parent = if let Some(parent) = &self.parent {
+            match parent.reserve() {
+                Some(reservation) => Some(Box::new(reservation)),
+                None => {
+                    self.remaining.fetch_add(1, Ordering::AcqRel);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         Some(ApiAttemptReservation {
             remaining: Arc::clone(&self.remaining),
             committed: false,
+            parent,
         })
     }
 }
@@ -86,10 +120,14 @@ impl Eq for ApiAttemptsLeft {}
 pub(crate) struct ApiAttemptReservation {
     remaining: Arc<AtomicU32>,
     committed: bool,
+    parent: Option<Box<ApiAttemptReservation>>,
 }
 
 impl ApiAttemptReservation {
     pub(crate) fn commit(mut self) {
+        if let Some(parent) = self.parent.take() {
+            parent.commit();
+        }
         self.committed = true;
     }
 }
@@ -285,6 +323,42 @@ impl PartialEq for RequestDispatchObserver {
 
 impl Eq for RequestDispatchObserver {}
 
+/// Host-only canonical usage observer. This does not grant budget authority
+/// or own a ledger; it retains facts before finish/telemetry can await.
+#[derive(Clone)]
+pub struct RequestUsageObserver {
+    on_usage: Arc<dyn Fn(&crate::ExecutionUsage) + Send + Sync>,
+}
+
+impl RequestUsageObserver {
+    /// Capture a host callback without granting model-attempt authority.
+    #[must_use]
+    pub fn new(on_usage: impl Fn(&crate::ExecutionUsage) + Send + Sync + 'static) -> Self {
+        Self {
+            on_usage: Arc::new(on_usage),
+        }
+    }
+
+    /// Synchronously retain canonical facts before response finalization.
+    pub fn observe(&self, usage: &crate::ExecutionUsage) {
+        (self.on_usage)(usage);
+    }
+}
+
+impl std::fmt::Debug for RequestUsageObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestUsageObserver(..)")
+    }
+}
+
+impl PartialEq for RequestUsageObserver {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.on_usage, &other.on_usage)
+    }
+}
+
+impl Eq for RequestUsageObserver {}
+
 /// Credential captures owned by one logical native request. Retry drafts share
 /// the same per-profile snapshot without sharing credentials across routes.
 #[derive(Clone, Default)]
@@ -417,6 +491,8 @@ pub struct ExecutionContext {
     /// Host-owned observation of the first admitted physical dispatch, never
     /// serialized into provider input.
     pub request_dispatch_observer: Option<RequestDispatchObserver>,
+    /// Optional host accounting observation; never serialized to providers.
+    pub request_usage_observer: Option<RequestUsageObserver>,
     /// Host message sources whose content contributes to the canonical request.
     /// Used to project row-scoped admission only after all normalization passes.
     pub request_message_source_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
@@ -538,6 +614,50 @@ mod tests {
             .commit();
         assert_eq!(budget.remaining(), 0, "dispatched attempts stay spent");
         assert!(budget.reserve().is_none());
+    }
+
+    #[test]
+    fn capped_candidate_spends_and_refunds_the_parent_operation() {
+        let parent = ApiAttemptsLeft::new(5);
+        let candidate = parent.capped(1);
+        assert!(candidate.shares_scope_with(&parent));
+        let reservation = candidate.reserve().unwrap();
+        assert_eq!(parent.remaining(), 4);
+        assert_eq!(candidate.remaining(), 0);
+        drop(reservation);
+        assert_eq!(parent.remaining(), 5);
+        assert_eq!(candidate.remaining(), 1);
+        candidate.reserve().unwrap().commit();
+        assert!(candidate.reserve().is_none());
+        for _ in 0..4 {
+            parent.reserve().unwrap().commit();
+        }
+        assert_eq!(parent.remaining(), 0);
+        assert!(parent.reserve().is_none());
+    }
+
+    #[test]
+    fn nested_capped_budgets_compete_for_the_same_physical_allowance() {
+        let parent = ApiAttemptsLeft::new(5);
+        let mut handles = Vec::new();
+        for _ in 0..12 {
+            let child = parent.capped(2).capped(1);
+            handles.push(std::thread::spawn(move || {
+                if let Some(reservation) = child.reserve() {
+                    reservation.commit();
+                    true
+                } else {
+                    false
+                }
+            }));
+        }
+        let committed = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|done| *done)
+            .count();
+        assert_eq!(committed, 5);
+        assert_eq!(parent.remaining(), 0);
     }
 
     #[test]

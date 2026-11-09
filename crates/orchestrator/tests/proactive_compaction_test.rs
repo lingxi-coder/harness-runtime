@@ -20,7 +20,31 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use std::sync::Arc;
+use sidequery::{
+    CacheSafeParamsSlot, ForkedAgentRunner, SideQueryClient, SideQueryError, SideQueryRequest,
+    SideQueryResponse,
+};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct SummaryClient {
+    seen: Mutex<Vec<SideQueryRequest>>,
+}
+
+#[async_trait::async_trait]
+impl SideQueryClient for SummaryClient {
+    async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        self.seen.lock().unwrap().push(request);
+        Ok(SideQueryResponse {
+            text: Some("<summary>pre-call summary</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
 
 /// Build an orchestrator with a `MockApiClient` (single `end_turn` response)
 /// and an optional compactor at `threshold`. Returns the orch + the api mock so
@@ -31,6 +55,7 @@ fn make_orch(
     Arc<ConversationOrchestrator>,
     Arc<MockApiClient>,
     Arc<MockOutputStream>,
+    Arc<SummaryClient>,
 ) {
     make_orch_with(threshold, false)
 }
@@ -45,6 +70,7 @@ fn make_orch_with(
     Arc<ConversationOrchestrator>,
     Arc<MockApiClient>,
     Arc<MockOutputStream>,
+    Arc<SummaryClient>,
 ) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
@@ -59,6 +85,7 @@ fn make_orch_with(
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
     let memory = Arc::new(StaticMemoryProvider::empty());
+    let summary = Arc::new(SummaryClient::default());
     let mut orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api.clone(),
@@ -70,15 +97,25 @@ fn make_orch_with(
         std::env::temp_dir(),
     );
     if let Some(t) = threshold {
-        let compactor = CompactionOrchestrator::new(t);
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        let runner = Arc::new(
+            ForkedAgentRunner::new()
+                .with_side_query_client(summary.clone(), "test-compact-model".into()),
+        );
+        let compactor = CompactionOrchestrator::with_autocompactor(
+            compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+            t,
+        );
         let compactor = if model_derived {
             compactor.with_model_derived_threshold()
         } else {
             compactor
         };
-        orch = orch.with_compaction(Arc::new(compactor));
+        orch = orch
+            .with_cache_safe_slot(slot)
+            .with_compaction(Arc::new(compactor));
     }
-    (Arc::new(orch), api, output)
+    (Arc::new(orch), api, output, summary)
 }
 
 /// Register `id` with the process-global model registry so
@@ -98,7 +135,8 @@ async fn set_session_model(orch: &ConversationOrchestrator, model: &str) {
     orch.session().lock().await.model = model.to_string();
 }
 
-/// Seed `n` filler user messages so the token estimate clears a small threshold.
+/// Seed completed turns so Native's reactive split has older assistant rounds
+/// to summarize while retaining the latest API round.
 async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
     let session = orch.session();
     let mut s = session.lock().await;
@@ -107,6 +145,16 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
             MessageId::new(),
             format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
         ));
+        s.history.push(ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: format!("reply-{i}: completed turn with context to summarize"),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        });
     }
 }
 
@@ -122,9 +170,10 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
     // snip's 10-message protected-tail floor the estimate stays over threshold,
     // so autocompact (not snip alone) fires in the proactive pre-call trigger
     // before the first model call.
-    let (orch, api, output) = make_orch(Some(100));
+    let (orch, api, output, summary) = make_orch(Some(100));
     seed_history(&orch, 60).await;
-    let before = history(&orch).await.len();
+    let seeded = history(&orch).await;
+    let before = seeded.len();
     assert!(before >= 60, "seed should produce a large history");
 
     orch.run_turn("hello").await.expect("turn ok");
@@ -172,6 +221,39 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
         call_has_boundary,
         "the model call's messages must include the compaction boundary marker"
     );
+    assert!(calls[0]
+        .iter()
+        .any(|message| { message.text_content().contains("pre-call summary") }));
+    assert!(
+        calls[0]
+            .iter()
+            .any(|message| message.id() == seeded[before - 1].id()),
+        "the latest assistant-led API round remains verbatim in the first main call"
+    );
+    assert!(
+        !calls[0]
+            .iter()
+            .any(|message| message.id() == seeded[0].id()),
+        "older rounds must be replaced by the summary before the first main call"
+    );
+    let summary_calls = summary.seen.lock().unwrap();
+    assert_eq!(
+        summary_calls.len(),
+        1,
+        "one real summary query before generation"
+    );
+    assert!(summary_calls[0]
+        .messages
+        .iter()
+        .any(|message| message.id() == seeded[0].id()));
+    assert!(
+        !summary_calls[0]
+            .messages
+            .iter()
+            .any(|message| message.id() == seeded[before - 1].id()),
+        "the summary query must exclude the kept latest round"
+    );
+    drop(summary_calls);
 
     assert_eq!(
         output.compaction_phase_snapshot().await,
@@ -193,13 +275,17 @@ async fn under_threshold_is_strict_noop() {
     // High threshold (10M tokens) => the small seeded history is well under it,
     // so the proactive trigger must be a strict no-op: history unchanged (apart
     // from the turn's own user+assistant append) and NO CompactionCompleted.
-    let (orch, _api, output) = make_orch(Some(10_000_000));
+    let (orch, api, output, summary) = make_orch(Some(10_000_000));
     seed_history(&orch, 3).await;
     let before = history(&orch).await;
 
     orch.run_turn("hello").await.expect("turn ok");
 
     assert!(output.compaction_phase_snapshot().await.is_empty());
+    assert!(
+        summary.seen.lock().unwrap().is_empty(),
+        "no summary query below threshold"
+    );
     let after = history(&orch).await;
     // No boundary marker anywhere.
     assert!(
@@ -216,6 +302,9 @@ async fn under_threshold_is_strict_noop() {
         &before[..],
         "the seeded history prefix must be untouched under threshold"
     );
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(&calls[0][..before.len()], &before);
 
     let events = output.snapshot().await;
     assert!(
@@ -235,12 +324,14 @@ async fn gate_follows_a_wide_catalog_model_instead_of_the_engine_threshold() {
     // window, so the same small history stays untouched even though the
     // compactor was constructed with a 100-token threshold.
     register_model("test-gate-wide-model", 1_000_000, 384_000);
-    let (orch, _api, output) = make_orch_with(Some(100), true);
+    let (orch, _api, output, summary) = make_orch_with(Some(100), true);
     set_session_model(&orch, "test-gate-wide-model").await;
     seed_history(&orch, 60).await;
     let before = history(&orch).await;
 
     orch.run_turn("hello").await.expect("turn ok");
+
+    assert!(summary.seen.lock().unwrap().is_empty());
 
     assert!(
         output.compaction_phase_snapshot().await.is_empty(),
@@ -273,7 +364,7 @@ async fn gate_compacts_a_narrow_model_despite_a_huge_engine_threshold() {
     let saved_max_context = std::env::var("LINGXI_MAX_CONTEXT_TOKENS").ok();
     std::env::remove_var("LINGXI_MAX_CONTEXT_TOKENS");
 
-    let (orch, _api, output) = make_orch_with(Some(10_000_000), true);
+    let (orch, _api, output, summary) = make_orch_with(Some(10_000_000), true);
     set_session_model(&orch, "test-gate-narrow-model").await;
     seed_history(&orch, 1000).await;
     let before = history(&orch).await.len();
@@ -284,6 +375,8 @@ async fn gate_compacts_a_narrow_model_despite_a_huge_engine_threshold() {
         None => std::env::remove_var("LINGXI_MAX_CONTEXT_TOKENS"),
     }
     turn.expect("turn ok");
+
+    assert_eq!(summary.seen.lock().unwrap().len(), 1);
 
     let events = output.snapshot().await;
     assert!(
@@ -302,11 +395,13 @@ async fn gate_compacts_a_narrow_model_despite_a_huge_engine_threshold() {
 async fn no_compactor_wired_is_strict_noop() {
     // No compactor at all => proactive trigger is a strict no-op even with a
     // large history.
-    let (orch, _api, output) = make_orch(None);
+    let (orch, _api, output, summary) = make_orch(None);
     seed_history(&orch, 60).await;
     let before = history(&orch).await;
 
     orch.run_turn("hello").await.expect("turn ok");
+
+    assert!(summary.seen.lock().unwrap().is_empty());
 
     assert!(output.compaction_phase_snapshot().await.is_empty());
     let after = history(&orch).await;

@@ -534,7 +534,7 @@ pub fn register_core_batch_8(
         ReloadSkillsHandler, SideQuestionHandler, SkillDoctorHandler, StopHandler, SubtaskHandler,
     };
 
-    reg.register_builtin_handler(Arc::new(AutocompactHandler::new()));
+    reg.register_builtin_handler(Arc::new(AutocompactHandler::new().with_handle(handle.clone())));
 
     // cc2.1.212: the fork/subtask surface is gated on the agent-view flag exactly
     // like the binary command list `Blr`:

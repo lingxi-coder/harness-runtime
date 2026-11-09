@@ -858,7 +858,9 @@ impl ConversationOrchestrator {
                 || live.compact_summary_messages != replayed.state.compact_summary_messages
                 || live.virtual_user_messages != replayed.state.virtual_user_messages
                 || live.hook_message_grouping != replayed.state.hook_message_grouping
-                || live.native_request_history != replayed.state.native_request_history
+                || !live
+                    .native_request_history
+                    .request_shape_matches(&replayed.state.native_request_history)
             {
                 return Err(UNAVAILABLE.to_owned());
             }

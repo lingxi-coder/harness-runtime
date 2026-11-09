@@ -6,11 +6,11 @@
 //! the right source.
 
 use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Where a field's effective value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// `LINGXI_*` / `CLAUDE_CODE_*` / `CLAUDE_*` env var.
@@ -79,6 +79,8 @@ impl ProvenanceTrace {
 /// Reflect which top-level fields are `Some(_)` in this layer.
 fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
     vec![
+        ("autoCompactEnabled", layer.auto_compact_enabled.is_some()),
+        ("autoCompactWindow", layer.auto_compact_window.is_some()),
         ("trustedDirectories", layer.trusted_directories.is_some()),
         (
             "additionalDirectories",

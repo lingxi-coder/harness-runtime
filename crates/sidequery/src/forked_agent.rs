@@ -21,6 +21,10 @@ use thiserror::Error;
 /// Compaction inherits the main model's ordinary request budget instead.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
 
+type SessionThinkingSource = dyn Fn() -> Result<llm_runtime::model::thinking::ThinkingConfig, llm_runtime::LlmError>
+    + Send
+    + Sync;
+
 fn is_empty_instruction_projection(message: &ConversationMessage) -> bool {
     matches!(message, ConversationMessage::System { content, subtype, .. }
         if content.string_at("").is_some_and(str::is_empty) && subtype.as_deref() == Some("model_reminder_attachment"))
@@ -135,6 +139,9 @@ pub struct ForkedAgentRunner {
     /// the legacy no-`thinking` wire for runners without session inheritance.
     session_thinking:
         Result<Option<llm_runtime::model::thinking::ThinkingConfig>, llm_runtime::LlmError>,
+    /// Read the live session policy when each fork starts. The production
+    /// runner survives thinking-mode changes after session construction.
+    session_thinking_source: Option<Arc<SessionThinkingSource>>,
 }
 
 impl Default for ForkedAgentRunner {
@@ -151,17 +158,16 @@ impl ForkedAgentRunner {
         Self {
             side_query: None,
             session_thinking: Ok(None),
+            session_thinking_source: None,
         }
     }
 
     /// Wire a real single-turn forked path backed by `client`, calling `model`.
     ///
-    /// `model` is supplied at construction (rather than per-request or scraped
-    /// from `CacheSafeParams.system_context`) because neither
-    /// [`ForkedAgentRequest`] nor [`CacheSafeParams`] carries a first-class
-    /// model string today, and the wiring site (engine / autocompactor) owns
-    /// the active model — e.g. `AutocompactConfig::summary_model` or
-    /// `OrchestratorConfig::model`.
+    /// `model` is the fallback for a parent snapshot with no main-loop model.
+    /// Each fork prefers the snapshot's current model and provider profile so
+    /// model switches retain the owning provider instead of using the startup
+    /// selection or an unrelated provider's small model.
     #[must_use]
     pub fn with_side_query_client(
         mut self,
@@ -230,6 +236,21 @@ impl ForkedAgentRunner {
         // host may still use the main request successfully; only the actual
         // generic fork should surface this projection error.
         self.session_thinking = thinking.map(Some);
+        self.session_thinking_source = None;
+        self
+    }
+
+    /// Inherit the current session thinking policy on each fork, including
+    /// mode or budget changes made after this runner was constructed.
+    #[must_use]
+    pub fn with_session_thinking_source(
+        mut self,
+        source: impl Fn() -> Result<llm_runtime::model::thinking::ThinkingConfig, llm_runtime::LlmError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.session_thinking_source = Some(Arc::new(source));
         self
     }
 
@@ -265,12 +286,24 @@ impl ForkedAgentRunner {
     /// Returns [`ForkError::MissingBackend`] when no backend is configured,
     /// or [`ForkError::Api`] when the wired [`SideQueryClient::query`] fails.
     pub async fn run(&self, req: ForkedAgentRequest) -> Result<ForkedAgentResult, ForkError> {
+        self.run_with_usage_observer(req, None).await
+    }
+
+    /// Observe a one-shot fork's canonical usage before terminal stream
+    /// completion, so a cancellation cannot discard already-received facts.
+    pub async fn run_with_usage_observer(
+        &self,
+        req: ForkedAgentRequest,
+        usage_observer: Option<crate::side_query::ForkedUsageObserver>,
+    ) -> Result<ForkedAgentResult, ForkError> {
         let Some((client, model)) = &self.side_query else {
             return Err(ForkError::MissingBackend);
         };
-        let session_thinking = self.session_thinking.as_ref().copied().map_err(|error| {
-            ForkError::Api(crate::side_query::SideQueryError::Api(error.clone()))
-        })?;
+        let session_thinking = match &self.session_thinking_source {
+            Some(source) => source().map(Some),
+            None => self.session_thinking.clone(),
+        }
+        .map_err(|error| ForkError::Api(crate::side_query::SideQueryError::Api(error)))?;
 
         let cp = &req.cache_safe_params;
 
@@ -370,6 +403,7 @@ impl ForkedAgentRunner {
         };
         let options = crate::side_query::ForkedSideQueryOptions {
             fork_point_message_id: cp.fork_context_messages.last().map(ConversationMessage::id),
+            usage_observer,
             ..Default::default()
         };
         for turn in 0..max_turns {
@@ -923,6 +957,78 @@ mod tests {
         runner2.run(req2).await.expect("wired run succeeds");
         let sent2 = client2.seen.lock().unwrap().clone().expect("client called");
         assert_eq!(sent2.thinking, None, "unwired runners keep the legacy wire");
+    }
+
+    #[tokio::test]
+    async fn compaction_observes_live_thinking_changes_on_each_provider_route() {
+        use llm_runtime::model::thinking::ThinkingConfig;
+
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "<summary>ok</summary>".into(),
+            canned_usage: Usage::default(),
+        });
+        let live = Arc::new(Mutex::new(ThinkingConfig::Adaptive));
+        let source = live.clone();
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "claude-sonnet-5-5".into())
+            .with_session_thinking_source(move || Ok(*source.lock().unwrap()));
+
+        for (profile, model) in [
+            ("anthropic", "claude-opus-5-5"),
+            ("openai", "gpt-5.4"),
+            ("gemini", "gemini-3.7-flash"),
+            ("deepseek", "deepseek-v4-pro"),
+            ("grok", "grok-4.7"),
+            ("qwen", "qwen3.8-max"),
+            ("kimi", "kimi-k3"),
+            ("minimax", "MiniMax-M3"),
+            ("custom-provider", "custom-model"),
+        ] {
+            for thinking in [
+                ThinkingConfig::Disabled,
+                ThinkingConfig::Enabled {
+                    budget_tokens: 4096,
+                },
+                ThinkingConfig::Adaptive,
+            ] {
+                *live.lock().unwrap() = thinking;
+                let mut req =
+                    request_with(vec![user_msg("history")], vec![user_msg("compact")], None);
+                req.cache_safe_params.tool_use_options.main_loop_model = model.into();
+                req.cache_safe_params.tool_use_options.model_profile = Some(profile.into());
+                runner.run(req).await.expect("live-policy compaction");
+                let sent = client.seen.lock().unwrap().clone().unwrap();
+                assert_eq!(sent.thinking, Some(thinking), "{profile}/{model}");
+                assert_eq!(sent.model, model);
+                assert_eq!(sent.profile.as_deref(), Some(profile));
+                assert_eq!(sent.max_tokens, None, "retain the selected model's budget");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_session_thinking_projection_failure_does_not_dispatch() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "claude-sonnet-5-5".into())
+            .with_session_thinking_source(|| {
+                Err(llm_runtime::LlmError::InvalidRequest {
+                    message: "unrepresentable live thinking budget".into(),
+                })
+            });
+        let error = runner
+            .run(request_with(vec![], vec![user_msg("compact")], None))
+            .await
+            .expect_err("invalid policy must fail before model work");
+        assert!(matches!(error, ForkError::Api(SideQueryError::Api(
+            llm_runtime::LlmError::InvalidRequest { message }
+        )) if message == "unrepresentable live thinking budget"));
+        assert!(client.seen.lock().unwrap().is_none());
     }
 
     #[tokio::test]

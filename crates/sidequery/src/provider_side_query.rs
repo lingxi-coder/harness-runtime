@@ -378,8 +378,21 @@ fn decode_response(
         None
     };
 
-    let bt = resp.usage.counts();
-    let usage = cost::Usage {
+    let usage = fork_cost_usage(&resp.usage);
+
+    SideQueryResponse {
+        text,
+        structured,
+        tool_calls,
+        usage,
+        stop_reason: resp.stop_reason,
+        retry_count,
+    }
+}
+
+fn fork_cost_usage(usage: &llm_runtime::ExecutionUsage) -> cost::Usage {
+    let bt = usage.counts();
+    cost::Usage {
         tokens: cost::TokenUsage {
             input: bt.input_tokens,
             output: bt.output_tokens.saturating_sub(bt.reasoning_tokens),
@@ -392,15 +405,17 @@ fn decode_response(
         },
         server_tool_use: None,
         speed: None,
-    };
+    }
+}
 
-    SideQueryResponse {
-        text,
-        structured,
-        tool_calls,
-        usage,
-        stop_reason: resp.stop_reason,
-        retry_count,
+fn observe_fork_usage(observer: &crate::ForkedUsageObserver, usage: &llm_runtime::ExecutionUsage) {
+    if usage.report.usage.is_some()
+        && matches!(
+            usage.report.state,
+            llm_runtime::UsageState::Partial | llm_runtime::UsageState::Complete
+        )
+    {
+        observer.observe(fork_cost_usage(usage));
     }
 }
 
@@ -590,6 +605,12 @@ impl ProviderSideQueryClient {
             canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
             canonical.execution.model_attempt = request.model_attempt;
             canonical.execution.api_attempts_left = request.api_attempts_left;
+            canonical.execution.request_usage_observer =
+                options.usage_observer.clone().map(|observer| {
+                    llm_runtime::RequestUsageObserver::new(move |usage| {
+                        observe_fork_usage(&observer, usage)
+                    })
+                });
             canonical
                 .execution
                 .set_request_dispatch_admission(admission);
@@ -638,7 +659,11 @@ impl ProviderSideQueryClient {
                 // request policy, with auxiliary ownership and no transcript writes.
                 canonical.execution.anthropic_request_kind = Default::default(); // Main
                 canonical.execution.isolated_query = true;
-                collect_completed_response(service.stream_request(canonical).await?).await?
+                collect_completed_response_with_observer(
+                    service.stream_request(canonical).await?,
+                    options.usage_observer.clone(),
+                )
+                .await?
             } else {
                 service.execute_side_query_request(canonical).await?
             };
@@ -1118,6 +1143,30 @@ async fn collect_completed_response(
         + Send
         + 'static,
 ) -> Result<llm_runtime::HistoryResponse, SideQueryError> {
+    collect_completed_response_with_observer(stream, None).await
+}
+
+async fn collect_completed_response_with_observer(
+    stream: impl futures_util::Stream<Item = Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
+        + Send
+        + 'static,
+    observer: Option<crate::side_query::ForkedUsageObserver>,
+) -> Result<llm_runtime::HistoryResponse, SideQueryError> {
+    use futures_util::StreamExt;
+    let stream = stream.inspect(move |event| {
+        let (Some(observer), Ok(event)) = (&observer, event) else {
+            return;
+        };
+        let usage = match event {
+            llm_runtime::HistoryEvent::MessageStart { response }
+            | llm_runtime::HistoryEvent::Completed { response } => Some(&response.usage),
+            llm_runtime::HistoryEvent::MessageDelta { usage, .. } => usage.as_ref(),
+            _ => None,
+        };
+        if let Some(usage) = usage {
+            observe_fork_usage(observer, usage);
+        }
+    });
     llm_runtime::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
         .await
         .map_err(|(_partial_content, err)| map_structured_llm_error(err))
@@ -3027,6 +3076,171 @@ mod tests {
         let bodies = transport.received_bodies.lock().unwrap();
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0]["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn compaction_usage_observer_survives_real_sse_disconnect_without_double_counting() {
+        for completed in [false, true] {
+            let mut transport = StreamStubTransport::text_response("<summary>work</summary>");
+            // Anthropic's final delta can omit input usage. The SDK supplies
+            // a cumulative snapshot, rather than an output-only replacement.
+            let mut terminal: serde_json::Value =
+                serde_json::from_str(&transport.frames[4]).unwrap();
+            terminal["usage"]
+                .as_object_mut()
+                .unwrap()
+                .remove("input_tokens");
+            transport.frames[4] = terminal.to_string();
+            if !completed {
+                transport.frames.pop();
+            }
+            let client = structured_session_client(Arc::new(transport), None);
+            let mut request = req(None);
+            request.model = "claude-sonnet-4-20250514".into();
+            request.query_source = QuerySource::Compaction;
+            request.api_attempts_left = Some(llm_runtime::ApiAttemptsLeft::new(1));
+            let observer = crate::ForkedUsageObserver::default();
+            let result = client
+                .query_fork(
+                    request,
+                    ForkedSideQueryOptions {
+                        usage_observer: Some(observer.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            let usage = observer
+                .snapshot()
+                .expect("SSE already supplied canonical usage");
+            assert_eq!(
+                (usage.tokens.input, usage.tokens.output),
+                (1, 1),
+                "message_start and message_delta are cumulative snapshots"
+            );
+            if completed {
+                assert_eq!(result.unwrap().response.usage, usage);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_stream_compaction_observes_usage_through_the_physical_attempt() {
+        let model = "claude-sonnet-4-20250514";
+        let body = serde_json::json!({
+            "id":"known-usage", "type":"message", "role":"assistant", "model":model,
+            "content":[{"type":"text","text":"<summary>retained work</summary>"}],
+            "stop_reason":"end_turn", "usage":{"input_tokens":42,"output_tokens":7}
+        });
+        let transport = Arc::new(StubTransport::new(body.to_string()));
+        let mut provider = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap();
+        provider.auth = AuthStrategy::None;
+        provider.credential = CredentialConfig::None;
+        provider.models = vec![ModelProfile {
+            request_model: model.into(),
+            display_model: model.into(),
+            billing_model: model.into(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: Default::default(),
+            capabilities: Capabilities {
+                streaming: false,
+                tools: true,
+                ..Default::default()
+            },
+        }];
+        let runtime = ModelRuntime::from_config(ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let service = llm_runtime::ApiService::new(
+            Arc::new(runtime),
+            transport,
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+        );
+        let client = ProviderSideQueryClient::from_service(Arc::new(service));
+        let mut request = req(None);
+        request.model = model.into();
+        request.query_source = QuerySource::Compaction;
+        let observer = crate::ForkedUsageObserver::default();
+        let response = client
+            .query_fork(
+                request,
+                ForkedSideQueryOptions {
+                    usage_observer: Some(observer.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let usage = observer
+            .snapshot()
+            .expect("unregistered WireAttempt observed before finish");
+        assert_eq!((usage.tokens.input, usage.tokens.output), (42, 7));
+        assert_eq!(response.response.usage, usage);
+    }
+
+    #[tokio::test]
+    async fn compaction_usage_observer_survives_dropping_an_unfinished_stream() {
+        use futures_util::{FutureExt, StreamExt};
+        let observer = crate::ForkedUsageObserver::default();
+        let mut partial = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+            input_tokens: 42,
+            output_tokens: 7,
+            ..Default::default()
+        });
+        partial.report.state = llm_runtime::UsageState::Partial;
+        let start = llm_runtime::HistoryEvent::MessageStart {
+            response: Box::new(llm_runtime::HistoryResponse {
+                id: "partial".into(),
+                model: "provider-model".into(),
+                content: Vec::new(),
+                stop_reason: None,
+                stop_details: None,
+                resumable: None,
+                usage: partial,
+                cost: None,
+                provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+            }),
+        };
+        let stream = futures_util::stream::iter([Ok(start)]).chain(futures_util::stream::pending());
+        assert!(
+            collect_completed_response_with_observer(stream, Some(observer.clone()))
+                .now_or_never()
+                .is_none(),
+            "the pending future is dropped before message_stop"
+        );
+        let usage = observer.snapshot().unwrap();
+        assert_eq!((usage.tokens.input, usage.tokens.output), (42, 7));
+        let no_usage = crate::ForkedUsageObserver::default();
+        observe_fork_usage(&no_usage, &llm_runtime::ExecutionUsage::default());
+        let mut invalid = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+            input_tokens: 999,
+            ..Default::default()
+        });
+        invalid.report.state = llm_runtime::UsageState::Invalid;
+        observe_fork_usage(&no_usage, &invalid);
+        assert!(
+            no_usage.snapshot().is_none(),
+            "Missing/Invalid reports cannot manufacture counts"
+        );
+        let stream = futures_util::stream::pending();
+        assert!(
+            collect_completed_response_with_observer(stream, Some(no_usage.clone()))
+                .now_or_never()
+                .is_none()
+        );
+        assert!(
+            no_usage.snapshot().is_none(),
+            "unknown usage must remain unknown"
+        );
     }
     #[tokio::test]
     async fn responses_compaction_http_preserves_the_last_summary_request() {

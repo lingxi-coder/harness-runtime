@@ -21,24 +21,17 @@
 //!   setting."`), otherwise parses `auto`/`reset`/`unset`/`default` or a
 //!   `100k–1M` token spec (`odo`) and **persists it to `userSettings`**.
 //!
-//! ## LingXi divergence (why this is read-only)
-//!
-//! LingXi's auto-compact window is resolved by
-//! `compaction::thresholds::effective_context_window_size`, whose only override
-//! knob is the `LINGXI_AUTO_COMPACT_WINDOW` env var (a positive integer). There
-//! is **no** `userSettings.autoCompactWindow` store and **no**
-//! `OrchestratorHandle` getter/setter for it (checked `platform-api/src/orchestrator.rs`).
-//! So this handler is a faithful **read-only status/echo**: it reports the
-//! current resolution and, when an argument is supplied while the env override
-//! is active, surfaces the byte-exact env-precedence note explaining why the
-//! value can't be changed here. Every emitted literal is byte-exact from the
-//! 2.1.198 binary, with the env var rebranded `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-//! → `LINGXI_AUTO_COMPACT_WINDOW` (the var LingXi actually honours), matching
-//! the established rebrand of product/env nouns in `core_description`.
+//! The registered handler reads the active provider/model resolution, persists
+//! per-model windows to the host-owned user settings file, and applies a
+//! successful edit immediately. The environment variable is rebranded from
+//! `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to `LINGXI_AUTO_COMPACT_WINDOW`.
 
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::host::auto_compact::{AutoCompactCommandSnapshot, AutoCompactWindow};
+use lingxi_core::host::OrchestratorHandle;
+use std::sync::Arc;
 
 /// The env var LingXi honours for the auto-compact window override
 /// (`compaction::thresholds::effective_context_window_size`). Rebrand of the
@@ -79,13 +72,8 @@ const EXPLAIN_OVERRIDE_WARNING: &str =
 /// (`" tokens (default for this model)"` has 0 hits in the 2.1.220 binary; the
 /// 2.1.220 twin `$ly` @236076164 is the same expression without them).
 ///
-/// LingXi reach today: the handler resolves only [`WindowSource::Env`] (the
-/// `LINGXI_AUTO_COMPACT_WINDOW` override) and [`WindowSource::Auto`], because
-/// `compaction::thresholds::effective_context_window_size` returns a bare `u64`
-/// with no source taxonomy and the slash-command handler has no access to the
-/// main-loop model (the oracle reads `t.options.mainLoopModel`). The remaining
-/// arms carry the byte-exact upstream copy and are selected as soon as that
-/// resolver returns a `(window, configured, source)` triple.
+/// Legacy disconnected renderer. Registered commands use the live host snapshot
+/// below, which also carries the active model, cap and enabled state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowSource {
     /// `source:"auto"` — no override and no model-specific default applied.
@@ -104,9 +92,7 @@ pub enum WindowSource {
 impl WindowSource {
     /// The `Auto-compact window: …` line for this source, byte-exact with `sgT`.
     ///
-    /// The upstream `${i}` (` · capped to N by model`) suffix is not rendered:
-    /// it needs the `configured`-vs-`window` split the port's resolver does not
-    /// expose yet (pre-existing, also absent in the port against 2.1.220).
+    /// Unbound handlers have no model cap; registered handlers use `current_status`.
     fn window_line(self) -> String {
         match self {
             Self::Auto => "Auto-compact window: auto".to_string(),
@@ -137,27 +123,139 @@ impl WindowSource {
     }
 }
 
-/// `/autocompact` handler (headless, read-only). See module docs.
-#[derive(Debug, Default, Clone)]
-pub struct AutocompactHandler;
+/// `/autocompact` handler for the headless and bridge command surface.
+#[derive(Default, Clone)]
+pub struct AutocompactHandler {
+    handle: Option<Arc<dyn OrchestratorHandle>>,
+}
 
 impl AutocompactHandler {
     /// Construct a new `AutocompactHandler`.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// The current window override from `LINGXI_AUTO_COMPACT_WINDOW`, or `None`
-    /// when the var has no positive JS integer prefix. Keep parsing and the
-    /// 100k–1M clamp aligned with the live threshold resolver.
+    /// Bind the selected live model and the host-owned settings destination.
+    #[must_use]
+    pub fn with_handle(mut self, handle: Arc<dyn OrchestratorHandle>) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    fn current_status(snapshot: &AutoCompactCommandSnapshot) -> String {
+        let configured = format_tokens_compact(snapshot.configured);
+        let suffix = if snapshot.configured > snapshot.window {
+            format!(
+                " · capped to {} by model",
+                format_tokens_compact(snapshot.window)
+            )
+        } else {
+            String::new()
+        };
+        let value = match snapshot.source.as_str() {
+            "auto" => "auto".to_owned(),
+            "experiment" | "clientdata" => format!("auto ({configured} tokens){suffix}"),
+            source => {
+                let label = match source {
+                    "env" => format!("from {WINDOW_ENV_VAR}"),
+                    "model-default" => "default for this model".to_owned(),
+                    "unknown-model" => "default for an unrecognized model".to_owned(),
+                    _ => "from settings".to_owned(),
+                };
+                format!("{configured} tokens ({label}){suffix}")
+            }
+        };
+        let mut lines = vec![format!(
+            "Auto-compact window for {}: {value}",
+            snapshot.display_name
+        )];
+        if let Ok(raw) = std::env::var(WINDOW_ENV_VAR) {
+            if let Some(diagnostic) = lingxi_core::host::auto_compact::environment_diagnostic(&raw)
+            {
+                lines.push(diagnostic);
+            }
+        }
+        if !snapshot.enabled {
+            lines.push("Auto-compact is currently disabled (see /config)".into());
+        }
+        lines.push(EXPLAIN_THRESHOLD.into());
+        if snapshot.recommend_auto {
+            lines.push(EXPLAIN_AUTO_RECOMMENDED.into());
+        }
+        if snapshot.override_warning {
+            lines.push(EXPLAIN_OVERRIDE_WARNING.into());
+        }
+        lines.join("\n")
+    }
+
+    async fn handle_current(&self, handle: &dyn OrchestratorHandle, argument: &str) -> String {
+        let snapshot = match handle.auto_compact_command_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return format!("Couldn't read setting: {error}"),
+        };
+        if argument.is_empty() {
+            return Self::current_status(&snapshot);
+        }
+        if snapshot.source == "env" {
+            return ENV_PRECEDENCE_NOTE.into();
+        }
+        let Some(window) = parse_window(argument) else {
+            return format!("Couldn't parse '{argument}'. Expected 'auto' or 100k–1M tokens (e.g. 500k, 200000, or 200 as shorthand)");
+        };
+        let Some(path) = snapshot.user_settings_path.as_ref() else {
+            return "Couldn't save setting: user settings path is unavailable".into();
+        };
+        if let Err(error) = persist_window(path, &snapshot.settings_key, window) {
+            return format!("Couldn't save setting: {error}");
+        }
+        if let Err(error) = handle
+            .auto_compact_window_changed(&snapshot.settings_key, window)
+            .await
+        {
+            return format!("Couldn't apply setting: {error}");
+        }
+        let resulting = match handle.auto_compact_command_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return format!("Couldn't read setting: {error}"),
+        };
+        let overridden =
+            (resulting.source == "settings").then_some(resulting.configured) != window.tokens();
+        let label = format!("Auto-compact window for {}", snapshot.display_name);
+        if window == AutoCompactWindow::Auto {
+            return if overridden {
+                format!("{label} set to auto in settings, but a higher-priority override is active ({} tokens)", format_tokens_compact(resulting.window))
+            } else {
+                format!("{label} set to auto")
+            };
+        }
+        let tokens = window.tokens().expect("numeric window");
+        let suffix = if overridden {
+            format!(
+                ", but a higher-priority override is active ({} tokens)",
+                format_tokens_compact(resulting.window)
+            )
+        } else if resulting.window < tokens {
+            format!(
+                " (capped to model limit of {})",
+                format_tokens_compact(resulting.window)
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{label} set to {} tokens{suffix}",
+            format_tokens_compact(tokens)
+        )
+    }
+
+    /// The current environment override, sharing Native's suffix/prefix parser
+    /// and 100k–1M clamp with the live threshold resolver.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn env_window() -> Option<u64> {
         std::env::var(WINDOW_ENV_VAR)
             .ok()
-            .map(|raw| lingxi_core::host::env::parse_int_env(&raw))
-            .filter(|value| !value.is_nan() && *value > 0.0)
-            .map(|value| value.clamp(100_000.0, 1_000_000.0) as u64)
+            .and_then(|raw| lingxi_core::host::auto_compact::resolve_env_window(&raw))
     }
 
     /// Render the no-argument status block (`M$m`) for a resolved window
@@ -173,38 +271,44 @@ impl AutocompactHandler {
         lines.join("\n")
     }
 
-    /// The window source the port can resolve today: the env override, else
-    /// `auto`. (See [`WindowSource`] for why `model-default`/`unknown-model`
-    /// are not selectable from this handler yet.)
+    /// Fallback source for an intentionally unbound standalone handler.
     fn resolved_source(window: Option<u64>) -> WindowSource {
         window.map_or(WindowSource::Auto, WindowSource::Env)
     }
 }
 
-/// Mirrors the binary's `gl` token formatter (`Intl.NumberFormat` compact
-/// notation, lower-cased, with a trailing `.0` stripped): `200000` → `200k`,
-/// `1000000` → `1m`, `1500000` → `1.5m`. For the round values a user sets via
-/// the env var this matches upstream exactly; it may differ by a rounding digit
-/// for non-round inputs (upstream uses full Intl 3-significant-figure rounding),
-/// which is unobservable for the integer window values LingXi accepts.
+/// Native 2.1.319 `fa`/`Ur`: compact notation with one fractional digit,
+/// lower-cased, then `.0` removed. `200000` → `200k`, `1500000` → `1.5m`.
 fn format_tokens_compact(n: u64) -> String {
-    fn trim(v: f64) -> String {
-        // One decimal place, `.0` stripped (matches `gl`'s `.replace(".0","")`).
-        let s = format!("{v:.1}");
-        s.strip_suffix(".0").map_or(s.clone(), str::to_string)
-    }
-    if n >= 1_000_000 {
-        format!("{}m", trim(n as f64 / 1_000_000.0))
+    // Intl uses half-expand rounding and promotes the suffix when rounding
+    // 999.95k to 1.0m. Integer arithmetic preserves those ties exactly.
+    let (divisor, suffix) = if n >= 999_950 {
+        (1_000_000, "m")
     } else if n >= 1_000 {
-        format!("{}k", trim(n as f64 / 1_000.0))
+        (1_000, "k")
     } else {
-        n.to_string()
+        return n.to_string();
+    };
+    let tenths = n.saturating_add(divisor / 20) / (divisor / 10);
+    if tenths % 10 == 0 {
+        format!("{}{suffix}", tenths / 10)
+    } else {
+        format!("{}.{digits}{suffix}", tenths / 10, digits = tenths % 10)
     }
 }
 
 #[async_trait]
 impl BuiltinCommandHandler for AutocompactHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        if let Some(handle) = self.handle.as_ref() {
+            let argument = crate::model::trim_source_text(&args.raw_args);
+            let display = self
+                .handle_current(handle.as_ref(), argument.string_at("").unwrap_or_default())
+                .await;
+            return CommandResult::Done {
+                display: Some(display.into()),
+            };
+        }
         let window = Self::env_window();
         let arg = crate::model::trim_source_text(&args.raw_args);
         let has_argument = !arg.string_units("").unwrap_or_default().is_empty();
@@ -217,10 +321,7 @@ impl BuiltinCommandHandler for AutocompactHandler {
             // env-precedence note (`EQt` short-circuit).
             ENV_PRECEDENCE_NOTE.to_string()
         } else {
-            // Set-argument, no env override: LingXi has no writable settings
-            // store for the window (the only knob is the env var), so this is
-            // read-only — report the current (model-default) resolution.
-            Self::status_block(WindowSource::Auto)
+            "Couldn't save setting: no active model is bound to this command".to_owned()
         };
 
         CommandResult::Done {
@@ -235,6 +336,66 @@ impl BuiltinCommandHandler for AutocompactHandler {
     fn description(&self) -> &str {
         "Configure the auto-compact window size"
     }
+}
+
+fn parse_window(argument: &str) -> Option<AutoCompactWindow> {
+    let argument = lingxi_core::host::effort::trim_js_whitespace(argument).to_lowercase();
+    if matches!(argument.as_str(), "auto" | "reset" | "unset" | "default") {
+        return Some(AutoCompactWindow::Auto);
+    }
+    match lingxi_core::host::auto_compact::parse_size(&argument, true) {
+        lingxi_core::host::auto_compact::ParsedAutoCompactSize::InRange(tokens) => {
+            Some(AutoCompactWindow::Tokens(tokens))
+        }
+        _ => None,
+    }
+}
+
+fn persist_window(
+    path: &std::path::Path,
+    settings_key: &str,
+    window: AutoCompactWindow,
+) -> Result<(), String> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    migrations::settings_update::transform_settings_source_with_receipt(path, |source| {
+        let value = Utf16JsonProjection::from_serde_value(
+            &serde_json::to_value(window).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if lingxi_core::host::effort_table::object_prototype_key(settings_key) {
+            if window == AutoCompactWindow::Auto {
+                source
+                    .remove_field("autoCompactWindow")
+                    .map_err(|error| error.to_string())?;
+            } else {
+                source
+                    .set_field("autoCompactWindow", value)
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
+        let empty = || Utf16JsonProjection::parse("{}").expect("empty object");
+        let mut models = source
+            .subprojection("/modelSettings")
+            .ok()
+            .filter(|value| value.object_entries().is_some())
+            .unwrap_or_else(empty);
+        let mut model = models
+            .subprojection_property_units(&settings_key.encode_utf16().collect::<Vec<_>>())
+            .ok()
+            .filter(|value| value.object_entries().is_some())
+            .unwrap_or_else(empty);
+        model
+            .set_field("autoCompactWindow", value)
+            .map_err(|error| error.to_string())?;
+        models
+            .set_field(settings_key, model)
+            .map_err(|error| error.to_string())?;
+        source
+            .set_field("modelSettings", models)
+            .map_err(|error| error.to_string())
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -268,6 +429,9 @@ mod tests {
         assert_eq!(format_tokens_compact(1_000_000), "1m");
         assert_eq!(format_tokens_compact(1_500_000), "1.5m");
         assert_eq!(format_tokens_compact(50_000), "50k");
+        assert_eq!(format_tokens_compact(150_001), "150k");
+        assert_eq!(format_tokens_compact(150_050), "150.1k");
+        assert_eq!(format_tokens_compact(999_950), "1m");
     }
 
     /// SC-03: the two window-source labels 2.1.238 added to `sgT` are rendered
@@ -368,13 +532,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_env_with_arg_is_read_only_status() {
+    async fn unbound_handler_does_not_claim_to_save_a_window() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var(WINDOW_ENV_VAR);
         let h = AutocompactHandler::new();
         match h.handle(&args("200k")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.starts_with("Auto-compact window: auto\n"));
+                assert_eq!(
+                    s,
+                    "Couldn't save setting: no active model is bound to this command".into()
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -411,5 +578,149 @@ mod tests {
             assert_eq!(AutocompactHandler::env_window(), Some(expected));
         }
         std::env::remove_var(WINDOW_ENV_VAR);
+    }
+
+    #[test]
+    fn window_parser_matches_native_319_cases_and_command_reset_aliases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../compaction/tests/fixtures/claude_2_1_319_settings_parser.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            let expected = if matches!(input, "reset" | "unset" | "default") {
+                Some(AutoCompactWindow::Auto)
+            } else if case["expected"].is_null() {
+                None
+            } else {
+                AutoCompactWindow::from_value(&case["expected"])
+            };
+            assert_eq!(parse_window(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn persisted_window_preserves_sibling_models_settings_and_utf16_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path,
+            r#"{"opaque":"\ud800","autoCompactWindow":200000,"modelSettings":{"provider-a/model":{"effortLevel":"high","autoCompactWindow":500000},"provider-b/model":{"autoCompactWindow":300000}}}"#
+        ).unwrap();
+        persist_window(&path, "provider-a/model", AutoCompactWindow::Auto).unwrap();
+        let source = migrations::settings_update::read_settings_source(&path).unwrap();
+        assert_eq!(source.string_units("/opaque"), Some(vec![0xd800]));
+        assert_eq!(source.number_at("/autoCompactWindow"), Some(200000.0));
+        let models = source.subprojection("/modelSettings").unwrap();
+        let a = models
+            .subprojection_property_units(&"provider-a/model".encode_utf16().collect::<Vec<_>>())
+            .unwrap();
+        let b = models
+            .subprojection_property_units(&"provider-b/model".encode_utf16().collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(a.string_at("/autoCompactWindow"), Some("auto"));
+        assert_eq!(a.string_at("/effortLevel"), Some("high"));
+        assert_eq!(b.number_at("/autoCompactWindow"), Some(300000.0));
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(
+            persist_window(&path, "provider-a/model", AutoCompactWindow::Tokens(500000)).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+    }
+
+    #[test]
+    fn current_status_includes_model_cap_and_disabled_setting() {
+        // current_status reads Native's environment diagnostic too. Serialize
+        // this reader with the tests that temporarily install malformed knobs.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(WINDOW_ENV_VAR);
+        std::env::remove_var(WINDOW_ENV_VAR);
+        let snapshot = AutoCompactCommandSnapshot {
+            settings_key: "provider/model".into(),
+            display_name: "Model".into(),
+            enabled: false,
+            window: 200000,
+            configured: 500000,
+            source: "settings".into(),
+            recommend_auto: true,
+            override_warning: false,
+            user_settings_path: None,
+        };
+        let text = AutocompactHandler::current_status(&snapshot);
+        assert!(text.starts_with("Auto-compact window for Model: 500k tokens (from settings) · capped to 200k by model\nAuto-compact is currently disabled (see /config)\n"), "unexpected status: {text:?}");
+        assert!(!text.contains(EXPLAIN_OVERRIDE_WARNING));
+        if let Some(previous) = previous {
+            std::env::set_var(WINDOW_ENV_VAR, previous);
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_handler_persists_current_profile_and_reset_applies_immediately() {
+        use orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(WINDOW_ENV_VAR);
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            orchestrator::ConversationOrchestrator::new(
+                orchestrator::OrchestratorConfig {
+                    model: "autocompact-command-test".into(),
+                    ..Default::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                directory.path().to_owned(),
+            )
+            .with_config_home(directory.path().to_owned()),
+        );
+        handle.session().lock().await.model_profile = Some("provider-a".into());
+        let handler = AutocompactHandler::new().with_handle(handle.clone());
+        let result = handler.handle(&args("500k")).await;
+        let CommandResult::Done {
+            display: Some(text),
+        } = result
+        else {
+            panic!("expected command success")
+        };
+        assert!(text.contains("set to 500k tokens"), "{text:?}");
+        let settings = migrations::settings_update::read_settings_source(
+            &directory.path().join("settings.json"),
+        )
+        .unwrap();
+        let models = settings.subprojection("/modelSettings").unwrap();
+        let row = models
+            .subprojection_property_units(
+                &"provider-a/autocompact-command-test"
+                    .encode_utf16()
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(row.number_at("/autoCompactWindow"), Some(500000.0));
+        assert_eq!(
+            handle.auto_compact_command_snapshot().await.unwrap().source,
+            "settings"
+        );
+        let result = handler.handle(&args("reset")).await;
+        let CommandResult::Done {
+            display: Some(text),
+        } = result
+        else {
+            panic!("expected command success")
+        };
+        assert!(text.ends_with("set to auto"), "{text:?}");
+        assert_ne!(
+            handle.auto_compact_command_snapshot().await.unwrap().source,
+            "settings"
+        );
+        handle.session().lock().await.model_profile = Some("provider-b".into());
+        assert_ne!(
+            handle.auto_compact_command_snapshot().await.unwrap().source,
+            "settings"
+        );
     }
 }

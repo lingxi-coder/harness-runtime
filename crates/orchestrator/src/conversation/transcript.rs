@@ -45,8 +45,38 @@ struct PreappendedRowMetadata<'a> {
 pub(crate) fn persisted_assistant_usage(usage: &llm_runtime::ExecutionUsage) -> JsonPayload {
     if usage.provider_metadata.is_root_object() {
         let provider_usage = with_native_usage_iterations(&usage.provider_metadata);
-        let provider_usage = without_host_usage_metadata(&provider_usage);
+        let mut provider_usage = without_host_usage_metadata(&provider_usage);
         if provider_usage.object_len("").is_some_and(|len| len > 0) {
+            // Native-shaped usage stays byte-faithful. Other providers use
+            // names such as prompt_tokens or promptTokenCount; retain those
+            // observations and add the SDK's disjoint canonical buckets so
+            // cold context accounting has the same basis as a live turn.
+            if ![
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+            .iter()
+            .any(|field| provider_usage.payload_at(&format!("/{field}")).is_some())
+            {
+                if let Some(counts) = usage.report.usage {
+                    for (field, value) in [
+                        ("input_tokens", counts.input_tokens),
+                        ("output_tokens", counts.output_tokens),
+                        ("cache_read_input_tokens", counts.cache_read_tokens),
+                        ("cache_creation_input_tokens", counts.cache_write_tokens),
+                    ] {
+                        provider_usage = provider_usage
+                            .with_object_field(
+                                field,
+                                &JsonPayload::from_generated_value(&serde_json::Value::from(value))
+                                    .expect("token count serializes"),
+                            )
+                            .expect("usage is an object");
+                    }
+                }
+            }
             return provider_usage;
         }
     }
@@ -5545,8 +5575,28 @@ impl ConversationOrchestrator {
             None,
         );
         let row_uuid = row.row_id.as_uuid().to_string();
+        if let Some(context) = row
+            .usage
+            .as_ref()
+            .and_then(super::context_usage::execution_context_management)
+        {
+            jmsg.message
+                .set_field("context_management", context)
+                .expect("assistant message is an object");
+        }
         jmsg.uuid.clone_from(&row_uuid);
         jmsg.timestamp.clone_from(&row.timestamp);
+        let (requested_model, requested_profile) = self.requested_route_for_transcript().await;
+        jmsg.extra
+            .set_field("requestedModel", requested_model.into())
+            .expect("extra metadata is an object");
+        jmsg.extra
+            .set_field(
+                "requestedModelProfile",
+                Source::from_serde_value(&serde_json::json!(requested_profile))
+                    .expect("profile source"),
+            )
+            .expect("extra metadata is an object");
         // Compaction refers to the live host message, while message.id keeps
         // the provider response identity shared by its streamed block rows.
         if let Some(logical_id) = row.logical_message_id {
@@ -5722,6 +5772,21 @@ impl ConversationOrchestrator {
         Ok(())
     }
 
+    async fn requested_route_for_transcript(&self) -> (String, Option<String>) {
+        if let Some(slot) = &self.model_runtime.cache_safe_slot {
+            if let Some(params) = slot.get_last().await {
+                if !params.tool_use_options.main_loop_model.trim().is_empty() {
+                    return (
+                        params.tool_use_options.main_loop_model,
+                        params.tool_use_options.model_profile,
+                    );
+                }
+            }
+        }
+        let session = self.session.lock().await;
+        (session.model.clone(), session.model_profile.clone())
+    }
+
     /// Persist a NON-streaming (batched) assistant turn as ONE merged JSONL line
     /// carrying the full BetaMessage envelope — the real `model` (the live
     /// session model, same source [`Self::persist_assistant_per_block`] uses),
@@ -5824,6 +5889,22 @@ impl ConversationOrchestrator {
             request_id,
             None,
         );
+        if let Some(context) = usage.and_then(super::context_usage::execution_context_management) {
+            jmsg.message
+                .set_field("context_management", context)
+                .expect("assistant message is an object");
+        }
+        let (requested_model, requested_profile) = self.requested_route_for_transcript().await;
+        jmsg.extra
+            .set_field("requestedModel", requested_model.into())
+            .expect("extra metadata is an object");
+        jmsg.extra
+            .set_field(
+                "requestedModelProfile",
+                Source::from_serde_value(&serde_json::json!(requested_profile))
+                    .expect("profile source"),
+            )
+            .expect("extra metadata is an object");
         jmsg.extra
             .set_field(
                 "modelProfile",

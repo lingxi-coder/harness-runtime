@@ -1,4 +1,4 @@
-//! Claude Code 2.1.286 post-compact JSONL persistence and cold-resume parity.
+//! Claude Code 2.1.319 post-compact JSONL persistence and cold-resume parity.
 //!
 //! Both full automatic compaction and tail-preserving manual compaction persist
 //! a chain-reset boundary and a typed summary. Only the manual path records
@@ -25,6 +25,22 @@ use session::jsonl::writer::JsonlWriter;
 use session::jsonl::JsonlMessage;
 use std::sync::Arc;
 use tempfile::tempdir;
+
+fn full_auto_config() -> OrchestratorConfig {
+    // Native 2.1.319 routes model-default windows through the reactive path.
+    // These fixtures specifically exercise full-auto persistence, so select a
+    // recognized model whose unconfigured window resolves to source:"auto".
+    let model = "claude-sonnet-4-20250514";
+    assert_eq!(
+        compaction::thresholds::resolve_auto_compact_window(model, &[], None, true).source,
+        compaction::thresholds::AutoCompactWindowSource::Auto,
+        "the persistence fixture must exercise full automatic compaction"
+    );
+    OrchestratorConfig {
+        model: model.into(),
+        ..OrchestratorConfig::default()
+    }
+}
 
 fn source_value(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> Value {
     serde_json::from_str(&source.to_json_string().expect("valid source projection"))
@@ -242,7 +258,7 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         if manual { u64::MAX } else { 200 },
     );
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        full_auto_config(),
         api.clone(),
         Arc::new(tool_api::registry::ToolRegistry::new()),
         noop_hook_executor(),
@@ -678,8 +694,17 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
         .mark_loaded(["WebFetch".to_string(), "Task".to_string()]);
     let registry = Arc::new(registry);
 
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(SummaryClient), "test-compact-model".into()),
+    );
+    let compactor = CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        200,
+    );
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        full_auto_config(),
         api.clone(),
         registry,
         noop_hook_executor(),
@@ -690,7 +715,8 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
     )
     .with_session_id(session_id)
     .with_jsonl_writer(writer)
-    .with_compaction(Arc::new(CompactionOrchestrator::new(200)));
+    .with_cache_safe_slot(slot)
+    .with_compaction(Arc::new(compactor));
     orch.initialize_conversation_mode()
         .await
         .expect("initialize fixed session mode");
@@ -717,6 +743,10 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
     let cm = boundary_extra
         .get("compactMetadata")
         .expect("compactMetadata persisted");
+    assert!(
+        cm.get("preservedMessages").is_none(),
+        "the discovered-tools fixture uses full automatic compaction"
+    );
 
     // preCompactDiscoveredTools carries the loaded set, sorted + deduped.
     let discovered: Vec<&str> = cm

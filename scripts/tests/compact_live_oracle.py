@@ -164,13 +164,13 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict], expec
     statuses = [event for event in events if event.get("subtype") == "status"]
     boundaries = [event for event in events if event.get("subtype") == "compact_boundary"]
     errors = [event["compact_error"] for event in statuses if "compact_error" in event]
-    short_history_compacts = scenario == "too-few" and expected_version in ("2.1.286", "2.1.318")
+    short_history_compacts = scenario == "too-few" and expected_version in ("2.1.286", "2.1.318", "2.1.319")
     if scenario in ("success", "prompt-too-long", "multiple-text-blocks", "summary-reask") or short_history_compacts:
         assert len(boundaries) == 1, "Expected one successful compact boundary"
         assert any(event.get("compact_result") == "success" for event in statuses)
         summary_index = next(i for i, request in enumerate(requests) if is_summary(request["body"]))
         parent = requests[summary_index - 1]["body"]
-        for key in ("tools", "thinking", "max_tokens", "context_management", "output_config"):
+        for key in ("model", "tools", "thinking", "max_tokens", "context_management", "output_config"):
             assert summaries[0].get(key) == parent.get(key), f"Parent {key} changed during compact"
         assert "PRIORITY_MARKER_42" in json.dumps(requests[-1]["body"]["messages"])
         if scenario in ("multiple-text-blocks", "summary-reask"):
@@ -306,7 +306,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New output directory (usually under /tmp)")
-    parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286", "2.1.318"), default="2.1.261")
+    parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286", "2.1.318", "2.1.319"), default="2.1.261")
     parser.add_argument("--scenario", choices=("all",) + SCENARIOS + LATEST_SCENARIOS, default="all")
     parser.add_argument("--timeout", type=float, default=45, help="Seconds per scenario")
     args = parser.parse_args()
@@ -323,9 +323,10 @@ def main() -> None:
     ).stdout.strip()
     if not re.match(rf"^{re.escape(args.expected_version)}(?:\s|$)", version):
         raise RuntimeError(f"Expected Claude Code {args.expected_version}; got {version!r}")
-    if args.scenario in LATEST_SCENARIOS and args.expected_version != "2.1.318":
-        parser.error("The selected scenario requires Claude Code 2.1.318")
-    scenarios = SCENARIOS + (LATEST_SCENARIOS if args.expected_version == "2.1.318" else ()) if args.scenario == "all" else (args.scenario,)
+    supports_latest_scenarios = args.expected_version in ("2.1.318", "2.1.319")
+    if args.scenario in LATEST_SCENARIOS and not supports_latest_scenarios:
+        parser.error("The selected scenario requires Claude Code 2.1.318 or 2.1.319")
+    scenarios = SCENARIOS + (LATEST_SCENARIOS if supports_latest_scenarios else ()) if args.scenario == "all" else (args.scenario,)
     with binary.open("rb") as source:
         binary_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
     reports = []

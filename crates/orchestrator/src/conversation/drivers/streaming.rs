@@ -944,12 +944,25 @@ impl StreamingTurnDriver<'_> {
         // `"prompt_too_long"`). Use the exact same custom beta set as the
         // provider request so context-1m sessions are not preempted at the
         // default 200k boundary.
-        let warning = orch.api.context_warning(
-            compaction::grouping::estimate_tokens_for_range(&prepared.snapshot),
-            &prepared.model,
-            prepared.model_profile.as_deref(),
-        );
-        if warning.is_at_blocking_limit {
+        let estimate = orch
+            .current_live_context_usage_for(&prepared.snapshot)
+            .await;
+        let (auto_compact_enabled, settings_window) =
+            orch.auto_compact_settings_for(&prepared.model, prepared.model_profile.as_deref());
+        let warning = orch
+            .api
+            .compact_warning(
+                estimate,
+                &prepared.model,
+                prepared.model_profile.as_deref(),
+                settings_window,
+                auto_compact_enabled,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "context pressure is unavailable");
+                compaction::thresholds::warning_for_input_budget(estimate, None)
+            });
+        if warning.is_at_blocking_limit && !compaction::is_context_collapse_enabled() {
             tracing::warn!(
                 model = %prepared.model,
                 "prompt at blocking limit — preempting before stream"
@@ -3221,9 +3234,11 @@ impl StreamingTurnDriver<'_> {
         {
             return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
-        orch.record_main_loop_assistant_usage(
+        orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,
             pumped.served_model.as_deref().unwrap_or(&model),
+            &request_model,
+            model_profile.as_deref(),
             pumped.usage.as_ref(),
         )
         .await;

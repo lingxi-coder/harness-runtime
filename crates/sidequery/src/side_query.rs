@@ -195,6 +195,33 @@ pub struct ForkedSideQueryOptions {
     pub system_blocks: Option<Vec<llm_runtime::SystemBlock>>,
     /// Parent's last assistant group (or last message for an unfinished turn).
     pub fork_point_message_id: Option<lingxi_core::types::MessageId>,
+    /// Optional host accounting sink for a one-shot fork. Snapshots survive
+    /// dropping the stream future after usage has already been observed.
+    pub usage_observer: Option<ForkedUsageObserver>,
+}
+
+/// Latest canonical usage snapshot for one physical one-shot fork. Updates
+/// replace cumulative counters; streaming deltas are never added twice.
+#[derive(Debug, Clone, Default)]
+pub struct ForkedUsageObserver(std::sync::Arc<std::sync::Mutex<Option<cost::Usage>>>);
+
+impl ForkedUsageObserver {
+    /// Replace the one-shot fork's cumulative provider usage snapshot.
+    pub fn observe(&self, usage: cost::Usage) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(usage);
+    }
+
+    #[must_use]
+    /// Read facts retained so far, including an unfinished stream's usage.
+    pub fn snapshot(&self) -> Option<cost::Usage> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Side-query failure surface.

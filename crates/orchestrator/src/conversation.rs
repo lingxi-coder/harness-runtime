@@ -323,6 +323,72 @@ pub trait OrchestratorApiClient: Send + Sync {
         }
     }
 
+    /// Input ceiling for compaction on the selected provider route. A window
+    /// override is a total context window, so shared-window providers must
+    /// retain their actual output reservation inside it.
+    fn compact_input_budget(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        settings_window: Option<u64>,
+        enabled: bool,
+    ) -> Result<Option<u64>, LlmError> {
+        let configured = compaction::thresholds::resolve_auto_compact_window(
+            model,
+            &self.active_betas(),
+            settings_window.filter(|_| enabled),
+            enabled,
+        );
+        match self.context_budget(model, profile)? {
+            Some(context) => Ok(compact_route_input_budget(&context, configured)),
+            None => Ok(Some(
+                configured.window.saturating_sub(
+                    compaction::context_window::max_output_tokens_for_model(model)
+                        .min(compaction::thresholds::MAX_OUTPUT_TOKENS_FOR_SUMMARY),
+                ),
+            )),
+        }
+    }
+
+    /// Keep small provider windows usable; Native Claude overrides this with
+    /// its exact 13k buffer, including explicitly configured 100k windows.
+    fn compact_threshold(&self, model: &str, profile: Option<&str>, budget: u64) -> u64 {
+        if matches!(self.context_budget(model, profile), Ok(None)) {
+            compaction::thresholds::native_threshold_for_input_budget(budget)
+        } else {
+            compaction::thresholds::threshold_for_input_budget(budget)
+        }
+    }
+
+    /// Pressure reporting shares the automatic compactor's selected budget.
+    fn compact_warning(
+        &self,
+        tokens: u64,
+        model: &str,
+        profile: Option<&str>,
+        settings_window: Option<u64>,
+        enabled: bool,
+    ) -> Result<compaction::thresholds::TokenWarningState, LlmError> {
+        let budget = self.compact_input_budget(model, profile, settings_window, enabled)?;
+        if self.context_budget(model, profile)?.is_none() {
+            let actual =
+                compaction::context_window::context_window_for_model(model, &self.active_betas())
+                    .saturating_sub(
+                        compaction::context_window::max_output_tokens_for_model(model)
+                            .min(compaction::thresholds::MAX_OUTPUT_TOKENS_FOR_SUMMARY),
+                    );
+            return Ok(compaction::thresholds::native_warning_for_input_budgets(
+                tokens,
+                budget.unwrap_or(actual),
+                actual,
+                enabled,
+            ));
+        }
+        let mut warning = compaction::thresholds::warning_for_input_budget(tokens, budget);
+        warning.is_above_auto_compact_threshold &= enabled;
+        Ok(warning)
+    }
+
     fn context_warning(
         &self,
         tokens: u64,
@@ -576,6 +642,37 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         Ok(())
     }
+}
+
+/// Preserve provider-owned input policy while applying an explicit total
+/// window. Unrecognized model names never borrow Claude's assumed 200k cap.
+pub(crate) fn compact_route_input_budget(
+    context: &llm_runtime::ResolvedContext,
+    configured: compaction::thresholds::ResolvedAutoCompactWindow,
+) -> Option<u64> {
+    use compaction::thresholds::AutoCompactWindowSource;
+    if !matches!(
+        configured.source,
+        AutoCompactWindowSource::Env | AutoCompactWindowSource::Settings
+    ) {
+        return context.effective_input_budget;
+    }
+    let reserve = if context.shared_window == Some(true) {
+        context.output_reserve_tokens.unwrap_or(0)
+    } else {
+        0
+    };
+    let mut budget = configured
+        .configured
+        .saturating_sub(reserve)
+        .saturating_sub(context.safety_tokens);
+    if let Some(limit) = context.effective_input_budget {
+        budget = budget.min(limit);
+    }
+    if let Some(limit) = context.hard_input_limit {
+        budget = budget.min(limit.saturating_sub(context.safety_tokens));
+    }
+    Some(budget)
 }
 
 /// Re-map a terminal `RateLimited` turn error onto the user-facing copy
@@ -2062,11 +2159,15 @@ impl ConversationOrchestrator {
 // public façade and shared state shape; behavior lives in these child modules.
 #[path = "conversation/attachment_order.rs"]
 mod attachment_order;
+#[path = "conversation/auto_compact_settings.rs"]
+mod auto_compact_settings_impl;
 pub(crate) mod closing_placement;
 #[path = "conversation/command_describe.rs"]
 mod command_describe_impl;
 #[path = "conversation/compaction.rs"]
 mod compaction_impl;
+#[path = "conversation/context_usage.rs"]
+pub(crate) mod context_usage;
 mod task_delivery;
 pub(crate) use compaction_impl::{
     SessionCompactCore, SessionCompactCoreOutput, SessionCompactDecision,

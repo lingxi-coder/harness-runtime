@@ -1,0 +1,225 @@
+{
+  "version": "2.1.319",
+  "sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "ranges": [
+    {
+      "name": "integer-prefix-patterns-and-t2s",
+      "offset": 259477214,
+      "bytes": 277
+    },
+    {
+      "name": "Qf",
+      "offset": 259477491,
+      "bytes": 68
+    },
+    {
+      "name": "UCe",
+      "offset": 271029423,
+      "bytes": 411
+    },
+    {
+      "name": "UTn",
+      "offset": 271034347,
+      "bytes": 139
+    }
+  ],
+  "scope": "UTn auto-compact window parser only. Limits WO=1e5,pj=1e6 from artifact offset 259762652. Command reset/unset/default aliases, settings persistence, and provider display are outside this fixture.",
+  "cases": [
+    {
+      "input": "auto",
+      "expected": "auto"
+    },
+    {
+      "input": " AUTO ",
+      "expected": "auto"
+    },
+    {
+      "input": "reset",
+      "expected": null
+    },
+    {
+      "input": "unset",
+      "expected": null
+    },
+    {
+      "input": "default",
+      "expected": null
+    },
+    {
+      "input": "",
+      "expected": null
+    },
+    {
+      "input": " ",
+      "expected": null
+    },
+    {
+      "input": "100",
+      "expected": 100000
+    },
+    {
+      "input": "200",
+      "expected": 200000
+    },
+    {
+      "input": "1000",
+      "expected": 1000000
+    },
+    {
+      "input": "99",
+      "expected": null
+    },
+    {
+      "input": "1001",
+      "expected": null
+    },
+    {
+      "input": "100000",
+      "expected": 100000
+    },
+    {
+      "input": "200000",
+      "expected": 200000
+    },
+    {
+      "input": "1000000",
+      "expected": 1000000
+    },
+    {
+      "input": "1000001",
+      "expected": null
+    },
+    {
+      "input": "100k",
+      "expected": 100000
+    },
+    {
+      "input": " 200K ",
+      "expected": 200000
+    },
+    {
+      "input": "1m",
+      "expected": 1000000
+    },
+    {
+      "input": "0.5m",
+      "expected": 500000
+    },
+    {
+      "input": ".5m",
+      "expected": 500000
+    },
+    {
+      "input": "0.1m",
+      "expected": 100000
+    },
+    {
+      "input": "0.099999m",
+      "expected": null
+    },
+    {
+      "input": "150.5k",
+      "expected": 150500
+    },
+    {
+      "input": "150.0005k",
+      "expected": 150001
+    },
+    {
+      "input": "150.00049k",
+      "expected": 150000
+    },
+    {
+      "input": "200.9",
+      "expected": 200000
+    },
+    {
+      "input": "1e5",
+      "expected": 100000
+    },
+    {
+      "input": "2E5",
+      "expected": 200000
+    },
+    {
+      "input": "2e2",
+      "expected": 200000
+    },
+    {
+      "input": "1e6",
+      "expected": 1000000
+    },
+    {
+      "input": "1e5.5",
+      "expected": null
+    },
+    {
+      "input": "2e2.5k",
+      "expected": 200000
+    },
+    {
+      "input": "200xyz",
+      "expected": 200000
+    },
+    {
+      "input": "200xk",
+      "expected": 200000
+    },
+    {
+      "input": "200x",
+      "expected": 200000
+    },
+    {
+      "input": "200,000",
+      "expected": 200000
+    },
+    {
+      "input": "200_000",
+      "expected": 200000
+    },
+    {
+      "input": "200 000",
+      "expected": 200000
+    },
+    {
+      "input": "200 000",
+      "expected": 200000
+    },
+    {
+      "input": "200 000",
+      "expected": 200000
+    },
+    {
+      "input": "2,00,000",
+      "expected": null
+    },
+    {
+      "input": "+200",
+      "expected": 200000
+    },
+    {
+      "input": "-200",
+      "expected": null
+    },
+    {
+      "input": "0",
+      "expected": null
+    },
+    {
+      "input": "NaN",
+      "expected": null
+    },
+    {
+      "input": "Infinity",
+      "expected": null
+    },
+    {
+      "input": "0x200",
+      "expected": null
+    },
+    {
+      "input": "100000000000000000000000000000000",
+      "expected": null
+    }
+  ]
+}

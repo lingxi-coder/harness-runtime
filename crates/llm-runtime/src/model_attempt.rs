@@ -97,6 +97,7 @@ pub trait ModelAttemptSettlement: Send {
 pub(crate) struct WireAttempt {
     lease: Option<Box<dyn ModelAttemptLease>>,
     usage: ExecutionUsage,
+    usage_observer: Option<crate::RequestUsageObserver>,
     classifier: Option<ClassifierDiagnostic>,
     dispatched: bool,
 }
@@ -148,6 +149,7 @@ impl WireAttempt {
         Self {
             lease,
             usage: ExecutionUsage::default(),
+            usage_observer: None,
             classifier: None,
             dispatched: false,
         }
@@ -158,6 +160,7 @@ impl WireAttempt {
         request: &LlmRequest,
         prepared: &PreparedLlmCall,
     ) -> Self {
+        self.usage_observer = request.execution.request_usage_observer.clone();
         if let Some(layout) = &request.execution.classifier_cache_layout {
             // A normal serde string conversion rejects isolated UTF-16 units.
             // Inspect the flat source tree without materializing or logging text.
@@ -228,6 +231,9 @@ impl WireAttempt {
         completeness: ModelAttemptUsageCompleteness,
     ) {
         self.usage = usage.clone();
+        if let Some(observer) = &self.usage_observer {
+            observer.observe(usage);
+        }
         if let Some(lease) = self.lease.as_mut() {
             lease.observe_usage(&self.usage, completeness);
         }
@@ -305,6 +311,55 @@ mod classifier_diagnostic_tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn unregistered_attempt_keeps_observed_usage_when_dropped_before_finish() {
+        let snapshot = Arc::new(Mutex::new(None));
+        let capture = snapshot.clone();
+        let observer = crate::RequestUsageObserver::new(move |usage| {
+            if let Some(counts) = usage.report.usage.filter(|_| {
+                matches!(
+                    usage.report.state,
+                    crate::UsageState::Partial | crate::UsageState::Complete
+                )
+            }) {
+                *capture.lock().unwrap() = Some(counts);
+            }
+        });
+        let mut attempt = WireAttempt::new(None);
+        attempt.usage_observer = Some(observer);
+        attempt.mark_dispatched().unwrap();
+        attempt.observe(
+            &ExecutionUsage::default(),
+            ModelAttemptUsageCompleteness::Partial,
+        );
+        assert!(snapshot.lock().unwrap().is_none());
+        let mut invalid = ExecutionUsage::from_counts(crate::Usage {
+            input_tokens: 999,
+            ..Default::default()
+        });
+        invalid.report.state = crate::UsageState::Invalid;
+        attempt.observe(&invalid, ModelAttemptUsageCompleteness::Partial);
+        assert!(
+            snapshot.lock().unwrap().is_none(),
+            "invalid usage is not invented as zero"
+        );
+        for tokens in [42, 84] {
+            attempt.observe(
+                &ExecutionUsage::from_counts(crate::Usage {
+                    input_tokens: tokens,
+                    output_tokens: 7,
+                    ..Default::default()
+                }),
+                ModelAttemptUsageCompleteness::Complete,
+            );
+        }
+        // No registered accounting lease is present. Host facts must already
+        // be visible before any finish/collected-finish/telemetry future runs.
+        drop(attempt);
+        let counts = snapshot.lock().unwrap().unwrap();
+        assert_eq!((counts.input_tokens, counts.output_tokens), (84, 7));
+    }
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
     struct Fields(BTreeMap<String, String>);

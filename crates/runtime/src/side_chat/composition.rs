@@ -33,7 +33,7 @@ fn compaction_runner(
     Arc::new(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(query, model.to_string())
-            .with_session_thinking(api.thinking()),
+            .with_session_thinking_source(move || api.thinking()),
     )
 }
 

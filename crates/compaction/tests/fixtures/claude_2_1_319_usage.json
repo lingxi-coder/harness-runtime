@@ -1,0 +1,844 @@
+{
+  "version": "2.1.319",
+  "sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "ranges": [
+    {
+      "name": "Tde",
+      "offset": 270960333,
+      "bytes": 490
+    },
+    {
+      "name": "SI",
+      "offset": 270960823,
+      "bytes": 57
+    },
+    {
+      "name": "n$",
+      "offset": 270960880,
+      "bytes": 93
+    },
+    {
+      "name": "Jsn",
+      "offset": 270960973,
+      "bytes": 119
+    },
+    {
+      "name": "Zsn",
+      "offset": 270961092,
+      "bytes": 303
+    },
+    {
+      "name": "mne",
+      "offset": 270961748,
+      "bytes": 526
+    },
+    {
+      "name": "Qve",
+      "offset": 270962274,
+      "bytes": 344
+    },
+    {
+      "name": "E7e",
+      "offset": 270962618,
+      "bytes": 72
+    },
+    {
+      "name": "Zv",
+      "offset": 270962690,
+      "bytes": 68
+    },
+    {
+      "name": "yN",
+      "offset": 270962758,
+      "bytes": 209
+    },
+    {
+      "name": "oW",
+      "offset": 270962967,
+      "bytes": 107
+    },
+    {
+      "name": "Ff",
+      "offset": 270964792,
+      "bytes": 98
+    },
+    {
+      "name": "v7e",
+      "offset": 270964890,
+      "bytes": 38
+    },
+    {
+      "name": "Nre",
+      "offset": 270964928,
+      "bytes": 131
+    },
+    {
+      "name": "nin",
+      "offset": 270965059,
+      "bytes": 275
+    },
+    {
+      "name": "C7e",
+      "offset": 270966116,
+      "bytes": 300
+    }
+  ],
+  "scope": "Native usage anchor, scalar/iteration usage normalization, compact boundary reset, and server-cleared metadata. Synthetic UTF-16/4 tail estimator; no attachment/tokenizer/synthetic-error-message behavior or provider request execution.",
+  "cases": [
+    {
+      "name": "no-usage-estimate",
+      "rows": [
+        {
+          "type": "user",
+          "message": {
+            "content": "aaaaaaaa"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "content": "bbbbbbbb"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "cccc"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": null,
+        "liveTokens": 5,
+        "serverClearedTokens": 0,
+        "triggerTokens": 5
+      }
+    },
+    {
+      "name": "usage-includes-input-cache-and-output",
+      "rows": [
+        {
+          "type": "user",
+          "message": {
+            "content": "aaaaaaaa"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 1
+        },
+        "liveTokens": 152000,
+        "serverClearedTokens": 0,
+        "triggerTokens": 152000
+      }
+    },
+    {
+      "name": "usage-plus-tail-estimate",
+      "rows": [
+        {
+          "type": "user",
+          "message": {
+            "content": "aaaaaaaa"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbbbbbb"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 1
+        },
+        "liveTokens": 152002,
+        "serverClearedTokens": 0,
+        "triggerTokens": 152002
+      }
+    },
+    {
+      "name": "zero-usage-skipped",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-2",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "bbbb"
+              }
+            ],
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 999
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "cccc"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152002,
+        "serverClearedTokens": 0,
+        "triggerTokens": 152002
+      }
+    },
+    {
+      "name": "zero-input-only-estimate",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 999
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbb"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": null,
+        "liveTokens": 2,
+        "serverClearedTokens": 0,
+        "triggerTokens": 2
+      }
+    },
+    {
+      "name": "latest-valid-usage-wins",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbb"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-2",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "cccc"
+              }
+            ],
+            "usage": {
+              "input_tokens": 20000,
+              "output_tokens": 200
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "dddddddd"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 20200,
+          "anchorIndex": 2
+        },
+        "liveTokens": 20202,
+        "serverClearedTokens": 0,
+        "triggerTokens": 20202
+      }
+    },
+    {
+      "name": "same-api-message-anchor-rewinds",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "shared",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 10,
+              "output_tokens": 1
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "shared",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "bbbbbbbb"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "cccc"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152003,
+        "serverClearedTokens": 0,
+        "triggerTokens": 152003
+      }
+    },
+    {
+      "name": "boundary-clears-usage-anchor",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "compact_boundary"
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "aaaaaaaa"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbb"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 0,
+          "anchorIndex": 1
+        },
+        "liveTokens": 3,
+        "serverClearedTokens": 0,
+        "triggerTokens": 3
+      }
+    },
+    {
+      "name": "post-boundary-usage-anchor",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "compact_boundary"
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "aaaa"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "new",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "bbbb"
+              }
+            ],
+            "usage": {
+              "input_tokens": 10000,
+              "output_tokens": 100
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "cccc"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 10100,
+          "anchorIndex": 3
+        },
+        "liveTokens": 10101,
+        "serverClearedTokens": 0,
+        "triggerTokens": 10101
+      }
+    },
+    {
+      "name": "unmetered-usage-skipped",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "assistant",
+          "message": {
+            "id": "unmetered",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "bbbb"
+              }
+            ],
+            "usage": {
+              "input_tokens": 999999,
+              "output_tokens": 100
+            },
+            "stop_reason": "end_turn"
+          },
+          "isUnmetered": true
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "cccc"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152002,
+        "serverClearedTokens": 0,
+        "triggerTokens": 152002
+      }
+    },
+    {
+      "name": "fallback-iteration-normalized",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000,
+              "iterations": [
+                {
+                  "type": "message",
+                  "input_tokens": 80000,
+                  "output_tokens": 1000,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 4000
+                },
+                {
+                  "type": "fallback_message",
+                  "input_tokens": 50000,
+                  "output_tokens": 300,
+                  "cache_creation_input_tokens": 2000,
+                  "cache_read_input_tokens": 1000
+                },
+                {
+                  "type": "compaction",
+                  "input_tokens": 900000,
+                  "output_tokens": 8000,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0
+                }
+              ]
+            },
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 53300,
+          "anchorIndex": 0
+        },
+        "liveTokens": 53300,
+        "serverClearedTokens": 0,
+        "triggerTokens": 53300
+      }
+    },
+    {
+      "name": "server-cleared-tokens-added",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn",
+            "context_management": {
+              "applied_edits": [
+                {
+                  "type": "clear_tool_uses_20250919",
+                  "cleared_input_tokens": 25000,
+                  "cleared_tool_uses": 5
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbb"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152001,
+        "serverClearedTokens": 25000,
+        "triggerTokens": 177001
+      }
+    },
+    {
+      "name": "server-cleared-client-estimate-clamped",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn",
+            "context_management": {
+              "applied_edits": [
+                {
+                  "type": "clear_tool_uses_20250919",
+                  "cleared_input_tokens": 25000,
+                  "cleared_tool_uses": 5
+                }
+              ],
+              "client_estimated_cleared_input_tokens": 15000
+            }
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152000,
+        "serverClearedTokens": 15000,
+        "triggerTokens": 167000
+      }
+    },
+    {
+      "name": "server-cleared-measured-client-estimate",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn",
+            "context_management": {
+              "applied_edits": [
+                {
+                  "type": "clear_tool_uses_20250919",
+                  "cleared_input_tokens": 25000,
+                  "cleared_tool_uses": 5
+                }
+              ],
+              "client_estimated_cleared_input_tokens": 30000,
+              "client_estimate_measured_from_prompts": true
+            }
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 152000,
+          "anchorIndex": 0
+        },
+        "liveTokens": 152000,
+        "serverClearedTokens": 30000,
+        "triggerTokens": 182000
+      }
+    },
+    {
+      "name": "server-cleared-stops-at-boundary",
+      "rows": [
+        {
+          "type": "assistant",
+          "message": {
+            "id": "message-1",
+            "model": "mock-model",
+            "content": [
+              {
+                "type": "text",
+                "text": "aaaa"
+              }
+            ],
+            "usage": {
+              "input_tokens": 120000,
+              "cache_read_input_tokens": 20000,
+              "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000
+            },
+            "stop_reason": "end_turn",
+            "context_management": {
+              "applied_edits": [
+                {
+                  "type": "clear_tool_uses_20250919",
+                  "cleared_input_tokens": 25000,
+                  "cleared_tool_uses": 5
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "compact_boundary"
+        },
+        {
+          "type": "user",
+          "message": {
+            "content": "bbbb"
+          }
+        }
+      ],
+      "expected": {
+        "anchor": {
+          "tokens": 0,
+          "anchorIndex": 1
+        },
+        "liveTokens": 1,
+        "serverClearedTokens": 0,
+        "triggerTokens": 1
+      }
+    }
+  ]
+}

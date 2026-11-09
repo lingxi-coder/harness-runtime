@@ -3053,6 +3053,22 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("effort_command_snapshot".into()))
     }
 
+    /// Current auto-compaction resolution for the selected provider/model route.
+    async fn auto_compact_command_snapshot(
+        &self,
+    ) -> Result<super::auto_compact::AutoCompactCommandSnapshot, HandleError> {
+        Err(HandleError::Unimplemented("auto_compact_command_snapshot".into()))
+    }
+
+    /// Publish a successful persisted per-model window edit to the live session.
+    async fn auto_compact_window_changed(
+        &self,
+        _settings_key: &str,
+        _window: super::auto_compact::AutoCompactWindow,
+    ) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("auto_compact_window_changed".into()))
+    }
+
     /// Independent session switch; changing it never rewrites effort.
     async fn ultracode_enabled(&self) -> bool {
         false

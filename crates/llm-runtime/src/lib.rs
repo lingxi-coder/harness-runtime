@@ -47,20 +47,20 @@ pub mod cloud_provider_env;
 pub mod computer;
 pub mod config;
 pub use computer::{scope_computer_request, ComputerNativeDeclaration, ComputerRequestProjection};
+mod classifier_cache;
 pub mod convert;
 pub mod cost;
-mod classifier_cache;
 mod dispatch_header;
 pub mod error;
 mod execution;
 mod execution_context;
 mod scope_output_quota;
-pub use scope_output_quota::{ScopeOutputQuota, ScopeDispatchAuthorization};
+pub use scope_output_quota::{ScopeDispatchAuthorization, ScopeOutputQuota};
 mod structured_output;
 pub use execution_context::{
     ApiAttemptsLeft, ClassifierCacheLayout, ExecutionContext, PendingPromptCacheObservation,
-    PromptCacheRequestContext,
-    RequestCredentials, RequestDispatchAdmission, RequestDispatchObserver,
+    PromptCacheRequestContext, RequestCredentials, RequestDispatchAdmission,
+    RequestDispatchObserver, RequestUsageObserver,
 };
 pub mod auth;
 pub mod fusion_hints;

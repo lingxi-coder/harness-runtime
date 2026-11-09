@@ -33,6 +33,13 @@ fn settings_snapshot(effective: Option<&EffectiveSettings>) -> NativeModelSettin
         Some(layer) => picker_models(&layer.projection),
     };
     NativeModelSettingsSnapshot {
+        auto_compact: lingxi_core::host::auto_compact::AutoCompactSettings {
+            layers: effective.source_layers.iter().map(|layer| {
+                lingxi_core::host::auto_compact::AutoCompactSettingsLayer::from_projection(
+                    layer.source, &layer.projection,
+                )
+            }).collect(),
+        },
         model_overrides: NativeModelObservation::Observed(effective.source_field("modelOverrides")),
         picker_options,
         anthropic_default_opus_model: NativeModelObservation::Unobserved,
@@ -62,6 +69,18 @@ fn picker_models(
 mod tests {
     use super::*;
     use lingxi_core::settings::{raw_layer_stack::SettingsRawLayer, SettingsJson};
+
+    #[test]
+    fn auto_compact_snapshot_keeps_original_tier_precedence() {
+        let settings = effective(vec![
+            (Source::User, r#"{"autoCompactEnabled":false,"modelSettings":{"provider/model":{"autoCompactWindow":500000}}}"#),
+            (Source::Project, r#"{"autoCompactWindow":200000}"#),
+        ]);
+        let settings = settings_snapshot(Some(&settings)).auto_compact;
+        assert!(!settings.enabled());
+        assert_eq!(settings.window_for("provider/model", str::to_owned),
+            Some(lingxi_core::host::auto_compact::AutoCompactWindow::Tokens(200000)));
+    }
 
     fn effective(layers: Vec<(Source, &str)>) -> EffectiveSettings {
         EffectiveSettings {

@@ -97,6 +97,39 @@ pub struct AutocompactConfig {
     pub allow_fallback: bool,
 }
 
+/// A provider-validated model used only for one compaction operation. The
+/// shared parent cache slot and the main conversation's model are untouched.
+#[derive(Debug, Clone)]
+pub struct CompactModelOverride {
+    pub model: String,
+    pub profile: Option<String>,
+    observed_usage: sidequery::ForkedUsageObserver,
+}
+
+impl CompactModelOverride {
+    #[must_use]
+    pub fn new(model: String, profile: Option<String>) -> Self {
+        Self {
+            model,
+            profile,
+            observed_usage: sidequery::ForkedUsageObserver::default(),
+        }
+    }
+
+    /// Observed usage of a one-shot candidate, retained across invalid
+    /// summaries, stream failure, and cancellation. Missing usage stays absent.
+    #[must_use]
+    pub fn observed_usage(&self) -> Option<Usage> {
+        self.observed_usage.snapshot()
+    }
+
+    fn observe(&self, usage: Usage) {
+        if usage != Usage::default() {
+            self.observed_usage.observe(usage);
+        }
+    }
+}
+
 impl Default for AutocompactConfig {
     fn default() -> Self {
         Self {
@@ -106,6 +139,27 @@ impl Default for AutocompactConfig {
             // including the no-tools preamble/trailer.
             compact_user_prompt: crate::prompt::get_compact_prompt(None),
             allow_fallback: true,
+        }
+    }
+}
+
+/// Per-operation controls for Native's reactive compaction ladder.
+/// Ordinary threshold compaction preserves the latest API round and only
+/// permits the summarize-all last resort once the request is blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReactiveCompactOptions {
+    /// Permit summarize-all after no assistant remains in the prefix.
+    pub allow_last_resort: bool,
+    /// Skip the round-preserving ladder after a rapid refill, retaining only
+    /// the pending user turn when summarize-all can safely consume the tail.
+    pub keep_no_round: bool,
+}
+
+impl Default for ReactiveCompactOptions {
+    fn default() -> Self {
+        Self {
+            allow_last_resort: true,
+            keep_no_round: false,
         }
     }
 }
@@ -214,10 +268,11 @@ impl Autocompactor {
         self.compact_impl(
             messages,
             custom_instructions,
-            false,
+            None,
             None,
             None,
             api_attempts_left,
+            None,
         )
         .await
     }
@@ -239,10 +294,14 @@ impl Autocompactor {
         self.compact_impl(
             messages,
             custom_instructions,
-            true,
+            Some(ReactiveCompactOptions {
+                allow_last_resort: self.config.allow_fallback,
+                keep_no_round: false,
+            }),
             None,
             None,
             api_attempts_left,
+            None,
         )
         .await
     }
@@ -290,10 +349,11 @@ impl Autocompactor {
         self.compact_impl(
             context,
             custom_instructions,
-            false,
+            None,
             None,
             Some(overrides),
             api_attempts_left,
+            None,
         )
         .await
     }
@@ -307,13 +367,59 @@ impl Autocompactor {
         initial_token_gap: Option<u64>,
         api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
+        self.compact_reactive_with_options(
+            messages,
+            custom_instructions,
+            initial_token_gap,
+            api_attempts_left,
+            ReactiveCompactOptions {
+                allow_last_resort: self.config.allow_fallback,
+                keep_no_round: false,
+            },
+        )
+        .await
+    }
+
+    /// Run the reactive ladder with the threshold path's explicit last-resort
+    /// and rapid-refill controls. Manual and PTL callers keep their existing
+    /// behavior through [`Self::compact_reactive_with_instructions`].
+    pub async fn compact_reactive_with_options(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&Utf16JsonProjection>,
+        initial_token_gap: Option<u64>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
+        options: ReactiveCompactOptions,
+    ) -> Result<CompactionResult, CompactionError> {
         self.compact_impl(
             messages,
             custom_instructions,
-            true,
+            Some(options),
             initial_token_gap,
             None,
             api_attempts_left,
+            None,
+        )
+        .await
+    }
+
+    /// One transient larger-model attempt through the reactive compact ladder.
+    pub async fn compact_reactive_with_model_override(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&Utf16JsonProjection>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
+        options: ReactiveCompactOptions,
+        model_override: &CompactModelOverride,
+    ) -> Result<CompactionResult, CompactionError> {
+        self.compact_impl(
+            messages,
+            custom_instructions,
+            Some(options),
+            None,
+            None,
+            api_attempts_left,
+            Some(model_override),
         )
         .await
     }
@@ -322,11 +428,13 @@ impl Autocompactor {
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
-        preserve_tail: bool,
+        reactive_options: Option<ReactiveCompactOptions>,
         initial_token_gap: Option<u64>,
         selector: Option<SelectorSummarize>,
         api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
+        model_override: Option<&CompactModelOverride>,
     ) -> Result<CompactionResult, CompactionError> {
+        let preserve_tail = reactive_options.is_some();
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
         if preserve_tail
             && !self
@@ -344,7 +452,14 @@ impl Autocompactor {
             return Err(CompactionError::NotEnoughMessages);
         }
         let group_tokens: Vec<_> = groups.iter().map(|group| group.estimated_tokens).collect();
-        let mut groups_preserved = usize::from(preserve_tail);
+        let keep_no_round = reactive_options.is_some_and(|options| options.keep_no_round);
+        let allow_last_resort =
+            reactive_options.is_some_and(|options| options.allow_last_resort || keep_no_round);
+        let mut groups_preserved = if keep_no_round {
+            groups.len()
+        } else {
+            usize::from(preserve_tail)
+        };
         if preserve_tail && groups.len() > 3 {
             if let Some(gap) = initial_token_gap {
                 let prompt = crate::prompt::get_compact_prompt_source(custom_instructions);
@@ -356,7 +471,7 @@ impl Autocompactor {
                     .saturating_add(prompt_tokens.saturating_add(2) / 4)
                     .saturating_sub(*group_tokens.last().unwrap_or(&0));
                 if remaining_gap > 0 {
-                    groups_preserved += preserved_group_step(
+                    groups_preserved = 1 + preserved_group_step(
                         &group_tokens[..groups.len() - 1],
                         Some(remaining_gap),
                     );
@@ -380,7 +495,7 @@ impl Autocompactor {
         let mut split_at = if preserve_tail {
             match split_prefix(groups_preserved) {
                 Some(split) => split,
-                None if self.config.allow_fallback => {
+                None if allow_last_resort => {
                     let keep_at = summarize_all_split(&messages);
                     let kept_tokens =
                         crate::grouping::estimate_tokens_for_range(&messages[keep_at..]);
@@ -409,6 +524,17 @@ impl Autocompactor {
                 .get_last()
                 .await
                 .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
+            if let Some(model) = model_override {
+                cache_params
+                    .tool_use_options
+                    .main_loop_model
+                    .clone_from(&model.model);
+                cache_params
+                    .tool_use_options
+                    .model_profile
+                    .clone_from(&model.profile);
+                cache_params.model_source = Some(model.model.as_str().into());
+            }
             let summary_model = if cache_params
                 .tool_use_options
                 .main_loop_model
@@ -489,7 +615,26 @@ impl Autocompactor {
                         .max_output_tokens
                         .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
                 };
-                let response = match runner.run(req.clone()).await {
+                let observed = runner
+                    .run_with_usage_observer(
+                        req.clone(),
+                        model_override.map(|model| model.observed_usage.clone()),
+                    )
+                    .await;
+                if let (Some(model), Ok(result)) = (model_override, &observed) {
+                    model.observe(result.usage);
+                }
+                if let (
+                    Some(model),
+                    Err(sidequery::ForkError::Api(sidequery::SideQueryError::Partial {
+                        usage,
+                        ..
+                    })),
+                ) = (model_override, &observed)
+                {
+                    model.observe(*usage);
+                }
+                let response = match observed {
                     Ok(result) if preserve_tail => {
                         Ok(reask_missing_summary(runner, req, result, &prompt).await?)
                     }
@@ -630,7 +775,7 @@ impl Autocompactor {
                     if let Some(split) = split_prefix(groups_preserved) {
                         split_at = split;
                         summarize = messages[..split_at].to_vec();
-                    } else if self.config.allow_fallback {
+                    } else if allow_last_resort {
                         // Hre's Qho last resort preserves a pending user turn,
                         // not a complete assistant-led API round. Account for
                         // the tail absent from the failed request when moving
@@ -1483,9 +1628,9 @@ mod tests {
     }
 
     #[test]
-    fn summary_validation_matches_official_318_oracle() {
+    fn summary_validation_matches_official_319_oracle() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/claude_2_1_318_compact.json"
+            "../tests/fixtures/claude_2_1_319_compact.json"
         ))
         .unwrap();
         for case in fixture["summaries"].as_array().unwrap() {
@@ -1640,6 +1785,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn larger_model_override_is_local_to_one_summary_fork() {
+        let history = vec![
+            user_msg("first request"),
+            assistant_text("first answer"),
+            user_msg("last request"),
+            assistant_text("last answer"),
+        ];
+        let (compactor, client) = wired("<summary>ok</summary>", history.clone()).await;
+        let slot = compactor.cache_slot.as_ref().unwrap();
+        let mut params = slot.get_last().await.unwrap();
+        params.tool_use_options.model_profile = Some("same-provider".into());
+        slot.save(params).await;
+        let larger =
+            CompactModelOverride::new("provider-large".into(), Some("same-provider".into()));
+        let result = compactor
+            .compact_reactive_with_model_override(
+                history.clone(),
+                None,
+                None,
+                ReactiveCompactOptions {
+                    allow_last_resort: true,
+                    keep_no_round: false,
+                },
+                &larger,
+            )
+            .await
+            .unwrap();
+        let sent = client.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(sent.model, "provider-large");
+        assert_eq!(sent.profile.as_deref(), Some("same-provider"));
+        assert_eq!(result.summary_model, "provider-large");
+        assert_eq!(result.summary_profile.as_deref(), Some("same-provider"));
+        assert_eq!(result.messages_to_preserve.last(), history.last());
+        let cached = slot.get_last().await.unwrap();
+        assert_eq!(cached.tool_use_options.main_loop_model, "test");
+        assert!(cached.model_source.is_none());
+        compactor.compact(history, None).await.unwrap();
+        assert_eq!(client.seen.lock().unwrap().as_ref().unwrap().model, "test");
+    }
+
+    #[tokio::test]
+    async fn larger_model_failure_keeps_completed_response_usage() {
+        struct KnownUsageClient;
+        #[async_trait]
+        impl SideQueryClient for KnownUsageClient {
+            async fn query(
+                &self,
+                _request: SideQueryRequest,
+            ) -> Result<SideQueryResponse, SideQueryError> {
+                let mut usage = Usage::default();
+                usage.tokens.input = 17;
+                usage.tokens.output = 7;
+                Ok(SideQueryResponse {
+                    text: Some("not a summary".into()),
+                    structured: None,
+                    tool_calls: Vec::new(),
+                    usage,
+                    stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
+                })
+            }
+        }
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        slot.save(cache_safe_params(Vec::new())).await;
+        let runner = Arc::new(
+            ForkedAgentRunner::new()
+                .with_side_query_client(Arc::new(KnownUsageClient), "test".into()),
+        );
+        let compactor = Autocompactor::with_forked_runner(runner, slot);
+        let larger =
+            CompactModelOverride::new("provider-large".into(), Some("same-provider".into()));
+        // This fake client returns a completed response without reserving a
+        // dispatch. A spent budget prevents the native missing-summary reask.
+        let result = compactor
+            .compact_reactive_with_model_override(
+                vec![user_msg("request"), assistant_text("answer")],
+                None,
+                Some(llm_runtime::ApiAttemptsLeft::new(0)),
+                ReactiveCompactOptions {
+                    allow_last_resort: true,
+                    keep_no_round: false,
+                },
+                &larger,
+            )
+            .await;
+        assert!(matches!(result, Err(CompactionError::Summary(_))));
+        let usage = larger.observed_usage().unwrap();
+        assert_eq!((usage.tokens.input, usage.tokens.output), (17, 7));
+    }
+
+    #[tokio::test]
     async fn compact_appends_manual_focus_to_prompt() {
         let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
         let focus = Utf16JsonProjection::from("Focus on the Rust changes");
@@ -1777,7 +2013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oracle_318_short_history_fallback_traces() {
+    async fn oracle_319_short_history_fallback_traces() {
         fn expand_text(value: &serde_json::Value) -> String {
             value.as_str().map(str::to_string).unwrap_or_else(|| {
                 value["text"]
@@ -1787,7 +2023,7 @@ mod tests {
             })
         }
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/claude_2_1_318_compact_fallback.json"
+            "../tests/fixtures/claude_2_1_319_compact_fallback.json"
         ))
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {
@@ -2040,6 +2276,135 @@ mod tests {
         assert_eq!(&requests[1].messages[1..4], &history[1..]);
         assert!(result.messages_to_preserve.is_empty());
         assert!(result.summary_messages[0].text_content().contains("part of the earlier conversation was too large to include and is NOT covered by this summary"));
+    }
+
+    #[tokio::test]
+    async fn threshold_reactive_preserves_the_latest_round_before_blocking() {
+        let history = vec![
+            user_msg("first question"),
+            assistant_text("first answer"),
+            user_msg("second question"),
+            assistant_text("latest answer"),
+            user_msg("pending question"),
+        ];
+        let (compactor, client) = wired("<summary>earlier context</summary>", vec![]).await;
+        let result = compactor
+            .compact_reactive_with_options(
+                history.clone(),
+                None,
+                None,
+                Some(llm_runtime::ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: false,
+                    keep_no_round: false,
+                },
+            )
+            .await
+            .expect("threshold compact preserves the latest round");
+        let sent = client.seen.lock().unwrap();
+        assert_eq!(sent.as_ref().unwrap().messages[..3], history[..3]);
+        assert_eq!(result.messages_to_preserve, history[3..]);
+        assert!(result.summary_messages[0]
+            .text_content()
+            .contains("The messages after this summary are the most recent messages from before compaction, kept verbatim."));
+    }
+
+    #[tokio::test]
+    async fn threshold_reactive_cannot_use_last_resort_before_blocking() {
+        let history = vec![
+            user_msg("first question"),
+            assistant_text("first answer"),
+            user_msg("second question"),
+            assistant_text("latest answer"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec![
+                "Prompt is too long".into(),
+                "<summary>must not be requested</summary>".into(),
+            ],
+            vec![],
+        )
+        .await;
+        let original = history.clone();
+        let result = compactor
+            .compact_reactive_with_options(
+                history.clone(),
+                None,
+                None,
+                Some(llm_runtime::ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: false,
+                    keep_no_round: false,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(CompactionError::MaxRetriesExceeded)));
+        assert_eq!(client.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            history, original,
+            "failed compaction does not consume history"
+        );
+    }
+
+    #[tokio::test]
+    async fn threshold_reactive_can_use_last_resort_once_blocking() {
+        let history = vec![
+            user_msg("first question"),
+            assistant_text("first answer"),
+            user_msg("second question"),
+            assistant_text("latest answer"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec![
+                "Prompt is too long".into(),
+                "<summary>blocking rescue</summary>".into(),
+            ],
+            vec![],
+        )
+        .await;
+        let result = compactor
+            .compact_reactive_with_options(
+                history,
+                None,
+                None,
+                Some(llm_runtime::ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: true,
+                    keep_no_round: false,
+                },
+            )
+            .await
+            .expect("blocking compaction can use the last resort");
+        assert_eq!(client.seen.lock().unwrap().len(), 2);
+        assert!(result.messages_to_preserve.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rapid_refill_keep_no_round_starts_with_all_completed_rounds() {
+        let history = vec![
+            user_msg("first question"),
+            assistant_text("first answer"),
+            user_msg("second question"),
+            assistant_text("latest answer"),
+            user_msg("pending question"),
+        ];
+        let (compactor, client) = wired("<summary>completed context</summary>", vec![]).await;
+        let result = compactor
+            .compact_reactive_with_options(
+                history.clone(),
+                None,
+                None,
+                Some(llm_runtime::ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: false,
+                    keep_no_round: true,
+                },
+            )
+            .await
+            .expect("rapid refill permits summarize-all while keeping pending input");
+        let sent = client.seen.lock().unwrap();
+        assert_eq!(sent.as_ref().unwrap().messages[..4], history[..4]);
+        assert_eq!(result.messages_to_preserve, history[4..]);
     }
 
     #[tokio::test]

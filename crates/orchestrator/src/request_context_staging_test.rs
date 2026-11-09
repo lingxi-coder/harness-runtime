@@ -1946,22 +1946,43 @@ fn auto_compaction_consumes_pending_prompt_before_nar_finalize_without_resurrect
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let transcript = root.path().join("compacted-ingress-finalization.jsonl");
+        let session_id = lingxi_core::types::SessionId::new();
+        let transcript = root.path().join(format!("{}.jsonl", session_id.as_uuid()));
         let filesystem: Arc<dyn FileSystem> =
             Arc::new(PosixFileSystem::new(root.path().to_owned()));
-        let orch = orchestrator(&cwd, &transcript, filesystem.clone())
-            .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(1)));
+        // Exercise Native's summarize-all `source:auto` path. Model-default
+        // windows use the separate recent-round preservation contract.
+        let model = "ingress-finalization-full-auto-compact-fixture";
+        llm_runtime::model::model_limits::register(
+            model,
+            llm_runtime::model::model_limits::ModelLimits {
+                context_window: 200_000,
+                max_output_tokens: 20_000,
+            },
+        );
+        assert_eq!(
+            compaction::thresholds::resolve_auto_compact_window(model, &[], None, true).source,
+            compaction::thresholds::AutoCompactWindowSource::Auto,
+        );
+        let orch = crate::test_support::with_scripted_compactor(
+            orchestrator(&cwd, &transcript, filesystem.clone()),
+            "The pending current prompt remains the active task after compaction.",
+        )
+        .with_session_id(session_id)
+        .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Code);
+        orch.session.lock().await.model = model.to_owned();
         bind_test_durable_transcript_target(
             &orch,
             &cwd,
             &root.path().join("durable-state"),
             &transcript,
         );
+        orch.initialize_conversation_mode().await.unwrap();
 
         for index in 0..24 {
             let row = ConversationMessage::user(
                 MessageId::new(),
-                format!("prior conversation row {index} with enough text to compact"),
+                format!("prior conversation row {index} with enough text to compact ").repeat(20),
             );
             orch.session.lock().await.history.push(row.clone());
             orch.persist_message_to_jsonl(&row).await;
@@ -1999,6 +2020,7 @@ fn auto_compaction_consumes_pending_prompt_before_nar_finalize_without_resurrect
                 .unwrap());
                 assert_eq!(pending_ingress_prompt_id(), Some(prompt_id));
 
+                orch.seed_compact_cache_safe_params(None).await.unwrap();
                 orch.maybe_compact_before_call(None).await;
                 let pending_history = orch.session.lock().await.model_context_history();
                 assert!(

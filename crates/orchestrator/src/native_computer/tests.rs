@@ -2940,6 +2940,7 @@ async fn full_compaction_preserves_abandonment_authority_but_not_pending_receipt
     for unresolved in [false, true] {
         for cold in [false, true] {
             let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+            fixture.orch.initialize_conversation_mode().await.unwrap();
             if unresolved {
                 fixture.prepared_receipt().await;
             } else {
@@ -3039,6 +3040,7 @@ async fn full_compaction_relinks_noncontiguous_abandonment_rows_on_cold_resume()
 
     for marker_already_persisted in [false, true] {
         let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+        fixture.orch.initialize_conversation_mode().await.unwrap();
         fixture.native().await;
         let blocks = fixture
             .bind(&openai(json!([{"type":"screenshot"}])))
@@ -3218,6 +3220,7 @@ async fn failed_native_compaction_stage_keeps_history_and_tip_on_cold_append() {
 
     let _registry_guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap();
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.orch.initialize_conversation_mode().await.unwrap();
     fixture.native().await;
     let blocks = fixture
         .bind(&openai(json!([{"type":"screenshot"}])))
@@ -3746,6 +3749,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 successor.model = MODEL.into();
                 let fixture =
                     Fixture::with_responses(provider, false, false, vec![successor]).await;
+                fixture.orch.initialize_conversation_mode().await.unwrap();
                 fixture
                     .orch
                     .session

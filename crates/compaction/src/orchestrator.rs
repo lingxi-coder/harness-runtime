@@ -14,7 +14,7 @@
 //! consecutive failures the layer short-circuits without calling the
 //! summarizer.
 
-use crate::autocompact::{Autocompactor, CompactionError};
+use crate::autocompact::{Autocompactor, CompactionError, ReactiveCompactOptions};
 use crate::cached_microcompact::CachedMicrocompact;
 use crate::context_collapse::ContextCollapse;
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
@@ -237,6 +237,16 @@ impl CompactionOrchestrator {
         self.autocompact_threshold()
     }
 
+    /// Apply a caller-resolved compact threshold for model-derived sessions.
+    /// Explicit thresholds supplied to the constructors remain pinned.
+    pub fn refresh_compact_threshold(&self, threshold: u64) -> u64 {
+        if self.model_derived_threshold {
+            self.autocompact_threshold
+                .store(threshold, Ordering::Relaxed);
+        }
+        self.autocompact_threshold()
+    }
+
     /// Run a user-requested `/compact` pass unconditionally.
     ///
     /// Manual compaction is deliberately separate from the automatic
@@ -345,6 +355,54 @@ impl CompactionOrchestrator {
         initial_token_gap: Option<u64>,
         api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
+        self.process_reactive_tracked_with_options(
+            messages,
+            tracking,
+            custom_instructions,
+            initial_token_gap,
+            api_attempts_left,
+            ReactiveCompactOptions {
+                allow_last_resort: self.auto.config.allow_fallback,
+                keep_no_round: false,
+            },
+        )
+        .await
+    }
+
+    /// Threshold-triggered reactive compaction shares the ordinary tracking
+    /// and operation budget while controlling last-resort and retained rounds.
+    pub async fn process_reactive_tracked_with_options(
+        &self,
+        messages: Vec<ConversationMessage>,
+        tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&Utf16JsonProjection>,
+        initial_token_gap: Option<u64>,
+        api_attempts_left: Option<ApiAttemptsLeft>,
+        options: ReactiveCompactOptions,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        self.process_reactive_tracked_with_model_override(
+            messages,
+            tracking,
+            custom_instructions,
+            initial_token_gap,
+            api_attempts_left,
+            options,
+            None,
+        )
+        .await
+    }
+
+    /// Reactive operation with a transient provider-local model override.
+    pub async fn process_reactive_tracked_with_model_override(
+        &self,
+        messages: Vec<ConversationMessage>,
+        tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&Utf16JsonProjection>,
+        initial_token_gap: Option<u64>,
+        api_attempts_left: Option<ApiAttemptsLeft>,
+        options: ReactiveCompactOptions,
+        model_override: Option<&crate::autocompact::CompactModelOverride>,
+    ) -> Result<IterationCompactionResult, CompactionError> {
         let rapid_refill = rapid_refill_count(tracking);
         if rapid_refill >= MAX_CONSECUTIVE_RAPID_REFILLS {
             return Ok(IterationCompactionResult {
@@ -365,15 +423,27 @@ impl CompactionOrchestrator {
             });
         }
         let media_analysis_to_preserve = media_analysis_messages(&messages);
-        let result = self
-            .auto
-            .compact_reactive_with_instructions(
-                messages,
-                custom_instructions,
-                initial_token_gap,
-                api_attempts_left,
-            )
-            .await;
+        let result = if let Some(model) = model_override {
+            self.auto
+                .compact_reactive_with_model_override(
+                    messages,
+                    custom_instructions,
+                    api_attempts_left,
+                    options,
+                    model,
+                )
+                .await
+        } else {
+            self.auto
+                .compact_reactive_with_options(
+                    messages,
+                    custom_instructions,
+                    initial_token_gap,
+                    api_attempts_left,
+                    options,
+                )
+                .await
+        };
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -478,6 +548,32 @@ impl CompactionOrchestrator {
     /// not run time-based microcompact merely because enough tool results exist.
     pub async fn process_iteration_tracked_with_instructions_and_timing(
         &self,
+        messages: Vec<ConversationMessage>,
+        snip_tokens_freed_already: u64,
+        tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&Utf16JsonProjection>,
+        last_assistant_at: Option<SystemTime>,
+        now: SystemTime,
+        api_attempts_left: Option<ApiAttemptsLeft>,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        self.process_iteration_tracked_with_context_tokens(
+            messages,
+            snip_tokens_freed_already,
+            tracking,
+            custom_instructions,
+            last_assistant_at,
+            now,
+            api_attempts_left,
+            None,
+        )
+        .await
+    }
+
+    /// Automatic pass with the caller's usage-anchored current context size.
+    /// Unlike message text alone this includes the measured system/tool prefix.
+    /// Savings from snip and microcompact are deducted before the auto gate.
+    pub async fn process_iteration_tracked_with_context_tokens(
+        &self,
         mut messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
@@ -485,6 +581,7 @@ impl CompactionOrchestrator {
         last_assistant_at: Option<SystemTime>,
         now: SystemTime,
         api_attempts_left: Option<ApiAttemptsLeft>,
+        context_tokens: Option<u64>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let media_analysis_to_preserve = media_analysis_messages(&messages);
         let mut layers = Vec::new();
@@ -577,12 +674,12 @@ impl CompactionOrchestrator {
         let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
         let estimate_after_micro = crate::grouping::estimate_tokens_for_range(&messages);
         let over_threshold = crate::threshold_calc::should_auto_compact(
-            estimate_after_micro,
+            context_tokens.unwrap_or(estimate_after_micro),
             // Snip removed messages but the surviving usage estimate above
             // already reflects the post-snip set, so no extra subtraction is
             // applied here (snip_freed = 0). The freed total still carries the
             // savings for the caller's accounting.
-            0,
+            context_tokens.map_or(0, |_| freed),
             self.autocompact_threshold(),
         );
         // Circuit breaker: after N consecutive failures, stop trying so a
@@ -662,7 +759,11 @@ impl CompactionOrchestrator {
             consecutive_failures: tracking.consecutive_failures,
             was_compacted,
             rapid_refill_breaker_tripped,
-            consecutive_rapid_refills: tracking.consecutive_rapid_refills,
+            consecutive_rapid_refills: if rapid_refill_breaker_tripped {
+                rapid_refill
+            } else {
+                tracking.consecutive_rapid_refills
+            },
             messages_to_preserve,
             media_analysis_to_preserve,
             compaction_usage,
@@ -867,7 +968,7 @@ mod tests {
         with_clean_window_env(|| {
             // A 1M-token catalog window with a 384k output cap: the threshold is
             // 1_000_000 − min(384_000, MAX_OUTPUT_TOKENS_FOR_SUMMARY) − buffer
-            // = 1_000_000 − 32_000 − 13_000.
+            // = 1_000_000 − 20_000 − 13_000.
             const MODEL: &str = "test-model-derived-threshold";
             llm_runtime::model::model_limits::register(
                 MODEL,
@@ -884,9 +985,18 @@ mod tests {
 
             // Opted in, the threshold follows the model the session is on.
             let derived = CompactionOrchestrator::new(150_000).with_model_derived_threshold();
-            assert_eq!(derived.refresh_autocompact_threshold(MODEL, &[]), 955_000);
-            assert_eq!(derived.autocompact_threshold(), 955_000);
+            assert_eq!(derived.refresh_autocompact_threshold(MODEL, &[]), 967_000);
+            assert_eq!(derived.autocompact_threshold(), 967_000);
         });
+    }
+
+    #[test]
+    fn caller_resolved_compact_threshold_respects_pinned_constructors() {
+        let pinned = CompactionOrchestrator::new(150_000);
+        assert_eq!(pinned.refresh_compact_threshold(67_000), 150_000);
+        let derived = CompactionOrchestrator::new(150_000).with_model_derived_threshold();
+        assert_eq!(derived.refresh_compact_threshold(67_000), 67_000);
+        assert_eq!(derived.autocompact_threshold(), 67_000);
     }
 
     #[tokio::test]
@@ -929,6 +1039,72 @@ mod tests {
             .expect("286 summarize_all covers one complete exchange");
         assert!(result.was_compacted);
         assert!(result.messages_to_preserve.is_empty());
+    }
+
+    #[tokio::test]
+    async fn threshold_reactive_tracks_failure_without_a_last_resort() {
+        let orch = forced_orchestrator(0).await;
+        let history = vec![long_user(0), assistant("only reply")];
+        let mut tracking = AutoCompactTrackingState::default();
+        let error = orch
+            .process_reactive_tracked_with_options(
+                history.clone(),
+                &mut tracking,
+                None,
+                None,
+                Some(ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: false,
+                    keep_no_round: false,
+                },
+            )
+            .await
+            .expect_err("no assistant remains before the kept round");
+        assert!(matches!(error, CompactionError::NotEnoughMessages));
+        assert_eq!(tracking.consecutive_failures, 1);
+        assert!(!tracking.compacted);
+
+        let rescued = orch
+            .process_reactive_tracked(history, &mut tracking, None, None, None)
+            .await
+            .expect("the legacy PTL entry point retains its last resort");
+        assert!(rescued.was_compacted);
+        assert_eq!(tracking.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn threshold_reactive_forwards_keep_no_round_and_tracks_refill() {
+        let orch = forced_orchestrator(0).await;
+        let history = vec![
+            long_user(0),
+            assistant("first reply"),
+            long_user(1),
+            assistant("latest reply"),
+            long_user(2),
+        ];
+        let mut tracking = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 1,
+            ..Default::default()
+        };
+        let result = orch
+            .process_reactive_tracked_with_options(
+                history.clone(),
+                &mut tracking,
+                None,
+                None,
+                Some(ApiAttemptsLeft::new(5)),
+                ReactiveCompactOptions {
+                    allow_last_resort: false,
+                    keep_no_round: true,
+                },
+            )
+            .await
+            .expect("rapid-refill controls reach the reactive summarizer");
+        assert_eq!(result.messages_to_preserve, history[4..]);
+        assert_eq!(tracking.turn_counter, 0);
+        assert_eq!(tracking.consecutive_rapid_refills, 1);
+        assert!(result.was_compacted);
     }
 
     /// Binary-verified: the manual path preserves the LAST API-round group
@@ -1164,6 +1340,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn measured_prefix_can_trigger_compaction_for_a_short_history() {
+        let orch = order_orchestrator(167_000);
+        let result = orch
+            .process_iteration_tracked_with_context_tokens(
+                vec![long_user(0), long_user(1)],
+                0,
+                &mut AutoCompactTrackingState::default(),
+                None,
+                None,
+                SystemTime::now(),
+                None,
+                Some(180_000),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.was_compacted,
+            "the measured prefix is part of context"
+        );
+    }
+
+    #[tokio::test]
+    async fn measured_context_gate_deducts_prior_snip_savings() {
+        let orch = order_orchestrator(167_000);
+        let result = orch
+            .process_iteration_tracked_with_context_tokens(
+                vec![long_user(0), long_user(1)],
+                20_000,
+                &mut AutoCompactTrackingState::default(),
+                None,
+                None,
+                SystemTime::now(),
+                None,
+                Some(180_000),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.was_compacted,
+            "snip lowered measured context to 160k"
+        );
+    }
+
+    #[tokio::test]
     async fn microcompact_cache_hit_is_reported_on_repeated_same_input() {
         let mut orch = order_orchestrator(1_000_000);
         orch.micro.config.enabled = true;
@@ -1376,6 +1596,14 @@ mod tests {
         assert!(
             !res.layers_applied.contains(&CompactionLayer::Autocompact),
             "autocompact must not fire when the rapid-refill breaker is tripped"
+        );
+        assert_eq!(
+            res.consecutive_rapid_refills, 3,
+            "report the refill that tripped"
+        );
+        assert_eq!(
+            tracking.consecutive_rapid_refills, 2,
+            "a skipped compact does not commit new tracking state"
         );
     }
 

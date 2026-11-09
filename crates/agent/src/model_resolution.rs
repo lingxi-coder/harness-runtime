@@ -192,6 +192,8 @@ impl<T> NativeModelObservation<T> {
 /// complete settings load; a partial source read remains `Unobserved`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NativeModelSettingsSnapshot {
+    /// Admitted per-tier auto-compaction settings, refreshed with this snapshot.
+    pub auto_compact: lingxi_core::host::auto_compact::AutoCompactSettings,
     /// Effective `modelOverrides` after Native source selection, preserving UTF-16.
     pub model_overrides: NativeModelObservation<Option<Utf16JsonProjection>>,
     /// `dSe()` winner's exact model picker option list; project/local tiers are excluded.

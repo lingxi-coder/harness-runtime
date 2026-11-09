@@ -191,6 +191,25 @@ pub fn history_to_jsonl_lines(
                         .set_field("resumable", resumable.clone())
                         .expect("assistant object");
                 }
+                if let Some(metadata) = conversation.native_request_history.assistant_usage.get(id)
+                {
+                    for (field, path) in [
+                        ("requestedModel", "/requestedModel"),
+                        ("requestedModelProfile", "/requestedProfile"),
+                    ] {
+                        if let Ok(value) = metadata.subprojection(path) {
+                            extra.set_field(field, value).expect("assistant metadata");
+                        }
+                    }
+                    for (field, path) in [
+                        ("usage", "/usage"),
+                        ("context_management", "/contextManagement"),
+                    ] {
+                        if let Ok(value) = metadata.subprojection(path) {
+                            inner.set_field(field, value).expect("assistant object");
+                        }
+                    }
+                }
                 ("assistant", inner)
             }
             ConversationMessage::System {

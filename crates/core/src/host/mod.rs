@@ -115,6 +115,7 @@ pub use device_api::{
 // retains temporary module re-exports for direct legacy consumers.
 pub use media_api::{audio, camera, stt, tts, voice};
 pub mod auth;
+pub mod auto_compact;
 pub mod backgrounding;
 pub mod bg_session_forker;
 pub mod bridge;

@@ -76,9 +76,26 @@ pub struct NativeRequestHistoryMetadata {
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub task_delivery_envelopes: HashMap<MessageId, TaskDeliveryHistoryEnvelope>,
+    /// Assistant usage and provider response identity, kept beside the frozen
+    /// provider-facing messages. This lets context accounting use measured
+    /// system/tool-prefix tokens after live turns, resume, and session forks.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub assistant_usage: HashMap<MessageId, Utf16JsonProjection>,
 }
 
 impl NativeRequestHistoryMetadata {
+    /// Compare the exact request-placement and task-delivery provenance.
+    /// Usage is a derived accounting sidecar: live logical response identities
+    /// and transcript per-block identities may differ without changing the
+    /// admitted request or its policy-relevant provenance.
+    #[must_use]
+    pub fn request_shape_matches(&self, other: &Self) -> bool {
+        self.before_closing_line_ids == other.before_closing_line_ids
+            && self.synthetic_closing_ids == other.synthetic_closing_ids
+            && self.task_deliveries == other.task_deliveries
+            && self.task_delivery_envelopes == other.task_delivery_envelopes
+    }
+
     /// True when there is no request-history metadata to persist or transfer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -86,12 +103,53 @@ impl NativeRequestHistoryMetadata {
             && self.synthetic_closing_ids.is_empty()
             && self.task_deliveries.is_empty()
             && self.task_delivery_envelopes.is_empty()
+            && self.assistant_usage.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_shape_ignores_derived_usage_but_preserves_all_request_provenance() {
+        let id = MessageId::new();
+        let base = NativeRequestHistoryMetadata::default();
+        let mut derived = base.clone();
+        derived.assistant_usage.insert(
+            id,
+            Utf16JsonProjection::parse(
+                r#"{"providerMessageId":"provider-id","usage":{"input_tokens":200000}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(base.request_shape_matches(&derived));
+        assert_ne!(
+            base, derived,
+            "full metadata equality still includes accounting"
+        );
+
+        let mut changed = derived.clone();
+        changed.before_closing_line_ids.insert(id);
+        assert!(!base.request_shape_matches(&changed));
+        let mut changed = derived.clone();
+        changed.synthetic_closing_ids.insert(id);
+        assert!(!base.request_shape_matches(&changed));
+        let mut changed = derived.clone();
+        changed
+            .task_deliveries
+            .insert(id, Utf16JsonProjection::parse(r#"{"id":"task"}"#).unwrap());
+        assert!(!base.request_shape_matches(&changed));
+        let mut changed = derived;
+        changed.task_delivery_envelopes.insert(
+            id,
+            TaskDeliveryHistoryEnvelope {
+                prompt_source: Some(Utf16JsonProjection::parse("null").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert!(!base.request_shape_matches(&changed));
+    }
 
     #[test]
     fn task_delivery_envelope_round_trip_preserves_missing_vs_null_and_false() {

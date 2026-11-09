@@ -3801,17 +3801,13 @@ pub async fn build_with_credential_stack(
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
     );
+    let compaction_thinking_service = api_service.clone();
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(compaction_side_query, orch_cfg.model.clone())
-            // (M10 cc2.1.198) the compaction summary call INHERITS the session
-            // extended-thinking config (binary: `thinkingConfig: mXt(r)` on the
-            // summarizer `sEt` call @216945141). This is the SAME resolved
-            // `cfg.session_thinking` the main-loop `ApiService` holds (boot
-            // MAX_THINKING_TOKENS / --max-thinking-tokens / alwaysThinkingEnabled
-            // resolution) — and the model predicates + `LINGXI_DISABLE_THINKING`
-            // kill switches still apply per request inside `reasoning_for_request`.
-            .with_session_thinking(Ok(cfg.session_thinking)),
+            // Read the current session policy for every fork, including
+            // thinking-mode and budget changes made after construction.
+            .with_session_thinking_source(move || compaction_thinking_service.thinking()),
     );
     // `/recap` reuses the SAME single-turn forked runner the autocompact
     // summarizer uses — CLONE the `Arc` here BEFORE `forked_runner` moves into

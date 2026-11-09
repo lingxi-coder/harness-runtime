@@ -185,9 +185,22 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
     // (`autoCompact.ts` `calculateTokenWarningState`). `auto_compact_enabled`
     // is `true` to mirror the always-on default of this port (no GrowthBook).
-    let estimate = compaction::grouping::estimate_tokens_for_range(&history_snapshot);
+    let estimate = orch.current_live_context_usage_for(&history_snapshot).await;
     let active_betas = orch.api.active_betas();
-    let warning = orch.api.context_warning(estimate, model, profile);
+    let (auto_compact_enabled, settings_window) = orch.auto_compact_settings_for(model, profile);
+    let warning = orch
+        .api
+        .compact_warning(
+            estimate,
+            model,
+            profile,
+            settings_window,
+            auto_compact_enabled,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "context pressure is unavailable");
+            compaction::thresholds::warning_for_input_budget(estimate, None)
+        });
 
     // SC-06: the one-shot unknown-model auto-compact notice (`Pk0`
     // @306646044). Upstream emits it from the REPL launcher (@306693668) as
@@ -206,8 +219,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
         if let Some(notice) = compaction::thresholds::unknown_model_window_notice_once(
             model,
             &active_betas,
-            None,
-            compaction::thresholds::is_auto_compact_enabled(true),
+            settings_window,
+            auto_compact_enabled,
         ) {
             tracing::warn!("[autocompact] {notice}");
         }
@@ -223,7 +236,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // (e.g. after a compaction). Default no-op for non-interactive sinks.
     let banner = compaction::token_warning_banner(
         &warning,
-        compaction::thresholds::is_auto_compact_enabled(true),
+        auto_compact_enabled,
         compaction::is_compact_warning_suppressed(),
         None,
     )
@@ -602,7 +615,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // A provider overflow is recovered by summarizing a prefix and preserving
     // its recent rounds. Never delete live history before that summary succeeds.
     // (4) Reactive-compact fallback: one full compact, then retry once more.
-    if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
+    if let Some(compactor) = orch
+        .compaction_runtime
+        .compaction
+        .clone()
+        .filter(|_| auto_compact_enabled)
+    {
         let snapshot = orch.session.lock().await.model_context_history();
         let original_snapshot = snapshot.clone();
         // hooks compaction lifecycle: PreCompact fires before the reactive
@@ -650,12 +668,17 @@ pub(crate) async fn call_api_with_ptl_recovery(
         let error_for_core = core_error.clone();
         let phase_output = orch.output.clone();
         let side_token = side_cancel.filter(|_| orch.side_chat).cloned();
+        let usage_metadata = orch.session.lock().await.native_request_history.clone();
         let core: SessionCompactCore = Arc::new(move |source_messages, instructions| {
             let cancel = side_token.clone();
             let compactor = compact_for_core.clone();
             let tracking = tracking_for_core.clone();
             let core_error = error_for_core.clone();
             let output = phase_output.clone();
+            let tokens_before = crate::conversation::context_usage::live_context_tokens(
+                &source_messages,
+                &usage_metadata,
+            );
             Box::pin(async move {
                 output.emit_compaction_phase("summarizing").await;
                 let api_started = std::time::Instant::now();
@@ -683,7 +706,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         result,
                         source_messages,
                         api_started.elapsed(),
-                    )),
+                    )
+                    .with_context_tokens(tokens_before)),
                     Err(error) => {
                         *core_error.lock().await = Some(error.clone());
                         Err(hooks::mods::ModError::Native(error.to_string()))
@@ -733,7 +757,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             .iter()
             .map(lingxi_core::types::text_byte_size)
             .sum();
-        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&source_messages);
+        let pre_tokens_estimate = orch.current_live_context_usage_for(&source_messages).await;
         // A successful summarizer response is owned before the failure-detail,
         // telemetry, or output awaits below.
         let compact_cost_receipt = compact_result.as_ref().ok().and_then(|result| {

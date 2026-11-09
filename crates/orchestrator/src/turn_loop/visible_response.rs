@@ -229,9 +229,11 @@ pub(super) fn process_visible_response<'a>(
             // consumer selects K and dispatches its original ToolUse blocks.
             assistant_blocks.clone_from(content);
         }
-        orch.record_main_loop_assistant_usage(
+        orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,
             &response.model,
+            model,
+            model_profile,
             (requested_model
                 && request_history_source
                     == super::mod_batched_step::RequestHistorySource::PhysicalRequest)

@@ -692,6 +692,11 @@ fn compaction_block_text_units(block: &lingxi_core::types::ContentBlock) -> Vec<
 }
 
 impl SessionCompactCoreOutput {
+    pub(crate) fn with_context_tokens(mut self, tokens_before: u64) -> Self {
+        self.event_result.tokens_before = Some(tokens_before as f64);
+        self
+    }
+
     pub(crate) fn new(
         result: compaction::IterationCompactionResult,
         source_messages: Vec<ConversationMessage>,
@@ -778,6 +783,15 @@ pub(crate) type SessionCompactCore = std::sync::Arc<
         + Sync,
 >;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomaticCompactOutcome {
+    Compacted,
+    Failed,
+    HookBlocked,
+    Cancelled,
+    NotNeeded,
+}
+
 /// Outcome of running the actual compaction callback through session.compact.
 pub(crate) enum SessionCompactDecision {
     Continue {
@@ -794,34 +808,10 @@ pub(crate) enum SessionCompactDecision {
 fn main_loop_context_tokens_from_execution_usage(
     usage: &llm_runtime::ExecutionUsage,
 ) -> Option<f64> {
-    // Match `assistant_usage_value`: the raw provider usage object is what the
-    // assistant row persists when one exists, so prefer its exact counters.
-    // The host-only stream annotations remain available here for Native's
-    // iteration override, then are removed at the transcript boundary.
-    if usage.provider_metadata.is_root_object() {
-        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
-            usage.provider_metadata.as_json_source(),
-        )
-        .ok()?;
-        return crate::resume::native_usage_context_tokens_from_projection(&projection);
-    }
-    let counts = usage.report.usage?;
-    let mut projection =
-        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!({
-            "input_tokens": counts.input_tokens,
-            "cache_creation_input_tokens": counts.cache_write_tokens,
-            "cache_read_input_tokens": counts.cache_read_tokens,
-            "output_tokens": counts.output_tokens,
-        }))
-        .ok()?;
-    if let Ok(metadata) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
-        usage.provider_metadata.as_json_source(),
-    ) {
-        if let Some(iterations) = crate::resume::native_usage_iterations_from_projection(&metadata)
-        {
-            projection.set_field("iterations", iterations).ok()?;
-        }
-    }
+    let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        super::transcript_impl::persisted_assistant_usage(usage).as_json_source(),
+    )
+    .ok()?;
     crate::resume::native_usage_context_tokens_from_projection(&projection)
 }
 
@@ -1030,23 +1020,75 @@ impl ConversationOrchestrator {
     /// Pair the current real response usage with the assistant row that was
     /// actually accepted into live history. Any synthetic or Mod-created row
     /// without this usage invalidates the pair through the identity check.
+    #[cfg(test)]
     pub(crate) async fn record_main_loop_assistant_usage(
         &self,
         assistant: &ConversationMessage,
         model: &str,
         usage: Option<&llm_runtime::ExecutionUsage>,
     ) {
+        let profile = self.session.lock().await.model_profile.clone();
+        self.record_main_loop_assistant_usage_for_request(
+            assistant,
+            model,
+            model,
+            profile.as_deref(),
+            usage,
+        )
+        .await;
+    }
+
+    pub(crate) async fn record_main_loop_assistant_usage_for_request(
+        &self,
+        assistant: &ConversationMessage,
+        model: &str,
+        requested_model: &str,
+        requested_profile: Option<&str>,
+        usage: Option<&llm_runtime::ExecutionUsage>,
+    ) {
         let assistant_id = assistant.id();
         let latest_assistant_id = {
-            let session = self.session.lock().await;
-            session
+            let mut session = self.session.lock().await;
+            let latest = session
                 .history
                 .iter()
                 .rev()
                 .find_map(|message| match message {
                     ConversationMessage::Assistant { id, .. } => Some(*id),
                     _ => None,
+                });
+            let absent_usage = llm_runtime::ExecutionUsage::default();
+            let metadata = (latest == Some(assistant_id))
+                .then(|| {
+                    super::context_usage::metadata_from_execution(
+                        assistant,
+                        model,
+                        usage.unwrap_or(&absent_usage),
+                    )
                 })
+                .flatten();
+            if let Some(mut metadata) = metadata {
+                metadata
+                    .set_field("requestedModel", requested_model.into())
+                    .expect("usage metadata is an object");
+                metadata
+                    .set_field(
+                        "requestedProfile",
+                        CompactSource::from_serde_value(&serde_json::json!(requested_profile))
+                            .expect("profile source"),
+                    )
+                    .expect("usage metadata is an object");
+                session
+                    .native_request_history
+                    .assistant_usage
+                    .insert(assistant_id, metadata);
+            } else {
+                session
+                    .native_request_history
+                    .assistant_usage
+                    .remove(&assistant_id);
+            }
+            latest
         };
         let snapshot = if latest_assistant_id == Some(assistant_id)
             && model != "<synthetic>"
@@ -2035,12 +2077,15 @@ impl ConversationOrchestrator {
             let phase_output = self.output.clone();
             let compact_for_core = compactor.clone();
             let cancel_for_core = cancel.clone();
+            let usage_metadata = self.session.lock().await.native_request_history.clone();
             let core: SessionCompactCore =
                 std::sync::Arc::new(move |source_messages, instructions| {
                     let compactor = compact_for_core.clone();
                     let cancel = cancel_for_core.clone();
                     let phase_output = phase_output.clone();
                     let safety_observer = safety_observer.clone();
+                    let tokens_before =
+                        context_usage::live_context_tokens(&source_messages, &usage_metadata);
                     Box::pin(lingxi_core::host::model_safety::bind_model_safety(
                         safety_observer,
                         async move {
@@ -2065,7 +2110,8 @@ impl ConversationOrchestrator {
                                 result,
                                 source_messages,
                                 api_started.elapsed(),
-                            ))
+                            )
+                            .with_context_tokens(tokens_before))
                         },
                     ))
                 });
@@ -2101,8 +2147,7 @@ impl ConversationOrchestrator {
                 .iter()
                 .map(lingxi_core::types::text_byte_size)
                 .sum();
-            let pre_tokens_estimate =
-                compaction::grouping::estimate_tokens_for_range(&history_before);
+            let pre_tokens_estimate = self.current_live_context_usage_for(&history_before).await;
             let cost_receipt =
                 self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
             // CC re-checks `signal.aborted` between compaction phases: an Esc that
@@ -3342,6 +3387,10 @@ impl ConversationOrchestrator {
         {
             let mut s = self.session.lock().await;
             s.replace_model_context_history(history_after);
+            // Native k4e zeroes usage on kept rows. The Rust message carrier
+            // keeps usage beside history, so retire those pre-compact anchors
+            // at the same successful commit boundary.
+            s.native_request_history.assistant_usage.clear();
             self.compaction_runtime
                 .total_tokens_reminder_usage
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -3483,11 +3532,25 @@ impl ConversationOrchestrator {
     /// Mirrors claude-code's `Xtt` last-usage snapshot (see
     /// [`Self::last_response_input_tokens`]).
     pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::ExecutionUsage) {
-        let total_input = usage
-            .counts()
-            .input_tokens
-            .saturating_add(usage.counts().cache_read_tokens)
-            .saturating_add(usage.counts().cache_write_tokens);
+        let total_input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            super::transcript_impl::persisted_assistant_usage(usage).as_json_source(),
+        )
+        .ok()
+        .and_then(|source| crate::resume::native_usage_input_tokens_from_projection(&source))
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                value as u64
+            }
+        })
+        .unwrap_or_else(|| {
+            usage
+                .counts()
+                .input_tokens
+                .saturating_add(usage.counts().cache_read_tokens)
+                .saturating_add(usage.counts().cache_write_tokens)
+        });
         self.compaction_runtime
             .last_response_input_tokens
             .store(total_input, std::sync::atomic::Ordering::Relaxed);
@@ -3750,7 +3813,9 @@ impl ConversationOrchestrator {
     /// Protect a fully admitted external batch until this turn ends. Hosts may
     /// compact consumed history before this fence, never the unconsumed batch.
     pub fn protect_external_input_from_compaction(&self) {
-        self.compaction_runtime.external_input_protected.store(true, std::sync::atomic::Ordering::Release);
+        self.compaction_runtime
+            .external_input_protected
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) async fn maybe_compact_before_call(&self, side_cancel: Option<&CancellationToken>) {
@@ -3774,6 +3839,93 @@ impl ConversationOrchestrator {
         .await;
     }
 
+    fn larger_compact_model_for_history(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        history: &[ConversationMessage],
+        metadata: &lingxi_core::host::NativeRequestHistoryMetadata,
+    ) -> Option<compaction::autocompact::CompactModelOverride> {
+        if lingxi_core::host::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_NO_MODEL_FALLBACK")
+                .ok()
+                .as_deref(),
+        ) {
+            return None;
+        }
+        let (candidate, old_profile) = context_usage::latest_requested_model(history, metadata)?;
+        if candidate == model {
+            return None;
+        }
+        let current_budget = self.api.context_budget(model, profile).ok()??;
+        let current_profile = current_budget.profile_name.as_str();
+        if current_profile.is_empty() || old_profile.is_some_and(|old| old != current_profile) {
+            return None;
+        }
+        let candidate_budget = self
+            .api
+            .context_budget(candidate, Some(current_profile))
+            .ok()??;
+        if candidate_budget.profile_name != current_profile
+            || self
+                .api
+                .context_window_tokens(candidate, Some(current_profile))?
+                <= self
+                    .api
+                    .context_window_tokens(model, Some(current_profile))?
+        {
+            return None;
+        }
+        let resolver = self.model_resolution_context_provider.as_ref()?;
+        let current = resolver
+            .context_for_route(model, Some(current_profile))
+            .ok()?;
+        let proposed = resolver
+            .context_for_route(candidate, Some(current_profile))
+            .ok()?;
+        if current.route.provider.is_none()
+            || current.route.provider != proposed.route.provider
+            || current.route.endpoint != proposed.route.endpoint
+            || current.route.protocol != proposed.route.protocol
+            || current.route.profile.as_deref() != Some(current_profile)
+            || proposed.route.profile.as_deref() != Some(current_profile)
+            || proposed.entitlement_allowed == Some(false)
+        {
+            return None;
+        }
+        // `Other` covers several independent providers. The same explicit
+        // profile plus observed endpoint/protocol is required to bind it.
+        if current.route.provider == Some(agent::model_resolution::ModelProviderKind::Other)
+            && (current.route.endpoint.is_none() || current.route.protocol.is_none())
+        {
+            return None;
+        }
+        if self
+            .model_runtime
+            .main_model_restriction
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(enforcement, _)| {
+                llm_runtime::model::allowlist::model_allowed_under(enforcement, candidate)
+                    == Some(false)
+            })
+        {
+            return None;
+        }
+        if self.api.last_rate_limit_full().is_some_and(|rate| {
+            rate.status.as_deref() == Some("rejected")
+                && rate.resets_at.is_some()
+                && !rate.overage_in_use
+        }) {
+            return None;
+        }
+        Some(compaction::autocompact::CompactModelOverride::new(
+            candidate.to_owned(),
+            Some(current_profile.to_owned()),
+        ))
+    }
+
     async fn maybe_compact_before_call_with_options(
         &self,
         side_cancel: Option<&CancellationToken>,
@@ -3781,288 +3933,472 @@ impl ConversationOrchestrator {
         force_idle: bool,
         api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) {
-        if self.compaction_runtime.external_input_protected.load(std::sync::atomic::Ordering::Acquire) {return;}
-        let Some(compactor) = self.compaction_runtime.compaction.clone() else {
-            // No compactor wired — strict no-op (history untouched).
-            return;
-        };
-        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
-            return;
-        }
+        self.run_auto_compact_operation(
+            side_cancel,
+            idle_cancel,
+            force_idle,
+            api_attempts_left,
+            None,
+        )
+        .await;
+    }
 
-        // Context collapse owns proactive headroom while enabled. Its committed
-        // view is applied later by `prepare_model_call_snapshot`; prompt-too-long
-        // recovery drains staged collapses before the ordinary compact fallback.
-        // The gate is default-off, so the established autocompact path remains
-        // byte-identical unless explicitly enabled.
-        if compaction::is_context_collapse_enabled() {
-            return;
-        }
-
-        // #54 per-turn turn-counter increment + `tengu_post_autocompact_turn`
-        // emit (binary `if(le?.compacted)le.turnCounter++,G(
-        // "tengu_post_autocompact_turn",{turnId,turnCounter,queryChainId,queryDepth})`,
-        // offsets 202951666 / ~209133741). Runs on EVERY turn after a compact
-        // (regardless of the threshold below) so the rapid-refill window
-        // (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
-        // turns-since-previous-compact correctly. Capture under the lock, then
-        // emit after releasing it (the analytics emit is async).
-        let post_autocompact = if force_idle {
-            None
-        } else {
-            let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
-            if tracking.compacted {
-                tracking.turn_counter = tracking.turn_counter.saturating_add(1);
-                Some((tracking.turn_id.clone(), tracking.turn_counter))
-            } else {
-                None
-            }
-        };
-        if let Some((turn_id, turn_counter)) = post_autocompact {
-            self.fire_post_autocompact_turn(&turn_id, turn_counter)
-                .await;
-        }
-
-        // Snapshot history + estimate tokens WITHOUT holding the lock across
-        // the (possibly networked) compaction call. The session's CURRENT model
-        // rides along for the threshold resolution below.
-        let pending_ingress_prompt_id = crate::request_context::pending_ingress_prompt_id();
-        let (snapshot, last_assistant_at, model, model_profile) = {
-            let s = self.session.lock().await;
-            let snapshot = s.model_context_history();
-            (
-                snapshot,
-                s.message_timing.last_assistant_at,
-                s.model.clone(),
-                s.model_profile.clone(),
-            )
-        };
-        let prompt_in_compaction_input = pending_ingress_prompt_id
-            .filter(|prompt_id| snapshot.iter().any(|message| message.id() == *prompt_id));
-        let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
-
-        // The gate's ceiling belongs to the model, not to the engine:
-        // claude-code resolves `getAutoCompactThreshold(model)`
-        // (`autoCompact.ts:72-91`) at its `autoCompactIfNeeded` call site, so a
-        // 1M-token catalog model must not be compacted at a boot-time constant
-        // sized for the 200k Claude window, and a mid-session model switch must
-        // move the gate with it. `refresh_autocompact_threshold` is a no-op for
-        // fixed-threshold callers (tests, embedded hosts) — it returns their
-        // configured value.
-        let threshold = match self.api.context_budget(&model, model_profile.as_deref()) {
-            Ok(Some(context)) => {
-                // Existing explicit settings remain authoritative within hard limits.
-                let configured = compaction::thresholds::resolve_auto_compact_window(
-                    &model,
-                    &self.api.active_betas(),
-                    None,
-                    true,
-                );
-                let budget = if matches!(
-                    configured.source,
-                    compaction::thresholds::AutoCompactWindowSource::Env
-                        | compaction::thresholds::AutoCompactWindowSource::Settings
-                ) {
-                    Some(
-                        context
-                            .hard_input_limit
-                            .map_or(configured.configured, |limit| {
-                                limit.min(configured.configured)
-                            }),
-                    )
-                } else {
-                    context.effective_input_budget
-                };
-                compactor.refresh_context_budget(budget)
-            }
-            Ok(None) => compactor.refresh_autocompact_threshold(&model, &self.api.active_betas()),
-            Err(error) => {
-                tracing::warn!(%error, "cannot resolve context budget before compaction");
-                return;
-            }
-        };
-
-        // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
-        // because we have done no snip work yet at the call site.
-        if !force_idle && !compaction::should_auto_compact(estimate, 0, threshold) {
-            return;
-        }
-
-        // #7 consecutive-failures breaker (`bin/claude.exe` `ewo` step 2): a
-        // tripped breaker (`consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)
-        // makes compaction a guaranteed no-op, so RETURN HERE — BEFORE the
-        // fixed-prefix overflow probe below. The binary's `ewo` runs
-        // `if(o?.consecutiveFailures>=Swo) return {wasCompacted:!1}` (Swo=3)
-        // ahead of `Wom` (the prefix-overflow probe that emits
-        // `tengu_auto_compact_prefix_overflow`), so a breaker-tripped,
-        // over-threshold session emits NO prefix-overflow event. Without this
-        // early return our code fired a spurious `tengu_auto_compact_prefix_overflow`
-        // (`wouldHaveBlocked:true`) every turn for such a session.
-        {
-            let tracking = self.compaction_runtime.compaction_tracking.lock().await;
-            if tracking.consecutive_failures
-                >= compaction::thresholds::MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+    fn run_auto_compact_operation<'a>(
+        &'a self,
+        side_cancel: Option<&'a CancellationToken>,
+        idle_cancel: Option<&'a CancellationToken>,
+        force_idle: bool,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
+        model_override: Option<compaction::autocompact::CompactModelOverride>,
+    ) -> futures::future::BoxFuture<'a, AutomaticCompactOutcome> {
+        Box::pin(async move {
+            let operation_budget =
+                api_attempts_left.unwrap_or_else(Self::new_compaction_api_budget);
+            let api_attempts_left = Some(operation_budget.clone());
+            let mut fallback_failure_tracking = None;
+            if self
+                .compaction_runtime
+                .external_input_protected
+                .load(std::sync::atomic::Ordering::Acquire)
             {
-                return;
+                return AutomaticCompactOutcome::NotNeeded;
             }
-        }
-
-        // #55 fixed-prefix overflow guard (`a3p`, `bin/claude.exe` offset
-        // 203004969). If the immovable prefix (system prompt + tools +
-        // attachments = `totalInput − messages`) already exceeds the autocompact
-        // threshold, compaction can NEVER bring usage below threshold. Mirror the
-        // auto path exactly: WARN + emit `tengu_auto_compact_prefix_overflow`
-        // (`wouldHaveBlocked:true`) but STILL PROCEED — the guard is observational
-        // on the auto path; only the reactive PTL path surfaces it to the user as
-        // `compactionImpossible`. `totalInput` is the last response's input total
-        // (the `Xtt` snapshot); `0` until the first call ⇒ a strict no-op.
-        let total_input = self
-            .compaction_runtime
-            .last_response_input_tokens
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let (doc_blocks, img_blocks) = count_document_and_image_blocks(&snapshot);
-        if let Some(overflow) = compaction::compaction_prefix_overflow(
-            total_input,
-            estimate,
-            threshold,
-            0,
-            doc_blocks,
-            img_blocks,
-        ) {
-            tracing::warn!(
-                prefix_tokens = overflow.prefix_tokens,
-                threshold_tokens = overflow.threshold_tokens,
-                "autocompact: fixed prefix ~{} > threshold {} — compaction cannot help",
-                overflow.prefix_tokens,
-                overflow.threshold_tokens,
-            );
-            self.fire_prefix_overflow_telemetry(overflow).await;
-            // Fall through — the auto path STILL PROCEEDS (parity with the binary).
-        }
-
-        // hooks compaction lifecycle: PreCompact fires once we have crossed the
-        // autocompact threshold and are about to run the summary pass (TS
-        // `executePreCompactHooks` BEFORE the summary request, `compact.ts:413`).
-        // The proactive trigger is always the `auto` arm. TS precomputed arm: a
-        // blocking PreCompact hook logs `Precomputed compact blocked by
-        // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
-        let compact_started = std::time::Instant::now();
-        self.output.emit_compaction_started().await;
-        let idle_hook_owner =
-            force_idle.then(|| format!("idle-pre-compact:{}", uuid::Uuid::new_v4()));
-        let pre_compact = if let (Some(cancel), Some(owner)) = (idle_cancel, idle_hook_owner) {
-            let Some(outcome) = self
-                .fire_pre_compact_for_idle("auto", None, cancel, owner)
-                .await
-            else {
-                self.output
-                    .emit_compaction_finished(Some("Compaction canceled."))
-                    .await;
-                return;
+            let Some(compactor) = self.compaction_runtime.compaction.clone() else {
+                // No compactor wired — strict no-op (history untouched).
+                return AutomaticCompactOutcome::NotNeeded;
             };
-            outcome
-        } else {
-            self.fire_pre_compact("auto", None).await
-        };
-        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
-            self.output
-                .emit_compaction_finished(Some("Compaction canceled."))
-                .await;
-            return;
-        }
-        if let Some(detail) = pre_compact.blocked_by {
-            let detail = detail.string_at("").unwrap_or_default().to_owned();
-            tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
-            self.output
-                .emit_compaction_finished(Some(&format!(
-                    "Compaction blocked by PreCompact hook: {detail}"
-                )))
-                .await;
-            return;
-        }
-
-        let cost_scope = match self.compaction_cost_scope().await {
-            Ok(scope) => scope,
-            Err(error) => {
-                tracing::error!(%error, "proactive compaction cost preflight failed");
-                self.output
-                    .emit_compaction_finished(Some(&format!(
-                        "Compaction cost preflight failed: {error}"
-                    )))
-                    .await;
-                return;
+            if idle_cancel.is_some_and(CancellationToken::is_cancelled)
+                || side_cancel.is_some_and(CancellationToken::is_cancelled)
+            {
+                return AutomaticCompactOutcome::Cancelled;
             }
-        };
-        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
-            self.output
-                .emit_compaction_finished(Some("Compaction canceled."))
-                .await;
-            return;
-        }
-        let tracking_state = std::sync::Arc::new(tokio::sync::Mutex::new(
-            self.compaction_runtime
+
+            // Context collapse owns proactive headroom while enabled. Its committed
+            // view is applied later by `prepare_model_call_snapshot`; prompt-too-long
+            // recovery drains staged collapses before the ordinary compact fallback.
+            // The gate is default-off, so the established autocompact path remains
+            // byte-identical unless explicitly enabled.
+            if compaction::is_context_collapse_enabled() {
+                return AutomaticCompactOutcome::NotNeeded;
+            }
+
+            // #54 per-turn turn-counter increment + `tengu_post_autocompact_turn`
+            // emit (binary `if(le?.compacted)le.turnCounter++,G(
+            // "tengu_post_autocompact_turn",{turnId,turnCounter,queryChainId,queryDepth})`,
+            // offsets 202951666 / ~209133741). Runs on EVERY turn after a compact
+            // (regardless of the threshold below) so the rapid-refill window
+            // (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
+            // turns-since-previous-compact correctly. Capture under the lock, then
+            // emit after releasing it (the analytics emit is async).
+            let post_autocompact = if force_idle || model_override.is_some() {
+                None
+            } else {
+                let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
+                if tracking.compacted {
+                    tracking.turn_counter = tracking.turn_counter.saturating_add(1);
+                    Some((tracking.turn_id.clone(), tracking.turn_counter))
+                } else {
+                    None
+                }
+            };
+            if let Some((turn_id, turn_counter)) = post_autocompact {
+                self.fire_post_autocompact_turn(&turn_id, turn_counter)
+                    .await;
+            }
+
+            // Snapshot history + estimate tokens WITHOUT holding the lock across
+            // the (possibly networked) compaction call. The session's CURRENT model
+            // rides along for the threshold resolution below.
+            let pending_ingress_prompt_id = crate::request_context::pending_ingress_prompt_id();
+            let (snapshot, last_assistant_at, model, model_profile, usage_metadata) = {
+                let s = self.session.lock().await;
+                let snapshot = s.model_context_history();
+                (
+                    snapshot,
+                    s.message_timing.last_assistant_at,
+                    s.model.clone(),
+                    s.model_profile.clone(),
+                    s.native_request_history.clone(),
+                )
+            };
+            let prompt_in_compaction_input = pending_ingress_prompt_id
+                .filter(|prompt_id| snapshot.iter().any(|message| message.id() == *prompt_id));
+            let estimate = context_usage::context_tokens_for_compaction(&snapshot, &usage_metadata);
+            let live_context_tokens =
+                context_usage::live_context_tokens(&snapshot, &usage_metadata);
+            let message_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
+
+            // The gate's ceiling belongs to the model, not to the engine:
+            // claude-code resolves `getAutoCompactThreshold(model)`
+            // (`autoCompact.ts:72-91`) at its `autoCompactIfNeeded` call site, so a
+            // 1M-token catalog model must not be compacted at a boot-time constant
+            // sized for the 200k Claude window, and a mid-session model switch must
+            // move the gate with it. `refresh_autocompact_threshold` is a no-op for
+            // fixed-threshold callers (tests, embedded hosts) — it returns their
+            // configured value.
+            let (auto_compact_enabled, settings_window) =
+                self.auto_compact_settings_for(&model, model_profile.as_deref());
+            if !auto_compact_enabled {
+                return AutomaticCompactOutcome::NotNeeded;
+            }
+            let threshold = match self.api.compact_input_budget(
+                &model,
+                model_profile.as_deref(),
+                settings_window,
+                auto_compact_enabled,
+            ) {
+                Ok(Some(budget)) => compactor.refresh_compact_threshold(
+                    self.api
+                        .compact_threshold(&model, model_profile.as_deref(), budget),
+                ),
+                Ok(None) => return AutomaticCompactOutcome::NotNeeded,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot resolve context budget before compaction");
+                    return AutomaticCompactOutcome::Failed;
+                }
+            };
+
+            // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
+            // because we have done no snip work yet at the call site.
+            if !force_idle && !compaction::should_auto_compact(estimate, 0, threshold) {
+                return AutomaticCompactOutcome::NotNeeded;
+            }
+
+            // #7 consecutive-failures breaker (`bin/claude.exe` `ewo` step 2): a
+            // tripped breaker (`consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)
+            // makes compaction a guaranteed no-op, so RETURN HERE — BEFORE the
+            // fixed-prefix overflow probe below. The binary's `ewo` runs
+            // `if(o?.consecutiveFailures>=Swo) return {wasCompacted:!1}` (Swo=3)
+            // ahead of `Wom` (the prefix-overflow probe that emits
+            // `tengu_auto_compact_prefix_overflow`), so a breaker-tripped,
+            // over-threshold session emits NO prefix-overflow event. Without this
+            // early return our code fired a spurious `tengu_auto_compact_prefix_overflow`
+            // (`wouldHaveBlocked:true`) every turn for such a session.
+            {
+                let tracking = self.compaction_runtime.compaction_tracking.lock().await;
+                if tracking.consecutive_failures
+                    >= compaction::thresholds::MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+                {
+                    return AutomaticCompactOutcome::NotNeeded;
+                }
+            }
+
+            let blocking = self
+                .api
+                .compact_warning(
+                    live_context_tokens,
+                    &model,
+                    model_profile.as_deref(),
+                    settings_window,
+                    auto_compact_enabled,
+                )
+                .is_ok_and(|warning| warning.is_at_blocking_limit);
+            let original_tracking = self
+                .compaction_runtime
                 .compaction_tracking
                 .lock()
                 .await
-                .clone(),
-        ));
-        let tracking_for_core = tracking_state.clone();
-        let compact_for_core = compactor.clone();
-        let phase_output = self.output.clone();
-        let last_assistant_at_for_core = last_assistant_at;
-        let operation_cancel = if self.side_chat {
-            side_cancel.cloned()
-        } else if force_idle {
-            idle_cancel.cloned()
-        } else {
-            None
-        };
-        let operation_cancel_for_core = operation_cancel.clone();
-        let token_budget = Some(api_attempts_left.unwrap_or_else(Self::new_compaction_api_budget));
-        let core: SessionCompactCore = std::sync::Arc::new(move |source_messages, instructions| {
-            let cancel = operation_cancel_for_core.clone();
-            let tracking = tracking_for_core.clone();
-            let compactor = compact_for_core.clone();
-            let phase_output = phase_output.clone();
-            let last_assistant_at = last_assistant_at_for_core;
-            let force_idle = force_idle;
-            let token_budget = token_budget.clone();
-            Box::pin(async move {
-                phase_output.emit_compaction_phase("summarizing").await;
-                let api_started = std::time::Instant::now();
-                let mut tracking = tracking.lock().await;
-                let iteration_started_at = if force_idle {
-                    None
-                } else {
-                    Some(std::time::SystemTime::now())
-                };
-                let request = async {
-                    if force_idle {
-                        compactor
-                            .process_reactive_tracked(
-                                source_messages.clone(),
-                                &mut tracking,
-                                instructions.as_ref(),
-                                None,
-                                token_budget,
-                            )
-                            .await
-                    } else {
-                        compactor
-                            .process_iteration_tracked_with_instructions_and_timing(
-                                source_messages.clone(),
-                                0,
-                                &mut tracking,
-                                instructions.as_ref(),
-                                last_assistant_at,
-                                iteration_started_at
-                                    .expect("non-idle compaction records its start"),
-                                token_budget,
-                            )
-                            .await
+                .clone();
+            // hxr includes server-cleared context in its larger-model test;
+            // reactive allowLastResort below deliberately uses retained Ff.
+            let candidate_blocking = self
+                .api
+                .compact_warning(
+                    estimate,
+                    &model,
+                    model_profile.as_deref(),
+                    settings_window,
+                    auto_compact_enabled,
+                )
+                .is_ok_and(|warning| warning.is_at_blocking_limit);
+            if model_override.is_none()
+                && !force_idle
+                && candidate_blocking
+                && original_tracking.consecutive_failures == 0
+                && operation_budget.remaining() > 0
+            {
+                if let Some(candidate) = self.larger_compact_model_for_history(
+                    &model,
+                    model_profile.as_deref(),
+                    &snapshot,
+                    &usage_metadata,
+                ) {
+                    let outcome = self
+                        .run_auto_compact_operation(
+                            side_cancel,
+                            idle_cancel,
+                            false,
+                            Some(operation_budget.capped(1)),
+                            Some(candidate),
+                        )
+                        .await;
+                    match outcome {
+                        AutomaticCompactOutcome::Compacted
+                        | AutomaticCompactOutcome::HookBlocked
+                        | AutomaticCompactOutcome::Cancelled => return outcome,
+                        AutomaticCompactOutcome::Failed => {
+                            fallback_failure_tracking = Some(
+                                self.compaction_runtime
+                                    .compaction_tracking
+                                    .lock()
+                                    .await
+                                    .clone(),
+                            );
+                            // eSn counts the whole operation from the original
+                            // tracking baseline, not once per attempted model.
+                            *self.compaction_runtime.compaction_tracking.lock().await =
+                                original_tracking.clone();
+                        }
+                        AutomaticCompactOutcome::NotNeeded => {}
                     }
+                }
+            }
+
+            // #55 fixed-prefix overflow guard (`a3p`, `bin/claude.exe` offset
+            // 203004969). If the immovable prefix (system prompt + tools +
+            // attachments = `totalInput − messages`) already exceeds the autocompact
+            // threshold, compaction can NEVER bring usage below threshold. Mirror the
+            // auto path exactly: WARN + emit `tengu_auto_compact_prefix_overflow`
+            // (`wouldHaveBlocked:true`) but STILL PROCEED — the guard is observational
+            // on the auto path; only the reactive PTL path surfaces it to the user as
+            // `compactionImpossible`. `totalInput` is the last response's input total
+            // (the `Xtt` snapshot); `0` until the first call ⇒ a strict no-op.
+            let total_input = self
+                .compaction_runtime
+                .last_response_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let (doc_blocks, img_blocks) = count_document_and_image_blocks(&snapshot);
+            if let Some(overflow) = compaction::compaction_prefix_overflow(
+                total_input,
+                message_estimate,
+                threshold,
+                0,
+                doc_blocks,
+                img_blocks,
+            ) {
+                tracing::warn!(
+                    prefix_tokens = overflow.prefix_tokens,
+                    threshold_tokens = overflow.threshold_tokens,
+                    "autocompact: fixed prefix ~{} > threshold {} — compaction cannot help",
+                    overflow.prefix_tokens,
+                    overflow.threshold_tokens,
+                );
+                self.fire_prefix_overflow_telemetry(overflow).await;
+                // Fall through — the auto path STILL PROCEEDS (parity with the binary).
+            }
+
+            // hooks compaction lifecycle: PreCompact fires once we have crossed the
+            // autocompact threshold and are about to run the summary pass (TS
+            // `executePreCompactHooks` BEFORE the summary request, `compact.ts:413`).
+            // The proactive trigger is always the `auto` arm. TS precomputed arm: a
+            // blocking PreCompact hook logs `Precomputed compact blocked by
+            // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
+            let compact_started = std::time::Instant::now();
+            self.output.emit_compaction_started().await;
+            let idle_hook_owner =
+                force_idle.then(|| format!("idle-pre-compact:{}", uuid::Uuid::new_v4()));
+            let pre_compact = if let (Some(cancel), Some(owner)) = (idle_cancel, idle_hook_owner) {
+                let Some(outcome) = self
+                    .fire_pre_compact_for_idle("auto", None, cancel, owner)
+                    .await
+                else {
+                    self.output
+                        .emit_compaction_finished(Some("Compaction canceled."))
+                        .await;
+                    return AutomaticCompactOutcome::Cancelled;
                 };
-                let result = if let Some(cancel) = cancel {
+                outcome
+            } else {
+                self.fire_pre_compact("auto", None).await
+            };
+            if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return AutomaticCompactOutcome::Cancelled;
+            }
+            if let Some(detail) = pre_compact.blocked_by {
+                let detail = detail.string_at("").unwrap_or_default().to_owned();
+                tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
+                self.output
+                    .emit_compaction_finished(Some(&format!(
+                        "Compaction blocked by PreCompact hook: {detail}"
+                    )))
+                    .await;
+                return AutomaticCompactOutcome::HookBlocked;
+            }
+
+            let cost_scope = match self.compaction_cost_scope().await {
+                Ok(scope) => scope,
+                Err(error) => {
+                    tracing::error!(%error, "proactive compaction cost preflight failed");
+                    self.output
+                        .emit_compaction_finished(Some(&format!(
+                            "Compaction cost preflight failed: {error}"
+                        )))
+                        .await;
+                    return AutomaticCompactOutcome::Failed;
+                }
+            };
+            if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return AutomaticCompactOutcome::Cancelled;
+            }
+            let tracking_state = std::sync::Arc::new(tokio::sync::Mutex::new(
+                self.compaction_runtime
+                    .compaction_tracking
+                    .lock()
+                    .await
+                    .clone(),
+            ));
+            let tracking_for_core = tracking_state.clone();
+            let compact_for_core = compactor.clone();
+            let phase_output = self.output.clone();
+            let last_assistant_at_for_core = last_assistant_at;
+            let threshold_source = compaction::thresholds::resolve_auto_compact_window(
+                &model,
+                &self.api.active_betas(),
+                settings_window,
+                auto_compact_enabled,
+            )
+            .source;
+            // Native Zno routes configured and model-default windows through Hre
+            // so the latest API round remains available after threshold compaction.
+            let threshold_reactive = threshold_source
+                != compaction::thresholds::AutoCompactWindowSource::Auto
+                && !self.config.query_source.is_empty();
+            // Native cWe @274520856 guards queued human input independently of
+            // tool calls. Typed attachment payloads live beside the rendered rows.
+            let queued_human_commands: std::collections::HashSet<_> = self
+                .transcript
+                .model_reminder_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(_, payload)| {
+                    payload.string_at("/type") == Some("queued_command")
+                        && payload.string_at("/commandMode") != Some("task-notification")
+                        && payload
+                            .at_pointer("/isMeta")
+                            .and_then(|value| value.as_bool())
+                            != Some(true)
+                        && (payload.at_pointer("/origin").is_none()
+                            || payload.string_at("/origin/kind") == Some("human"))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            let operation_cancel = if side_cancel.is_some() {
+                side_cancel.cloned()
+            } else if force_idle {
+                idle_cancel.cloned()
+            } else {
+                None
+            };
+            let operation_cancel_for_core = operation_cancel.clone();
+            let token_budget = api_attempts_left;
+            let model_override_for_core = model_override.clone();
+            let core: SessionCompactCore = std::sync::Arc::new(
+                move |source_messages, instructions| {
+                    let cancel = operation_cancel_for_core.clone();
+                    let tracking = tracking_for_core.clone();
+                    let compactor = compact_for_core.clone();
+                    let phase_output = phase_output.clone();
+                    let last_assistant_at = last_assistant_at_for_core;
+                    let force_idle = force_idle;
+                    let model_override = model_override_for_core.clone();
+                    let token_budget = token_budget.clone();
+                    let queued_human_commands = queued_human_commands.clone();
+                    let tokens_before =
+                        context_usage::live_context_tokens(&source_messages, &usage_metadata);
+                    let context_tokens = context_usage::context_tokens_for_compaction(
+                        &source_messages,
+                        &usage_metadata,
+                    );
+                    Box::pin(async move {
+                        phase_output.emit_compaction_phase("summarizing").await;
+                        let api_started = std::time::Instant::now();
+                        let mut tracking = tracking.lock().await;
+                        let iteration_started_at = if force_idle {
+                            None
+                        } else {
+                            Some(std::time::SystemTime::now())
+                        };
+                        let request = async {
+                            if let Some(model_override) = model_override.as_ref() {
+                                compactor
+                                    .process_reactive_tracked_with_model_override(
+                                        source_messages.clone(),
+                                        &mut tracking,
+                                        instructions.as_ref(),
+                                        None,
+                                        token_budget,
+                                        compaction::autocompact::ReactiveCompactOptions {
+                                            allow_last_resort: blocking,
+                                            keep_no_round: false,
+                                        },
+                                        Some(model_override),
+                                    )
+                                    .await
+                            } else if force_idle {
+                                compactor
+                                    .process_reactive_tracked(
+                                        source_messages.clone(),
+                                        &mut tracking,
+                                        instructions.as_ref(),
+                                        None,
+                                        token_budget,
+                                    )
+                                    .await
+                            } else if threshold_reactive {
+                                let rapid_refill =
+                                    compaction::thresholds::rapid_refill_count(&tracking);
+                                let has_queued_human_command =
+                                    compaction::grouping::group_messages_by_api_round(
+                                        &source_messages,
+                                    )
+                                    .last()
+                                    .is_some_and(|round| {
+                                        source_messages[round.start..round.end].iter().any(
+                                            |message| queued_human_commands.contains(&message.id()),
+                                        )
+                                    });
+                                compactor
+                                    .process_reactive_tracked_with_options(
+                                        source_messages.clone(),
+                                        &mut tracking,
+                                        instructions.as_ref(),
+                                        None,
+                                        token_budget,
+                                        compaction::autocompact::ReactiveCompactOptions {
+                                            allow_last_resort: blocking,
+                                            // Native WMi defaults to true. A refill
+                                            // below the blocking limit can summarize
+                                            // all completed rounds to stop thrashing.
+                                            keep_no_round: rapid_refill > 0
+                                                && !blocking
+                                                && !has_queued_human_command,
+                                        },
+                                    )
+                                    .await
+                            } else {
+                                compactor
+                                    .process_iteration_tracked_with_context_tokens(
+                                        source_messages.clone(),
+                                        0,
+                                        &mut tracking,
+                                        instructions.as_ref(),
+                                        last_assistant_at,
+                                        iteration_started_at
+                                            .expect("non-idle compaction records its start"),
+                                        token_budget,
+                                        Some(context_tokens),
+                                    )
+                                    .await
+                            }
+                        };
+                        let result = if let Some(cancel) = cancel {
                     tokio::select! {
                         biased;
                         () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),
@@ -4072,177 +4408,218 @@ impl ConversationOrchestrator {
                     request.await
                 }
                 .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
-                Ok(SessionCompactCoreOutput::new(
+                        Ok(SessionCompactCoreOutput::new(
+                            result,
+                            source_messages,
+                            api_started.elapsed(),
+                        )
+                        .with_context_tokens(tokens_before))
+                    })
+                },
+            );
+            if operation_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return AutomaticCompactOutcome::Cancelled;
+            }
+            let compacted = if let Some(cancel) = operation_cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    result = self.dispatch_session_compact_mods(
+                        "auto",
+                        snapshot,
+                        pre_compact.additional_instructions.as_ref(),
+                        core,
+                    ) => Some(result),
+                }
+            } else {
+                Some(
+                    self.dispatch_session_compact_mods(
+                        "auto",
+                        snapshot,
+                        pre_compact.additional_instructions.as_ref(),
+                        core,
+                    )
+                    .await,
+                )
+            };
+            if let Some(override_model) = model_override.as_ref() {
+                if let Some(usage) = override_model.observed_usage() {
+                    let receipt = cost_scope.as_ref().map(|scope| {
+                        scope.submit_model_response(cost::CostModelResponse {
+                            model_ref: crate::cost_wiring::model_ref_from_string(
+                                &override_model.model,
+                                override_model.profile.as_deref(),
+                            ),
+                            usage,
+                            duration: compact_started.elapsed(),
+                            retries: 0,
+                            cache_read_input_tokens: usage.tokens.cache_read,
+                            cache_creation_input_tokens: usage.tokens.cache_write,
+                            is_batch_request: false,
+                            account: None,
+                            bus: self.model_runtime.analytics_bus.clone(),
+                        })
+                    });
+                    if let Err(error) = self.settle_compaction_usage(receipt).await {
+                        tracing::error!(%error, "candidate compaction cost settlement failed");
+                        return AutomaticCompactOutcome::Failed;
+                    }
+                }
+            }
+            let Some(compacted) = compacted else {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return AutomaticCompactOutcome::Cancelled;
+            };
+            if operation_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return AutomaticCompactOutcome::Cancelled;
+            }
+            let tracking_after_core = tracking_state.lock().await.clone();
+            let turns_since = i64::from(tracking_after_core.turn_counter);
+            *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
+            let (result, snapshot, compact_duration, core_ran) = match compacted {
+                Ok(SessionCompactDecision::Continue {
                     result,
                     source_messages,
-                    api_started.elapsed(),
-                ))
-            })
-        });
-        if operation_cancel
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            self.output
-                .emit_compaction_finished(Some("Compaction canceled."))
-                .await;
-            return;
-        }
-        let compacted = if let Some(cancel) = operation_cancel.as_ref() {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => None,
-                result = self.dispatch_session_compact_mods(
-                    "auto",
-                    snapshot,
-                    pre_compact.additional_instructions.as_ref(),
-                    core,
-                ) => Some(result),
+                    api_duration,
+                    core_ran,
+                    ..
+                }) => (result, source_messages, api_duration, core_ran),
+                Ok(SessionCompactDecision::Skip { reason, .. }) => {
+                    tracing::info!(%reason, "proactive compact skipped by session.compact Mod");
+                    self.output.emit_compaction_skipped().await;
+                    self.output.emit_compaction_finished(None).await;
+                    if let Some(failed) = fallback_failure_tracking {
+                        *self.compaction_runtime.compaction_tracking.lock().await = failed;
+                    }
+                    return AutomaticCompactOutcome::NotNeeded;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "proactive autocompact failed; continuing un-compacted");
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
+                    return AutomaticCompactOutcome::Failed;
+                }
+            };
+            if !core_ran {
+                tracing::debug!(
+                    "proactive session.compact Mod supplied replacement without running core"
+                );
             }
-        } else {
-            Some(
-                self.dispatch_session_compact_mods(
-                    "auto",
-                    snapshot,
-                    pre_compact.additional_instructions.as_ref(),
-                    core,
-                )
-                .await,
-            )
-        };
-        let Some(compacted) = compacted else {
-            self.output
-                .emit_compaction_finished(Some("Compaction canceled."))
-                .await;
-            return;
-        };
-        if operation_cancel
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            self.output
-                .emit_compaction_finished(Some("Compaction canceled."))
-                .await;
-            return;
-        }
-        let tracking_after_core = tracking_state.lock().await.clone();
-        let turns_since = i64::from(tracking_after_core.turn_counter);
-        *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
-        let (result, snapshot, compact_duration, core_ran) = match compacted {
-            Ok(SessionCompactDecision::Continue {
-                result,
-                source_messages,
-                api_duration,
-                core_ran,
-                ..
-            }) => (result, source_messages, api_duration, core_ran),
-            Ok(SessionCompactDecision::Skip { reason, .. }) => {
-                tracing::info!(%reason, "proactive compact skipped by session.compact Mod");
-                self.output.emit_compaction_skipped().await;
-                self.output.emit_compaction_finished(None).await;
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "proactive autocompact failed; continuing un-compacted");
+            let estimate = self.current_live_context_usage_for(&snapshot).await;
+            let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+            let bytes_before: u64 = snapshot
+                .iter()
+                .map(lingxi_core::types::text_byte_size)
+                .sum();
+            // The response facts become session-owned before any telemetry,
+            // output, or cancellation-sensitive await below.
+            let cost_receipt = if model_override.is_none() {
+                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration)
+            } else {
+                None
+            };
+            if let Err(error) = self.settle_compaction_usage(cost_receipt).await {
+                tracing::error!(%error, "proactive compaction cost settlement failed");
                 self.output
-                    .emit_compaction_finished(Some(&error.to_string()))
+                    .emit_compaction_finished(Some(&format!(
+                        "Compaction cost settlement failed: {error}"
+                    )))
                     .await;
-                return;
+                return AutomaticCompactOutcome::Failed;
             }
-        };
-        if !core_ran {
-            tracing::debug!(
-                "proactive session.compact Mod supplied replacement without running core"
-            );
-        }
-        let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
-        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot
-            .iter()
-            .map(lingxi_core::types::text_byte_size)
-            .sum();
-        // The response facts become session-owned before any telemetry,
-        // output, or cancellation-sensitive await below.
-        let cost_receipt =
-            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
-        if let Err(error) = self.settle_compaction_usage(cost_receipt).await {
-            tracing::error!(%error, "proactive compaction cost settlement failed");
-            self.output
-                .emit_compaction_finished(Some(&format!(
-                    "Compaction cost settlement failed: {error}"
-                )))
-                .await;
-            return;
-        }
 
-        // #54 rapid-refill (thrashing) breaker (proactive trip): when the
-        // breaker tripped, the orchestrator SKIPPED the summarizer (history
-        // untouched). Emit `tengu_auto_compact_rapid_refill_breaker` and warn,
-        // then return — re-summarizing cannot help (a file/tool output is too
-        // large), so the proactive path leaves history alone. Mirrors `Eho`
-        // (`bin/claude.exe` offset 203006250).
-        if result.rapid_refill_breaker_tripped {
-            let consecutive = result.consecutive_rapid_refills;
-            // `turnsSincePreviousCompact` = the tracking turn counter (the
-            // binary reports `oe?.turnCounter ?? -1`).
-            tracing::warn!(
+            // #54 rapid-refill (thrashing) breaker (proactive trip): when the
+            // breaker tripped, the orchestrator SKIPPED the summarizer (history
+            // untouched). Emit `tengu_auto_compact_rapid_refill_breaker` and warn,
+            // then return — re-summarizing cannot help (a file/tool output is too
+            // large), so the proactive path leaves history alone. Mirrors `Eho`
+            // (`bin/claude.exe` offset 203006250).
+            if result.rapid_refill_breaker_tripped {
+                let consecutive = result.consecutive_rapid_refills;
+                // `turnsSincePreviousCompact` = the tracking turn counter (the
+                // binary reports `oe?.turnCounter ?? -1`).
+                tracing::warn!(
                 consecutive_rapid_refills = consecutive,
                 turns_since_previous_compact = turns_since,
                 "autocompact: rapid-refill breaker tripped — {consecutive} consecutive refills within <{} turns each",
                 compaction::RAPID_REFILL_TURN_WINDOW,
             );
-            self.fire_rapid_refill_breaker_telemetry(consecutive, turns_since)
-                .await;
-            self.output
-                .emit_compaction_finished(Some(compaction::RAPID_REFILL_THRASHING_MESSAGE))
-                .await;
-            return;
-        }
+                self.fire_rapid_refill_breaker_telemetry(consecutive, turns_since)
+                    .await;
+                self.output
+                    .emit_compaction_finished(Some(compaction::RAPID_REFILL_THRASHING_MESSAGE))
+                    .await;
+                return AutomaticCompactOutcome::NotNeeded;
+            }
 
-        if !result.was_compacted {
-            // Snip/micro may have fired but autocompact did not (circuit
-            // breaker tripped, or the post-snip estimate fell under threshold).
-            // Keep history untouched so the proactive trigger stays a strict
-            // no-op whenever autocompact itself did not run — matching the
-            // manual-path contract that only the autocompact transition emits a
-            // boundary marker.
-            self.output.emit_compaction_skipped().await;
-            return;
-        }
+            if !result.was_compacted {
+                // Snip/micro may have fired but autocompact did not (circuit
+                // breaker tripped, or the post-snip estimate fell under threshold).
+                // Keep history untouched so the proactive trigger stays a strict
+                // no-op whenever autocompact itself did not run — matching the
+                // manual-path contract that only the autocompact transition emits a
+                // boundary marker.
+                self.output.emit_compaction_skipped().await;
+                if let Some(failed) = fallback_failure_tracking {
+                    *self.compaction_runtime.compaction_tracking.lock().await = failed;
+                }
+                return AutomaticCompactOutcome::NotNeeded;
+            }
 
-        // Native's ordinary `auto` path summarizes the complete current P,
-        // including an unfinalized ingress user row, and replaces P with the
-        // returned boundary/summary/replacements. Do not move that row back to
-        // the preserved tail; the accepted NAr finalizer records only its
-        // staged attachments and must not resurrect the summarized prompt.
-        // `cancel: None` — the proactive trigger has no user-cancellable
-        // surface. A Some result is the commit evidence required before the
-        // task-local ingress batch may explain a now-missing prompt row.
-        let applied = self
-            .apply_post_compact(
-                result,
-                compaction::CompactTrigger::Auto,
-                estimate,
-                messages_before,
-                bytes_before,
-                compact_started,
-                operation_cancel.as_ref(),
-            )
-            .await;
-        if applied.is_some() {
-            if let Some(prompt_id) = prompt_in_compaction_input {
-                let prompt_retained = self
-                    .session
-                    .lock()
-                    .await
-                    .history
-                    .iter()
-                    .any(|message| message.id() == prompt_id);
-                if !prompt_retained {
-                    crate::request_context::mark_pending_ingress_prompt_compacted(prompt_id);
+            // Native's ordinary `auto` path summarizes the complete current P,
+            // including an unfinalized ingress user row, and replaces P with the
+            // returned boundary/summary/replacements. Do not move that row back to
+            // the preserved tail; the accepted NAr finalizer records only its
+            // staged attachments and must not resurrect the summarized prompt.
+            // `cancel: None` — the proactive trigger has no user-cancellable
+            // surface. A Some result is the commit evidence required before the
+            // task-local ingress batch may explain a now-missing prompt row.
+            let applied = self
+                .apply_post_compact(
+                    result,
+                    compaction::CompactTrigger::Auto,
+                    estimate,
+                    messages_before,
+                    bytes_before,
+                    compact_started,
+                    operation_cancel.as_ref(),
+                )
+                .await;
+            if applied.is_some() {
+                if let Some(prompt_id) = prompt_in_compaction_input {
+                    let prompt_retained = self
+                        .session
+                        .lock()
+                        .await
+                        .history
+                        .iter()
+                        .any(|message| message.id() == prompt_id);
+                    if !prompt_retained {
+                        crate::request_context::mark_pending_ingress_prompt_compacted(prompt_id);
+                    }
                 }
             }
-        }
+            if applied.is_some() {
+                AutomaticCompactOutcome::Compacted
+            } else {
+                AutomaticCompactOutcome::Failed
+            }
+        })
     }
 
     /// Append an SDK/stream-json compact boundary with its structured metadata.
@@ -4455,7 +4832,16 @@ impl ConversationOrchestrator {
         trigger: &str,
         custom_instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> PreCompactHookOutcome {
-        if self.compaction_runtime.external_input_protected.load(std::sync::atomic::Ordering::Acquire) {return PreCompactHookOutcome{blocked_by:Some("Current external input must remain complete".into()),additional_instructions:None};}
+        if self
+            .compaction_runtime
+            .external_input_protected
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return PreCompactHookOutcome {
+                blocked_by: Some("Current external input must remain complete".into()),
+                additional_instructions: None,
+            };
+        }
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
@@ -4570,6 +4956,378 @@ impl ConversationOrchestrator {
                 ctx,
             )
             .await;
+    }
+}
+
+#[cfg(test)]
+mod larger_compact_model_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use lingxi_core::types::{ContentBlock, MessageId};
+    use std::sync::{Arc, Mutex};
+
+    struct RouteApi;
+
+    #[async_trait::async_trait]
+    impl crate::OrchestratorApiClient for RouteApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            Err(llm_runtime::LlmError::Transport {
+                message: "unused main request".into(),
+            })
+        }
+
+        fn context_budget(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<Option<llm_runtime::ResolvedContext>, llm_runtime::LlmError> {
+            if !matches!(model, "small" | "large" | "foreign") || profile != Some("same-provider") {
+                return Ok(None);
+            }
+            // Raw catalog windows are intentionally equal; Native's selected
+            // small-model window is 200k until the 1M route is actually chosen.
+            let profile: lingxi_llm_client::protocol::ProviderProfile = serde_json::from_value(serde_json::json!({
+                "provider_id":"custom", "profile_name":"same-provider", "base_url":"https://example.test",
+                "protocol":"open_ai_chat", "auth":"none", "models":[{
+                    "request_model":model, "display_model":model, "billing_model":model,
+                    "metadata":{"contextWindowTokens":1000000}
+                }]
+            })).unwrap();
+            Ok(Some(
+                lingxi_llm_client::client::context::resolve_context(
+                    &profile,
+                    &profile.models[0],
+                    &Default::default(),
+                    None,
+                    &Default::default(),
+                )
+                .unwrap(),
+            ))
+        }
+
+        fn context_window_tokens(&self, model: &str, _profile: Option<&str>) -> Option<u64> {
+            match model {
+                "small" => Some(200_000),
+                "large" | "foreign" => Some(1_000_000),
+                _ => None,
+            }
+        }
+
+        fn compact_warning(
+            &self,
+            tokens: u64,
+            _model: &str,
+            _profile: Option<&str>,
+            _settings_window: Option<u64>,
+            enabled: bool,
+        ) -> Result<compaction::thresholds::TokenWarningState, llm_runtime::LlmError> {
+            Ok(compaction::thresholds::native_warning_for_input_budgets(
+                tokens, 180_000, 180_000, enabled,
+            ))
+        }
+    }
+
+    fn route_context(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<
+        agent::model_resolution::ModelResolutionContext,
+        agent::model_resolution::ModelResolutionError,
+    > {
+        Ok(agent::model_resolution::ModelResolutionContext {
+            route: agent::model_resolution::ModelRouteFacts {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                provider: Some(agent::model_resolution::ModelProviderKind::Other),
+                endpoint: Some(
+                    if model == "foreign" {
+                        "https://other.test"
+                    } else {
+                        "https://example.test"
+                    }
+                    .into(),
+                ),
+                protocol: Some("open_ai_chat".into()),
+            },
+            registered_model_ids: ["small".into(), "large".into()].into_iter().collect(),
+            entitlement_allowed: Some(true),
+            ..Default::default()
+        })
+    }
+
+    struct SummaryClient {
+        failures: usize,
+        seen: Mutex<Vec<sidequery::SideQueryRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for SummaryClient {
+        async fn query(
+            &self,
+            request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(request);
+            if seen.len() <= self.failures {
+                return Err(sidequery::SideQueryError::Api(
+                    llm_runtime::LlmError::Transport {
+                        message: "summary transport failed".into(),
+                    },
+                ));
+            }
+            Ok(sidequery::SideQueryResponse {
+                text: Some("<summary>retained work</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    fn assistant(text: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            per_turn_effort: None,
+            resumable: None,
+        }
+    }
+
+    async fn fixture(
+        failures: usize,
+    ) -> (
+        ConversationOrchestrator,
+        Arc<SummaryClient>,
+        Arc<sidequery::CacheSafeParamsSlot>,
+        Vec<ConversationMessage>,
+    ) {
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        let client = Arc::new(SummaryClient {
+            failures,
+            seen: Mutex::new(Vec::new()),
+        });
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "small".into()),
+        );
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "small".into(),
+                ..Default::default()
+            },
+            Arc::new(RouteApi),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(route_context))
+        .with_compaction(Arc::new(
+            compaction::CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+                1_000,
+            ),
+        ))
+        .with_cache_safe_slot(slot.clone());
+        let history = vec![
+            ConversationMessage::user(MessageId::new(), "first request".into()),
+            assistant("first answer"),
+            ConversationMessage::user(MessageId::new(), "recent request".into()),
+            assistant("recent answer"),
+            ConversationMessage::user(MessageId::new(), "pending request".into()),
+        ];
+        {
+            let mut state = orch.session.lock().await;
+            state.model_profile = Some("same-provider".into());
+            state.history = history.clone();
+        }
+        slot.save(sidequery::CacheSafeParams {
+            model_source: None,
+            system_prompt: Arc::new("system".into()),
+            system_prompt_input: None,
+            user_context: Default::default(),
+            system_context: Default::default(),
+            user_context_message: None,
+            tool_use_options: tool_api::context::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "small".into(),
+                model_profile: Some("same-provider".into()),
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            fork_context_messages: history.clone(),
+            typed_attachment_ids: Default::default(),
+            task_deliveries: Default::default(),
+            transcript_path: None,
+            generation: 0,
+            tools: Vec::new(),
+            effort: None,
+        })
+        .await;
+        orch.record_main_loop_assistant_usage_for_request(
+            &history[3],
+            "served-large",
+            "large",
+            Some("same-provider"),
+            Some(&llm_runtime::ExecutionUsage::from_counts(
+                lingxi_llm_client::protocol::Usage {
+                    input_tokens: 220_000,
+                    output_tokens: 100,
+                    ..Default::default()
+                },
+            )),
+        )
+        .await;
+        (orch, client, slot, history)
+    }
+
+    #[tokio::test]
+    async fn blocked_compact_tries_larger_requested_route_without_switching_session_model() {
+        let (orch, client, slot, history) = fixture(0).await;
+        orch.maybe_compact_before_call(None).await;
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].model, "large");
+        assert_eq!(seen[0].profile.as_deref(), Some("same-provider"));
+        assert_eq!(seen[0].api_attempts_left.as_ref().unwrap().remaining(), 1);
+        drop(seen);
+        let state = orch.session.lock().await;
+        assert_eq!(state.model, "small");
+        assert_eq!(state.model_profile.as_deref(), Some("same-provider"));
+        assert!(state.history.iter().any(|row| row.id() == history[3].id()));
+        assert!(state
+            .history
+            .iter()
+            .any(|row| compaction::is_compact_boundary(row)));
+        assert_eq!(
+            slot.get_last()
+                .await
+                .unwrap()
+                .tool_use_options
+                .main_loop_model,
+            "small"
+        );
+    }
+
+    #[tokio::test]
+    async fn larger_model_candidate_accounts_for_server_cleared_context() {
+        let (orch, client, _, history) = fixture(0).await;
+        orch.record_main_loop_assistant_usage_for_request(
+            &history[3],
+            "served-large",
+            "large",
+            Some("same-provider"),
+            Some(&llm_runtime::ExecutionUsage::from_counts(
+                lingxi_llm_client::protocol::Usage {
+                    input_tokens: 170_000,
+                    output_tokens: 100,
+                    ..Default::default()
+                },
+            )),
+        )
+        .await;
+        orch.session.lock().await.native_request_history.assistant_usage
+            .get_mut(&history[3].id()).unwrap()
+            .set_field("contextManagement", CompactSource::from_serde_value(&serde_json::json!({
+                "applied_edits":[{"type":"clear_tool_uses_20250919","cleared_input_tokens":10000}]
+            })).unwrap()).unwrap();
+        let state = orch.session.lock().await;
+        assert!(
+            context_usage::live_context_tokens(&history, &state.native_request_history) < 177_000
+        );
+        assert!(
+            context_usage::context_tokens_for_compaction(&history, &state.native_request_history)
+                >= 177_000
+        );
+        drop(state);
+        orch.maybe_compact_before_call(None).await;
+        assert_eq!(client.seen.lock().unwrap()[0].model, "large");
+    }
+
+    #[tokio::test]
+    async fn candidate_failure_retries_current_model_and_counts_whole_operation_once() {
+        for failures in [1, 2] {
+            let (orch, client, _, history) = fixture(failures).await;
+            orch.maybe_compact_before_call(None).await;
+            let seen = client.seen.lock().unwrap();
+            assert_eq!(
+                seen.iter()
+                    .map(|request| request.model.as_str())
+                    .collect::<Vec<_>>(),
+                ["large", "small"]
+            );
+            assert!(seen[0]
+                .api_attempts_left
+                .as_ref()
+                .unwrap()
+                .shares_scope_with(seen[1].api_attempts_left.as_ref().unwrap()));
+            drop(seen);
+            let state = orch.session.lock().await;
+            let tracking = orch.compaction_runtime.compaction_tracking.lock().await;
+            if failures == 1 {
+                assert!(tracking.compacted);
+                assert_eq!(tracking.consecutive_failures, 0);
+            } else {
+                assert_eq!(
+                    state.history, history,
+                    "failed summaries preserve original history"
+                );
+                assert_eq!(tracking.consecutive_failures, 1);
+            }
+            assert_eq!(state.model, "small");
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_requires_same_resolved_provider_profile_and_larger_selected_window() {
+        let (orch, _, _, history) = fixture(0).await;
+        let mut metadata = orch.session.lock().await.native_request_history.clone();
+        assert_eq!(
+            orch.larger_compact_model_for_history(
+                "small",
+                Some("same-provider"),
+                &history,
+                &metadata
+            )
+            .unwrap()
+            .model,
+            "large"
+        );
+        assert!(orch
+            .larger_compact_model_for_history("large", Some("same-provider"), &history, &metadata)
+            .is_none());
+        let source = metadata.assistant_usage.get_mut(&history[3].id()).unwrap();
+        source
+            .set_field("requestedModel", "foreign".into())
+            .unwrap();
+        assert!(orch
+            .larger_compact_model_for_history("small", Some("same-provider"), &history, &metadata)
+            .is_none());
+        let source = metadata.assistant_usage.get_mut(&history[3].id()).unwrap();
+        source.set_field("requestedModel", "large".into()).unwrap();
+        source
+            .set_field("requestedProfile", "other-provider".into())
+            .unwrap();
+        assert!(orch
+            .larger_compact_model_for_history("small", Some("same-provider"), &history, &metadata)
+            .is_none());
     }
 }
 
@@ -5052,7 +5810,7 @@ mod session_compact_mod_tests {
     }
 
     #[tokio::test]
-    async fn native_295_compact_summary_reaches_output_and_jsonl_with_exact_source() {
+    async fn native_319_compact_summary_reaches_output_and_jsonl_with_exact_source() {
         use crate::test_support::{
             noop_hook_executor, MockApiClient, NoOpPermissionGate, StaticMemoryProvider,
         };
@@ -5083,6 +5841,17 @@ mod session_compact_mod_tests {
 
         let response = native_compact_summary_response();
         assert_eq!(response.string_units(""), Some(vec![65, 0xd800, 66]));
+        // Production uses the bounded validation path. Keep the captured
+        // summary's exact units inside a valid response envelope so this test
+        // exercises source fidelity without relying on untagged acceptance.
+        let response_units = "<summary>"
+            .encode_utf16()
+            .chain(response.string_units("").unwrap())
+            .chain("</summary>".encode_utf16())
+            .collect::<Vec<_>>();
+        let response =
+            CompactSource::root_string(String::from_utf16_lossy(&response_units), response_units)
+                .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -5216,11 +5985,21 @@ mod session_compact_mod_tests {
             "the persisted summary follows its compact boundary"
         );
 
-        let native_content = native_summary.subprojection("/message/content").unwrap();
+        let native_319: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../compaction/tests/fixtures/claude_2_1_319_compact.json"
+        ))
+        .unwrap();
+        let native_units = native_319["sourceContinuations"][0]["expectedUtf16"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| u16::try_from(value.as_u64().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        let native_content =
+            CompactSource::root_string(String::from_utf16_lossy(&native_units), native_units)
+                .unwrap();
         let persisted_content = summary_row.subprojection("/message/content").unwrap();
-        let native_content_source = raw_message_content_source(include_str!(
-            "../../../../docs/parity/current-alignment/fixtures/compact-summary-295/native-d800-summary-row.jsonl"
-        ));
+        let native_content_source = native_content.to_json_string().unwrap();
         let persisted_content_source =
             raw_message_content_source(persisted_summary_raw.as_deref().unwrap());
         assert_eq!(

@@ -669,6 +669,7 @@ mod tests {
             .collect::<Vec<_>>();
         let picker_option = Utf16JsonProjection::parse(r#"{"model":"claude-opus-4-6"}"#).unwrap();
         let settings = NativeModelSettingsSnapshot {
+            auto_compact: Default::default(),
             model_overrides: NativeModelObservation::Observed(Some(model_override_source(
                 &model_id,
                 override_units.clone(),
@@ -719,6 +720,7 @@ mod tests {
         let route = foundry_route_context();
         let candidate = Utf16JsonProjection::from("claude-opus-4-6");
         let settings = NativeModelSettingsSnapshot {
+            auto_compact: Default::default(),
             model_overrides: NativeModelObservation::Observed(Some(model_override_source(
                 &model_id,
                 Vec::new(),

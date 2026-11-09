@@ -281,7 +281,7 @@ async fn hook_executor_with(
 }
 
 /// Build an orchestrator with a single `end_turn` mock response, a compactor at
-/// `threshold`, and the provided hook executor.
+/// `threshold`, a real mock-backed summarizer, and the provided hook executor.
 fn make_orch(
     hooks: Arc<HookExecutorImpl>,
     threshold: u64,
@@ -298,6 +298,17 @@ fn make_orch(
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
     let memory = Arc::new(StaticMemoryProvider::empty());
+    // The default model's tuned window uses Native's recent-round-preserving
+    // path. It requires a real summary call rather than the full-auto stub.
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(CompactSummaryClient), "test-model".into()),
+    );
+    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        threshold,
+    ));
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
@@ -308,7 +319,8 @@ fn make_orch(
         memory,
         std::env::temp_dir(),
     )
-    .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(threshold)));
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
     (Arc::new(orch), output)
 }
 

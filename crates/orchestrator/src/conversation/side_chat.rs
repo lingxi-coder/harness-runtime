@@ -12,6 +12,9 @@ pub struct SideChatParentSnapshot {
     pub history: Vec<ConversationMessage>,
     /// Provider profile paired with the acknowledged model.
     pub model_profile: Option<String>,
+    /// Parent's admitted auto-compaction policy; independent after capture.
+    #[serde(default)]
+    pub auto_compact: lingxi_core::host::auto_compact::AutoCompactSettings,
     /// Configured source identity and its route anchor at snapshot time.
     pub configured_model_source: Option<lingxi_core::host::ModelSourceBinding>,
     /// Raw source binding stored on the session at snapshot time.
@@ -123,6 +126,8 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut snapshot = SideChatParentSnapshot {
+            auto_compact: self.model_runtime.native_model_settings.read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner).auto_compact.clone(),
             config,
             history: legal_prefix(&session.model_context_history()),
             model_profile: session.model_profile.clone(),
@@ -169,6 +174,7 @@ impl ConversationOrchestrator {
         session.user_model_setting = snapshot.user_model_setting.clone();
         session.user_model_setting_source = snapshot.user_model_setting_source;
         drop(session);
+        self.refresh_auto_compact_settings(snapshot.auto_compact.clone());
         *self
             .model_runtime
             .configured_model_source
@@ -195,6 +201,25 @@ mod tests {
     use std::sync::Arc;
 
     struct NativeSourceRouteApi;
+
+    #[tokio::test]
+    async fn side_chat_preserves_auto_compact_policy_across_capture_and_recovery() {
+        let parent = new_orchestrator(false);
+        let policy = lingxi_core::host::auto_compact::AutoCompactSettings {
+            layers: vec![lingxi_core::host::auto_compact::AutoCompactSettingsLayer::from_projection(
+                lingxi_core::settings::tracer::Source::User,
+                &Utf16JsonProjection::parse(r#"{"autoCompactEnabled":false,"autoCompactWindow":500000}"#).unwrap(),
+            )],
+        };
+        parent.refresh_auto_compact_settings(policy.clone());
+        let snapshot = parent.side_chat_parent_snapshot().await;
+        parent.refresh_auto_compact_settings(Default::default());
+        let recovered: SideChatParentSnapshot = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let child = new_orchestrator(true);
+        child.seed_side_chat(&recovered).await.unwrap();
+        assert_eq!(child.model_runtime.native_model_settings.read().unwrap().auto_compact, policy);
+        assert_eq!(parent.model_runtime.native_model_settings.read().unwrap().auto_compact, Default::default());
+    }
 
     #[async_trait]
     impl OrchestratorApiClient for NativeSourceRouteApi {

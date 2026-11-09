@@ -73,6 +73,38 @@ pub struct ProviderApiAdapter {
     fast_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Native 2.1.319 Ure reserves min(model output, 20k), independently of the
+/// full output cap used by the SDK's main-request admission. Explicit provider
+/// input policy still bounds this selected route.
+fn native_compact_input_budget(
+    context: &llm_runtime::ResolvedContext,
+    model: &str,
+    window: u64,
+) -> u64 {
+    let reserve = compaction::context_window::max_output_tokens_for_model(model)
+        .min(compaction::thresholds::MAX_OUTPUT_TOKENS_FOR_SUMMARY);
+    let mut budget = window.saturating_sub(reserve);
+    if let Some(limit) = context.max_input_tokens {
+        budget = budget.min(limit);
+    }
+    use lingxi_llm_client::protocol::ContextPolicy;
+    match context.policy {
+        ContextPolicy::Custom { input_tokens } => budget = budget.min(input_tokens),
+        ContextPolicy::Auto if context.policy_source != "default" => {
+            if let Some(limit) = context.standard_price_input_tokens {
+                budget = budget.min(limit);
+            }
+            if let Some(recommendation) = context.recommendation.as_ref() {
+                budget = budget.min(recommendation.input_tokens);
+            }
+        }
+        // The SDK's default price-aware Auto budget is application policy,
+        // not Native's model window. An explicit Auto selection still applies.
+        ContextPolicy::Auto | ContextPolicy::Long => {}
+    }
+    budget.saturating_sub(context.safety_tokens)
+}
+
 impl ProviderApiAdapter {
     /// Wrap a constructed [`llm_runtime::ApiService`]. The composition roots build
     /// the service via `ApiService::new_with_routing(...).with_*(...)` and hand the
@@ -548,6 +580,73 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
     ) -> Result<Option<llm_runtime::ResolvedContext>, LlmError> {
         self.service.resolve_context(model, profile).map(Some)
+    }
+
+    fn compact_input_budget(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        settings_window: Option<u64>,
+        enabled: bool,
+    ) -> Result<Option<u64>, LlmError> {
+        let context = self.service.resolve_context(model, profile)?;
+        let configured = compaction::thresholds::resolve_auto_compact_window(
+            model,
+            self.service.active_custom_betas(),
+            settings_window.filter(|_| enabled),
+            enabled,
+        );
+        if !(self.is_first_party_route(model, profile)
+            && llm_runtime::model::context_window::is_claude_family(model))
+        {
+            return Ok(crate::conversation::compact_route_input_budget(
+                &context, configured,
+            ));
+        }
+        let actual = self.context_window_tokens(model, profile).unwrap_or(0);
+        let window = match configured.source {
+            compaction::thresholds::AutoCompactWindowSource::Auto
+            | compaction::thresholds::AutoCompactWindowSource::UnknownModel => actual,
+            _ => actual.min(configured.configured),
+        };
+        Ok(Some(native_compact_input_budget(&context, model, window)))
+    }
+
+    fn compact_threshold(&self, model: &str, profile: Option<&str>, budget: u64) -> u64 {
+        if self.is_first_party_route(model, profile)
+            && llm_runtime::model::context_window::is_claude_family(model)
+        {
+            compaction::thresholds::native_threshold_for_input_budget(budget)
+        } else {
+            compaction::thresholds::threshold_for_input_budget(budget)
+        }
+    }
+
+    fn compact_warning(
+        &self,
+        tokens: u64,
+        model: &str,
+        profile: Option<&str>,
+        settings_window: Option<u64>,
+        enabled: bool,
+    ) -> Result<compaction::thresholds::TokenWarningState, LlmError> {
+        let budget = self.compact_input_budget(model, profile, settings_window, enabled)?;
+        if self.is_first_party_route(model, profile)
+            && llm_runtime::model::context_window::is_claude_family(model)
+        {
+            let context = self.service.resolve_context(model, profile)?;
+            let actual_window = self.context_window_tokens(model, profile).unwrap_or(0);
+            let actual_budget = native_compact_input_budget(&context, model, actual_window);
+            return Ok(compaction::thresholds::native_warning_for_input_budgets(
+                tokens,
+                budget.unwrap_or(actual_budget),
+                actual_budget,
+                enabled,
+            ));
+        }
+        let mut warning = compaction::thresholds::warning_for_input_budget(tokens, budget);
+        warning.is_above_auto_compact_threshold &= enabled;
+        Ok(warning)
     }
 
     fn context_window_tokens(&self, model: &str, profile: Option<&str>) -> Option<u64> {
@@ -4669,6 +4768,237 @@ mod tests {
             None,
         );
         ProviderApiAdapter::new(Arc::new(service))
+    }
+
+    #[test]
+    fn compact_native_budget_and_warning_match_319_small_window_boundaries() {
+        let model = "claude-opus-4-6";
+        let profile = Some("anthropic");
+        let adapter = make_first_party_context_window_adapter(
+            builtin_context_window_model(model),
+            Vec::new(),
+        );
+        assert_eq!(
+            adapter
+                .compact_input_budget(model, profile, None, true)
+                .unwrap(),
+            Some(180_000)
+        );
+        let budget = adapter
+            .compact_input_budget(model, profile, Some(100_000), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget, 80_000);
+        assert_eq!(adapter.compact_threshold(model, profile, budget), 67_000);
+        assert!(
+            !adapter
+                .compact_warning(66_999, model, profile, Some(100_000), true)
+                .unwrap()
+                .is_above_auto_compact_threshold
+        );
+        let at = adapter
+            .compact_warning(67_000, model, profile, Some(100_000), true)
+            .unwrap();
+        assert!(at.is_above_auto_compact_threshold);
+        assert!(
+            !at.is_at_blocking_limit,
+            "the configured auto window is not the hard blocking window"
+        );
+        assert!(
+            !adapter
+                .compact_warning(176_999, model, profile, Some(100_000), true)
+                .unwrap()
+                .is_at_blocking_limit
+        );
+        assert!(
+            adapter
+                .compact_warning(177_000, model, profile, Some(100_000), true)
+                .unwrap()
+                .is_at_blocking_limit
+        );
+        assert_eq!(
+            adapter
+                .compact_input_budget(model, profile, Some(100_000), false)
+                .unwrap(),
+            Some(180_000),
+            "disabled auto compact ignores the per-model settings window"
+        );
+    }
+
+    #[test]
+    fn compact_native_haiku_5_5_uses_model_window_instead_of_default_price_cap() {
+        let id = "claude-haiku-5-5";
+        let model = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap()
+            .models
+            .into_iter()
+            .find(|model| model.request_model == id)
+            .expect("the current catalog includes Haiku 5.5");
+        let adapter = make_first_party_context_window_adapter(model.clone(), Vec::new());
+        let context = adapter
+            .context_budget(id, Some("anthropic"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.policy_source, "default");
+        assert_eq!(
+            context.standard_price_input_tokens,
+            Some(100_000),
+            "the catalog's real price tier must exercise the default Auto clamp"
+        );
+        let budget = adapter
+            .compact_input_budget(id, Some("anthropic"), None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget, 980_000);
+        assert_eq!(
+            adapter.compact_threshold(id, Some("anthropic"), budget),
+            967_000
+        );
+        assert!(
+            adapter
+                .compact_warning(967_000, id, Some("anthropic"), None, true)
+                .unwrap()
+                .is_above_auto_compact_threshold
+        );
+        assert!(
+            !adapter
+                .compact_warning(976_999, id, Some("anthropic"), Some(100_000), true)
+                .unwrap()
+                .is_at_blocking_limit
+        );
+        assert!(
+            adapter
+                .compact_warning(977_000, id, Some("anthropic"), Some(100_000), true)
+                .unwrap()
+                .is_at_blocking_limit
+        );
+
+        let mut explicit_auto = model;
+        explicit_auto.metadata.context = Some(
+            serde_json::from_value(serde_json::json!({
+                "sharedWindow": true,
+                "application": {"mode": "auto"}
+            }))
+            .unwrap(),
+        );
+        let explicit = make_first_party_context_window_adapter(explicit_auto, Vec::new());
+        assert_eq!(
+            explicit
+                .compact_input_budget(id, Some("anthropic"), None, true)
+                .unwrap(),
+            Some(100_000),
+            "an explicitly selected price-aware Auto policy remains authoritative"
+        );
+    }
+
+    #[test]
+    fn compact_unknown_provider_window_uses_explicit_soft_budget_and_known_hard_limit() {
+        let id = "unknown-provider-context-model";
+        let mut model = builtin_context_window_model("claude-opus-4-6");
+        model.display_model = id.into();
+        model.request_model = id.into();
+        model.billing_model = id.into();
+        model.aliases.clear();
+        model.metadata = Default::default();
+        let adapter_for = |model| {
+            make_context_window_adapter_with_profile(
+                "unknown-context-provider",
+                ProviderId::Custom {
+                    name: "unknown-context-provider".into(),
+                },
+                ProtocolFamily::OpenAiChat,
+                "https://unknown-context.example.test/v1",
+                model,
+                Vec::new(),
+            )
+        };
+        let profile = Some("unknown-context-provider");
+        let adapter = adapter_for(model.clone());
+        assert_eq!(
+            adapter
+                .context_budget(id, profile)
+                .unwrap()
+                .unwrap()
+                .effective_input_budget,
+            None
+        );
+        assert_eq!(
+            adapter
+                .compact_input_budget(id, profile, None, true)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            adapter
+                .compact_input_budget(id, profile, Some(100_000), true)
+                .unwrap(),
+            Some(100_000),
+            "an explicit application window is usable without guessing a provider capacity"
+        );
+        assert_eq!(
+            adapter
+                .compact_input_budget(id, profile, Some(100_000), false)
+                .unwrap(),
+            None,
+            "a disabled setting must not create a context budget"
+        );
+
+        model.metadata.max_input_tokens = Some(60_000);
+        let bounded = adapter_for(model);
+        assert_eq!(
+            bounded
+                .compact_input_budget(id, profile, Some(100_000), true)
+                .unwrap(),
+            Some(60_000),
+            "an explicit soft window cannot exceed the selected provider's known input ceiling"
+        );
+    }
+
+    #[test]
+    fn compact_provider_budget_retains_actual_shared_output_and_route_identity() {
+        let mut model = builtin_context_window_model("claude-opus-4-6");
+        model.metadata.context_window_tokens = Some(1_000_000);
+        model.metadata.max_input_tokens = Some(1_000_000);
+        model.metadata.max_output_tokens = Some(32_000);
+        model.metadata.context = Some(
+            serde_json::from_value(serde_json::json!({
+                "sharedWindow": true,
+                "application": {"mode": "long"}
+            }))
+            .unwrap(),
+        );
+        let adapter = make_context_window_adapter_with_profile(
+            "independent-gateway",
+            ProviderId::Custom {
+                name: "independent-gateway".into(),
+            },
+            ProtocolFamily::AnthropicMessages,
+            "https://gateway.example.test",
+            model,
+            Vec::new(),
+        );
+        let model = "claude-opus-4-6";
+        let profile = Some("independent-gateway");
+        let context = adapter.context_budget(model, profile).unwrap().unwrap();
+        assert_eq!(
+            adapter
+                .compact_input_budget(model, profile, None, true)
+                .unwrap(),
+            context.effective_input_budget,
+            "a provider route keeps its published window despite the Claude-shaped model name"
+        );
+        let reserve = context.output_reserve_tokens.unwrap();
+        assert!(reserve > 0);
+        assert_eq!(
+            adapter
+                .compact_input_budget(model, profile, Some(100_000), true)
+                .unwrap(),
+            Some(100_000 - reserve),
+            "the explicit total window retains the provider's real shared output reservation"
+        );
     }
 
     #[test]

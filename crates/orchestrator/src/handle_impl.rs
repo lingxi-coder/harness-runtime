@@ -3063,6 +3063,21 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .clone()
     }
 
+    async fn auto_compact_command_snapshot(
+        &self,
+    ) -> Result<lingxi_core::host::auto_compact::AutoCompactCommandSnapshot, HandleError> {
+        self.current_auto_compact_command_snapshot().await
+    }
+
+    async fn auto_compact_window_changed(
+        &self,
+        settings_key: &str,
+        window: lingxi_core::host::auto_compact::AutoCompactWindow,
+    ) -> Result<(), HandleError> {
+        self.publish_auto_compact_window(settings_key, window);
+        Ok(())
+    }
+
     async fn effort_command_snapshot(
         &self,
     ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, HandleError> {
@@ -4124,12 +4139,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Snapshot the live model and history together. The history component
         // uses the exact estimator auto-compaction uses, so replacing history
         // with a compact summary immediately lowers the Messages row.
-        let (model, model_profile, history) = {
+        let (model, model_profile, history, usage_metadata) = {
             let session = self.session.lock().await;
             (
                 session.model.clone(),
                 session.model_profile.clone(),
                 session.history.clone(),
+                session.native_request_history.clone(),
             )
         };
         let max_context_tokens = self
@@ -4159,6 +4175,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut system_tool_tokens = estimate_json_tokens(&system_tools);
         let mcp_tool_tokens = estimate_json_tokens(&mcp_tools);
         let message_tokens = compaction::grouping::estimate_tokens_for_range(&history);
+        let measured_context_tokens =
+            crate::conversation::context_usage::live_context_tokens(&history, &usage_metadata);
 
         // Native m$o reports the model-invocable skill listing as its own row
         // while excluding those tokens from System tools. Read one atomic
@@ -4211,12 +4229,21 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .as_ref()
             .map_or(0, |listing| listing.total_tokens);
         system_tool_tokens = system_tool_tokens.saturating_sub(skills_tokens);
-        let live_context_tokens = system_prompt_tokens
+        let estimated_context_tokens = system_prompt_tokens
             .saturating_add(system_tool_tokens)
             .saturating_add(mcp_tool_tokens)
             .saturating_add(memory_tokens)
             .saturating_add(skills_tokens)
             .saturating_add(message_tokens);
+        // A response usage anchor includes the actual system/tool prefix. If
+        // no response has been measured, retain the complete local estimate.
+        let has_usage_anchor =
+            crate::conversation::context_usage::has_measured_usage(&history, &usage_metadata);
+        let live_context_tokens = if has_usage_anchor {
+            measured_context_tokens
+        } else {
+            estimated_context_tokens
+        };
         let autocompact_buffer = compaction::thresholds::AUTOCOMPACT_BUFFER_TOKENS
             .min(max_context_tokens.saturating_sub(live_context_tokens));
         let free_tokens = max_context_tokens
@@ -6405,9 +6432,10 @@ mod tests {
             .last_response_output_tokens
             .store(88, std::sync::atomic::Ordering::Relaxed);
 
+        let resumed_session_id = lingxi_core::types::SessionId::new();
         lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            lingxi_core::types::SessionId::new(),
+            resumed_session_id,
             resumed_history,
             None,
             None,
@@ -6417,7 +6445,15 @@ mod tests {
                 transcript_source: None,
                 working_directory: None,
                 worktree_session: None,
-                transcript_metadata: None,
+                transcript_metadata: Some(vec![Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({
+                        "type":"fixed-session-mode",
+                        "sessionId":resumed_session_id.as_uuid(),
+                        "sessionMode":"code",
+                        "instructionEpoch":0,
+                    }),
+                )
+                .unwrap()]),
                 api_error_message_ids: Vec::new(),
                 current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: 100,
@@ -6561,13 +6597,25 @@ mod tests {
             "an unpinned runtime inherits transcript effort"
         );
 
+        let second_session_id = lingxi_core::types::SessionId::new();
         lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            lingxi_core::types::SessionId::new(),
+            second_session_id,
             Vec::new(),
             None,
             None,
-            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                transcript_metadata: Some(vec![Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({
+                        "type":"fixed-session-mode",
+                        "sessionId":second_session_id.as_uuid(),
+                        "sessionMode":"code",
+                        "instructionEpoch":0,
+                    }),
+                )
+                .unwrap()]),
+                ..Default::default()
+            },
         )
         .await
         .expect("second hot resume");

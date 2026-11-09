@@ -239,10 +239,21 @@ fn deserialize_model_settings<'de, D: serde::Deserializer<'de>>(
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-/// Per-model effort overrides (`modelSettings.<model>`).
+fn deserialize_auto_compact_window<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::host::auto_compact::AutoCompactWindow>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    // Native uses catch(undefined): an invalid window does not reject siblings.
+    Ok(crate::host::auto_compact::AutoCompactWindow::from_value(&value))
+}
+
+/// Per-model effort and auto-compaction overrides (`modelSettings.<model>`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
+    /// Per-model auto-compaction window; `auto` masks a top-level override.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_auto_compact_window")]
+    pub auto_compact_window: Option<crate::host::auto_compact::AutoCompactWindow>,
     /// Persisted effort for this model.
     #[serde(
         default,
@@ -925,6 +936,12 @@ impl ProviderRegion {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Automatically summarize when the active model approaches its context limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_enabled: Option<bool>,
+    /// Default auto-compaction window, overridable for individual models.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_auto_compact_window")]
+    pub auto_compact_window: Option<crate::host::auto_compact::AutoCompactWindow>,
     /// Settings-owned environment values. Hosts install the merged map before
     /// creating a child process; changing settings never mutates Tokio's process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3149,6 +3166,24 @@ mod tests {
             strategy_for("maxEffortLevel").is_none(),
             "top-level maxEffortLevel is not last-wins-merged"
         );
+    }
+
+    #[test]
+    fn auto_compact_settings_round_trip_and_invalid_windows_leave_siblings() {
+        use crate::host::auto_compact::AutoCompactWindow;
+        let parsed: SettingsJson = serde_json::from_str(r#"{
+            "autoCompactEnabled":false,"autoCompactWindow":200000,
+            "modelSettings":{"provider/model":{"autoCompactWindow":"auto","effortLevel":"high"},
+                "other":{"autoCompactWindow":99999,"effortLevel":"low"}}
+        }"#).unwrap();
+        assert_eq!(parsed.auto_compact_enabled, Some(false));
+        assert_eq!(parsed.auto_compact_window, Some(AutoCompactWindow::Tokens(200000)));
+        let models = parsed.model_settings.as_ref().unwrap();
+        assert_eq!(models["provider/model"].auto_compact_window, Some(AutoCompactWindow::Auto));
+        assert_eq!(models["other"].auto_compact_window, None);
+        assert_eq!(models["other"].effort_level.as_deref(), Some("low"));
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(encoded["modelSettings"]["provider/model"]["autoCompactWindow"], "auto");
     }
 
     #[test]

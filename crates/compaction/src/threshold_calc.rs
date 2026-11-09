@@ -162,8 +162,8 @@ mod tests {
 
     #[test]
     fn effective_window_caps_reserved_at_summary_budget() {
-        // max_output above the summary cap → reserve only the cap (32k).
-        assert_eq!(effective_context_window(64_000, 200_000), 168_000);
+        // max_output above the summary cap → reserve only the cap (20k).
+        assert_eq!(effective_context_window(64_000, 200_000), 180_000);
         // max_output below the cap → reserve the smaller amount.
         assert_eq!(effective_context_window(8_192, 200_000), 191_808);
     }

@@ -147,6 +147,9 @@ impl Fixture {
             .unwrap()
             .lines()
             .filter(|line| !line.is_empty())
+            .filter(|line| {
+                SourceJson::parse(line).unwrap().string_at("/type") != Some("fixed-session-mode")
+            })
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
@@ -186,6 +189,7 @@ async fn read_trigger(root: &ConversationOrchestrator, fixture: &Fixture) {
 
 /// Raw attachments precede a real resumable user tip in the persisted chain.
 async fn persist_user(root: &ConversationOrchestrator, text: &str) -> ConversationMessage {
+    root.initialize_conversation_mode().await.unwrap();
     let message = ConversationMessage::user(MessageId::new(), text.into());
     root.session.lock().await.history.push(message.clone());
     root.persist_message_to_jsonl(&message).await;

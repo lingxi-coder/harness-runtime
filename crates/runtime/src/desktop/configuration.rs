@@ -731,9 +731,9 @@ pub struct DesktopConfig {
     /// `MAX_THINKING_TOKENS` env var + the `--max-thinking-tokens` flag +
     /// the `alwaysThinkingEnabled` setting (claude-code `qIe()` + the `wn`
     /// request-build arm; see `llm_runtime::model::thinking::
-    /// session_thinking_from_env`). Applied to BOTH the main-loop `ApiService`
-    /// (`.with_thinking`) and the compaction/side-query `ForkedAgentRunner`
-    /// (`.with_session_thinking`), so the summarizer inherits the same intent.
+    /// session_thinking_from_env`). Applied to the main-loop `ApiService`
+    /// (`.with_thinking`); compaction forks read that service's live policy
+    /// through `.with_session_thinking_source`.
     /// The env read is host-side (F2-01: `build()` must not read env), so this
     /// carries the already-resolved config. Defaults to
     /// [`ThinkingConfig::Adaptive`] — byte-identical to the pre-resolver boot.
