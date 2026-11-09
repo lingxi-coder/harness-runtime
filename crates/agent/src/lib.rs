@@ -54,6 +54,7 @@ pub mod observer_delivery;
 pub mod observer_text;
 pub mod permission_mode;
 pub mod pool;
+pub mod prompt_policy;
 pub mod runner;
 pub mod tool_resolver;
 pub mod transcript;

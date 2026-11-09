@@ -5150,6 +5150,7 @@ mod larger_compact_model_tests {
             system_context: Default::default(),
             user_context_message: None,
             tool_use_options: tool_api::context::ToolUseOptions {
+                prompt_policy: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,

@@ -1216,8 +1216,17 @@ impl ConversationOrchestrator {
             return Vec::new();
         }
         let proactivity = self.native_proactivity_state.refresh_gates(gates);
-        let (permission_mode, main_loop_model) =
-            (self.permission_mode(), self.tools.main_loop_model());
+        let policy = self.current_prompt_policy().await.ok();
+        let (permission_mode, main_loop_model) = (
+            self.permission_mode(),
+            policy
+                .as_ref()
+                .map(|policy| policy.target.canonical_model.clone()),
+        );
+        let prompt_is_lean = policy
+            .as_ref()
+            .map(|policy| crate::prompt::prompt_policy_is_lean(policy))
+            .unwrap_or(true);
         let tools: Vec<String> = self
             .filtered_available_tools()
             .await
@@ -1270,9 +1279,7 @@ impl ConversationOrchestrator {
         }
 
         let previous_auto_mode = latest_auto_mode(prior_history, &attachments);
-        let simple_system_prompt = facts
-            .simple_system_prompt
-            .unwrap_or_else(|| tool_api::dh_simple_system_prompt(main_loop_model.as_deref()));
+        let simple_system_prompt = facts.simple_system_prompt.unwrap_or(prompt_is_lean);
         let auto_mode = auto_mode_payload(
             permission_mode.as_deref(),
             simple_system_prompt,

@@ -3,8 +3,8 @@
 //!
 //! The fork path lets the model spawn a child that inherits the parent's FULL
 //! conversation context + system prompt for a byte-identical prompt-cache
-//! prefix. Claude Code 2.1.232 turns this on by default for interactive
-//! sessions; only an explicit `subagent_type: "fork"` takes the path. This
+//! prefix. Claude Code 2.1.319 enables this by default in interactive and
+//! headless sessions; only an explicit `subagent_type: "fork"` takes the path. This
 //! module hosts the pure, dependency-free pieces of that feature —
 //! the feature gate, the recursion guard, the cache-prefix message builders, and
 //! the boilerplate constants — in the leaf `core::host` crate so BOTH consumers can
@@ -43,37 +43,100 @@ pub const FORK_SUBAGENT_TYPE: &str = "fork";
 /// prompt-cache sharing. Byte-exact: contains an em-dash (U+2014).
 const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background";
 
-/// Fork-subagent feature gate (claude-code 2.1.232 `JDd` / `Krb` / `SPe`).
-///
-/// Oracle (`~/.local/share/claude/versions/2.1.232`):
-/// - `Pge()` coordinator mode → `"disabled"`
-/// - `CLAUDE_CODE_FORK_SUBAGENT === false` → `"disabled"`
-/// - `CLAUDE_CODE_FORK_SUBAGENT === true` → `"env"` (enabled, even headless)
-/// - else `Nn()` non-interactive → `"disabled"`
-/// - else `"default"` (enabled)
-/// `SPe()` is `JDd() !== "disabled"`.
-///
-/// The product gate reads only `LINGXI_FORK_SUBAGENT`.
-/// `is_coordinator` / `is_non_interactive` are passed in because the leaf
-/// `core::host` crate cannot read `CoordinatorMode` / the session — mirroring
-/// `isCoordinatorMode()` + `getIsNonInteractiveSession()`.
+/// Native `C_n` provenance. The owning session supplies any previously cached source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSubagentSource {
+    Disabled,
+    Environment,
+    Default,
+}
+
+impl ForkSubagentSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Environment => "env",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Request/session observations for Native `C_n`; no process-global memoization.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForkSubagentGateInputs {
+    pub is_coordinator: bool,
+    pub runtime_disabled: bool,
+    pub environment: Option<bool>,
+    pub cached_source: Option<ForkSubagentSource>,
+    pub is_non_interactive: bool,
+    pub headless_cohort_disabled: bool,
+}
+
+#[must_use]
+pub fn fork_subagent_source(input: ForkSubagentGateInputs) -> ForkSubagentSource {
+    if input.is_coordinator || input.runtime_disabled || input.environment == Some(false) {
+        return ForkSubagentSource::Disabled;
+    }
+    if let Some(source) = input.cached_source {
+        return source;
+    }
+    if input.environment != Some(true) && input.is_non_interactive && input.headless_cohort_disabled
+    {
+        return ForkSubagentSource::Disabled;
+    }
+    if input.environment == Some(true) {
+        ForkSubagentSource::Environment
+    } else {
+        ForkSubagentSource::Default
+    }
+}
+
+/// Native `yPt`: availability and background execution are separate decisions.
+#[must_use]
+pub fn fork_subagent_background_allowed(
+    input: ForkSubagentGateInputs,
+    foreground_only: bool,
+) -> bool {
+    match fork_subagent_source(input) {
+        ForkSubagentSource::Disabled => false,
+        ForkSubagentSource::Environment => true,
+        ForkSubagentSource::Default => !foreground_only,
+    }
+}
+
+/// Product gate: absent runtime/cohort restrictions use Native's enabled default.
+/// Only `LINGXI_FORK_SUBAGENT` controls the product environment override.
 #[must_use]
 pub fn is_fork_subagent_enabled(is_coordinator: bool, is_non_interactive: bool) -> bool {
-    // `JDd`: coordinator (`Pge`) wins over the env override.
-    if is_coordinator {
-        return false;
-    }
+    fork_subagent_source(fork_subagent_inputs(is_coordinator, is_non_interactive))
+        != ForkSubagentSource::Disabled
+}
+
+/// Standard CLI/host default; hosts with a distinct Native `PC` fact use the pure gate.
+#[must_use]
+pub fn is_fork_subagent_background_enabled(is_coordinator: bool, is_non_interactive: bool) -> bool {
+    fork_subagent_background_allowed(
+        fork_subagent_inputs(is_coordinator, is_non_interactive),
+        is_non_interactive,
+    )
+}
+
+fn fork_subagent_inputs(is_coordinator: bool, is_non_interactive: bool) -> ForkSubagentGateInputs {
     let v = fork_subagent_env();
-    // `Y.CLAUDE_CODE_FORK_SUBAGENT === !1`
-    if crate::host::env::is_env_defined_falsy(v.as_deref()) {
-        return false;
+    let environment = if crate::host::env::is_env_truthy(v.as_deref()) {
+        Some(true)
+    } else if crate::host::env::is_env_defined_falsy(v.as_deref()) {
+        Some(false)
+    } else {
+        None
+    };
+    ForkSubagentGateInputs {
+        is_coordinator,
+        is_non_interactive,
+        environment,
+        ..Default::default()
     }
-    // `Krb`: explicit true (`=== !0`) is `"env"` and skips the headless disable.
-    if crate::host::env::is_env_truthy(v.as_deref()) {
-        return true;
-    }
-    // Unset → `"default"` on interactive, `"disabled"` on `Nn()` headless.
-    !is_non_interactive
 }
 
 fn fork_subagent_env() -> Option<String> {
@@ -406,22 +469,24 @@ mod tests {
     }
 
     #[test]
-    fn fork_gate_on_by_default_when_interactive() {
+    fn fork_gate_enabled_but_headless_foreground_by_default() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", None);
         assert!(
             is_fork_subagent_enabled(false, false),
-            "2.1.232 default ON for interactive non-coordinator"
+            "2.1.319 default ON for interactive non-coordinator"
         );
         assert!(
-            !is_fork_subagent_enabled(false, true),
-            "unset + headless ⇒ OFF"
+            is_fork_subagent_enabled(false, true),
+            "unset + headless remains available"
         );
+        assert!(is_fork_subagent_background_enabled(false, false));
+        assert!(!is_fork_subagent_background_enabled(false, true));
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
     }
 
     #[test]
-    fn fork_gate_explicit_true_wins_over_headless() {
+    fn fork_gate_explicit_true_allows_headless_background() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", Some("1"));
         assert!(
@@ -430,8 +495,9 @@ mod tests {
         );
         assert!(
             is_fork_subagent_enabled(false, true),
-            "explicit env true skips the headless disable (Krb env arm)"
+            "explicit env true allows headless fork"
         );
+        assert!(is_fork_subagent_background_enabled(false, true));
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
     }
 
@@ -449,9 +515,45 @@ mod tests {
         for value in ["0", "false", "1", "true"] {
             let _legacy = EnvGuard::set("CLAUDE_CODE_FORK_SUBAGENT", Some(value));
             assert!(is_fork_subagent_enabled(false, false));
-            assert!(!is_fork_subagent_enabled(false, true));
+            assert!(is_fork_subagent_enabled(false, true));
+            assert!(!is_fork_subagent_background_enabled(false, true));
             assert!(!is_fork_subagent_enabled(true, false));
             assert!(!is_fork_subagent_enabled(true, true));
+        }
+    }
+
+    #[test]
+    fn fork_gate_matches_native_319_source_and_background_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/fork_subagent_2_1_319.json"
+        ))
+        .unwrap();
+        for row in fixture["cases"].as_array().unwrap() {
+            let cached_source = row["cachedSource"].as_str().map(|source| match source {
+                "env" => ForkSubagentSource::Environment,
+                "default" => ForkSubagentSource::Default,
+                other => panic!("unexpected cached source {other}"),
+            });
+            let input = ForkSubagentGateInputs {
+                is_coordinator: row["coordinator"].as_bool().unwrap(),
+                runtime_disabled: row["runtimeDisabled"].as_bool().unwrap(),
+                environment: row["environment"].as_bool(),
+                cached_source,
+                is_non_interactive: row["nonInteractive"].as_bool().unwrap(),
+                headless_cohort_disabled: row["headlessCohortDisabled"].as_bool().unwrap(),
+            };
+            let source = fork_subagent_source(input);
+            assert_eq!(source.as_str(), row["source"].as_str().unwrap(), "{row}");
+            assert_eq!(
+                source != ForkSubagentSource::Disabled,
+                row["enabled"].as_bool().unwrap(),
+                "{row}"
+            );
+            assert_eq!(
+                fork_subagent_background_allowed(input, row["foregroundOnly"].as_bool().unwrap(),),
+                row["background"].as_bool().unwrap(),
+                "{row}"
+            );
         }
     }
 

@@ -157,6 +157,58 @@ impl ConversationOrchestrator {
         model_ingress_attachment(identity, previous)
     }
 
+    /// Reconcile the final request route with typed model rows actually present
+    /// in this snapshot. Pending source rows participate without being published
+    /// to session history before request admission.
+    pub(crate) fn model_prompt_ingress_attachment_for_snapshot(
+        &self,
+        model_id: &str,
+        profile: Option<&str>,
+        snapshot: &[ConversationMessage],
+        staged: &[(ConversationMessage, Source)],
+    ) -> Option<PromptIngressAttachment> {
+        if !self.prompt_ingress_environment_enabled() {
+            return None;
+        }
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        model_ingress_attachment_for_snapshot(
+            self.api.as_ref(),
+            model_id,
+            profile,
+            snapshot,
+            &attachments,
+            staged,
+        )
+    }
+
+    /// Project the new identity through the same bundle/Mod attachment hook as
+    /// ordinary ingress. The caller owns deferred or admitted persistence.
+    pub(crate) async fn project_model_prompt_ingress_for_snapshot(
+        &self,
+        model_id: &str,
+        profile: Option<&str>,
+        snapshot: &mut Vec<ConversationMessage>,
+        staged: &[(ConversationMessage, Source)],
+    ) -> Option<PromptIngressAttachment> {
+        let row =
+            self.model_prompt_ingress_attachment_for_snapshot(model_id, profile, snapshot, staged)?;
+        if let Some(message) = self
+            .mod_prompt_attachment(
+                "model",
+                row.message.clone(),
+                serde_json::json!({"kind":"engine"}),
+            )
+            .await
+        {
+            snapshot.push(message);
+        }
+        Some(row)
+    }
+
     fn prompt_ingress_environment_enabled(&self) -> bool {
         !self.config.bare
             && !lingxi_core::host::env::is_env_truthy(
@@ -277,6 +329,37 @@ fn model_identity_for_route(
         marketing_name,
         knowledge_cutoff,
     }
+}
+
+fn model_ingress_attachment_for_snapshot(
+    api: &dyn OrchestratorApiClient,
+    model_id: &str,
+    profile: Option<&str>,
+    snapshot: &[ConversationMessage],
+    attachments: &std::collections::HashMap<MessageId, Source>,
+    staged: &[(ConversationMessage, Source)],
+) -> Option<PromptIngressAttachment> {
+    let mut previous = None;
+    let mut has_model_announcement = false;
+    for message in snapshot {
+        let payload = staged
+            .iter()
+            .rev()
+            .find(|(row, _)| row.id() == message.id())
+            .map(|(_, payload)| payload)
+            .or_else(|| attachments.get(&message.id()));
+        if let Some(payload) = payload.filter(|payload| payload.string_at("/type") == Some("model"))
+        {
+            has_model_announcement = true;
+            previous = model_identity_from_payload(payload);
+        }
+    }
+    // Initial announcements belong to the regular ingress producer. Idle
+    // wakes and legacy histories without typed identity must remain silent.
+    if !has_model_announcement {
+        return None;
+    }
+    model_ingress_attachment(model_identity_for_route(api, model_id, profile), previous)
 }
 
 fn environment_snapshot_from_payload(payload: &Source) -> Option<EnvironmentSnapshot> {
@@ -620,6 +703,10 @@ fn render_environment_snapshot(snapshot: &EnvironmentSnapshot) -> String {
     if let Some(os_version) = &snapshot.os_version {
         lines.push(format!(" - OS Version: {os_version}"));
     }
+    lines.push(format!(
+        " - {}",
+        crate::prompt::env_block::UNTRUSTED_DOWNLOAD_GUIDANCE
+    ));
     if let Some(directory) = &snapshot.scratchpad_directory {
         lines.push(render_scratchpad_notice(directory));
     }
@@ -1166,6 +1253,117 @@ mod tests {
             })
         )
         .is_some());
+    }
+
+    #[test]
+    fn final_route_identity_uses_typed_snapshot_order_and_pending_sources() {
+        let api = crate::test_support::MockApiClient::new(Vec::new());
+        let claude = model_ingress_attachment(
+            model_identity_for_route(&api, "claude-sonnet-4-6", None),
+            None,
+        )
+        .unwrap();
+        let payloads =
+            std::collections::HashMap::from([(claude.message.id(), claude.payload.clone())]);
+        let mut snapshot = vec![claude.message.clone()];
+        let retained = snapshot.clone();
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "claude-sonnet-4-6",
+            None,
+            &snapshot,
+            &payloads,
+            &[]
+        )
+        .is_none());
+        let changed = model_ingress_attachment_for_snapshot(
+            &api,
+            "gpt-test",
+            Some("openai"),
+            &snapshot,
+            &payloads,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            changed.payload.string_at("/identity/modelId"),
+            Some("gpt-test")
+        );
+        assert!(changed.message.text_content().contains("gpt-test"));
+        assert_eq!(
+            snapshot, retained,
+            "projection preserves original history rows"
+        );
+        snapshot.push(changed.message.clone());
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "gpt-test",
+            Some("openai"),
+            &snapshot,
+            &payloads,
+            &[(changed.message, changed.payload)]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn final_route_identity_does_not_infer_a_model_from_rendered_text() {
+        let api = crate::test_support::MockApiClient::new(Vec::new());
+        let mut claude = model_ingress_attachment(
+            model_identity_for_route(&api, "claude-sonnet-4-6", None),
+            None,
+        )
+        .unwrap();
+        let id = claude.message.id();
+        claude.message =
+            ConversationMessage::user_meta(id, "You are powered by the model gpt-test.".into());
+        let payloads = std::collections::HashMap::from([(id, claude.payload)]);
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "gpt-test",
+            Some("openai"),
+            &[claude.message.clone()],
+            &payloads,
+            &[]
+        )
+        .is_some());
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "claude-sonnet-4-6",
+            None,
+            &[claude.message],
+            &payloads,
+            &[]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn final_route_identity_preserves_silence_without_a_typed_announcement() {
+        let api = crate::test_support::MockApiClient::new(Vec::new());
+        let payloads = std::collections::HashMap::new();
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "gpt-test",
+            Some("openai"),
+            &[],
+            &payloads,
+            &[]
+        )
+        .is_none());
+        let legacy = ConversationMessage::user_meta(
+            MessageId::new(),
+            "You are powered by the model Claude.".into(),
+        );
+        assert!(model_ingress_attachment_for_snapshot(
+            &api,
+            "gpt-test",
+            Some("openai"),
+            &[legacy],
+            &payloads,
+            &[]
+        )
+        .is_none());
     }
 
     #[test]

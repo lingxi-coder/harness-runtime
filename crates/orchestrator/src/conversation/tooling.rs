@@ -638,10 +638,10 @@ impl ConversationOrchestrator {
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
-        let (session_id, model, selected_model_profile) = {
-            let s = self.session.lock().await;
-            (s.session_id, s.model.clone(), s.model_profile.clone())
-        };
+        let session_id = self.session.lock().await.session_id;
+        let prompt_policy = self.current_prompt_policy().await?;
+        let model = prompt_policy.target.request_model.clone();
+        let model_profile = prompt_policy.target.profile_name.clone();
         // Same snapshot, one turn earlier than it used to be taken: claude-code
         // registers the main-loop model as a LIVE accessor (`Dx(()=>HR(rt()))`,
         // read back by `J$e()`), so the `OO()` todo/task tool gate must see the
@@ -649,19 +649,13 @@ impl ConversationOrchestrator {
         // inside `filtered_available_tools` — keeps the advertise path free of a
         // second `session` lock, which would deadlock the callers that already
         // hold one.
-        self.refresh_main_loop_model_for_route(&model, selected_model_profile.as_deref());
+        self.refresh_main_loop_model_for_route(&model, model_profile.as_deref());
         let model_source = self
-            .main_model_source_for_request(&model, selected_model_profile.as_deref())
+            .main_model_source_for_request(&model, model_profile.as_deref())
             .await;
         // Use the provider profile selected by the trusted runtime route, not
         // a model-name guess. This also fills in a configured default profile
         // when the session has no explicit profile pin.
-        let model_profile = self
-            .api
-            .resolve_media_route(&model, selected_model_profile.as_deref())
-            .ok()
-            .map(|route| route.main.profile_name)
-            .or(selected_model_profile);
         let tools = self.filtered_available_tools().await;
         // Capture canonical names and aliases from the exact post-filter vector
         // used below to build this request's wire tool declarations. A later
@@ -695,7 +689,8 @@ impl ConversationOrchestrator {
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
                 (true, Some(provider)) => {
-                    let snapshot = crate::prompt::skill_listing::preparation_snapshot(provider).await?;
+                    let snapshot =
+                        crate::prompt::skill_listing::preparation_snapshot(provider).await?;
                     provider.bash_precommit_skills(&snapshot.entries).await?
                 }
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
@@ -704,6 +699,7 @@ impl ConversationOrchestrator {
         let output_style_is_default = self.active_output_style_is_default().await;
         let plan_mode_hybrid_search = self.native_plan_mode_hybrid_search();
         let prompt_options = PromptOptions {
+            prompt_policy: Some(Arc::clone(&prompt_policy)),
             include_examples: true,
             session_id: Some(session_id),
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
@@ -716,6 +712,7 @@ impl ConversationOrchestrator {
             bash_precommit_session_generation,
         };
         let cache_key = WireToolSchemaCacheKey {
+            prompt_policy_fingerprint: prompt_policy.fingerprint(),
             exact_schema_identities: tools
                 .iter()
                 .map(|tool| {
@@ -748,7 +745,10 @@ impl ConversationOrchestrator {
         let mut wire = {
             let cached_wire = {
                 let cache = self.prompt_runtime.wire_tool_schema_cache.lock().await;
-                cache.as_ref().filter(|entry| entry.key == cache_key).map(|entry| entry.wire.clone())
+                cache
+                    .as_ref()
+                    .filter(|entry| entry.key == cache_key)
+                    .map(|entry| entry.wire.clone())
             };
             if let Some(wire) = cached_wire {
                 wire
@@ -762,7 +762,11 @@ impl ConversationOrchestrator {
                     });
                 // Token counts belong to this exact wire generation. Clearing
                 // on replacement also rules out ABA reuse of an old pointer key.
-                self.prompt_runtime.deferred_tool_token_cache.lock().await.clear();
+                self.prompt_runtime
+                    .deferred_tool_token_cache
+                    .lock()
+                    .await
+                    .clear();
                 wire
             }
         };
@@ -893,7 +897,9 @@ impl ConversationOrchestrator {
                 let mut cache = self.prompt_runtime.deferred_tool_token_cache.lock().await;
                 // Bounded even if concurrent request routes replace the wire
                 // cache while exact token-count requests are in flight.
-                if cache.len() >= 16 { cache.clear(); }
+                if cache.len() >= 16 {
+                    cache.clear();
+                }
                 cache.insert(token_cache_key, counted);
                 counted
             }
@@ -1154,6 +1160,10 @@ impl ConversationOrchestrator {
         if !self.prompt_snapshot_eligible() {
             return;
         }
+        let Ok(policy) = self.current_prompt_policy().await else {
+            return;
+        };
+        let metadata = policy.metadata();
         let recorded = self
             .prompt_runtime
             .prompt_snapshot
@@ -1162,6 +1172,7 @@ impl ConversationOrchestrator {
             .as_ref()
             .filter(|snapshot| {
                 !snapshot.system_prompt.is_empty()
+                    && snapshot.prompt_policy.as_ref() == Some(&metadata)
                     && snapshot.system_prompt.iter().all(|part| !part.is_empty())
                     && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
             })

@@ -2344,6 +2344,8 @@ fn fresh_subagent_ctx() -> SubagentContext {
         transcript_fs: None,
         resumed_history: None,
         rendered_system_prompt: Some(Arc::new(Utf16JsonProjection::from(""))),
+        prompt_policy: None,
+        prompt_state: None,
         mobile_runtime_environment_reminder: None,
         instruction_context: Default::default(),
         instruction_context_is_override: false,
@@ -4711,6 +4713,90 @@ async fn child_turn_complete_mod_uses_bound_session_ui() {
         text.string_at("")
             == Some(format!("child-start:{}:visible question", child_cwd.display()).as_str())
     }));
+}
+
+#[tokio::test]
+async fn child_step_rewrite_threads_its_own_policy_and_prefix_into_nested_tools() {
+    let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Agent", Some("tool_use")))]);
+    let invoker = Arc::new(CaptureLiveInvocationContexts::default());
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 1);
+    ctx.agent_definition.model = AgentModel::Explicit("claude-opus-5".into());
+    let initial = crate::prompt_policy::resolve_target(
+        Some(api.as_ref()),
+        "claude-opus-5",
+        None,
+        Default::default(),
+    )
+    .unwrap();
+    let state = crate::prompt_policy::SubagentPromptState {
+        initial_policy: initial.policy.clone(),
+        role: Some("SPECIALIZED CHILD ROLE".into()),
+        fork_prefix: None,
+        fork_policy: None,
+        custom_system_prompt: None,
+        append_system_prompt: None,
+        environment: None,
+        cwd: None,
+        addendum: None,
+        operator_suffix: None,
+        tool_registry: None,
+        system_renderer: None,
+        seeded_context: Default::default(),
+        replace_initial_context: false,
+    };
+    let initial_body = state.render(&initial).system.unwrap().as_ref().clone();
+    ctx.rendered_system_prompt = Some(Arc::new(initial_body.clone()));
+    ctx.prompt_policy = Some(initial.policy);
+    ctx.prompt_state = Some(Arc::new(state));
+    let request = crate::mod_turn_step::ChildStepRequest {
+        api,
+        model: "claude-opus-5".into(),
+        profile: None,
+        prompt_profile: None,
+        prompt_context: Some(ctx.clone()),
+        prompt_captures: Default::default(),
+        system: Some(initial_body.clone()),
+        messages: ctx.prompt_messages.clone(),
+        tools: Vec::new(),
+        effort: None,
+        forced_tool: None,
+        call_opts: Default::default(),
+        fallback_target: Default::default(),
+        agent_spawn_provenance: Default::default(),
+    };
+    let stream = request.open("gpt-test-model", None).await.unwrap();
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    let _attempt = accumulate_agent_stream_live(
+        stream,
+        &ctx,
+        None,
+        ctx.prompt_messages.clone(),
+        Some(initial_body),
+        request.prompt_captures,
+        "gpt-test-model".into(),
+        "claude-opus-5".into(),
+        None,
+        None,
+        &[],
+        None,
+        false,
+        &std::sync::atomic::AtomicBool::new(true),
+        &std::sync::atomic::AtomicBool::new(false),
+        &std::sync::atomic::AtomicBool::new(false),
+        &std::sync::Mutex::new(Default::default()),
+        &out_tx,
+    )
+    .await;
+    let calls = invoker.contexts.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let policy = calls[0].prompt_policy.as_ref().unwrap();
+    assert_eq!(policy.bundle_id, "generic-code-lean-v1");
+    assert_eq!(policy.target.canonical_model, "gpt-test-model");
+    let fork = calls[0].fork_context.as_ref().unwrap();
+    let prefix = fork.system_prompt.as_ref().unwrap().string_at("").unwrap();
+    assert!(prefix.contains("software engineering"));
+    assert!(prefix.contains("SPECIALIZED CHILD ROLE"));
+    assert!(!prefix.contains("Claude"));
 }
 
 #[tokio::test]

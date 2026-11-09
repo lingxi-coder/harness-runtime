@@ -68,6 +68,7 @@
 //! back into the walk at the boundary where the oracle's attachment row sat.
 
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use std::collections::HashMap;
 
 /// `a3m` @ 296477528 — the reminder body, byte-exact (U+2014 EM DASH).
 pub const SILENT_TURN_REMINDER_TEXT: &str = "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell \u{2014} a finding, a change of plan.";
@@ -90,8 +91,7 @@ const NO_RESPONSE_REQUESTED_SENTINEL: &str = "No response requested.";
 pub const SPEAKING_TOOL_NAMES: &[&str] =
     &["AskUserQuestion", "Brief", "ExitPlanMode", "SendUserFile"];
 
-/// 2.1.263 `jfr(model)`: an explicit env override wins; otherwise use the
-/// Fable 5.1 prompt bundle or the model's silent-turn capability.
+/// 2.1.319 `G$n(model)`: an explicit reminder override wins over model traits.
 #[must_use]
 pub fn is_enabled(model: &str) -> bool {
     let raw = std::env::var("CLAUDE_CODE_SILENT_TURN_REMINDER").ok();
@@ -102,9 +102,14 @@ fn enabled_with_override(model: &str, raw: Option<&str>) -> bool {
     if raw.is_some() {
         return lingxi_core::host::env::is_env_truthy(raw);
     }
-    let capabilities = lingxi_core::host::model_capabilities::capabilities_for_loose(model);
-    capabilities.contains(&"fable_5_1_prompt_bundle")
-        || capabilities.contains(&"silent_turn_reminder")
+    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    lingxi_core::host::model_capabilities::prompt_feature_enabled(
+        model,
+        "silent_turn_reminder",
+        environment.as_deref(),
+        None,
+        None,
+    )
 }
 
 /// `c3m()` — the reminder text, with the env override applied.
@@ -132,6 +137,40 @@ pub fn turns_between_reminders() -> usize {
     }
 }
 
+#[must_use]
+pub fn seconds_between_reminders() -> Option<f64> {
+    let raw = std::env::var("CLAUDE_CODE_SILENT_TURN_REMINDER_SECONDS").ok();
+    seconds_between_reminders_from(None, raw.as_deref())
+}
+
+#[must_use]
+pub fn seconds_between_reminders_from(
+    model_seconds: Option<f64>,
+    environment: Option<&str>,
+) -> Option<f64> {
+    if let Some(raw) = environment {
+        let raw = lingxi_core::host::effort::trim_js_whitespace(raw);
+        return Some(if raw.is_empty() {
+            0.0
+        } else if let Some(digits) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            u64::from_str_radix(digits, 16).map_or(f64::NAN, |value| value as f64)
+        } else if let Some(digits) = raw.strip_prefix("0b").or_else(|| raw.strip_prefix("0B")) {
+            u64::from_str_radix(digits, 2).map_or(f64::NAN, |value| value as f64)
+        } else if let Some(digits) = raw.strip_prefix("0o").or_else(|| raw.strip_prefix("0O")) {
+            u64::from_str_radix(digits, 8).map_or(f64::NAN, |value| value as f64)
+        } else if raw.to_ascii_lowercase().contains("inf")
+            && !matches!(raw, "Infinity" | "+Infinity" | "-Infinity")
+        {
+            f64::NAN
+        } else {
+            raw.parse::<f64>().unwrap_or(f64::NAN)
+        });
+    }
+    model_seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 1.0)
+        .map(f64::floor)
+}
+
 /// The `Ezm` result pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SilentStretch {
@@ -142,11 +181,117 @@ pub struct SilentStretch {
     pub reminders_in_stretch: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimedSilentStretch {
+    pub stretch: SilentStretch,
+    pub silent_since_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoredSilentClocks {
+    pub message_timestamps: HashMap<MessageId, i64>,
+    pub reminder_marks: Vec<usize>,
+    pub reminder_timestamps: HashMap<usize, i64>,
+}
+
+/// Recover clocks from the selected transcript chain, aligned with its retained
+/// history. Missing timestamps remain absent rather than being replaced by now.
+#[must_use]
+pub fn restore_silent_clocks(
+    rows: &[session::jsonl::JsonlMessage],
+    history: &[ConversationMessage],
+) -> RestoredSilentClocks {
+    let mut positions = HashMap::<MessageId, Vec<usize>>::new();
+    for (index, message) in history.iter().enumerate() {
+        positions.entry(message.id()).or_default().push(index);
+    }
+    let mut restored = RestoredSilentClocks::default();
+    let mut boundary = 0;
+    let mut aligned = false;
+    let mut assistant_group: Option<(String, MessageId, Option<usize>)> = None;
+    for row in rows {
+        let Ok(uuid) = uuid::Uuid::parse_str(&row.uuid) else {
+            continue;
+        };
+        let outer_id = MessageId::from_uuid(uuid);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+            .ok()
+            .map(|time| time.timestamp_millis());
+        let payload = (row.message_type == "attachment")
+            .then_some(row.attachment_projection.as_ref())
+            .flatten();
+        if row.message_type != "assistant" {
+            assistant_group = None;
+        }
+        if payload.is_some_and(|payload| payload.string_at("/type") == Some("silent_turn_reminder"))
+        {
+            // A reminder before the first retained row belongs to context that
+            // was compacted away, so it cannot count in this silent stretch.
+            if aligned {
+                restored.reminder_marks.push(boundary);
+                if let Some(timestamp) = timestamp {
+                    restored.reminder_timestamps.insert(boundary, timestamp);
+                } else {
+                    restored.reminder_timestamps.remove(&boundary);
+                }
+            }
+            continue;
+        }
+        let (id, index) = if row.message_type == "assistant" {
+            let key = row.message.string_at("/id").unwrap_or(&row.uuid);
+            if let Some((previous, id, index)) = &assistant_group {
+                if previous == key {
+                    (*id, *index)
+                } else {
+                    let id = MessageId::from_uuid(uuid::Uuid::parse_str(key).unwrap_or(uuid));
+                    let index = positions.get(&id).and_then(|positions| {
+                        positions.iter().copied().find(|index| *index >= boundary)
+                    });
+                    assistant_group = Some((key.to_owned(), id, index));
+                    (id, index)
+                }
+            } else {
+                let id = MessageId::from_uuid(uuid::Uuid::parse_str(key).unwrap_or(uuid));
+                let index = positions.get(&id).and_then(|positions| {
+                    positions.iter().copied().find(|index| *index >= boundary)
+                });
+                assistant_group = Some((key.to_owned(), id, index));
+                (id, index)
+            }
+        } else {
+            // Queued human prompt attachments may project their source UUID
+            // rather than the transcript envelope UUID.
+            let source_id = payload
+                .and_then(|payload| payload.string_at("/source_uuid"))
+                .and_then(MessageId::parse_prefixed)
+                .filter(|id| positions.contains_key(id));
+            let id = source_id.unwrap_or(outer_id);
+            let index = positions
+                .get(&id)
+                .and_then(|positions| positions.iter().copied().find(|index| *index >= boundary));
+            (id, index)
+        };
+        if let Some(index) = index {
+            aligned = true;
+            boundary = boundary.max(index + 1);
+            // Native reverse scanning observes the last row of an assistant
+            // group first. A malformed last timestamp invalidates that clock.
+            if let Some(timestamp) = timestamp {
+                restored.message_timestamps.insert(id, timestamp);
+            } else {
+                restored.message_timestamps.remove(&id);
+            }
+        }
+    }
+    restored
+}
+
 /// One row of the reconstructed oracle message list.
 enum Row {
     Assistant { id: MessageId, spoke: bool },
     Reminder,
     RealUser,
+    MetaUser,
     Other,
 }
 
@@ -161,10 +306,101 @@ fn text_speaks(text: &str) -> bool {
 /// The `o=!0` predicate inside `Ezm`.
 fn assistant_spoke(content: &[ContentBlock]) -> bool {
     content.iter().any(|b| match b {
-        ContentBlock::Text { text, .. } => text_speaks(text),
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+            text_speaks(text)
+        }
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            !thinking.trim().is_empty() && signature.as_deref().is_some_and(is_narration_signature)
+        }
         ContentBlock::ToolUse { name, .. } => SPEAKING_TOOL_NAMES.contains(&name.as_str()),
         _ => false,
     })
+}
+
+/// Native `Uwn` reads the last length-delimited fields 2 → 1 → 8.
+#[must_use]
+pub fn is_narration_signature(signature: &str) -> bool {
+    use base64::engine::{general_purpose, DecodePaddingMode, GeneralPurposeConfig};
+    use base64::Engine;
+
+    let compact: String = signature
+        .chars()
+        .filter(|ch| !matches!(ch, '\t' | '\n' | '\u{000c}' | '\r' | ' '))
+        .collect();
+    let padding = compact
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    if compact.len() % 4 == 1 || (padding != 0 && (compact.len() % 4 != 0 || padding > 2)) {
+        return false;
+    }
+    let engine = general_purpose::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let Ok(bytes) = engine.decode(compact) else {
+        return false;
+    };
+    last_signature_bytes(&bytes, 2)
+        .and_then(|outer| last_signature_bytes(outer, 1))
+        .and_then(|inner| last_signature_bytes(inner, 8))
+        == Some(b"narration".as_slice())
+}
+
+fn signature_varint(bytes: &[u8], cursor: &mut usize) -> Option<f64> {
+    // Native `tst` uses JavaScript numbers, including when skipping an unknown
+    // field whose ten-byte varint exceeds u64. Preserve that parser behavior.
+    let mut value = 0.0;
+    let mut multiplier = 1.0;
+    for _ in 0..10 {
+        let byte = *bytes.get(*cursor)?;
+        *cursor += 1;
+        value += f64::from(byte & 0x7f) * multiplier;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        multiplier *= 128.0;
+    }
+    None
+}
+
+fn last_signature_bytes(bytes: &[u8], field: u64) -> Option<&[u8]> {
+    let mut cursor = 0usize;
+    let mut found = None;
+    while cursor < bytes.len() {
+        let key = signature_varint(bytes, &mut cursor)?;
+        match (key % 8.0) as u8 {
+            0 => {
+                signature_varint(bytes, &mut cursor)?;
+            }
+            1 => cursor = cursor.checked_add(8)?,
+            2 => {
+                let length = signature_varint(bytes, &mut cursor)?;
+                if length > bytes.len().saturating_sub(cursor) as f64 {
+                    return None;
+                }
+                let length = length as usize;
+                let end = cursor.checked_add(length)?;
+                let value = bytes.get(cursor..end)?;
+                if (key / 8.0).floor() == field as f64 {
+                    found = Some(value);
+                }
+                cursor = end;
+            }
+            5 => cursor = cursor.checked_add(4)?,
+            _ => return None,
+        }
+        if cursor > bytes.len() {
+            return None;
+        }
+    }
+    found
 }
 
 /// `sxl(content)` @296542062 — does this user line carry a `tool_result`?
@@ -183,8 +419,12 @@ fn row_for(msg: &ConversationMessage) -> Row {
         ConversationMessage::User {
             content, is_meta, ..
         } => {
-            if !*is_meta && !carries_tool_result(content) {
-                Row::RealUser
+            if !carries_tool_result(content) {
+                if *is_meta {
+                    Row::MetaUser
+                } else {
+                    Row::RealUser
+                }
             } else {
                 Row::Other
             }
@@ -193,18 +433,19 @@ fn row_for(msg: &ConversationMessage) -> Row {
     }
 }
 
-/// The `i()` flush closure. Returns `true` when the walk must stop because the
-/// group that just closed SPOKE.
 fn flush_group(
     current: &mut Option<MessageId>,
     spoke: &mut bool,
     turns: &mut usize,
     reminders: usize,
+    group_time: Option<i64>,
+    silent_since: &mut Option<i64>,
 ) -> bool {
     if current.is_none() {
         return false;
     }
     if *spoke {
+        *silent_since = silent_since.or(group_time);
         return true;
     }
     if reminders == 0 {
@@ -215,69 +456,119 @@ fn flush_group(
     false
 }
 
-/// `Ezm(messages)` — scan the tail of `history` for the current silent stretch.
-///
-/// `reminder_marks` holds the `history.len()` value captured at each previous
-/// emission (see the PORT SEAM note in the module docs); a mark of `n` sits
-/// between `history[n - 1]` and `history[n]`, which is exactly where the
-/// oracle's `silent_turn_reminder` attachment row lived.
 #[must_use]
 pub fn scan_silent_stretch(
     history: &[ConversationMessage],
     reminder_marks: &[usize],
 ) -> SilentStretch {
-    let mut rows: Vec<Row> = Vec::with_capacity(history.len() + reminder_marks.len());
+    scan_silent_stretch_with_timestamps(history, reminder_marks, &HashMap::new(), &HashMap::new())
+        .stretch
+}
+
+/// Native `fzr` over host-stamped message and transient attachment clocks.
+#[must_use]
+pub fn scan_silent_stretch_with_timestamps(
+    history: &[ConversationMessage],
+    reminder_marks: &[usize],
+    message_timestamps: &HashMap<MessageId, i64>,
+    reminder_timestamps: &HashMap<usize, i64>,
+) -> TimedSilentStretch {
+    let mut rows = Vec::with_capacity(history.len() + reminder_marks.len());
     for boundary in 0..=history.len() {
         for mark in reminder_marks {
             if *mark == boundary {
-                rows.push(Row::Reminder);
+                rows.push((Row::Reminder, reminder_timestamps.get(mark).copied()));
             }
         }
-        if let Some(msg) = history.get(boundary) {
-            rows.push(row_for(msg));
+        if let Some(message) = history.get(boundary) {
+            rows.push((
+                row_for(message),
+                message_timestamps.get(&message.id()).copied(),
+            ));
         }
     }
 
     let mut turns = 0usize;
     let mut reminders = 0usize;
-    let mut current: Option<MessageId> = None;
+    let mut current = None;
     let mut spoke = false;
+    let mut silent_since = None;
+    let mut group_time = None;
+    let mut oldest_time = None;
 
-    for row in rows.iter().rev() {
-        match row {
-            Row::Assistant { id, spoke: s } => {
-                if current != Some(*id) {
-                    if flush_group(&mut current, &mut spoke, &mut turns, reminders) {
-                        return SilentStretch {
+    for (row, timestamp) in rows.iter().rev() {
+        oldest_time = *timestamp;
+        if let Row::Assistant {
+            id,
+            spoke: speaking,
+        } = row
+        {
+            if current != Some(*id) {
+                if flush_group(
+                    &mut current,
+                    &mut spoke,
+                    &mut turns,
+                    reminders,
+                    group_time,
+                    &mut silent_since,
+                ) {
+                    return TimedSilentStretch {
+                        stretch: SilentStretch {
                             turns_since_last_reminder: turns,
                             reminders_in_stretch: reminders,
-                        };
-                    }
-                    current = Some(*id);
-                }
-                if *s {
-                    spoke = true;
-                }
-            }
-            other => {
-                if flush_group(&mut current, &mut spoke, &mut turns, reminders) {
-                    return SilentStretch {
-                        turns_since_last_reminder: turns,
-                        reminders_in_stretch: reminders,
+                        },
+                        silent_since_ms: silent_since,
                     };
                 }
-                match other {
-                    Row::Reminder => reminders += 1,
-                    Row::RealUser => break,
-                    _ => {}
-                }
+                current = Some(*id);
+                group_time = *timestamp;
             }
+            spoke |= *speaking;
+            continue;
+        }
+        if flush_group(
+            &mut current,
+            &mut spoke,
+            &mut turns,
+            reminders,
+            group_time,
+            &mut silent_since,
+        ) {
+            return TimedSilentStretch {
+                stretch: SilentStretch {
+                    turns_since_last_reminder: turns,
+                    reminders_in_stretch: reminders,
+                },
+                silent_since_ms: silent_since,
+            };
+        }
+        match row {
+            Row::Reminder => {
+                reminders += 1;
+                silent_since = silent_since.or(*timestamp);
+            }
+            Row::RealUser => {
+                silent_since = silent_since.or(*timestamp);
+                break;
+            }
+            Row::MetaUser => silent_since = silent_since.or(*timestamp),
+            _ => {}
         }
     }
-    flush_group(&mut current, &mut spoke, &mut turns, reminders);
-    SilentStretch {
-        turns_since_last_reminder: turns,
-        reminders_in_stretch: reminders,
+    flush_group(
+        &mut current,
+        &mut spoke,
+        &mut turns,
+        reminders,
+        group_time,
+        &mut silent_since,
+    );
+    TimedSilentStretch {
+        stretch: SilentStretch {
+            turns_since_last_reminder: turns,
+            reminders_in_stretch: reminders,
+        },
+        silent_since_ms: silent_since.or(oldest_time),
     }
 }
 
@@ -288,11 +579,330 @@ pub fn should_emit(stretch: SilentStretch, turns_required: usize) -> bool {
         && stretch.turns_since_last_reminder >= turns_required
 }
 
+/// A configured seconds threshold replaces the turn-count cap (`pzr`, 2.1.319).
+#[must_use]
+pub fn should_emit_with_elapsed(
+    stretch: SilentStretch,
+    turns_required: usize,
+    elapsed_ms: Option<i64>,
+    seconds_required: Option<f64>,
+) -> bool {
+    match seconds_required {
+        Some(required) => {
+            stretch.turns_since_last_reminder >= 1
+                && elapsed_ms.is_some_and(|elapsed| elapsed.div_euclid(1000) as f64 >= required)
+        }
+        None => should_emit(stretch, turns_required),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lingxi_core::types::ToolUseId;
     use serde_json::json;
+
+    fn clock_row(
+        kind: &str,
+        uuid: u128,
+        inner: Option<&str>,
+        seconds: Option<i64>,
+        attachment: Option<serde_json::Value>,
+    ) -> session::jsonl::JsonlMessage {
+        let mut row = json!({
+            "type": kind,
+            "uuid": uuid::Uuid::from_u128(uuid).to_string(),
+            "parentUuid": null,
+            "sessionId": uuid::Uuid::from_u128(999).to_string(),
+            "message": {"role":kind,"content":[]},
+        });
+        if let Some(inner) = inner {
+            row["message"]["id"] = inner.into();
+        }
+        if let Some(seconds) = seconds {
+            row["timestamp"] = chrono::DateTime::from_timestamp(seconds, 0)
+                .unwrap()
+                .to_rfc3339()
+                .into();
+        }
+        if let Some(attachment) = attachment {
+            row["attachment"] = attachment;
+        }
+        serde_json::from_value(row).unwrap()
+    }
+
+    fn clock_history(kind: &str, uuid: u128) -> ConversationMessage {
+        let id = MessageId::from_uuid(uuid::Uuid::from_u128(uuid));
+        if kind == "assistant" {
+            let mut row = silent_assistant();
+            if let ConversationMessage::Assistant { id: stored, .. } = &mut row {
+                *stored = id;
+            }
+            row
+        } else {
+            ConversationMessage::user(id, "task".into())
+        }
+    }
+
+    #[test]
+    fn restored_silent_clocks_follow_inner_assistant_groups_and_attachment_boundaries() {
+        let inner = uuid::Uuid::from_u128(10).to_string();
+        let rows = vec![
+            clock_row("user", 1, None, Some(0), None),
+            clock_row("assistant", 2, Some(&inner), Some(10), None),
+            clock_row("assistant", 3, Some(&inner), Some(20), None),
+            clock_row(
+                "attachment",
+                4,
+                None,
+                Some(30),
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+            clock_row("user", 5, None, Some(40), None),
+            clock_row(
+                "assistant",
+                6,
+                Some("msg_provider_non_uuid"),
+                Some(45),
+                None,
+            ),
+            clock_row(
+                "assistant",
+                7,
+                Some("msg_provider_non_uuid"),
+                Some(50),
+                None,
+            ),
+            clock_row(
+                "attachment",
+                8,
+                None,
+                Some(55),
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+            clock_row("assistant", 9, None, None, None),
+        ];
+        let history = vec![
+            clock_history("user", 1),
+            clock_history("assistant", 10),
+            clock_history("user", 5),
+            clock_history("assistant", 6),
+            clock_history("assistant", 9),
+        ];
+        let clocks = restore_silent_clocks(&rows, &history);
+        assert_eq!(clocks.message_timestamps[&history[1].id()], 20_000);
+        assert_eq!(clocks.message_timestamps[&history[3].id()], 50_000);
+        assert!(!clocks.message_timestamps.contains_key(&history[4].id()));
+        assert_eq!(clocks.reminder_marks, [2, 4]);
+        assert_eq!(
+            clocks.reminder_timestamps,
+            HashMap::from([(2, 30_000), (4, 55_000)])
+        );
+    }
+
+    #[test]
+    fn restored_silent_clocks_ignore_discarded_context_and_missing_timestamps() {
+        let retained_inner = uuid::Uuid::from_u128(20).to_string();
+        let mut invalid = clock_row("assistant", 13, Some(&retained_inner), Some(30), None);
+        invalid.timestamp = "bad timestamp".into();
+        let rows = vec![
+            clock_row("user", 1, None, Some(0), None),
+            clock_row(
+                "attachment",
+                2,
+                None,
+                Some(5),
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+            clock_row("user", 10, None, Some(10), None),
+            clock_row("assistant", 11, Some(&retained_inner), Some(20), None),
+            invalid,
+            clock_row(
+                "attachment",
+                14,
+                None,
+                None,
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+        ];
+        let history = vec![clock_history("user", 10), clock_history("assistant", 20)];
+        let clocks = restore_silent_clocks(&rows, &history);
+        assert_eq!(
+            clocks.message_timestamps,
+            HashMap::from([(history[0].id(), 10_000)])
+        );
+        assert_eq!(clocks.reminder_marks, [2]);
+        assert!(clocks.reminder_timestamps.is_empty());
+    }
+
+    #[test]
+    fn restored_silent_clocks_use_queued_source_ids_and_latest_boundary_clock() {
+        let source = uuid::Uuid::from_u128(30).to_string();
+        let rows = vec![
+            clock_row(
+                "attachment",
+                1,
+                None,
+                Some(10),
+                Some(json!({"type":"queued_command","source_uuid":source})),
+            ),
+            clock_row(
+                "attachment",
+                2,
+                None,
+                Some(20),
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+            clock_row(
+                "attachment",
+                3,
+                None,
+                Some(30),
+                Some(json!({"type":"silent_turn_reminder"})),
+            ),
+        ];
+        let history = vec![clock_history("user", 30)];
+        let clocks = restore_silent_clocks(&rows, &history);
+        assert_eq!(clocks.message_timestamps[&history[0].id()], 10_000);
+        assert_eq!(clocks.reminder_marks, [1, 1]);
+        assert_eq!(clocks.reminder_timestamps, HashMap::from([(1, 30_000)]));
+    }
+
+    #[test]
+    fn narration_signatures_match_319_native_parser() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["narrationSignatures"].as_array().unwrap() {
+            assert_eq!(
+                is_narration_signature(case["signature"].as_str().unwrap()),
+                case["narration"].as_bool().unwrap(),
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn timed_reminder_matches_319_native_producer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["silentCases"].as_array().unwrap() {
+            let stretch = SilentStretch {
+                turns_since_last_reminder: case["stretch"]["turnsSinceLastReminder"]
+                    .as_u64()
+                    .unwrap() as usize,
+                reminders_in_stretch: case["stretch"]["remindersInStretch"].as_u64().unwrap()
+                    as usize,
+            };
+            let elapsed_ms = case["stretch"]["silentSince"].as_str().map(|since| {
+                case["nowMs"].as_i64().unwrap()
+                    - chrono::DateTime::parse_from_rfc3339(since)
+                        .unwrap()
+                        .timestamp_millis()
+            });
+            assert_eq!(
+                should_emit_with_elapsed(
+                    stretch,
+                    DEFAULT_SILENT_TURN_REMINDER_TURNS,
+                    elapsed_ms,
+                    case["environment"]["CLAUDE_CODE_SILENT_TURN_REMINDER_SECONDS"].as_f64(),
+                ),
+                !case["attachments"].as_array().unwrap().is_empty(),
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn timed_scan_matches_319_native_history_walk() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["silentCases"].as_array().unwrap() {
+            let mut history = Vec::new();
+            let mut marks = Vec::new();
+            let mut timestamps = HashMap::new();
+            let mut reminder_timestamps = HashMap::new();
+            let mut ids = HashMap::new();
+            for row in case["messages"].as_array().unwrap() {
+                let timestamp =
+                    chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str().unwrap())
+                        .unwrap()
+                        .timestamp_millis();
+                let message = match row["type"].as_str().unwrap() {
+                    "attachment" => {
+                        marks.push(history.len());
+                        reminder_timestamps.insert(history.len(), timestamp);
+                        continue;
+                    }
+                    "user" if row["message"]["content"].is_array() => tool_result_user(),
+                    "user" => real_user(),
+                    "assistant" => {
+                        let id = *ids
+                            .entry(row["message"]["id"].as_str().unwrap().to_owned())
+                            .or_insert_with(MessageId::new);
+                        let content = row["message"]["content"].as_array().unwrap().iter().map(|block| {
+                            match block["type"].as_str().unwrap() {
+                                "thinking" => ContentBlock::Thinking {
+                                    thinking: block["thinking"].as_str().unwrap().to_owned(),
+                                    signature: block["signature"].as_str().map(str::to_owned),
+                                },
+                                "text" => ContentBlock::Text {
+                                    text: block["text"].as_str().unwrap().to_owned(),
+                                    citations: None,
+                                },
+                                _ => ContentBlock::ToolUse {
+                                    id: ToolUseId::new(),
+                                    name: block["name"].as_str().unwrap().to_owned(),
+                                    input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+                                    provider_id: None,
+                                },
+                            }
+                        }).collect();
+                        ConversationMessage::Assistant {
+                            per_turn_effort: None,
+                            id,
+                            content,
+                            stop_reason: None,
+                            resumable: None,
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                timestamps.insert(message.id(), timestamp);
+                history.push(message);
+            }
+            let actual = scan_silent_stretch_with_timestamps(
+                &history,
+                &marks,
+                &timestamps,
+                &reminder_timestamps,
+            );
+            assert_eq!(
+                actual.stretch.turns_since_last_reminder as u64,
+                case["stretch"]["turnsSinceLastReminder"].as_u64().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                actual.stretch.reminders_in_stretch as u64,
+                case["stretch"]["remindersInStretch"].as_u64().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                actual.silent_since_ms,
+                case["stretch"]["silentSince"].as_str().map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .unwrap()
+                        .timestamp_millis()
+                }),
+                "{case}"
+            );
+        }
+    }
 
     fn silent_assistant() -> ConversationMessage {
         ConversationMessage::Assistant {
@@ -401,11 +1011,13 @@ mod tests {
     }
 
     #[test]
-    fn silent_reminder_defaults_follow_2_1_263_model_capabilities() {
+    fn silent_reminder_defaults_follow_2_1_319_model_capabilities() {
         for model in [
             "claude-fable-5-1",
             "claude-mythos-5-1",
             "anthropic/claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
         ] {
             assert!(enabled_with_override(model, None), "{model}");
             assert!(!enabled_with_override(model, Some("0")), "{model}");
@@ -414,6 +1026,26 @@ mod tests {
             assert!(!enabled_with_override(model, None), "{model}");
             assert!(enabled_with_override(model, Some("1")), "{model}");
         }
+    }
+
+    #[test]
+    fn silent_turn_text_and_limits_match_319_native_source() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            SILENT_TURN_REMINDER_TEXT,
+            fixture["silentTurn"]["body"].as_str().unwrap()
+        );
+        assert_eq!(
+            DEFAULT_SILENT_TURN_REMINDER_TURNS as u64,
+            fixture["silentTurn"]["turns"].as_u64().unwrap()
+        );
+        assert_eq!(
+            MAX_REMINDERS_PER_STRETCH as u64,
+            fixture["silentTurn"]["maxReminders"].as_u64().unwrap()
+        );
     }
 
     #[test]

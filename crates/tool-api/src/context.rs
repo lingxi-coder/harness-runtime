@@ -148,6 +148,14 @@ pub struct ToolUseContext {
     /// yet wired (`AgentTool` then runs the fork child with `FORK_AGENT`'s empty
     /// system prompt — functional, not byte-identical).
     pub fork_parent_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Policy metadata paired with the captured parent prefix.
+    pub fork_prompt_policy: Option<lingxi_core::host::prompt_policy::PromptPolicyMetadata>,
+    /// User-authored complete system override carried through a fork.
+    pub fork_custom_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// User-authored append instructions, separate from generated templates.
+    pub fork_append_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Original specialized-agent instructions retained when a fork changes model.
+    pub fork_role_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Per-agent working directory OVERRIDE (claude-code's `agentWorktree` /
     /// `cwd`, threaded into the agent's `AsyncLocalStorage` cwd that every tool
     /// reads via `Mt()`). `Some` ONLY for a subagent isolated in a git worktree
@@ -331,6 +339,7 @@ impl ToolUseContext {
     pub fn model_seed(main_loop_model: String) -> Self {
         Self {
             options: ToolUseOptions {
+                prompt_policy: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -368,6 +377,10 @@ impl ToolUseContext {
             cancel: None,
             cancellation_scope: ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
             depth: 0,
@@ -395,6 +408,9 @@ mod tests {
 /// Per-call options that travel inside [`ToolUseContext`].
 #[derive(Clone)]
 pub struct ToolUseOptions {
+    /// The owning request's resolved prompt policy, shared with nested tool
+    /// calls. A new model route resolves a new policy instead of mutating it.
+    pub prompt_policy: Option<Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
     /// Emit debug-level traces from this call.
     pub debug: bool,
     /// Emit verbose informational traces from this call.

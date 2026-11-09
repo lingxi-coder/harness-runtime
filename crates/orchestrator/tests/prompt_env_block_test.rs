@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 fn ctx_minimal() -> SystemPromptContext {
     SystemPromptContext {
+        native_system_turns: None,
+        prompt_policy: None,
         cwd: PathBuf::from("/Users/u/proj"),
         platform: "darwin".into(),
         model: "claude-opus-4-7".into(),

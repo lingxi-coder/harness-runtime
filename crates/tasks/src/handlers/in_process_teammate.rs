@@ -324,6 +324,43 @@ pub trait TeammateSystemPromptRenderer: Send + Sync {
     async fn render_default_system_prompt(
         &self,
     ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError>;
+
+    async fn render_system_prompt_for_target(
+        &self,
+        _target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        self.render_default_system_prompt().await
+    }
+}
+
+struct TeammatePromptSource {
+    renderer: Option<Arc<dyn TeammateSystemPromptRenderer>>,
+    custom: Option<Utf16JsonProjection>,
+}
+
+#[async_trait]
+impl agent::prompt_policy::SubagentSystemPromptRenderer for TeammatePromptSource {
+    async fn render_system_prompt(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        let base = match &self.renderer {
+            Some(renderer) => {
+                renderer
+                    .render_system_prompt_for_target(&target.policy.target)
+                    .await?
+            }
+            None => match target.policy.system {
+                lingxi_core::host::prompt_policy::SystemPromptBinding::Template(template) => {
+                    Utf16JsonProjection::from(template.trim_end())
+                }
+                _ => Utf16JsonProjection::from(""),
+            },
+        };
+        Ok(render_teammate_system_prompt(&base, self.custom.as_ref())
+            .as_ref()
+            .clone())
+    }
 }
 
 fn render_teammate_system_prompt(
@@ -1246,6 +1283,25 @@ impl InProcessTeammateHandler {
             definition.model = AgentModel::Explicit(selection.model.clone());
             child_selection = Some(selection);
         }
+        let prompt_mode = self
+            .tool_invoker
+            .as_ref()
+            .and_then(|invoker| invoker.trusted_session_profile())
+            .map_or(Default::default(), |profile| profile.mode);
+        let prompt_model = child_selection
+            .as_ref()
+            .map(|selection| selection.model.clone())
+            .unwrap_or_else(|| match &definition.model {
+                AgentModel::Alias(model) | AgentModel::Explicit(model) => model.clone(),
+                AgentModel::Inherit => "inherit".into(),
+            });
+        let prompt_target = agent::prompt_policy::resolve_target(
+            Some(self.api_client.as_ref()),
+            &prompt_model,
+            selected_profile.as_deref(),
+            prompt_mode,
+        )
+        .map_err(|error| TaskError::Internal(error.to_string()))?;
         // Advertise the teammate's tool pool (claude-code `assembleToolPool`) via
         // the SAME shared resolver `PoolSubagentSpawner` uses, keyed on the
         // resolved model/profile. Unfilled registry ⇒ empty (chat-only). With
@@ -1259,11 +1315,12 @@ impl InProcessTeammateHandler {
                     Some(gate) => gate.native_mcp_deny_context().await,
                     None => lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
                 };
-                agent::resolve_subagent_tools(
+                agent::tool_resolver::resolve_subagent_tools_with_handback_and_policy(
                     registry,
                     &definition,
                     &deny_context,
                     child_selection.as_ref(),
+                    Some(prompt_target.policy.clone()),
                     0,
                     // Every in-process teammate is a coordinator worker, so
                     // shared and inline `role:"comms"` MCP tools stay with
@@ -1274,8 +1331,11 @@ impl InProcessTeammateHandler {
                     // equivalent connect step, so this is always empty
                     // (byte-identical to before this feature).
                     &[],
+                    None,
+                    Default::default(),
                 )
                 .await
+                .map(|(schemas, allowed, _)| (schemas, allowed))
                 .map_err(|e| TaskError::Internal(e.to_string()))?
             }
             None => (Vec::new(), Vec::new()),
@@ -1314,22 +1374,45 @@ impl InProcessTeammateHandler {
         // addendum, then an optional `# Custom Agent Instructions` section.
         // A standalone/test handler without a renderer still receives the
         // teammate addendum; production always wires the live renderer.
-        let base_system_prompt = match self.system_prompt_renderer.get() {
-            Some(renderer) => renderer
-                .render_default_system_prompt()
-                .await
-                .map_err(|error| {
-                    TaskError::Internal(
-                        error
-                            .diagnostic_projection()
-                            .to_json_string()
-                            .unwrap_or_else(|_| "settings operation failed".to_owned()),
-                    )
-                })?,
-            None => Utf16JsonProjection::from(""),
+        let prompt_state = agent::prompt_policy::SubagentPromptState {
+            initial_policy: prompt_target.policy.clone(),
+            role: Some(
+                render_teammate_system_prompt(
+                    &Utf16JsonProjection::from(""),
+                    definition.system_prompt.as_ref(),
+                )
+                .as_ref()
+                .clone(),
+            ),
+            fork_prefix: None,
+            fork_policy: None,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+            environment: None,
+            cwd: None,
+            addendum: None,
+            operator_suffix: None,
+            tool_registry: self.tool_registry.get().cloned(),
+            system_renderer: Some(Arc::new(TeammatePromptSource {
+                renderer: self.system_prompt_renderer.get().cloned(),
+                custom: definition.system_prompt.clone(),
+            })),
+            seeded_context: Default::default(),
+            replace_initial_context: false,
         };
-        let rendered_system_prompt =
-            render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_ref());
+        let rendered_system_prompt = prompt_state
+            .render_for_route(&prompt_target)
+            .await
+            .map_err(|error| {
+                TaskError::Internal(
+                    error
+                        .diagnostic_projection()
+                        .to_json_string()
+                        .unwrap_or_else(|_| "settings operation failed".to_owned()),
+                )
+            })?
+            .system
+            .expect("teammate system prompt is present");
         let icon = definition.icon.clone();
         let context = SubagentContext {
             server_fallback_model_enforcement: None,
@@ -1378,6 +1461,8 @@ impl InProcessTeammateHandler {
             transcript_fs: self.transcript.as_ref().map(|(fs, _)| fs.clone()),
             resumed_history: None,
             rendered_system_prompt: Some(rendered_system_prompt),
+            prompt_policy: Some(prompt_target.policy),
+            prompt_state: Some(Arc::new(prompt_state)),
             mobile_runtime_environment_reminder: None,
             instruction_context: Default::default(),
             instruction_context_is_override: false,

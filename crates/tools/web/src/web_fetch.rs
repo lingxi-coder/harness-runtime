@@ -1057,28 +1057,7 @@ impl Tool for WebFetchTool {
     }
 
     async fn description(&self, _input: &Source, _opts: &DescriptionOptions) -> String {
-        // Byte-locked VERBATIM to claude-code `DESCRIPTION`
-        // (`WebFetchTool/prompt.ts:3-21`). The TS constant is a template literal
-        // that begins and ends with a newline; reproduced exactly.
-        "\n\
-- Fetches content from a specified URL and processes it using an AI model\n\
-- Takes a URL and a prompt as input\n\
-- Fetches the URL content, converts HTML to markdown\n\
-- Processes the content with the prompt using a small, fast model\n\
-- Returns the model's response about the content\n\
-- Use this tool when you need to retrieve and analyze web content\n\
-\n\
-Usage notes:\n\
-  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions.\n\
-  - The URL must be a fully-formed valid URL\n\
-  - HTTP URLs will be automatically upgraded to HTTPS\n\
-  - The prompt should describe what information you want to extract from the page\n\
-  - This tool is read-only and does not modify any files\n\
-  - Results may be summarized if the content is very large\n\
-  - Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL\n\
-  - When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.\n\
-  - For GitHub URLs, prefer an authenticated GitHub tool; when available, this can be an MCP integration or the gh CLI through a registered shell tool.\n"
-            .into()
+        include_str!("templates/claude-code-2.1.319/web-fetch-description.md").into()
     }
     async fn prompt(&self, opts: &PromptOptions) -> Source {
         // 1:1 with claude-code `CXc(model, hasArtifactTool)` (binary @280151) —
@@ -1101,15 +1080,17 @@ Usage notes:\n\
         // `OEd` clause — the read-only artifact surface `isArtifactReadEnabled()`
         // — is a separate Statsig-gated feature, also off, and is Stage-2.)
         let has_artifact_tool = tool_api::artifact_gate::is_enabled();
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        if tool_api::prompt_uses_lean(opts) {
             let artifact_exception = if has_artifact_tool {
-                " Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403)."
+                include_str!("templates/claude-code-2.1.319/web-fetch-artifact-exception.md")
             } else {
                 ""
             };
             format!(
-                "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.{artifact_exception}\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL."
-            ).into()
+                include_str!("templates/claude-code-2.1.319/web-fetch-lean.md"),
+                artifact_exception = artifact_exception
+            )
+            .into()
         } else {
             let description = self
                 .description(
@@ -1123,13 +1104,16 @@ Usage notes:\n\
             // between the auth-warning line and the description (which begins with
             // `\n`). Empty when the gate is off ⇒ `access.\n\n- Fetches…` verbatim.
             let artifact_bullet = if has_artifact_tool {
-                "- Exception: claude.ai/code/artifact/{uuid} URLs (including preview.claude.ai) ARE fetchable \u{2014} WebFetch uses your claude.ai login. Use WebFetch for these, not curl or a headless browser (those return the SPA shell or a Cloudflare 403, not the content).\n"
+                include_str!("templates/claude-code-2.1.319/web-fetch-artifact-bullet.md")
             } else {
                 ""
             };
             format!(
-                "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{artifact_bullet}{description}"
-            ).into()
+                include_str!("templates/claude-code-2.1.319/web-fetch-long.md"),
+                artifact_bullet = artifact_bullet,
+                description = description
+            )
+            .into()
         }
     }
 

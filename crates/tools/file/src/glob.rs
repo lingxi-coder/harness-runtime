@@ -144,10 +144,7 @@ const GLOB_MAX_RESULT_SIZE_CHARS: usize = 100_000;
 /// Oracle 2.1.238 `znp` (@285270818) — the four unconditional bullets. The
 /// delegate-to-Agent bullet lives in [`GLOB_DESCRIPTION_AGENT_BULLET`] because
 /// upstream gates it (ST-03).
-const GLOB_DESCRIPTION_BASE: &str = r#"- Fast file pattern matching tool that works with any codebase size
-- Supports glob patterns like "**/*.js" or "src/**/*.ts"
-- Returns matching file paths sorted by modification time
-- Use this tool when you need to find files by name patterns"#;
+const GLOB_DESCRIPTION_BASE: &str = include_str!("templates/claude-code-2.1.319/glob-long-base.md");
 
 /// ST-03: the fifth bullet is NOT unconditional. Oracle 2.1.238:
 /// `BJb = `${znp}\n- When you are doing an open ended search … (if available)``
@@ -155,7 +152,8 @@ const GLOB_DESCRIPTION_BASE: &str = r#"- Fast file pattern matching tool that wo
 /// under a NON-default subagent steer (`DZ()!=="default"`, port
 /// `lingxi_core::host::live_sessions::subagent_steer_is_default()`) the whole bullet is
 /// dropped, not shortened. Grep gates its own Agent bullet the same way.
-const GLOB_DESCRIPTION_AGENT_BULLET: &str = "\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)";
+const GLOB_DESCRIPTION_AGENT_BULLET: &str =
+    include_str!("templates/claude-code-2.1.319/glob-long-agent.md");
 
 /// `ISa(e)`'s long arm: `DZ()==="default" ? BJb : znp`.
 fn glob_description(steer_is_default: bool) -> String {
@@ -169,7 +167,7 @@ fn glob_description(steer_is_default: bool) -> String {
 /// The SHORT Glob prompt — byte-locked VERBATIM to claude-code `Jhi(e)`'s
 /// `Dh(e)===true` branch (binary offset 195605886), served to current-gen
 /// default models. Single line, no interpolation.
-const GLOB_PROMPT_SHORT: &str = r#"Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time."#;
+const GLOB_PROMPT_SHORT: &str = include_str!("templates/claude-code-2.1.319/glob-lean.md");
 
 /// `extractGlobBaseDirectory` (`utils/glob.ts:17-64`): peel the static base
 /// directory (everything before the first glob metachar `* ? [ {`) off a
@@ -426,7 +424,7 @@ impl Tool for GlobTool {
         // where `Jhi(e){if(Dh(e))return SHORT; return DZ()==="default"?BJb:znp}`
         // (2.1.238 `ISa`, @285270043). Predicate shared with TodoWrite via
         // `tool_api`.
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        if tool_api::prompt_uses_lean(opts) {
             GLOB_PROMPT_SHORT.into()
         } else {
             glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default()).into()
@@ -945,13 +943,14 @@ mod tests {
             )
             .await;
         assert_eq!(d, glob_description(true));
-        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        // prompt(model:claude-sonnet-4-6) selects the native long template.
         let long = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -961,6 +960,7 @@ mod tests {
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
@@ -1888,10 +1888,11 @@ mod tests {
         // prompt() equals DESCRIPTION for Glob.
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })

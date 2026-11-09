@@ -251,6 +251,18 @@ fn invocation_context_for_tool(
             .then(|| lingxi_core::host::tool_invoker::SubagentForkContext {
                 messages: current_history.to_vec(),
                 system_prompt: system_prompt.cloned(),
+                custom_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.custom_system_prompt.clone()),
+                append_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.append_system_prompt.clone()),
+                role_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.role.clone()),
             }),
         tool_execution_policy: if lingxi_core::host::is_fusion_panel_type(
             &ctx.agent_definition.agent_type,
@@ -279,6 +291,7 @@ fn invocation_context_for_tool(
             .cloned(),
         parent_model: Some(model.to_owned()),
         parent_model_profile: model_profile,
+        prompt_policy: ctx.prompt_policy.clone(),
         agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
         tool_context_state,
         current_history: current_history.to_vec(),
@@ -319,6 +332,7 @@ struct AgentStreamAttempt {
     declined_fallback: Option<String>,
     declined_api_error_row: Option<lingxi_core::host::ServerFallbackApiErrorRow>,
     partial_response: Option<llm_runtime::HistoryResponse>,
+    prompt_captures: crate::prompt_policy::RequestPromptCaptures,
 }
 
 impl AgentStreamAttempt {
@@ -334,6 +348,7 @@ impl AgentStreamAttempt {
             declined_fallback: None,
             declined_api_error_row: None,
             partial_response: None,
+            prompt_captures: Default::default(),
         }
     }
 }
@@ -1228,6 +1243,7 @@ async fn accumulate_agent_stream_live(
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
     request_messages: Vec<ConversationMessage>,
     system_prompt: Option<Utf16JsonProjection>,
+    prompt_captures: crate::prompt_policy::RequestPromptCaptures,
     initial_response_model: String,
     logical_tool_model: String,
     logical_tool_model_profile: Option<String>,
@@ -1261,6 +1277,7 @@ async fn accumulate_agent_stream_live(
     )> = None;
     let mut response_error: Option<(Vec<llm_runtime::ContentBlock>, LlmError)> = None;
     let mut active_response_model = initial_response_model.clone();
+    let mut active_prompt: Option<crate::prompt_policy::CapturedRequestPrompt> = None;
     // Keep the route being served separately from ResponseObserved: Native
     // emits that event when a fallback candidate starts, before the host has
     // accepted it. Only an admitted visible hop advances this source route.
@@ -1333,6 +1350,15 @@ async fn accumulate_agent_stream_live(
                 break;
             }
         };
+        if let HistoryEvent::MessageStart { response } | HistoryEvent::Completed { response } =
+            &event
+        {
+            active_prompt = prompt_captures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&response.id)
+                .cloned();
+        }
 
         if let HistoryEvent::ResponseObserved { model, .. } = &event {
             active_response_model.clone_from(model);
@@ -1474,15 +1500,22 @@ async fn accumulate_agent_stream_live(
                         .then_some(index)
                         .into_iter()
                         .collect::<Vec<_>>();
+                let source_ctx = active_prompt.as_ref().map(|capture| {
+                    let mut source = ctx.clone();
+                    source.prompt_policy = Some(capture.policy.clone());
+                    source
+                });
                 stage_assistant_row(
                     index,
                     std::slice::from_ref(&block),
                     None,
                     &source_tool_use_block_indices,
-                    ctx,
+                    source_ctx.as_ref().unwrap_or(ctx),
                     transcript,
                     &request_messages,
-                    system_prompt.as_ref(),
+                    active_prompt
+                        .as_ref()
+                        .map_or(system_prompt.as_ref(), |capture| capture.system.as_ref()),
                     &active_response_model,
                     &logical_tool_model,
                     logical_tool_model_profile.clone(),
@@ -1578,15 +1611,22 @@ async fn accumulate_agent_stream_live(
                         })
                         .collect::<Vec<_>>();
                     let mut complete_row_prior_siblings = Vec::new();
+                    let source_ctx = active_prompt.as_ref().map(|capture| {
+                        let mut source = ctx.clone();
+                        source.prompt_policy = Some(capture.policy.clone());
+                        source
+                    });
                     stage_assistant_row(
                         0,
                         &completed.content,
                         completed.stop_reason.as_deref(),
                         &source_tool_use_block_indices,
-                        ctx,
+                        source_ctx.as_ref().unwrap_or(ctx),
                         transcript,
                         &request_messages,
-                        system_prompt.as_ref(),
+                        active_prompt
+                            .as_ref()
+                            .map_or(system_prompt.as_ref(), |capture| capture.system.as_ref()),
                         &active_response_model,
                         &logical_tool_model,
                         logical_tool_model_profile.clone(),
@@ -1797,6 +1837,7 @@ async fn accumulate_agent_stream_live(
         declined_fallback,
         declined_api_error_row,
         partial_response,
+        prompt_captures,
     }
 }
 
@@ -3363,7 +3404,12 @@ async fn append_native_settings_prompt_attachments(
     let Some(provider) = ctx.native_settings_prompt_provider.clone() else {
         return;
     };
-    if !ctx.native_settings_prompt_context.is_admitted() {
+    if !ctx.native_settings_prompt_context.is_admitted()
+        || ctx
+            .prompt_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.reminders.is_native())
+    {
         return;
     }
     let rows = provider
@@ -3764,7 +3810,7 @@ async fn run_subagent_loop(
     // because they share its query generator; here the loops are separate, so
     // each run walks its own chain (handed down on the context).
     let mut refusal_cascade = lingxi_core::host::refusal_driver::RefusalCascadeState::default();
-    let system: Option<Utf16JsonProjection> = ctx
+    let mut system: Option<Utf16JsonProjection> = ctx
         .rendered_system_prompt
         .as_ref()
         .map(|prompt| prompt.as_ref().clone());
@@ -3779,6 +3825,23 @@ async fn run_subagent_loop(
     // gets sent on the wire as `tool_choice`.
     let mut tool_schemas: Vec<lingxi_core::host::SourceToolWireDefinition> =
         ctx.tool_schemas.clone();
+    let prompt_mode = ctx
+        .prompt_policy
+        .as_ref()
+        .map(|policy| policy.target.mode)
+        .or_else(|| {
+            ctx.tool_invoker
+                .as_ref()
+                .and_then(|invoker| invoker.trusted_session_profile())
+                .map(|profile| profile.mode)
+        })
+        .unwrap_or_default();
+    let mut prompt_route = ctx
+        .prompt_policy
+        .as_ref()
+        .filter(|_| ctx.resumed_history.is_none())
+        .map(|_| (model.clone(), model_profile.clone()));
+    let mut request_prompt: Option<crate::prompt_policy::RenderedSubagentPrompt> = None;
     let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
         let input_schema = Utf16JsonProjection::parse(schema_str).unwrap_or_else(|_| {
             Utf16JsonProjection::parse(r#"{"type":"object"}"#)
@@ -4544,6 +4607,50 @@ async fn run_subagent_loop(
                 )
                 .await;
                 flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+                if prompt_route.as_ref() != Some(&(model.clone(), model_profile.clone())) {
+                    let prepared = async {
+                        let target = crate::prompt_policy::resolve_target(
+                            Some(api_client.as_ref()),
+                            &model,
+                            model_profile.as_deref(),
+                            prompt_mode,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        if let Some(state) = &ctx.prompt_state {
+                            let rendered = state
+                                .render_for_route(&target)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let tools =
+                                crate::prompt_policy::rerender_tools(&ctx, &target, &tool_schemas)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                            system = rendered.system.as_ref().map(|body| body.as_ref().clone());
+                            tool_schemas = tools;
+                            request_prompt = Some(rendered);
+                        }
+                        ctx.prompt_policy = Some(target.policy);
+                        Ok::<_, String>(())
+                    }
+                    .await;
+                    if let Err(error) = prepared {
+                        emit_failed(
+                            &ctx,
+                            &out_tx,
+                            transcript.as_ref(),
+                            history,
+                            &mut transcript_written,
+                            agent_id,
+                            error,
+                            cumulative_usage.clone(),
+                            &last_usage,
+                            live_hook_model_selection,
+                        )
+                        .await;
+                        return;
+                    }
+                    prompt_route = Some((model.clone(), model_profile.clone()));
+                }
                 native_response_request_model.clone_from(&model);
                 native_response_request_profile.clone_from(&model_profile);
                 let api_call = async {
@@ -4567,6 +4674,9 @@ async fn run_subagent_loop(
                     // blocks were finalized.
                     let profile = model_profile.as_deref();
                     let mut model_snapshot = history.to_vec();
+                    if let (Some(state), Some(rendered)) = (&ctx.prompt_state, &request_prompt) {
+                        state.project_context(&mut model_snapshot, rendered);
+                    }
                     child_attachments
                         .screen(&mut model_snapshot, mod_host.as_ref(), &mod_cwd, agent_id)
                         .await;
@@ -4604,6 +4714,9 @@ async fn run_subagent_loop(
                         api: api_client.clone(),
                         model: current_model.clone(),
                         profile: profile.map(str::to_owned),
+                        prompt_profile: profile.map(str::to_owned),
+                        prompt_context: Some(ctx.clone()),
+                        prompt_captures: Default::default(),
                         system: system.clone(),
                         messages: messages_for_api,
                         tools,
@@ -4724,6 +4837,7 @@ async fn run_subagent_loop(
                         transcript.as_ref(),
                         request_messages,
                         system.clone(),
+                        request.prompt_captures.clone(),
                         current_model.clone(),
                         logical_tool_model.clone(),
                         logical_tool_model_profile.clone(),
@@ -5040,6 +5154,7 @@ async fn run_subagent_loop(
                     std::mem::take(&mut pending_attempt.early_tool_result_ids);
                 let attempt_request_messages =
                     std::mem::take(&mut pending_attempt.request_messages);
+                let attempt_prompt_captures = pending_attempt.prompt_captures.clone();
                 let (response, mut remainder) = match pending_attempt.response {
                     Some(Ok(r)) => r,
                     Some(Err((partial_blocks, e))) => {
@@ -6163,6 +6278,7 @@ async fn run_subagent_loop(
                     let next_transcript = transcript.clone();
                     let next_request_messages = attempt_request_messages.clone();
                     let next_system = system.clone();
+                    let next_prompt_captures = attempt_prompt_captures.clone();
                     let next_logical_tool_model = logical_tool_model.clone();
                     let next_logical_tool_profile = logical_tool_model_profile.clone();
                     let next_tool_context_state = tool_context_state.clone();
@@ -6186,6 +6302,7 @@ async fn run_subagent_loop(
                                 next_transcript.as_ref(),
                                 next_request_messages,
                                 next_system,
+                                next_prompt_captures,
                                 next_logical_tool_model.clone(),
                                 next_logical_tool_model,
                                 next_logical_tool_profile,

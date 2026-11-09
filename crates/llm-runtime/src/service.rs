@@ -2894,7 +2894,16 @@ impl ApiService {
             .map_err(crate::model_attempt::accounting_error)?;
         Ok(crate::model_attempt::WireAttempt::new(Some(lease)).with_classifier(request, prepared))
     }
-    /// Resolve the selected main route plus an optional same-profile vision delegate.
+    /// Prompt routing uses the exact request-local catalog, without credential lookup.
+    pub fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        self.client().prompt_target(model, profile, mode)
+    }
+
     /// Protocol selected for the model's canonical request and history adapter.
     pub fn protocol_for_model(
         &self,

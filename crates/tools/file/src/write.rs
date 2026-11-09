@@ -38,19 +38,12 @@ pub const TOOL_NAME: &str = "Write";
 /// `Dh(e)===false` branch (binary offset ~196432410): the base text plus
 /// `${ZAd()}` (the read-first line, `${Ws}`=Read) appended to the overwrite
 /// bullet, spelled out inline here. `${Ua}`=Edit. Em-dash is U+2014.
-const WRITE_PROMPT_LONG: &str = "Writes a file to the local filesystem.\n\nUsage:\n\
-- This tool will overwrite the existing file if there is one at the provided path.\n\
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n\
-- Prefer the Edit tool for modifying existing files \u{2014} it only sends the diff. Only use this tool to create new files or for complete rewrites.\n\
-- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n\
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.";
+const WRITE_PROMPT_LONG: &str = include_str!("templates/claude-code-2.1.319/write-long.md");
 
 /// The SHORT Write prompt — byte-locked VERBATIM to claude-code `v0i(e)`'s
 /// `Dh(e)===true` branch (binary offset 196432581), served to current-gen
 /// default models. `${Ws}`=Read, `${Ua}`=Edit. Em-dash is U+2014.
-const WRITE_PROMPT_SHORT: &str = "Writes a file to the local filesystem, overwriting if one exists.\n\
-\n\
-When to use: creating a new file, or fully replacing one you've already Read. Overwriting an existing file you haven't Read will fail. For partial changes, use Edit instead.";
+const WRITE_PROMPT_SHORT: &str = include_str!("templates/claude-code-2.1.319/write-lean.md");
 
 /// Build the model-facing `tool_result` message for a Write, byte-faithful to
 /// claude-code `FileWriteTool.mapToolResultToToolResultBlockParam`
@@ -306,7 +299,7 @@ impl Tool for FileWriteTool {
         // Model-gated, mirroring claude-code `v0i(e){if(Dh(e))return SHORT;
         // return LONG}` (binary offset ~196432410). Predicate shared with
         // TodoWrite via `tool_api`.
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        if tool_api::prompt_uses_lean(opts) {
             WRITE_PROMPT_SHORT.into()
         } else {
             WRITE_PROMPT_LONG.into()
@@ -782,13 +775,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        // model:None ⇒ Dh(undefined)=false ⇒ LONG (byte-anchor).
+        // model:claude-sonnet-4-6 selects the native long template (byte-anchor).
         let long_prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -800,6 +794,7 @@ mod tests {
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short_prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,

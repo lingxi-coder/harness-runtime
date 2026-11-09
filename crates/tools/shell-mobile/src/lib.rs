@@ -1280,6 +1280,7 @@ mod tests {
         let prompt = tool
             .clone()
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
@@ -1300,6 +1301,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
@@ -1342,6 +1344,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
@@ -1370,6 +1373,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,

@@ -1339,7 +1339,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = if cfg.cwd.starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
+    let permission_cwd = if cfg
+        .cwd
+        .starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
         || is_bound_mode_default_cwd(&cfg, &cwd)
     {
         cwd.clone()
@@ -2162,6 +2164,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
+        .with_conversation_mode(cfg.session_mode)
         .with_model_resolution_context_provider(model_resolution_context_provider.clone())
         .with_default_model(resolved_default_model.clone())
         .with_permission_mode(resolved_permission_mode)

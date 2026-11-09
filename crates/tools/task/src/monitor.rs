@@ -1883,6 +1883,7 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                prompt_policy: None,
                 available_tool_names: None,
                 cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,

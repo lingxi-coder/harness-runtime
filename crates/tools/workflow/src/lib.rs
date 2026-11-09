@@ -2563,6 +2563,7 @@ mod tests {
 
         let pointed = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 workflow_authoring_available: true,
@@ -2584,6 +2585,7 @@ mod tests {
 
         let inlined = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 workflow_authoring_available: false,

@@ -453,6 +453,14 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.trusted_session_profile())
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
@@ -599,6 +607,23 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 
 #[async_trait::async_trait]
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
+    async fn render_system_prompt_for_target(
+        &self,
+        target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::settings::SettingsError,
+    > {
+        match self.orchestrator.upgrade() {
+            Some(orchestrator) => {
+                orchestrator
+                    .assemble_default_system_prompt_for_target_preview(target)
+                    .await
+            }
+            None => Ok("".into()),
+        }
+    }
+
     async fn render_default_system_prompt(
         &self,
     ) -> Result<

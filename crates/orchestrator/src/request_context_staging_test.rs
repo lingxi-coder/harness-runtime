@@ -259,6 +259,7 @@ fn mod_registry(host: Arc<hooks::mods::ModHost>) -> Arc<tokio::sync::RwLock<hook
 
 fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
     PromptContext {
+        prompt_policies: Default::default(),
         prompt_id: std::sync::Mutex::new(prompt_id),
         rows: context_rows(Vec::new(), None),
         turn_projection: std::sync::Mutex::new(None),
@@ -267,6 +268,8 @@ fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
         ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
         next_model_step_ingress_kind: std::sync::Mutex::new(None),
         deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
     }
 }
 
@@ -631,6 +634,7 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(first_prompt_id),
                     rows: context_rows(vec![reminder], Some(&fallback)),
                     turn_projection: std::sync::Mutex::new(None),
@@ -639,6 +643,8 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     persist_prompt_ingress_after_user(
@@ -1037,6 +1043,7 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: Vec::new(),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1050,6 +1057,8 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     orch.append_accepted_prompt_ingress_reminder(&environment)
@@ -1440,6 +1449,7 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: Vec::new(),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1455,6 +1465,8 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
                     }),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let prepared = orch
@@ -1510,6 +1522,7 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: context_rows(Vec::new(), Some(&fallback)),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1518,6 +1531,8 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let cancel = lingxi_core::host::CancellationToken::new();
@@ -1682,11 +1697,14 @@ fn prompt_ingress_mods_screen_request_copies_and_re_resolve_after_cold_resume() 
         .with_session_id(session_id)
         .with_jsonl_writer(Arc::clone(&writer))
         .with_hook_registry(mod_registry(host.clone()));
-        writer.initialize_fixed_session_mode(
-            &session_id.as_uuid().to_string(),
-            orch.conversation_profile().await.mode,
-            0,
-        ).await.unwrap();
+        writer
+            .initialize_fixed_session_mode(
+                &session_id.as_uuid().to_string(),
+                orch.conversation_profile().await.mode,
+                0,
+            )
+            .await
+            .unwrap();
 
         let fallback_text = "<system-reminder>\nUnknown slash fallback\n</system-reminder>";
         let fallback_context =

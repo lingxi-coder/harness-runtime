@@ -786,6 +786,157 @@ impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
     }
 }
 
+#[derive(Default)]
+struct TargetSystemPromptRenderer {
+    models: StdMutex<Vec<String>>,
+}
+
+#[async_trait]
+impl TeammateSystemPromptRenderer for TargetSystemPromptRenderer {
+    async fn render_default_system_prompt(
+        &self,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        panic!("teammates must render their own target");
+    }
+
+    async fn render_system_prompt_for_target(
+        &self,
+        target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        self.models
+            .lock()
+            .unwrap()
+            .push(target.request_model.clone());
+        let policy = lingxi_core::host::prompt_policy::resolve_prompt_policy(target.clone());
+        let body = match policy.system {
+            lingxi_core::host::prompt_policy::SystemPromptBinding::Template(template) => template,
+            _ => "NATIVE HOST BODY",
+        };
+        Ok(format!(
+            "{body}\n# Output Style: custom\nHOST_STYLE\n# Memory\nHOST_MEMORY /memory/worker\nHOST_MOD_SECTION\nModel: {}",
+            target.request_model,
+        )
+        .into())
+    }
+}
+
+fn assert_generic_teammate_host_sections(
+    system: &Utf16JsonProjection,
+    policy: &lingxi_core::host::prompt_policy::ResolvedPromptPolicy,
+    custom: &Utf16JsonProjection,
+) {
+    let text = system.string_at("").unwrap();
+    for marker in [
+        "HOST_STYLE",
+        "HOST_MEMORY /memory/worker",
+        "HOST_MOD_SECTION",
+        TEAMMATE_SYSTEM_PROMPT_ADDENDUM,
+    ] {
+        assert_eq!(text.matches(marker).count(), 1, "{marker}");
+    }
+    assert!(!text.contains("NATIVE HOST BODY"));
+    assert!(!text.contains("<total_tokens>"));
+    assert!(text.contains(&format!("Model: {}", policy.target.request_model)));
+    for key in ["subagent_consent", "subagent_notes"] {
+        let appendix = policy.reminders.template_for(key).unwrap().trim_end();
+        assert_eq!(text.matches(appendix).count(), 1, "{key}");
+    }
+    let custom_units = custom.string_units("").unwrap();
+    assert!(system
+        .string_units("")
+        .unwrap()
+        .windows(custom_units.len())
+        .any(|units| units == custom_units));
+}
+
+#[tokio::test]
+async fn build_context_generic_teammates_keep_host_sections_and_custom_utf16() {
+    for model in ["gpt-5.5", "kimi-k2.5"] {
+        let renderer = Arc::new(TargetSystemPromptRenderer::default());
+        let handler = model_test_handler(Some(model)).with_system_prompt_renderer(renderer.clone());
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "worker")
+            .await
+            .unwrap();
+        let custom = Utf16JsonProjection::parse(r#""CUSTOM ROLE\ud800""#).unwrap();
+        definition.system_prompt = Some(custom.clone());
+        let context = handler
+            .build_context(
+                lingxi_core::types::AgentId::new(),
+                "worker",
+                "team",
+                "task",
+                definition,
+            )
+            .await
+            .unwrap();
+        let policy = context.prompt_policy.as_ref().unwrap();
+        assert!(!policy.tools.is_native());
+        assert_generic_teammate_host_sections(
+            context.rendered_system_prompt.as_ref().unwrap(),
+            policy,
+            &custom,
+        );
+        assert_eq!(*renderer.models.lock().unwrap(), [model]);
+    }
+}
+
+#[tokio::test]
+async fn teammate_fallback_from_claude_keeps_target_host_sections() {
+    let renderer = Arc::new(TargetSystemPromptRenderer::default());
+    let handler =
+        model_test_handler(Some("claude-opus-5")).with_system_prompt_renderer(renderer.clone());
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "worker")
+        .await
+        .unwrap();
+    let custom = Utf16JsonProjection::parse(r#""CUSTOM ROLE\ud800""#).unwrap();
+    definition.system_prompt = Some(custom.clone());
+    let context = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "worker",
+            "team",
+            "task",
+            definition,
+        )
+        .await
+        .unwrap();
+    assert!(context
+        .rendered_system_prompt
+        .as_ref()
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .contains("NATIVE HOST BODY"));
+    for model in ["gpt-5.5", "kimi-k2.5"] {
+        let target = agent::prompt_policy::resolve_target(
+            context.api_client.as_deref(),
+            model,
+            None,
+            context.prompt_policy.as_ref().unwrap().target.mode,
+        )
+        .unwrap();
+        // The runner uses this same saved source when its serving route changes.
+        let rendered = context
+            .prompt_state
+            .as_ref()
+            .unwrap()
+            .render_for_route(&target)
+            .await
+            .unwrap();
+        assert_generic_teammate_host_sections(
+            rendered.system.as_ref().unwrap(),
+            &rendered.policy,
+            &custom,
+        );
+    }
+    assert_eq!(
+        *renderer.models.lock().unwrap(),
+        ["claude-opus-5", "gpt-5.5", "kimi-k2.5"]
+    );
+}
+
 struct TaggedDiagnosticsSource(Option<Utf16JsonProjection>);
 
 #[async_trait]
@@ -859,8 +1010,8 @@ async fn build_context_creates_an_independent_diagnostics_source_per_teammate() 
 }
 
 #[tokio::test]
-async fn build_context_renders_default_addendum_then_custom_prompt() {
-    let handler = model_test_handler(None).with_system_prompt_renderer(Arc::new(
+async fn build_context_renders_claude_default_addendum_then_custom_prompt() {
+    let handler = model_test_handler(Some("claude-opus-5")).with_system_prompt_renderer(Arc::new(
         StaticSystemPromptRenderer("BASE DEFAULT PROMPT\n"),
     ));
     let mut def = DefaultTeammateDefinition
@@ -882,6 +1033,7 @@ async fn build_context_renders_default_addendum_then_custom_prompt() {
     let expected = format!(
         "BASE DEFAULT PROMPT\n{TEAMMATE_SYSTEM_PROMPT_ADDENDUM}\n\n# Custom Agent Instructions\nCUSTOM AGENT PROMPT"
     );
+    assert!(ctx.prompt_policy.as_ref().unwrap().tools.is_native());
     assert_eq!(
         ctx.rendered_system_prompt
             .as_ref()
@@ -3306,6 +3458,7 @@ fn source_json_fixture(
 }
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        prompt_policy: None,
         available_tool_names: None,
         cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,

@@ -1,0 +1,1 @@
+Do not use the Agent tool, workflows, or deep-research unless the user, a LINGXI.md file, or a skill asks for it

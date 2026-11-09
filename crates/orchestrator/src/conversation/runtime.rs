@@ -887,8 +887,7 @@ pub(crate) struct PromptRuntime {
     /// Exact deferred-schema token counts, memoized by the same stable schema
     /// key as `wire_tool_schema_cache`. `None` is cached too: unsupported
     /// providers must not retry a doomed count endpoint every turn.
-    pub(super) deferred_tool_token_cache:
-        Mutex<std::collections::HashMap<u64, Option<u64>>>,
+    pub(super) deferred_tool_token_cache: Mutex<std::collections::HashMap<u64, Option<u64>>>,
     /// `history.len()` captured at each `silent_turn_reminder` emission.
     ///
     /// The oracle keeps its emitted attachments IN the message list, so `Ezm`
@@ -898,6 +897,10 @@ pub(crate) struct PromptRuntime {
     /// and spliced back into the walk by
     /// [`crate::prompt::silent_turn::scan_silent_stretch`].
     pub(crate) silent_turn_reminder_marks: std::sync::Mutex<Vec<usize>>,
+    pub(crate) silent_turn_message_timestamps:
+        std::sync::Mutex<std::collections::HashMap<lingxi_core::types::MessageId, i64>>,
+    pub(crate) silent_turn_reminder_timestamps:
+        std::sync::Mutex<std::collections::HashMap<usize, i64>>,
     /// REM-14 `pendingMemoryUpdates` — the oracle's app-state queue
     /// (`jzm(e)` @296554545: `let t=e.getAppState().pendingMemoryUpdates;
     /// if(t.length===0)return[]; e.setAppState(…clear…)`), drained
@@ -935,8 +938,12 @@ pub(crate) struct PromptRuntime {
     /// `AgentTool.tsx:622-623` `override.systemPrompt = forkParentSystemPrompt`).
     /// `None` until the first successful turn / when the turn ran with no system
     /// prompt. Read by the fork dispatch path ONLY; no non-fork tool touches it.
-    pub(crate) current_turn_system_prompt:
-        Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+    pub(crate) current_turn_system_prompt: Mutex<
+        Option<(
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            Option<lingxi_core::host::prompt_policy::PromptPolicyMetadata>,
+        )>,
+    >,
     /// The ONE per-session read-state registry (`path → {content, mtime_ms,
     /// offset, limit}`) — the 1:1 port of claude-code's single
     /// `context.readFileState` LRU (`FileReadTool.ts:1032`). This is the sole
@@ -1026,9 +1033,12 @@ pub(crate) struct PromptRuntime {
     /// `StaticMemoryProvider`'s role for the eager block. Set via
     /// [`Self::with_nested_memory_roots`].
     pub(crate) nested_memory_roots: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
-    /// Current advertised skill membership. Initial ingress emits a listing;
-    /// later additions and withdrawals append only their delta. Stable membership
-    /// emits nothing. Clear/resume/compaction reset this context-local baseline.
+    /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
+    /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
+    /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
+    /// attachments.ts:2607/2699). When no new skill appears,
+    /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
+    /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<Vec<u16>>>,
     /// `plan_mode` attachment cadence (2.1.238 `X4T` @296525982 + `txl`
     /// @296558044). See [`PlanReminderCadence`].
@@ -1099,6 +1109,11 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// Typed additive source restored independently of a frozen prompt body.
+    /// A route or bundle migration may discard that body while keeping this
+    /// host-approved source; current configuration always has precedence.
+    pub(crate) restored_append_system_prompt:
+        std::sync::RwLock<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub(super) frozen_prompt_source_vector: Mutex<Option<Arc<FrozenPromptSourceVector>>>,
     /// Admitted conversation epoch that produced the static snapshot and
     /// its rendering hint. Legacy transcripts belong to epoch zero.
@@ -1170,6 +1185,8 @@ impl PromptRuntime {
             wire_tool_schema_cache: Mutex::new(None),
             deferred_tool_token_cache: Mutex::new(std::collections::HashMap::new()),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
+            silent_turn_message_timestamps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            silent_turn_reminder_timestamps: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_memory_updates: std::sync::Mutex::new(Vec::new()),
             tool_search_reminder_marks: std::sync::Mutex::new(Vec::new()),
             last_memory_scan_ms: std::sync::atomic::AtomicI64::new(
@@ -1207,6 +1224,7 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            restored_append_system_prompt: std::sync::RwLock::new(None),
             frozen_prompt_source_vector: Mutex::new(None),
             prompt_snapshot_epoch: Mutex::new(None),
             pending_prompt_source_vector: Mutex::new(None),
@@ -1268,6 +1286,24 @@ impl PromptRuntime {
     /// Prepare prompt-owned conversation state before session activation.
     /// Gv authority and its date/cursor are retired only in the synchronous
     /// activation commit while the current session identity is locked.
+    pub(crate) fn install_silent_clocks(
+        &self,
+        clocks: crate::prompt::silent_turn::RestoredSilentClocks,
+    ) {
+        *self
+            .silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.message_timestamps;
+        *self
+            .silent_turn_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.reminder_marks;
+        *self
+            .silent_turn_reminder_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.reminder_timestamps;
+    }
+
     pub(crate) async fn prepare_session_scoped_reset(&self) {
         *self.git_status_snapshot.lock().await = None;
         let mut sections = self.mod_prompt_sections.lock().await;
@@ -1284,6 +1320,14 @@ impl PromptRuntime {
         *self.current_prompt_id.lock().await = None;
         *self.pending_prompt_id.lock().await = None;
         self.silent_turn_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.silent_turn_reminder_timestamps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -1309,11 +1353,23 @@ impl PromptRuntime {
         *self.pending_skill_prefetch.lock().await = None;
         *self.pending_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot.lock().await = None;
+        self.restore_prompt_snapshot_append_source(None);
         *self.frozen_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot_epoch.lock().await = None;
         *self.context_rendering_hint.lock().await = None;
         self.prompt_snapshot_resume
             .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn restore_prompt_snapshot_append_source(
+        &self,
+        snapshot: Option<&lingxi_core::host::PromptSnapshot>,
+    ) {
+        *self
+            .restored_append_system_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            snapshot.and_then(|snapshot| snapshot.append_system_prompt.clone());
     }
     /// Retire the root's Gv/qb authority beside publication of the new session
     /// identity. The caller holds both the session and instruction cursor

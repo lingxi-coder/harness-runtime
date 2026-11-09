@@ -71,7 +71,10 @@ pub use hosted_search::{
     HostedFetchOutput, HostedFetchRequest, HostedSearchError, HostedSearchOutput,
     HostedSearchRequest, HostedWebSearchClient, McpTokenCounter,
 };
-pub use model_prompt_gate::dh_simple_system_prompt;
+pub use model_prompt_gate::{
+    apply_prompt_tool_override, dh_simple_system_prompt, prompt_uses_lean, prompt_uses_native,
+    prompt_uses_rewrite,
+};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;

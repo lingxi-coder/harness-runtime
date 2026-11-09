@@ -20,139 +20,75 @@ const WINDOWS_NT: &str = "Windows_NT";
 const WINDOWS_POWERSHELL_EXE: &str = "powershell.exe";
 const WINDOWS_CMD_EXE: &str = "cmd.exe";
 
-/// Marketing name for a model id, e.g. `claude-opus-4-6` -> `Opus 4.6`.
-///
-/// Mirrors `getMarketingNameForModel`. The TS resolves the id to a canonical
-/// short name first (`getCanonicalName`, which unwraps Bedrock/Vertex ARNs);
-/// without that provider-resolution layer we substring-match the lowercased
-/// id directly, which is equivalent for first-party ids. The `[1m]` 1M-context
-/// suffix is detected on the lowercased id (TS `modelId.toLowerCase()`).
-///
-/// Order is significant — every later needle is a substring of an earlier one,
-/// so the most specific suffix must be checked first. Returns `None` for an
-/// unknown model (TS falls back to `You are powered by the model {id}.`).
+/// Baked catalog display names, with Native's historical display overrides.
 #[must_use]
 pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
-    let original = model_id.to_ascii_lowercase();
     let canonical = lingxi_core::host::model_capabilities::normalize_model_id(model_id);
-    let has_1m = original.contains("[1m]");
-
-    if canonical == "claude-fable-5-1" {
-        return Some("Fable 5.1");
+    let has_1m = model_id.to_ascii_lowercase().contains("[1m]");
+    if has_1m {
+        match canonical.as_str() {
+            "claude-opus-4-6" => return Some("Opus 4.6 (1M context)"),
+            "claude-opus-4-7" => return Some("Opus 4.7 (1M context)"),
+            "claude-opus-4-8" => return Some("Opus 4.8 (1M context)"),
+            "claude-opus-5" => return Some("Opus 5 (1M context)"),
+            "claude-sonnet-4-0" => return Some("Sonnet 4 (1M context)"),
+            "claude-sonnet-4-5" => return Some("Sonnet 4.5 (1M context)"),
+            "claude-sonnet-4-6" => return Some("Sonnet 4.6 (1M context)"),
+            _ => {}
+        }
     }
-    if canonical == "claude-mythos-5-1" {
-        return Some("Mythos 5.1");
+    match canonical.as_str() {
+        "claude-3-5-haiku" => Some("Claude 3.5 Haiku"),
+        "claude-haiku-4-5" => Some("Haiku 4.5"),
+        "claude-haiku-5-5" => Some("Haiku 5.5"),
+        "claude-3-5-sonnet" => Some("Claude 3.5 Sonnet"),
+        "claude-3-7-sonnet" => Some("Claude 3.7 Sonnet"),
+        "claude-sonnet-4-0" => Some("Sonnet 4"),
+        "claude-sonnet-4-5" => Some("Sonnet 4.5"),
+        "claude-sonnet-4-6" => Some("Sonnet 4.6"),
+        "claude-sonnet-5" => Some("Sonnet 5"),
+        "claude-sonnet-5-5" => Some("Sonnet 5.5"),
+        "claude-opus-4-0" => Some("Opus 4"),
+        "claude-opus-4-1" => Some("Opus 4.1"),
+        "claude-opus-4-5" => Some("Opus 4.5"),
+        "claude-opus-4-6" => Some("Opus 4.6"),
+        "claude-opus-4-7" => Some("Opus 4.7"),
+        "claude-opus-4-8" => Some("Opus 4.8"),
+        "claude-opus-5" => Some("Opus 5"),
+        "claude-opus-5-5" => Some("Opus 5.5"),
+        "claude-fable-5" => Some("Fable 5"),
+        "claude-fable-5-1" => Some("Fable 5.1"),
+        "claude-mythos-5" => Some("Mythos 5"),
+        "claude-mythos-5-1" => Some("Mythos 5.1"),
+        _ => None,
     }
-    if canonical == "claude-opus-5" {
-        return Some(if has_1m {
-            "Opus 5 (1M context)"
-        } else {
-            "Opus 5"
-        });
-    }
-    if canonical == "claude-opus-4-8" {
-        return Some(if has_1m {
-            "Opus 4.8 (1M context)"
-        } else {
-            "Opus 4.8"
-        });
-    }
-    if canonical == "claude-opus-4-7" {
-        return Some(if has_1m {
-            "Opus 4.7 (1M context)"
-        } else {
-            "Opus 4.7"
-        });
-    }
-    if canonical == "claude-opus-4-6" {
-        return Some(if has_1m {
-            "Opus 4.6 (1M context)"
-        } else {
-            "Opus 4.6"
-        });
-    }
-    if canonical.starts_with("claude-opus-4-5") {
-        return Some("Opus 4.5");
-    }
-    if canonical.starts_with("claude-opus-4-1") {
-        return Some("Opus 4.1");
-    }
-    if canonical == "claude-opus-4" || canonical.starts_with("claude-opus-4-") {
-        return Some("Opus 4");
-    }
-    // sonnet-5 before the sonnet-4-x arms (2.1.198 registry display_name
-    // "Sonnet 5"; mutually exclusive substrings).
-    if canonical == "claude-sonnet-5" {
-        return Some(if has_1m {
-            "Sonnet 5 (1M context)"
-        } else {
-            "Sonnet 5"
-        });
-    }
-    if canonical == "claude-sonnet-4-6" {
-        return Some(if has_1m {
-            "Sonnet 4.6 (1M context)"
-        } else {
-            "Sonnet 4.6"
-        });
-    }
-    if canonical.starts_with("claude-sonnet-4-5") {
-        return Some(if has_1m {
-            "Sonnet 4.5 (1M context)"
-        } else {
-            "Sonnet 4.5"
-        });
-    }
-    if canonical == "claude-sonnet-4" || canonical.starts_with("claude-sonnet-4-") {
-        return Some(if has_1m {
-            "Sonnet 4 (1M context)"
-        } else {
-            "Sonnet 4"
-        });
-    }
-    if canonical.starts_with("claude-3-7-sonnet") {
-        return Some("Claude 3.7 Sonnet");
-    }
-    if canonical.starts_with("claude-3-5-sonnet") {
-        return Some("Claude 3.5 Sonnet");
-    }
-    if canonical.starts_with("claude-haiku-4-5") {
-        return Some("Haiku 4.5");
-    }
-    if canonical.starts_with("claude-3-5-haiku") {
-        return Some("Claude 3.5 Haiku");
-    }
-    None
 }
 
-/// Knowledge-cutoff string for a model id, e.g. `claude-opus-4-6` ->
-/// `May 2025`. Mirrors `getKnowledgeCutoff`. `None` for unknown models (TS
-/// omits the `Assistant knowledge cutoff is ...` sentence entirely).
+/// Knowledge cutoff recorded by Claude Code 2.1.319's baked model catalog.
 #[must_use]
 pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = lingxi_core::host::model_capabilities::normalize_model_id(model_id);
-    if canonical == "claude-opus-5" {
-        Some("May 2026")
-    } else if canonical == "claude-fable-5-1" || canonical == "claude-mythos-5-1" {
-        Some("June 2026")
-    } else if canonical == "claude-sonnet-5" {
-        Some("January 2026")
-    } else if canonical == "claude-opus-4-8" || canonical == "claude-opus-4-7" {
-        Some("January 2026")
-    } else if canonical == "claude-sonnet-4-6" {
-        Some("August 2025")
-    } else if canonical == "claude-opus-4-6" || canonical.starts_with("claude-opus-4-5") {
-        Some("May 2025")
-    } else if canonical.starts_with("claude-haiku-4") {
-        Some("February 2025")
-    } else if canonical == "claude-opus-4"
-        || canonical.starts_with("claude-opus-4-")
-        || canonical == "claude-sonnet-4"
-        || canonical.starts_with("claude-sonnet-4-")
-    {
-        Some("January 2025")
-    } else {
-        None
+    match canonical.as_str() {
+        "claude-haiku-4-5" => Some("February 2025"),
+        "claude-haiku-5-5" => Some("June 2026"),
+        "claude-sonnet-4-0" => Some("January 2025"),
+        "claude-sonnet-4-5" => Some("January 2025"),
+        "claude-sonnet-4-6" => Some("August 2025"),
+        "claude-sonnet-5" => Some("January 2026"),
+        "claude-sonnet-5-5" => Some("June 2026"),
+        "claude-opus-4-0" => Some("January 2025"),
+        "claude-opus-4-1" => Some("January 2025"),
+        "claude-opus-4-5" => Some("May 2025"),
+        "claude-opus-4-6" => Some("May 2025"),
+        "claude-opus-4-7" => Some("January 2026"),
+        "claude-opus-4-8" => Some("January 2026"),
+        "claude-opus-5" => Some("May 2026"),
+        "claude-opus-5-5" => Some("June 2026"),
+        "claude-fable-5" => Some("January 2026"),
+        "claude-fable-5-1" => Some("June 2026"),
+        "claude-mythos-5" => Some("January 2026"),
+        "claude-mythos-5-1" => Some("June 2026"),
+        _ => None,
     }
 }
 
@@ -380,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             marketing_name_for_model("claude-sonnet-5[1m]"),
-            Some("Sonnet 5 (1M context)")
+            Some("Sonnet 5")
         );
         assert_eq!(
             marketing_name_for_model("claude-haiku-4-5"),
@@ -392,6 +328,35 @@ mod tests {
         );
         // Unknown / unmapped -> None (TS bare-id fallback).
         assert_eq!(marketing_name_for_model("gpt-4o"), None);
+    }
+
+    #[test]
+    fn context_319_model_metadata_matches_the_native_catalog() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/context_prompts_319.json"
+        ))
+        .unwrap();
+        for model in oracle["models"].as_array().unwrap() {
+            let id = model["id"].as_str().unwrap();
+            assert_eq!(
+                marketing_name_for_model(id),
+                model["marketing_name"].as_str(),
+                "{id}"
+            );
+            assert_eq!(
+                knowledge_cutoff_for_model(id),
+                model["knowledge_cutoff"].as_str(),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            marketing_name_for_model("vendor-compat-claude-opus-5-5"),
+            None
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("vendor-compat-claude-opus-5-5"),
+            None
+        );
     }
 
     #[test]

@@ -20,6 +20,9 @@ pub(crate) struct ChildStepRequest {
     pub api: Arc<dyn SubagentApiClient>,
     pub model: String,
     pub profile: Option<String>,
+    pub prompt_profile: Option<String>,
+    pub prompt_context: Option<crate::context::SubagentContext>,
+    pub prompt_captures: crate::prompt_policy::RequestPromptCaptures,
     pub system: Option<Utf16JsonProjection>,
     pub messages: Vec<ConversationMessage>,
     pub tools: Vec<ToolDeclaration>,
@@ -38,20 +41,91 @@ impl ChildStepRequest {
         model: &str,
         effort: Option<Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        lingxi_core::host::refusal_driver::scope_fallback_target(
+        let mut system = self.system.clone();
+        let mut messages = self.messages.clone();
+        let mut tools = self.tools.clone();
+        let mut policy = self
+            .prompt_context
+            .as_ref()
+            .and_then(|context| context.prompt_policy.clone());
+        if model != self.model || self.profile != self.prompt_profile {
+            if let Some(context) = &self.prompt_context {
+                let mode = context
+                    .prompt_policy
+                    .as_ref()
+                    .map(|policy| policy.target.mode)
+                    .unwrap_or_default();
+                let target = crate::prompt_policy::resolve_target(
+                    Some(self.api.as_ref()),
+                    model,
+                    self.profile.as_deref(),
+                    mode,
+                )?;
+                policy = Some(target.policy.clone());
+                if let Some(state) = &context.prompt_state {
+                    let rendered = state.render_for_route(&target).await.map_err(|error| {
+                        LlmError::InvalidRequest {
+                            message: error.to_string(),
+                        }
+                    })?;
+                    system = rendered.system.as_ref().map(|body| body.as_ref().clone());
+                    state.project_context(&mut messages, &rendered);
+                    let fresh = crate::prompt_policy::rerender_tools(
+                        context,
+                        &target,
+                        &context.tool_schemas,
+                    )
+                    .await
+                    .map_err(|error| LlmError::InvalidRequest {
+                        message: error.to_string(),
+                    })?;
+                    let fresh = llm_runtime::convert::to_tool_declarations(fresh)?;
+                    for tool in &mut tools {
+                        if let Some(replacement) =
+                            fresh.iter().find(|fresh| fresh.name == tool.name)
+                        {
+                            *tool = replacement.clone();
+                        }
+                    }
+                }
+            }
+        }
+        let capture = policy.map(|policy| crate::prompt_policy::CapturedRequestPrompt {
+            policy,
+            system: system.clone(),
+        });
+        let stream = lingxi_core::host::refusal_driver::scope_fallback_target(
             self.fallback_target.clone(),
             self.api.stream(SubagentApiRequest {
                 model: model.to_owned(),
                 profile: self.profile.clone(),
-                system: self.system.clone(),
-                messages: self.messages.clone(),
-                tools: self.tools.clone(),
+                system,
+                messages,
+                tools,
                 forced_tool: self.forced_tool.clone(),
                 effort,
                 opts: self.call_opts.clone(),
             }),
         )
-        .await
+        .await?;
+        let captures = self.prompt_captures.clone();
+        Ok(stream
+            .inspect(move |event| {
+                if let (
+                    Some(capture),
+                    Ok(
+                        HistoryEvent::MessageStart { response }
+                        | HistoryEvent::Completed { response },
+                    ),
+                ) = (&capture, event)
+                {
+                    captures
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(response.id.clone(), capture.clone());
+                }
+            })
+            .boxed())
     }
 }
 

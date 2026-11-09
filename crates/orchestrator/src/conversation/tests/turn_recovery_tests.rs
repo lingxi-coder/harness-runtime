@@ -1725,11 +1725,8 @@ async fn startup_responses_websocket_prewarm_uses_current_model_profile_system_a
 
 #[tokio::test]
 async fn system_prompt_model_identity_follows_switch_model() {
-    // Regression (reported): /model switched the ROUTED model, but the <env>
-    // identity line ("You are powered by the model named …") stayed frozen
-    // at config.model, so a switched-to model (e.g. Fable 5) still saw — and
-    // reported — the launch model's identity (Opus 4.8). The prompt identity
-    // must track the LIVE session.model that switch_model updates.
+    // The 2.1.319 identity is an ingress attachment. It must track the live
+    // session model rather than the model used to construct the orchestrator.
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig {
             model: "claude-opus-4-8".to_string(),
@@ -1744,7 +1741,9 @@ async fn system_prompt_model_identity_follows_switch_model() {
         std::env::temp_dir(),
     );
 
-    let before = orch.build_system_prompt().await.unwrap();
+    let before_row = orch.model_prompt_ingress_attachment().await.unwrap();
+    assert_eq!(before_row.payload.string_at("/type"), Some("model"));
+    let before = before_row.rendered.string_at("/0/content").unwrap();
     assert!(
         before
             .contains("powered by the model named Opus 4.8. The exact model ID is claude-opus-4-8"),
@@ -1759,16 +1758,19 @@ async fn system_prompt_model_identity_follows_switch_model() {
     .await
     .expect("switch_model");
 
-    let after = orch.build_system_prompt().await.unwrap();
+    let after_row = orch.model_prompt_ingress_attachment().await.unwrap();
+    assert_eq!(
+        after_row.payload.string_at("/identity/modelId"),
+        Some("claude-fable-5-1")
+    );
+    let after = after_row.rendered.string_at("/0/content").unwrap();
     assert!(
         after.contains(
             "powered by the model named Fable 5.1. The exact model ID is claude-fable-5-1"
         ),
         "identity follows the switch: {after}"
     );
-    // The stale identity LINE must be gone. (The static "most recent Claude
-    // models … Opus 4.8" catalog sentence is model-independent and stays —
-    // so assert on the identity line, not the bare "Opus 4.8" substring.)
+    // The current model row contains no launch-model identity.
     assert!(
         !after.contains("powered by the model named Opus 4.8"),
         "the stale identity line must be gone after switching: {after}"
@@ -1777,16 +1779,26 @@ async fn system_prompt_model_identity_follows_switch_model() {
 
 #[tokio::test]
 async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
-    // A switched-to NON-Claude model must still get the strong "powered by
-    // the model named {name}" form each turn (via the catalog display name),
-    // not the weak id-only "the model {id}." — so its current identity is
-    // asserted clearly. (Also: no Claude-catalog contamination.)
+    // A non-Claude identity gets its display name and cutoff from the selected
+    // provider's catalog row, independently of its wire ID.
+    let api = Arc::new(MockApiClient::new(vec![]));
+    api.set_model_listings(vec![lingxi_core::host::ModelListing {
+        display_model: "DeepSeek V4 Pro".into(),
+        request_model: "deepseek-v4-pro".into(),
+        provider_id: "deepseek".into(),
+        metadata: lingxi_core::host::ModelMetadata {
+            family: Some("deepseek-v4".into()),
+            knowledge_cutoff: Some("catalog cutoff fixture".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig {
             model: "claude-opus-4-8".to_string(),
             ..OrchestratorConfig::default()
         },
-        Arc::new(MockApiClient::new(vec![])),
+        api,
         Arc::new(ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
@@ -1802,19 +1814,26 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
     .await
     .expect("switch_model");
 
-    let sp = orch.build_system_prompt().await.unwrap();
+    let identity = orch.model_prompt_ingress_attachment().await.unwrap();
+    assert_eq!(identity.payload.string_at("/type"), Some("model"));
+    let sp = identity.rendered.string_at("/0/content").unwrap();
     assert!(
-        sp.contains(" - You are powered by the model named ")
-            && sp.contains("The exact model ID is deepseek-v4-pro."),
+        sp.contains("You are powered by the model named DeepSeek V4 Pro.")
+            && sp.contains("The exact model ID is deepseek-v4-pro.")
+            && sp.contains("Assistant knowledge cutoff is catalog cutoff fixture."),
         "non-Claude model uses the named form with its exact id: {sp}"
     );
     assert!(
-        !sp.contains(" - You are powered by the model deepseek-v4-pro."),
+        !sp.contains("You are powered by the model deepseek-v4-pro."),
         "must NOT use the weak id-only fallback: {sp}"
     );
     // The prior fix: no Claude model-catalog line for a non-Claude model.
     assert!(
-        !sp.contains("claude-fable-5-1"),
+        !orch
+            .build_system_prompt()
+            .await
+            .unwrap()
+            .contains("claude-fable-5-1"),
         "no Claude catalog contamination for a non-Claude model: {sp}"
     );
 }
@@ -1823,10 +1842,8 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
 async fn system_prompt_reflects_session_cwd_swap() {
     // Task 5 (worktree 206 session-cwd plumbing): `EnterWorktree`/
     // `ExitWorktree` swap the shared `tool_api::SessionCwd` cell the tool
-    // layer resolves relative paths through. The NEXT system-prompt
-    // render must show the SWAPPED directory's env-block
-    // `Primary working directory:` line. The trailing gitStatus block is a
-    // separate start-of-conversation snapshot and remains frozen.
+    // layer resolves relative paths through. The next environment ingress
+    // attachment must show the swapped primary working directory.
     let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-boot-fixture");
     let session_cwd = tool_api::SessionCwd::new(boot_cwd.clone(), vec![boot_cwd.clone()]);
     let orch = ConversationOrchestrator::new(
@@ -1841,7 +1858,10 @@ async fn system_prompt_reflects_session_cwd_swap() {
     )
     .with_session_cwd(session_cwd.clone());
 
-    let before = orch.build_system_prompt().await.unwrap();
+    let before_rows = orch.environment_prompt_ingress_attachments().await;
+    let before_row = before_rows.first().expect("boot environment attachment");
+    assert_eq!(before_row.payload.string_at("/type"), Some("environment"));
+    let before = before_row.rendered.string_at("/0/content").unwrap();
     assert!(
         before.contains(&format!(
             "Primary working directory: {}",
@@ -1853,13 +1873,19 @@ async fn system_prompt_reflects_session_cwd_swap() {
     let worktree_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-worktree-fixture");
     session_cwd.swap(worktree_cwd.clone(), vec![worktree_cwd.clone()]);
 
-    let after = orch.build_system_prompt().await.unwrap();
+    let after_rows = orch.environment_prompt_ingress_attachments().await;
+    let after = after_rows
+        .first()
+        .expect("worktree environment attachment")
+        .rendered
+        .string_at("/0/content")
+        .unwrap();
     assert!(
         after.contains(&format!(
             "Primary working directory: {}",
             worktree_cwd.display()
         )),
-        "system prompt must reflect the swapped worktree cwd: {after}"
+        "environment attachment must reflect the swapped worktree cwd: {after}"
     );
     assert!(
         !after.contains(&format!(
@@ -1872,9 +1898,7 @@ async fn system_prompt_reflects_session_cwd_swap() {
 
 #[tokio::test]
 async fn system_prompt_cwd_stays_at_boot_cwd_when_never_swapped() {
-    // INERT INVARIANT: a caller that never calls `.with_session_cwd(...)`
-    // gets byte-identical behavior to before Task 5 — the prompt always
-    // shows the boot cwd handed to the constructor.
+    // A caller without a shared SessionCwd override announces its boot cwd.
     let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-inert-fixture");
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -1887,7 +1911,10 @@ async fn system_prompt_cwd_stays_at_boot_cwd_when_never_swapped() {
         boot_cwd.clone(),
     );
 
-    let sp = orch.build_system_prompt().await.unwrap();
+    let rows = orch.environment_prompt_ingress_attachments().await;
+    let environment = rows.first().expect("boot environment attachment");
+    assert_eq!(environment.payload.string_at("/type"), Some("environment"));
+    let sp = environment.rendered.string_at("/0/content").unwrap();
     assert!(
         sp.contains(&format!(
             "Primary working directory: {}",

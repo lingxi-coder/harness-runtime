@@ -75,6 +75,16 @@ impl HookPromptRequest {
 /// Minimal current contract the orchestrator needs from the API client.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
+    fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        Ok(lingxi_core::host::prompt_policy::PromptTarget::unresolved(
+            model, profile, mode,
+        ))
+    }
     /// Session-owned tool-reference normalization used by main and side queries.
     fn set_tool_search_enabled(&self, _enabled: bool) {}
 
@@ -1406,6 +1416,10 @@ mod conversation_test;
 #[path = "model_call_prepare_test.rs"]
 mod model_call_prepare_test;
 
+#[cfg(test)]
+#[path = "conversation/prompt_policy_tests.rs"]
+mod prompt_policy_tests;
+
 /// Bare text injected as a user message when streaming is cancelled (ESC /
 /// SIGINT) DURING tool execution for the current turn. 1:1 with claude-code
 /// `messages.ts:208` `INTERRUPT_MESSAGE_FOR_TOOL_USE`.
@@ -1484,6 +1498,7 @@ pub(crate) struct MainThreadAgentState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WireToolSchemaCacheKey {
+    prompt_policy_fingerprint: String,
     tool_names: Vec<String>,
     dynamic_schema_revisions: Vec<(String, String)>,
     // Immutable borrowed schema and owning Tool identities. Retaining the
@@ -2233,6 +2248,8 @@ mod prompt_cache_impl;
 mod prompt_impl;
 #[path = "conversation/prompt_ingress_environment.rs"]
 mod prompt_ingress_environment;
+#[path = "conversation/prompt_selection.rs"]
+pub(crate) mod prompt_selection;
 #[path = "conversation/reminders.rs"]
 mod reminders_impl;
 #[path = "conversation/skill_projection.rs"]

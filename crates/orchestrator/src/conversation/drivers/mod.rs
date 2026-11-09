@@ -1032,8 +1032,15 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        let prompt = prompt.into();
+        crate::turn_loop::boxed_turn_future(|| self.run_turn_source(prompt)).await
+    }
+
+    async fn run_turn_source(
+        &self,
+        prompt: Utf16JsonProjection,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
         llm_runtime::catalog_task::scope(async {
-            let prompt = prompt.into();
             self.cancel_idle_compaction();
             let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
             self.begin_turn_metrics();

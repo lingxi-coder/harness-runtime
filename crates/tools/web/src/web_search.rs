@@ -499,33 +499,8 @@ fn web_search_description() -> String {
     // It also ends with a trailing `\n`. Both are reproduced here (raw string
     // opens with a newline, first line is `- Allows...`, closes after a newline).
     format!(
-        r#"
-- Allows the assistant to search the web and use the results to inform responses
-- Provides up-to-date information for current events and recent data
-- Returns search result information formatted as search result blocks, including links as markdown hyperlinks
-- Use this tool for accessing information beyond the model's knowledge cutoff
-- Searches are performed automatically within a single API call
-
-CRITICAL REQUIREMENT - You MUST follow this:
-  - After answering the user's question, you MUST include a "Sources:" section at the end of your response
-  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)
-  - This is MANDATORY - never skip including sources in your response
-  - Example format:
-
-    [Your answer here]
-
-    Sources:
-    - [Source Title 1](https://example.com/1)
-    - [Source Title 2](https://example.com/2)
-
-Usage notes:
-  - Domain filtering can include or block specific websites when supported by the provider
-  - Unsupported providers or search options return an error
-
-IMPORTANT - Use the correct year in search queries:
-  - The current month is {month_year}. You MUST use this year when searching for recent information, documentation, or current events.
-  - Example: If the user asks for "latest React docs", search for "React documentation" with the current year, NOT last year
-"#
+        include_str!("templates/claude-code-2.1.319/web-search-long.md"),
+        month_year = month_year
     )
 }
 
@@ -548,25 +523,22 @@ IMPORTANT - Use the correct year in search queries:
 fn web_search_description_concise() -> String {
     let month_year = chrono::Local::now().format("%B %Y").to_string();
     format!(
-        r#"Search the web. Returns result blocks with titles and URLs.
-
-- The current month is {month_year} — use this when searching for recent information.
-- `allowed_domains` / `blocked_domains` filter results.
-- After answering from results, end with a "Sources:" list of the URLs you used as markdown links."#
+        include_str!("templates/claude-code-2.1.319/web-search-lean.md"),
+        month_year = month_year
     )
 }
 
-/// Select the WebSearch prompt variant — 1:1 with claude-code `CNi(model)`
-/// (binary offset ~197074952): `Dh(model) ? CONCISE : VERBOSE`. The session /
-/// subagent model is threaded via [`PromptOptions::model`]; `None` mirrors the
-/// binary's `Dh(undefined)` → VERBOSE.
-///
-/// The `Dh(model)` "simple system prompt" gate is the shared
-/// [`tool_api::dh_simple_system_prompt`] (single source of truth in
-/// `tool-api/src/model_prompt_gate.rs`), consulted identically by the file/task
-/// tools — `UWu`/`dfe`/`FWu` parity notes live there.
+/// Compatibility entry point for callers without resolved request options.
+#[cfg(test)]
 fn select_web_search_prompt(model: Option<&str>) -> String {
-    if tool_api::dh_simple_system_prompt(model) {
+    web_search_prompt(&PromptOptions {
+        model: model.map(str::to_owned),
+        ..PromptOptions::default()
+    })
+}
+
+fn web_search_prompt(options: &PromptOptions) -> String {
+    if tool_api::prompt_uses_lean(options) {
         web_search_description_concise()
     } else {
         web_search_description()
@@ -687,11 +659,7 @@ impl Tool for WebSearchTool {
         web_search_description()
     }
     async fn prompt(&self, opts: &PromptOptions) -> Source {
-        // 1:1 with claude-code `async prompt({model:e}){return CNi(e)}`
-        // (binary @202215633), where `CNi(model)=Dh(model)?CONCISE:VERBOSE`
-        // (@~197074952). The session/subagent model is threaded via
-        // `PromptOptions::model`; `None` ⇒ `Dh(undefined)` ⇒ VERBOSE.
-        select_web_search_prompt(opts.model.as_deref()).into()
+        web_search_prompt(opts).into()
     }
 
     async fn call(
@@ -1075,9 +1043,15 @@ mod tests {
         let prev = env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
         env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT");
 
-        // `None`/empty ⇒ Dh(undefined) ⇒ VERBOSE.
-        assert_eq!(select_web_search_prompt(None), web_search_description());
-        assert_eq!(select_web_search_prompt(Some("")), web_search_description());
+        // Standalone unknown routes use the generic Lean bundle.
+        assert_eq!(
+            select_web_search_prompt(None),
+            web_search_description_concise()
+        );
+        assert_eq!(
+            select_web_search_prompt(Some("")),
+            web_search_description_concise()
+        );
         // Current-gen models (UWu=false ⇒ !UWu=true ⇒ Dh true) ⇒ CONCISE.
         assert_eq!(
             select_web_search_prompt(Some("claude-opus-4-8")),
