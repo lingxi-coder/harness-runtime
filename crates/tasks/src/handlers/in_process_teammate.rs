@@ -331,6 +331,13 @@ pub trait TeammateSystemPromptRenderer: Send + Sync {
     ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
         self.render_default_system_prompt().await
     }
+
+    async fn render_prompt_context_for_target(
+        &self,
+        _target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        Ok(agent::handle::SubagentPromptContext::default())
+    }
 }
 
 struct TeammatePromptSource {
@@ -340,6 +347,16 @@ struct TeammatePromptSource {
 
 #[async_trait]
 impl agent::prompt_policy::SubagentSystemPromptRenderer for TeammatePromptSource {
+    async fn render_prompt_context(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        match &self.renderer {
+            Some(renderer) => renderer.render_prompt_context_for_target(target).await,
+            None => Ok(agent::handle::SubagentPromptContext::default()),
+        }
+    }
+
     async fn render_system_prompt(
         &self,
         target: &agent::handle::SubagentPromptTarget,
@@ -1344,7 +1361,7 @@ impl InProcessTeammateHandler {
         // Code runs it through the same teammate-message renderer as mailbox
         // input, with `from:"team-lead"`; a raw user message changes both the
         // prompt bytes and the trust boundary.
-        let prompt_messages = if description_units.is_empty() {
+        let mut prompt_messages = if description_units.is_empty() {
             vec![]
         } else {
             let rendered = teammate_message_envelope(TEAM_LEAD_NAME, description);
@@ -1374,7 +1391,7 @@ impl InProcessTeammateHandler {
         // addendum, then an optional `# Custom Agent Instructions` section.
         // A standalone/test handler without a renderer still receives the
         // teammate addendum; production always wires the live renderer.
-        let prompt_state = agent::prompt_policy::SubagentPromptState {
+        let mut prompt_state = agent::prompt_policy::SubagentPromptState {
             initial_policy: prompt_target.policy.clone(),
             role: Some(
                 render_teammate_system_prompt(
@@ -1400,7 +1417,7 @@ impl InProcessTeammateHandler {
             seeded_context: Default::default(),
             replace_initial_context: false,
         };
-        let rendered_system_prompt = prompt_state
+        let rendered = prompt_state
             .render_for_route(&prompt_target)
             .await
             .map_err(|error| {
@@ -1410,9 +1427,13 @@ impl InProcessTeammateHandler {
                         .to_json_string()
                         .unwrap_or_else(|_| "settings operation failed".to_owned()),
                 )
-            })?
-            .system
-            .expect("teammate system prompt is present");
+            })?;
+        prompt_state.seeded_context = agent::prompt_policy::inject_context(
+            &mut prompt_messages,
+            &rendered.context,
+            rendered.system_turns,
+        );
+        let rendered_system_prompt = rendered.system.expect("teammate system prompt is present");
         let icon = definition.icon.clone();
         let context = SubagentContext {
             server_fallback_model_enforcement: None,

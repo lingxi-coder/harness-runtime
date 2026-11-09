@@ -2203,6 +2203,7 @@ pub(crate) use compaction_impl::{
 };
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
+pub(crate) use drivers_impl::PreparedReminders;
 pub use drivers_impl::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, PendingPromptIdentity, QueuedPromptInput, RealtimeAgentContext,

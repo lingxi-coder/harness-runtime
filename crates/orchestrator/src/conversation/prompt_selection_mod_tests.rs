@@ -64,6 +64,174 @@ fn tool_registry() -> Arc<tool_api::registry::ToolRegistry> {
     Arc::new(registry)
 }
 
+fn task_registry() -> Arc<tool_api::registry::ToolRegistry> {
+    let context = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        Vec::new(),
+    );
+    let mut registry = tool_api::registry::ToolRegistry::new();
+    registry.register_builtin(Arc::new(tool_task::TaskCreateTool::new(context.clone())));
+    registry.register_builtin(Arc::new(tool_task::TaskUpdateTool::new(context)));
+    Arc::new(registry)
+}
+
+#[derive(Default)]
+struct OnceTaskNotifications(AtomicUsize);
+
+#[async_trait::async_trait]
+impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
+    async fn take_pending_task_notifications(
+        &self,
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
+        if self.0.fetch_add(1, Ordering::SeqCst) != 0 {
+            return Vec::new();
+        }
+        vec![lingxi_core::host::task_registry::TaskNotification {
+            task_id: "mod-completion".into(),
+            task_type: "local_bash".into(),
+            status: "completed".into(),
+            description: "ONE SHOT COMPLETION".into(),
+            ..Default::default()
+        }]
+    }
+}
+
+fn assert_task_reminder_projection(
+    model: &str,
+    messages: &[lingxi_core::types::ConversationMessage],
+    tools: &[llm_runtime::ToolDeclaration],
+) {
+    let generic = model == "gpt-5.5";
+    for name in ["TaskCreate", "TaskUpdate"] {
+        assert_eq!(
+            tools.iter().any(|tool| tool.name == name),
+            generic,
+            "{model} {name}"
+        );
+    }
+    let text = messages
+        .iter()
+        .map(|message| message.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        text.matches("The task tools haven't been used").count(),
+        usize::from(generic),
+        "{model}: {text}"
+    );
+    assert_eq!(
+        text.matches("ONE SHOT COMPLETION").count(),
+        1,
+        "durable completion: {text}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_mod_batched_rewrites_reminders_without_redraining_notifications() {
+    let targets = ["claude-opus-5", "gpt-5.5", "gpt-5.5"];
+    let (directory, hooks) = mod_host(&targets).await;
+    let api = Arc::new(RoutingApi {
+        inner: MockApiClient::new(targets.iter().map(|model| answer(model)).collect()),
+        resolutions: AtomicUsize::new(0),
+    });
+    let notifications = Arc::new(OnceTaskNotifications::default());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig {
+            model: "gpt-5.5".into(),
+            ..Default::default()
+        },
+        api.clone(),
+        task_registry(),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        directory.path().to_path_buf(),
+    )
+    .with_hook_registry(hooks)
+    .with_task_notifications(notifications.clone());
+    {
+        let mut session = orch.session.lock().await;
+        session.turns_since_last_todo_write = tool_task::reminder::TURNS_SINCE_WRITE;
+        session.turns_since_last_reminder = tool_task::reminder::TURNS_BETWEEN_REMINDERS;
+    }
+    orch.run_turn("keep the task assignment").await.unwrap();
+    let calls = api.inner.captured_requests().await;
+    assert_eq!(calls.len(), targets.len());
+    for (call, target) in calls.iter().zip(targets) {
+        let OrchestratorApiRequest::Main(call) = call else {
+            panic!("main request")
+        };
+        assert_eq!(call.model, target);
+        assert_task_reminder_projection(target, &call.messages, &call.tools);
+    }
+    assert_eq!(notifications.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        orch.session.lock().await.turns_since_last_reminder,
+        targets.len() as u32
+    );
+}
+
+#[tokio::test]
+async fn prompt_mod_streaming_rewrites_reminders_for_every_next_request() {
+    let targets = ["claude-opus-5", "gpt-5.5", "gpt-5.5"];
+    let (directory, hooks) = mod_host(&targets).await;
+    let api = Arc::new(RoutingApi {
+        inner: MockApiClient::new(vec![]),
+        resolutions: AtomicUsize::new(0),
+    });
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(
+        targets
+            .iter()
+            .enumerate()
+            .map(|(index, model)| stream_answer(model, &format!("request-{index}")))
+            .collect(),
+    ));
+    let notifications = Arc::new(OnceTaskNotifications::default());
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig {
+                model: "gpt-5.5".into(),
+                ..Default::default()
+            },
+            api,
+            streaming.clone(),
+            task_registry(),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            directory.path().to_path_buf(),
+        )
+        .with_hook_registry(hooks)
+        .with_task_notifications(notifications.clone()),
+    );
+    {
+        let mut session = orch.session.lock().await;
+        session.turns_since_last_todo_write = tool_task::reminder::TURNS_SINCE_WRITE;
+        session.turns_since_last_reminder = tool_task::reminder::TURNS_BETWEEN_REMINDERS;
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        orch.run_turn_streaming("keep the task assignment"),
+    )
+    .await
+    .expect("Mod response chain completes")
+    .unwrap();
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), targets.len());
+    for (call, target) in calls.iter().zip(targets) {
+        assert_eq!(call.model, target);
+        assert_task_reminder_projection(target, &call.messages, &call.tools);
+    }
+    assert_eq!(notifications.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        orch.session.lock().await.turns_since_last_reminder,
+        targets.len() as u32
+    );
+}
+
 fn answer(model: &str) -> HistoryResponse {
     let mut response = mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
@@ -342,6 +510,7 @@ async fn spawned_same_route_reuses_exact_captured_utf16_without_reresolving() {
         available_tool_names: Some(vec!["Read".into()]),
         skip_global_cache: true,
         request_history: None,
+        reminders: Default::default(),
     };
     let tools = previous.tools.clone();
     let before = api.resolutions.load(Ordering::SeqCst);
@@ -404,6 +573,7 @@ async fn changed_profile_rebuilds_tools_with_frozen_mode_and_preserves_custom_so
                 available_tool_names: None,
                 skip_global_cache: false,
                 request_history: Some(history.clone()),
+                reminders: Default::default(),
             },
             crate::query_model::ModelRoute {
                 model: "shared-alias".into(),

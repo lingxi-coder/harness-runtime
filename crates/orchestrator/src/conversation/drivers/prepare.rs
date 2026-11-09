@@ -63,6 +63,35 @@ pub(crate) struct PreparedTurnStep {
     pub(crate) date_change_reminder: Option<ConversationMessage>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct PreparedReminders {
+    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) engine_sources: std::collections::HashMap<MessageId, EngineReminderSource>,
+}
+
+impl PreparedReminders {
+    pub(crate) fn reproject(&self, snapshot: &mut Vec<ConversationMessage>, replacement: &Self) {
+        let prior_ids = self
+            .messages
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        let replacements = replacement
+            .messages
+            .iter()
+            .map(|message| (message.id(), message))
+            .collect::<std::collections::HashMap<_, _>>();
+        snapshot.retain_mut(|message| {
+            if let Some(replacement) = replacements.get(&message.id()) {
+                *message = (*replacement).clone();
+                true
+            } else {
+                !prior_ids.contains(&message.id())
+            }
+        });
+    }
+}
+
 fn classify_prompt_ingress_history(
     history: &[ConversationMessage],
     mut is_injected: impl FnMut(&lingxi_core::types::MessageId) -> bool,
@@ -154,8 +183,14 @@ impl ConversationOrchestrator {
                                 .map(ConversationMessage::id)
                                 .collect::<std::collections::HashSet<_>>();
                             snapshot.retain(|message| !prior_ids.contains(&message.id()));
-                            self.rerender_engine_reminders(previous, &prompt_policy, &wire_tools)
-                                .await
+                            self.rerender_prompt_reminders(
+                                &PreparedReminders {
+                                    messages: previous.turn_reminders.clone(),
+                                    engine_sources: previous.engine_reminder_sources.clone(),
+                                },
+                                &prompt_policy,
+                                &wire_tools,
+                            ).await.messages
                         };
                         let mut guarded_async_hook_reminders =
                             previous.guarded_async_hook_reminders.clone();
@@ -1157,6 +1192,7 @@ impl ConversationOrchestrator {
         ).await {
             deferred_context_announcement_rows.push((row.message, row.payload));
         }
+        self.project_dynamic_memory_context(&mut snapshot).await;
         let snapshot = self
             .prepare_persistent_chat_request(
                 snapshot,
@@ -1292,16 +1328,16 @@ impl ConversationOrchestrator {
         Some(rendered)
     }
 
-    async fn rerender_engine_reminders(
+    pub(crate) async fn rerender_prompt_reminders(
         &self,
-        previous: &PreparedTurnStep,
+        previous: &PreparedReminders,
         policy: &lingxi_core::host::prompt_policy::ResolvedPromptPolicy,
         tools: &[lingxi_core::host::SourceToolWireDefinition],
-    ) -> Vec<ConversationMessage> {
+    ) -> PreparedReminders {
         let has_tool = |name: &str| tools.iter().any(|tool| tool.name == name);
-        let mut reminders = Vec::with_capacity(previous.turn_reminders.len());
-        for message in &previous.turn_reminders {
-            let Some(source) = previous.engine_reminder_sources.get(&message.id()) else {
+        let mut reminders = Vec::with_capacity(previous.messages.len());
+        for message in &previous.messages {
+            let Some(source) = previous.engine_sources.get(&message.id()) else {
                 // Durable notifications and guarded hook completions already
                 // belong to this logical step. Never drain their queues again.
                 reminders.push(message.clone());
@@ -1342,7 +1378,10 @@ impl ConversationOrchestrator {
                 }
             }
         }
-        reminders
+        PreparedReminders {
+            messages: reminders,
+            engine_sources: previous.engine_sources.clone(),
+        }
     }
 
     fn push_engine_attachment<'a>(

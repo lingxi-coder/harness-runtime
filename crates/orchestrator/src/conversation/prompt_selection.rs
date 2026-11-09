@@ -142,6 +142,7 @@ pub(crate) struct ReselectedPromptComponents {
         Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub(crate) skip_global_cache: bool,
     pub(crate) request_history: Option<Vec<lingxi_core::types::ConversationMessage>>,
+    pub(crate) reminders: super::PreparedReminders,
 }
 
 impl ConversationOrchestrator {
@@ -211,6 +212,14 @@ impl ConversationOrchestrator {
                             };
                             let (tools, skip_global_cache, _, available_tool_names) =
                                 self.build_wire_tools_with_complete().await?;
+                            let reminders = self
+                                .rerender_prompt_reminders(&previous.reminders, &policy, &tools)
+                                .await;
+                            let mut request_history = previous.request_history;
+                            if let Some(history) = &mut request_history {
+                                previous.reminders.reproject(history, &reminders);
+                                self.project_dynamic_memory_context(history).await;
+                            }
                             if matches!(system, Some(SystemPromptInput::SourceVector { .. })) {
                                 self.record_prompt_snapshot_if_needed(system.as_ref(), &tools)
                                     .await;
@@ -222,7 +231,8 @@ impl ConversationOrchestrator {
                                 tools,
                                 available_tool_names: Some(available_tool_names),
                                 skip_global_cache,
-                                request_history: previous.request_history,
+                                request_history,
+                                reminders,
                             }
                         };
                         // Preserve the caller's typed custom source even when a new

@@ -23,6 +23,7 @@ mod prepare;
 mod projected_content;
 mod realtime;
 mod streaming;
+pub(crate) use prepare::PreparedReminders;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,

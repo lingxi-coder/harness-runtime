@@ -552,7 +552,7 @@ fn mod_turn_step_stream(
                             })?
                     };
                     let skip_global_cache_for_system_prompt = components.skip_global_cache;
-                    let mut snapshot = snapshot;
+                    let mut snapshot = components.request_history.clone().unwrap_or(snapshot);
                     crate::query_model::ROUTE
                         .scope(
                             Some(route.clone()),
@@ -574,7 +574,7 @@ fn mod_turn_step_stream(
                             ),
                         )
                         .await;
-                    let mut turn_reminders = Vec::new();
+                    let mut turn_reminders = components.reminders.messages.clone();
                     let mut guarded_reminders = publication_guards
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -585,6 +585,7 @@ fn mod_turn_step_stream(
                         &mut guarded_reminders,
                     );
                     typed_attachment_ids.extend(owner.typed_attachment_ids_for_snapshot(&snapshot));
+                    components.reminders.messages = turn_reminders;
                     components.request_history = Some(snapshot.clone());
                     *effective_model.lock().unwrap() = Some(components.clone());
                     let request_dispatch_admission =
@@ -1191,6 +1192,7 @@ impl StreamingTurnDriver<'_> {
             mut model_profile,
             outgoing_history_rewriter,
             mut turn_reminders,
+            engine_reminder_sources,
             tool_result_reminder_suffixes,
             mut native_anthropic_request_context,
             thinking_resumption_host_facts,
@@ -1367,6 +1369,10 @@ impl StreamingTurnDriver<'_> {
                     available_tool_names: available_tool_names.clone(),
                     skip_global_cache: skip_global_cache_for_system_prompt,
                     request_history: Some(snapshot.clone()),
+                    reminders: super::PreparedReminders {
+                        messages: turn_reminders.clone(),
+                        engine_sources: engine_reminder_sources.clone(),
+                    },
                 },
                 host,
                 orch.streaming_api.clone(),
@@ -1407,6 +1413,7 @@ impl StreamingTurnDriver<'_> {
                 wire_tools = components.tools.clone();
                 available_tool_names = components.available_tool_names.clone();
                 skip_global_cache_for_system_prompt = components.skip_global_cache;
+                turn_reminders = components.reminders.messages.clone();
                 mod_system_prompt = Some(components.system.clone());
                 if let Some(history) = &components.request_history {
                     query_history = history.clone();
@@ -3732,6 +3739,7 @@ impl StreamingTurnDriver<'_> {
             opened.wire_tools = components.tools.clone();
             opened.available_tool_names = components.available_tool_names.clone();
             opened.skip_global_cache_for_system_prompt = components.skip_global_cache;
+            opened.turn_reminders = components.reminders.messages.clone();
             if let Some(history) = &components.request_history {
                 opened.query_history = history.clone();
             }

@@ -222,6 +222,24 @@ Engine-owned environment context is replaced in the outgoing projection while
 history and custom role/addendum sources are retained. A fork reuses its captured
 system prefix only when the captured and current policies are equal.
 
+In-process teammates receive the host-rendered body together with environment,
+model and date messages for their own route. The runner carries the complete
+context seed into its request-local Mod context, so a subsequent model rewrite
+replaces that projection without deleting the assignment or retaining the
+previous model's memory instructions.
+
+With dynamic system sections excluded, native memory directories are supplied
+by an outgoing-only context message. Standard Claude bodies retain the static
+auto-memory protocol; Lean bodies receive their complete memory protocol in
+that message. It is recomputed for route changes and request rebuilds, including
+old sessions whose ordinary context sections were already announced. This
+message does not occupy a plugin `userContext` key or enter durable history.
+
+Both ordinary fallback and Mod model rewrites render eligible reminders from
+the logical step's original engine sources and replace their outgoing history
+copies by message ID. Same-route requests reuse their captured reminders;
+reselection does not drain notifications or advance reminder counters.
+
 ## Adding a model-specific bundle
 
 1. Add the static system, memory and any full tool/reminder replacement files.

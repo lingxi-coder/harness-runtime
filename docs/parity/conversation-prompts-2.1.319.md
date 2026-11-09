@@ -197,3 +197,40 @@ locks were updated for the synchronized text and typed-ingress placement;
 explicit styles retain proactive guidance as required by 2.1.319.
 The publication evidence is in the parent workspace's
 `artifacts/prompts-319-publication-20261109/work/` directory.
+
+## Review follow-up: request context and reminder projection
+
+The follow-up fixes three request-lifecycle omissions while retaining the pinned
+template bodies and model gates:
+
+- In-process teammates now receive the host environment and their own model/date
+  context. Each physical child request carries the complete context seed into
+  Mod dispatch, so consecutive fallback/model rewrites replace every old section
+  and retain the assignment and custom UTF-16 instructions.
+- With dynamic system sections excluded, an outgoing memory message supplies
+  the standard Claude directory or full Lean/rewrite protocol. It works with an
+  empty memory directory, prior context announcements and model switches. It
+  preserves plugin `Memory` keys and does not enter durable conversation history.
+- Batched and streaming Mod rewrites share the ordinary fallback's reminder
+  renderer. They project the target policy and admitted tools from original
+  engine sources, removing outdated history copies without consuming completion
+  queues or advancing reminder cadence again.
+
+New regressions exercise actual memory and Mod requests plus sequential teammate
+projections through Claude, GPT and Kimi in both context placement lanes. The
+legacy raw-snapshot routing test checks native prefix restoration before request
+preparation, then verifies the host's intentional migration of snapshots missing
+bundle metadata.
+
+Follow-up acceptance passed: **658 prompt tests across 13 packages**, **101
+distinct targeted lifecycle tests** (overlapping the prompt filter), all seven
+pinned source oracles, six complete native bodies, three native child fixtures,
+five integration byte locks and the file-tool integration. Four captured LingXi
+teammate requests against a mock API (Opus, Sonnet, GPT and Kimi) all contain the
+actual cwd/platform/shell, model/date and assignment. Desktop/Mobile composition
+also passed `cargo check`; this is not paid-provider or device acceptance.
+
+Final compilation used a dedicated target cache after detecting another
+worktree's metadata in the shared cache. Direct test binaries use the same
+16 MiB stack setting as Cargo. Logs, request captures and source manifests are
+retained under `artifacts/prompts-319-fixes-20261109/work/` in the parent workspace.

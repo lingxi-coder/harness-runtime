@@ -577,6 +577,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         prepared.native_anthropic_request_context;
                     let thinking_resumption_host_facts = prepared.thinking_resumption_host_facts;
                     let mut turn_reminders = prepared.turn_reminders;
+                    let engine_reminder_sources = prepared.engine_reminder_sources;
                     let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
                     let context_announcements = prepared.context_announcements;
                     let mut tools = prepared.wire_tools;
@@ -724,7 +725,10 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         max_tokens: max_tokens_override,
                         deferred: deferred_tools_reminder,
                         date_change: date_change_reminder,
-                        reminders: turn_reminders.clone(),
+                        reminders: crate::conversation::PreparedReminders {
+                            messages: turn_reminders.clone(),
+                            engine_sources: engine_reminder_sources.clone(),
+                        },
                         guarded_async_hook_reminders: guarded_async_hook_reminders.clone(),
                         context_announcements: context_announcements.clone(),
                         cost_scope: cost_scope.clone(),

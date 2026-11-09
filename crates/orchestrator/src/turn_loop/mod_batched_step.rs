@@ -32,7 +32,7 @@ pub(super) struct Request {
     pub max_tokens: Option<u32>,
     pub deferred: Option<ConversationMessage>,
     pub date_change: Option<ConversationMessage>,
-    pub reminders: Vec<ConversationMessage>,
+    pub reminders: crate::conversation::PreparedReminders,
     pub guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     pub context_announcements: crate::conversation::PreparedContextAnnouncements,
     pub cost_scope: Option<cost::CostSessionScope>,
@@ -273,6 +273,7 @@ pub(super) async fn dispatch(
         available_tool_names: params.available_tool_names.clone(),
         skip_global_cache: params.skip_global_cache_for_system_prompt,
         request_history: Some(params.history.clone()),
+        reminders: params.reminders.clone(),
     };
     let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
         "turnId":params.turn_id,
@@ -402,6 +403,10 @@ pub(super) async fn dispatch(
                 params.system = components.system.clone();
                 params.tools = components.tools.clone();
                 params.skip_global_cache_for_system_prompt = components.skip_global_cache;
+                params.reminders = components.reminders.clone();
+                if let Some(history) = &components.request_history {
+                    params.history = history.clone();
+                }
                 crate::query_model::ROUTE.scope(
                 Some(route.clone()),
                 PROMPT_POLICY_OVERRIDE.scope((route, Arc::clone(&components.policy)), async {
@@ -442,7 +447,7 @@ pub(super) async fn dispatch(
                         params.max_tokens,
                         params.deferred,
                         params.date_change,
-                        params.reminders.clone(),
+                        params.reminders.messages.clone(),
                         tool_result_reminder_suffixes,
                         &mut params.guarded_async_hook_reminders,
                         &params.context_announcements,
@@ -593,7 +598,7 @@ pub(super) async fn dispatch(
                     params.max_tokens,
                     params.deferred,
                     params.date_change,
-                    params.reminders.clone(),
+                    params.reminders.messages.clone(),
                     tool_result_reminder_suffixes,
                     &mut params.guarded_async_hook_reminders,
                     &params.context_announcements,

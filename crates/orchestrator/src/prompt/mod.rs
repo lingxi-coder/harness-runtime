@@ -484,6 +484,42 @@ pub(crate) fn resolve_context_prompt_policy(
 }
 
 #[must_use]
+pub(crate) fn dynamic_memory_section(ctx: &SystemPromptContext) -> Option<String> {
+    if !ctx.exclude_dynamic_sections {
+        return None;
+    }
+    let directory = ctx.memory_dir.as_ref()?;
+    let policy = resolve_context_prompt_policy(
+        ctx,
+        ctx.prompt_policy.as_ref().map_or(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            |policy| policy.target.mode,
+        ),
+    );
+    dynamic_memory_section_for_policy(directory, &policy)
+}
+
+pub(crate) fn dynamic_memory_section_for_policy(
+    directory: &std::path::Path,
+    policy: &ResolvedPromptPolicy,
+) -> Option<String> {
+    if !matches!(policy.memory, MemoryPromptBinding::ClaudeNative) {
+        return None;
+    }
+    let model = &policy.target.canonical_model;
+    Some(
+        if lingxi_core::host::model_capabilities::claude_lean_prompt_for(model) {
+            memory_section::render_with_hygiene(
+                &directory.to_string_lossy(),
+                lingxi_core::host::model_capabilities::lean_rewrite_for(model),
+            )
+        } else {
+            memory_section::render_auto_directory(&directory.to_string_lossy())
+        },
+    )
+}
+
+#[must_use]
 pub(crate) fn prompt_policy_is_lean(policy: &ResolvedPromptPolicy) -> bool {
     match policy.system {
         SystemPromptBinding::Template(_) => true,

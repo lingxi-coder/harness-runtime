@@ -71,7 +71,7 @@ pub struct SubagentPromptState {
 #[derive(Debug, Clone, Default)]
 pub struct PromptContextSeed {
     pub user_message: Option<MessageId>,
-    pub user_prefix_blocks: usize,
+    pub user_prefix: Vec<ContentBlock>,
     pub system_messages: Vec<MessageId>,
 }
 
@@ -81,6 +81,13 @@ pub trait SubagentSystemPromptRenderer: Send + Sync {
         &self,
         target: &SubagentPromptTarget,
     ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError>;
+
+    async fn render_prompt_context(
+        &self,
+        _target: &SubagentPromptTarget,
+    ) -> Result<SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        Ok(SubagentPromptContext::default())
+    }
 }
 
 pub struct RenderedSubagentPrompt {
@@ -141,6 +148,11 @@ impl SubagentPromptState {
                 // standalone generic child. Native teammate bytes stay intact.
                 if !target.policy.reminders.is_native() {
                     append_portable_reminders(&mut body, &target.policy);
+                }
+                let context = renderer.render_prompt_context(target).await?;
+                rendered.context.extend(context.additional_context);
+                if let Some(suffix) = context.system_suffix {
+                    append_text(&mut body, &Utf16JsonProjection::from(suffix), "\n\n");
                 }
                 rendered.system = body.map(Arc::new);
             }
@@ -240,22 +252,29 @@ impl SubagentPromptState {
     }
 
     /// Replace only engine-owned environment context in this request projection.
+    /// Return the source state for this exact projection. A downstream model
+    /// rewrite must use its complete seed, including optional context sections.
     pub fn project_context(
         &self,
         messages: &mut Vec<ConversationMessage>,
         rendered: &RenderedSubagentPrompt,
-    ) {
+    ) -> Self {
         if rendered.reuses_fork_prefix
             || (!self.replace_initial_context
                 && self.initial_policy.as_ref() == rendered.policy.as_ref())
         {
-            return;
+            return self.clone();
         }
         self.seeded_context.remove(messages);
         // Forked and recovered history may have been written by an older
         // process; the Native three-section envelope is unambiguous here.
         remove_native_environment_context(messages);
-        inject_context(messages, &rendered.context, rendered.system_turns);
+        let mut projected = self.clone();
+        projected.seeded_context =
+            inject_context(messages, &rendered.context, rendered.system_turns);
+        projected.initial_policy = rendered.policy.clone();
+        projected.replace_initial_context = false;
+        projected
     }
 }
 
@@ -266,8 +285,11 @@ impl PromptContextSeed {
             if let Some(ConversationMessage::User { content, .. }) =
                 messages.iter_mut().find(|row| row.id() == id)
             {
-                let count = self.user_prefix_blocks.min(content.len());
-                content.drain(..count);
+                // A previous fallback may already have removed this prefix.
+                // Never consume the assignment now occupying the same user row.
+                if content.starts_with(&self.user_prefix) {
+                    content.drain(..self.user_prefix.len());
+                }
             }
         }
     }
@@ -316,11 +338,12 @@ pub fn inject_context(
                 citations: None,
             })
             .collect::<Vec<_>>();
+        let seeded_prefix = prefix.clone();
         prefix.append(content);
         *content = prefix;
         PromptContextSeed {
             user_message: Some(*id),
-            user_prefix_blocks: sections.len(),
+            user_prefix: seeded_prefix,
             system_messages: Vec::new(),
         }
     } else {

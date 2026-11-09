@@ -487,6 +487,112 @@ impl ConversationOrchestrator {
             .await
     }
 
+    /// Render the environment messages accompanying a host-rendered child body.
+    pub async fn assemble_subagent_prompt_context_for_target_preview(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        let route = crate::query_model::ModelRoute {
+            model: target.model.clone(),
+            profile: target.model_profile.clone(),
+        };
+        crate::query_model::ROUTE
+            .scope(
+                Some(route.clone()),
+                super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                    (route, target.policy.clone()),
+                    async {
+                        let context = self.build_prompt_context_from_files(Vec::new()).await?;
+                        let (_, directories) = self.session_cwd.snapshot();
+                        let directories = directories
+                            .into_iter()
+                            .filter(|path| *path != context.cwd)
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>();
+                        let mut rendered =
+                            crate::prompt::subagent_env::subagent_env_block_for_target(
+                                target,
+                                &context.cwd,
+                                context.git_status.is_some(),
+                                &context.platform,
+                                &context.shell,
+                                &context.os_version,
+                                &directories,
+                                context.in_worktree,
+                            );
+                        // The host's default body already includes its native budget tail.
+                        rendered.system_suffix = None;
+                        if self.prompt_runtime.host_environment_probes_disabled {
+                            rendered.additional_context.remove(0);
+                        }
+                        if let Some(memory) = crate::prompt::dynamic_memory_section(&context) {
+                            rendered.additional_context.push(memory);
+                        }
+                        Ok(rendered)
+                    },
+                ),
+            )
+            .await
+    }
+
+    /// Keep machine-specific memory outside the cached body and the once-only
+    /// userContext announcement. This projection also works after cold resume,
+    /// compaction and route changes without overwriting plugin context keys.
+    pub(crate) async fn project_dynamic_memory_context(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+    ) {
+        let mut previous = None;
+        messages.retain(|message| {
+            if matches!(message, ConversationMessage::User { is_meta: true, origin: Some(origin), .. }
+                if origin.string_at("/type") == Some("dynamic_memory_context"))
+            {
+                previous = Some(message.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if self.config.bare
+            || self.is_persistent_app_chat()
+            || !self.config.exclude_dynamic_system_prompt_sections
+            || self.config.system_prompt_override.is_some()
+        {
+            return;
+        }
+        // The route has already passed system/tool preparation. Any settings
+        // failure is reported there; this outgoing projection has no producers.
+        let Ok(policy) = self.current_prompt_policy().await else {
+            return;
+        };
+        let Some(directory) = self
+            .prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .and_then(|prefetch| prefetch.user_memdir())
+        else {
+            return;
+        };
+        let Some(section) = crate::prompt::dynamic_memory_section_for_policy(directory, &policy)
+        else {
+            return;
+        };
+        let text = format!("<system-reminder>\n{section}\n</system-reminder>");
+        let reminder = previous
+            .filter(|message| message.text_content() == text)
+            .unwrap_or_else(|| {
+                let mut reminder = ConversationMessage::user_meta(MessageId::new(), text);
+                if let ConversationMessage::User { origin, .. } = &mut reminder {
+                    *origin = Some(projection_object(vec![(
+                        "type".into(),
+                        "dynamic_memory_context".into(),
+                    )]));
+                }
+                reminder
+            });
+        self.prepend_transient_leading_context(messages, reminder);
+    }
+
     /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
     /// (claude-code `bde(agentDef.agentType)` + `mainThreadAgentDefinition`).
     /// Called ONCE at startup by the composition root when `--agent` resolves to
@@ -1710,6 +1816,7 @@ impl ConversationOrchestrator {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
         self.screen_mod_persisted_attachments(messages).await;
+        self.project_dynamic_memory_context(messages).await;
     }
 
     /// Read-only test/host preview of the fixed runtime reminder.

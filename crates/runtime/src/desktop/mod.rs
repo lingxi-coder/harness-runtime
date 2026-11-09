@@ -607,6 +607,20 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 
 #[async_trait::async_trait]
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
+    async fn render_prompt_context_for_target(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        match self.orchestrator.upgrade() {
+            Some(orchestrator) => {
+                orchestrator
+                    .assemble_subagent_prompt_context_for_target_preview(target)
+                    .await
+            }
+            None => Ok(agent::handle::SubagentPromptContext::default()),
+        }
+    }
+
     async fn render_system_prompt_for_target(
         &self,
         target: &lingxi_core::host::prompt_policy::PromptTarget,

@@ -4674,8 +4674,12 @@ async fn run_subagent_loop(
                     // blocks were finalized.
                     let profile = model_profile.as_deref();
                     let mut model_snapshot = history.to_vec();
+                    let mut prompt_context = ctx.clone();
                     if let (Some(state), Some(rendered)) = (&ctx.prompt_state, &request_prompt) {
-                        state.project_context(&mut model_snapshot, rendered);
+                        prompt_context.prompt_state = Some(std::sync::Arc::new(
+                            state.project_context(&mut model_snapshot, rendered),
+                        ));
+                        prompt_context.prompt_policy = Some(rendered.policy.clone());
                     }
                     child_attachments
                         .screen(&mut model_snapshot, mod_host.as_ref(), &mod_cwd, agent_id)
@@ -4715,7 +4719,7 @@ async fn run_subagent_loop(
                         model: current_model.clone(),
                         profile: profile.map(str::to_owned),
                         prompt_profile: profile.map(str::to_owned),
-                        prompt_context: Some(ctx.clone()),
+                        prompt_context: Some(prompt_context),
                         prompt_captures: Default::default(),
                         system: system.clone(),
                         messages: messages_for_api,

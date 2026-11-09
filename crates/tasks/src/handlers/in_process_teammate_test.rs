@@ -793,6 +793,24 @@ struct TargetSystemPromptRenderer {
 
 #[async_trait]
 impl TeammateSystemPromptRenderer for TargetSystemPromptRenderer {
+    async fn render_prompt_context_for_target(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        let mut additional_context = vec![
+                "# Environment\nPrimary working directory: /workspace/worker\nPlatform: test-host\nShell: /bin/test-shell".into(),
+                format!("Model ID: {}.", target.model),
+                "Today's date is 2026-11-09.".into(),
+            ];
+        if target.policy.reminders.is_native() {
+            additional_context.push("# Memory\nNATIVE CONTEXT MEMORY /context-memory".into());
+        }
+        Ok(agent::handle::SubagentPromptContext {
+            additional_context,
+            system_suffix: None,
+        })
+    }
+
     async fn render_default_system_prompt(
         &self,
     ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
@@ -935,6 +953,117 @@ async fn teammate_fallback_from_claude_keeps_target_host_sections() {
         *renderer.models.lock().unwrap(),
         ["claude-opus-5", "gpt-5.5", "kimi-k2.5"]
     );
+}
+
+#[tokio::test]
+async fn teammate_prompt_context_survives_initial_render_and_model_fallback() {
+    for initial in ["claude-opus-5", "gpt-5.5", "kimi-k2.5"] {
+        let handler = model_test_handler(Some(initial))
+            .with_system_prompt_renderer(Arc::new(TargetSystemPromptRenderer::default()));
+        let definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "worker")
+            .await
+            .unwrap();
+        let context = handler
+            .build_context(
+                lingxi_core::types::AgentId::new(),
+                "worker",
+                "team",
+                "KEEP ASSIGNMENT",
+                definition,
+            )
+            .await
+            .unwrap();
+        let state = context.prompt_state.as_ref().unwrap();
+        let assert_context = |messages: &[lingxi_core::types::ConversationMessage], model: &str| {
+            let text = messages
+                .iter()
+                .map(|message| match message {
+                    lingxi_core::types::ConversationMessage::System {
+                        api_system: Some(api),
+                        ..
+                    } => api
+                        .content
+                        .iter()
+                        .filter_map(lingxi_core::types::ContentBlock::visible_text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => message.text_content(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for marker in [
+                "/workspace/worker",
+                "test-host",
+                "/bin/test-shell",
+                "KEEP ASSIGNMENT",
+            ] {
+                assert_eq!(
+                    text.matches(marker).count(),
+                    1,
+                    "{initial} -> {model}: {text}"
+                );
+            }
+            assert_eq!(text.matches("Model ID:").count(), 1, "{text}");
+            assert!(text.contains(&format!("Model ID: {model}.")), "{text}");
+            assert_eq!(text.matches("Today's date is ").count(), 1, "{text}");
+            assert_eq!(
+                text.matches("NATIVE CONTEXT MEMORY").count(),
+                usize::from(model.starts_with("claude-")),
+                "{text}"
+            );
+        };
+        assert_context(&context.prompt_messages, initial);
+        let target = agent::prompt_policy::resolve_target(
+            context.api_client.as_deref(),
+            initial,
+            None,
+            state.initial_policy.target.mode,
+        )
+        .unwrap();
+        let same = state.render_for_route(&target).await.unwrap();
+        let mut retry_messages = context.prompt_messages.clone();
+        state.project_context(&mut retry_messages, &same);
+        assert_eq!(
+            retry_messages, context.prompt_messages,
+            "same route reuses seeded context"
+        );
+        for fallback in ["claude-sonnet-4-6", "gpt-5.5", "kimi-k2.5"] {
+            let target = agent::prompt_policy::resolve_target(
+                context.api_client.as_deref(),
+                fallback,
+                None,
+                state.initial_policy.target.mode,
+            )
+            .unwrap();
+            let rendered = state.render_for_route(&target).await.unwrap();
+            let mut messages = context.prompt_messages.clone();
+            state.project_context(&mut messages, &rendered);
+            assert_context(&messages, fallback);
+        }
+        // The runner passes the current projection's complete seed to turn.step.
+        // Project already-rendered rows, including both System and User lanes.
+        let mut current_state = state.as_ref().clone();
+        let mut messages = context.prompt_messages.clone();
+        for next in [
+            "claude-sonnet-4-6",
+            "gpt-5.5",
+            "claude-opus-5",
+            "kimi-k2.5",
+            initial,
+        ] {
+            let target = agent::prompt_policy::resolve_target(
+                context.api_client.as_deref(),
+                next,
+                None,
+                current_state.initial_policy.target.mode,
+            )
+            .unwrap();
+            let rendered = current_state.render_for_route(&target).await.unwrap();
+            current_state = current_state.project_context(&mut messages, &rendered);
+            assert_context(&messages, next);
+        }
+    }
 }
 
 struct TaggedDiagnosticsSource(Option<Utf16JsonProjection>);
