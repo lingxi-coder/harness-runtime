@@ -373,6 +373,48 @@ pub trait SkillListingProvider: Send + Sync {
     }
 }
 
+tokio::task_local! {
+    // This memo lives for one preparation only: a new model step, fallback,
+    // or post-compaction preparation must observe live loader/usage changes.
+    static PREPARATION_SNAPSHOTS: std::cell::RefCell<std::collections::HashMap<
+        usize, (Arc<dyn SkillListingProvider>, Arc<tokio::sync::OnceCell<Arc<SkillListingSnapshot>>>)
+    >>;
+}
+
+pub(crate) async fn scope_preparation_snapshot<T>(future: impl Future<Output = T>) -> T {
+    PREPARATION_SNAPSHOTS
+        .scope(Default::default(), future)
+        .await
+}
+
+/// A committed compact can rebuild the host catalog within the same step.
+/// Retire only this task's memo; subsequent lookups reload its current view.
+pub(crate) fn invalidate_preparation_snapshot() {
+    let _ = PREPARATION_SNAPSHOTS.try_with(|snapshots| snapshots.borrow_mut().clear());
+}
+
+pub(crate) async fn preparation_snapshot(
+    provider: &Arc<dyn SkillListingProvider>,
+) -> Result<Arc<SkillListingSnapshot>, SettingsError> {
+    let identity = Arc::as_ptr(provider) as *const () as usize;
+    let cell = PREPARATION_SNAPSHOTS.try_with(|snapshots| {
+        snapshots
+            .borrow_mut()
+            .entry(identity)
+            .or_insert_with(|| (Arc::clone(provider), Arc::new(tokio::sync::OnceCell::new())))
+            .1
+            .clone()
+    });
+    match cell {
+        Ok(cell) => cell
+            .get_or_try_init(|| async { provider.skill_listing_snapshot().await.map(Arc::new) })
+            .await
+            .cloned(),
+        // Independent callers retain live provider behavior; no session cache.
+        Err(_) => provider.skill_listing_snapshot().await.map(Arc::new),
+    }
+}
+
 /// Apply host capability availability without rebuilding static catalog metadata.
 pub struct CapabilityGatedSkillListingProvider {
     inner: Arc<dyn SkillListingProvider>,
@@ -2106,5 +2148,46 @@ mod tests {
             char_budget(Some(100), 3, SkillListingBudgetSettings::default()),
             3.0
         );
+    }
+}
+
+#[cfg(test)]
+mod preparation_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn memoizes_only_within_one_preparation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = calls.clone();
+        let provider: Arc<dyn SkillListingProvider> =
+            Arc::new(LazySkillListingProvider::new(move || {
+                let loader_calls = loader_calls.clone();
+                async move {
+                    loader_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(SkillListingSnapshot {
+                        entries: Vec::new(),
+                        budget_settings: Default::default(),
+                    })
+                }
+            }));
+        scope_preparation_snapshot(async {
+            let first = preparation_snapshot(&provider).await.unwrap();
+            let second = preparation_snapshot(&provider).await.unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            invalidate_preparation_snapshot();
+            let after_compact = preparation_snapshot(&provider).await.unwrap();
+            assert!(!Arc::ptr_eq(&first, &after_compact));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        })
+        .await;
+        scope_preparation_snapshot(async {
+            preparation_snapshot(&provider).await.unwrap();
+        })
+        .await;
+        preparation_snapshot(&provider).await.unwrap();
+        preparation_snapshot(&provider).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 }

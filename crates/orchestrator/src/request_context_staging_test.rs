@@ -1668,6 +1668,7 @@ fn prompt_ingress_mods_screen_request_copies_and_re_resolve_after_cold_resume() 
             )
         };
         let api = Arc::new(MockApiClient::new(vec![response(), response()]));
+        let writer = Arc::new(JsonlWriter::new(transcript.clone(), filesystem.clone()));
         let orch = ConversationOrchestrator::new(
             config.clone(),
             api.clone(),
@@ -1679,11 +1680,13 @@ fn prompt_ingress_mods_screen_request_copies_and_re_resolve_after_cold_resume() 
             cwd.clone(),
         )
         .with_session_id(session_id)
-        .with_jsonl_writer(Arc::new(JsonlWriter::new(
-            transcript.clone(),
-            filesystem.clone(),
-        )))
+        .with_jsonl_writer(Arc::clone(&writer))
         .with_hook_registry(mod_registry(host.clone()));
+        writer.initialize_fixed_session_mode(
+            &session_id.as_uuid().to_string(),
+            orch.conversation_profile().await.mode,
+            0,
+        ).await.unwrap();
 
         let fallback_text = "<system-reminder>\nUnknown slash fallback\n</system-reminder>";
         let fallback_context =

@@ -119,6 +119,8 @@ struct BlockState {
     text_buf: String,
     /// Preserved provider text can carry lone UTF-16 units outside Rust String.
     text_utf16_code_units: Option<Vec<u16>>,
+    /// Normalize a caller-supplied initial display only on its first delta.
+    text_display_synced: bool,
     /// Whether accumulated deltas should replace the source block's text field.
     preserved_text_dirty: bool,
     /// Used for `ToolUse` (raw `partial_json` concat).
@@ -169,6 +171,7 @@ impl BlockAccumulator {
                 kind,
                 text_buf,
                 text_utf16_code_units,
+                text_display_synced: false,
                 preserved_text_dirty: false,
                 json_buf: Vec::new(),
                 signature: None,
@@ -194,8 +197,13 @@ impl BlockAccumulator {
                 utf16_code_units, ..
             } => {
                 if let Some(utf16_code_units) = utf16_code_units {
+                    sync_initial_display(
+                        &mut state.text_buf,
+                        utf16_code_units,
+                        &mut state.text_display_synced,
+                    );
                     utf16_code_units.extend(text.encode_utf16());
-                    state.text_buf = String::from_utf16_lossy(utf16_code_units);
+                    state.text_buf.push_str(text);
                 } else {
                     state.text_buf.push_str(text);
                 }
@@ -207,8 +215,13 @@ impl BlockAccumulator {
             }
             BlockKind::PreservedText(_) => {
                 if let Some(units) = &mut state.text_utf16_code_units {
+                    sync_initial_display(
+                        &mut state.text_buf,
+                        units,
+                        &mut state.text_display_synced,
+                    );
                     units.extend(text.encode_utf16());
-                    state.text_buf = String::from_utf16_lossy(units);
+                    state.text_buf.push_str(text);
                 } else {
                     state.text_buf.push_str(text);
                 }
@@ -234,23 +247,30 @@ impl BlockAccumulator {
             .blocks
             .get_mut(&index)
             .ok_or(StreamingError::BlockNotFound { index })?;
-        let previous_text = state.text_buf.clone();
         match &mut state.kind {
             BlockKind::Text {
                 utf16_code_units: units,
                 ..
             } => {
-                let units = units.get_or_insert_with(|| previous_text.encode_utf16().collect());
-                units.extend_from_slice(utf16_code_units);
-                state.text_buf = String::from_utf16_lossy(units);
+                let units = units.get_or_insert_with(|| state.text_buf.encode_utf16().collect());
+                sync_initial_display(
+                    &mut state.text_buf,
+                    units,
+                    &mut state.text_display_synced,
+                );
+                append_exact_text(&mut state.text_buf, units, utf16_code_units);
                 Ok(())
             }
             BlockKind::PreservedText(_) => {
                 let units = state
                     .text_utf16_code_units
-                    .get_or_insert_with(|| previous_text.encode_utf16().collect());
-                units.extend_from_slice(utf16_code_units);
-                state.text_buf = String::from_utf16_lossy(units);
+                    .get_or_insert_with(|| state.text_buf.encode_utf16().collect());
+                sync_initial_display(
+                    &mut state.text_buf,
+                    units,
+                    &mut state.text_display_synced,
+                );
+                append_exact_text(&mut state.text_buf, units, utf16_code_units);
                 state.preserved_text_dirty = true;
                 Ok(())
             }
@@ -368,6 +388,7 @@ impl BlockAccumulator {
             }) if protocol == "anthropic_messages" => {
                 state.text_buf = value.string_at("/text").unwrap_or_default().to_owned();
                 state.text_utf16_code_units = value.string_units("/text");
+                state.text_display_synced = false;
                 state.preserved_text_dirty = false;
                 *current = value;
                 Ok(())
@@ -597,9 +618,123 @@ fn append_payload_array(
     JsonPayload::parse(&source).map_err(|error| StreamingError::JsonPayload(error.to_string()))
 }
 
+// Decode only the appended suffix. A trailing high surrogate was displayed as
+// U+FFFD; replace that single scalar when the next frame completes its pair.
+fn append_exact_text(text: &mut String, units: &mut Vec<u16>, delta: &[u16]) {
+    let joins_pair = units
+        .last()
+        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+        && delta
+            .first()
+            .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit));
+    if joins_pair {
+        text.pop();
+        let start = units.len() - 1;
+        units.extend_from_slice(delta);
+        text.push_str(&String::from_utf16_lossy(&units[start..]));
+    } else {
+        units.extend_from_slice(delta);
+        text.push_str(&String::from_utf16_lossy(delta));
+    }
+}
+
+fn sync_initial_display(text: &mut String, units: &[u16], synced: &mut bool) {
+    if !*synced {
+        *text = String::from_utf16_lossy(units);
+        *synced = true;
+    }
+}
+
 #[cfg(test)]
 mod utf16_text_tests {
     use super::*;
+
+    #[test]
+    fn every_surrogate_partition_preserves_intermediate_and_final_text() {
+        let source = [0x61, 0xd83d, 0xde00, 0xd800, 0xd801, 0xdc01, 0xdc00, 0x62];
+        for split in 0..=source.len() {
+            let mut accumulator = BlockAccumulator::new();
+            accumulator
+                .start_block(
+                    0,
+                    BlockKind::Text {
+                        citations: None,
+                        utf16_code_units: None,
+                        initial_text: String::new(),
+                    },
+                )
+                .unwrap();
+            accumulator.append_text_utf16(0, &source[..split]).unwrap();
+            let snapshot = accumulator.incomplete_text_blocks();
+            if split > 0 {
+                assert!(
+                    matches!(&snapshot[0], ContentBlock::TextJsUtf16 { text, utf16_code_units, .. }
+                    if text == &String::from_utf16_lossy(&source[..split]) && utf16_code_units == &source[..split])
+                );
+            }
+            accumulator.append_text_utf16(0, &[]).unwrap();
+            accumulator.append_text_utf16(0, &source[split..]).unwrap();
+            accumulator.append_text(0, "suffix😀").unwrap();
+            let mut expected = source.to_vec();
+            expected.extend("suffix😀".encode_utf16());
+            assert!(
+                matches!(accumulator.stop_block(0).unwrap(), CompletedBlock::Text {
+                text, utf16_code_units: Some(units), ..
+            } if text == String::from_utf16_lossy(&expected) && units == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_text_recombines_frames_and_retains_lone_surrogates() {
+        let mut accumulator = BlockAccumulator::new();
+        accumulator
+            .start_block(
+                0,
+                BlockKind::PreservedText(ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: Utf16JsonProjection::parse(r#"{"type":"text","text":"prefix\ud83d"}"#)
+                        .unwrap(),
+                }),
+            )
+            .unwrap();
+        accumulator.append_text_utf16(0, &[0xde00, 0xd800]).unwrap();
+        accumulator.append_text(0, "tail").unwrap();
+        let expected = [
+            "prefix".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd83d, 0xde00, 0xd800],
+            "tail".encode_utf16().collect(),
+        ]
+        .concat();
+        for block in accumulator.incomplete_text_blocks().into_iter().chain(
+            match accumulator.stop_block(0).unwrap() {
+                CompletedBlock::Preserved(block) => Some(block),
+                _ => None,
+            },
+        ) {
+            assert!(matches!(block, ContentBlock::ProviderContent { value, .. }
+                if value.string_units("/text") == Some(expected.clone())));
+        }
+    }
+
+    #[test]
+    fn initial_exact_units_are_authoritative_after_first_delta() {
+        let mut accumulator = BlockAccumulator::new();
+        accumulator
+            .start_block(
+                0,
+                BlockKind::Text {
+                    citations: None,
+                    utf16_code_units: Some(vec![0xd83d]),
+                    initial_text: "different display".into(),
+                },
+            )
+            .unwrap();
+        accumulator.append_text_utf16(0, &[0xde00]).unwrap();
+        assert!(
+            matches!(accumulator.stop_block(0).unwrap(), CompletedBlock::Text { text, .. } if text == "😀")
+        );
+    }
 
     #[test]
     fn adjacent_exact_deltas_recombine_surrogate_pairs() {

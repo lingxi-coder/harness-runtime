@@ -1875,20 +1875,33 @@ impl ConversationOrchestrator {
     /// `MessageDisplay` hook never affects the turn, and firing is a strict
     /// no-op when no `MessageDisplay` hook is registered.
     pub(super) async fn fire_message_display(&self, turn_id: &str, assistant_id: MessageId) {
-        let ctx = self.lifecycle_hook_ctx(false).await;
-        let _ = self
-            .hooks
-            .execute(
-                HookEvent::MessageDisplay {
-                    turn_id: turn_id.to_string(),
-                    message_id: assistant_id.as_uuid().to_string(),
-                    index: 0,
-                    is_final: false,
-                    delta: source_string_projection(""),
-                },
-                ctx,
-            )
-            .await;
+        let mut ctx = self.lifecycle_hook_ctx(false).await;
+        let cancellation = CancellationToken::new();
+        ctx.idle_compaction_cancellation = Some(cancellation.clone());
+        ctx.idle_compaction_process_owner =
+            Some(format!("message-display-begin:{}", uuid::Uuid::new_v4()));
+        let event = HookEvent::MessageDisplay {
+            turn_id: turn_id.to_string(),
+            message_id: assistant_id.as_uuid().to_string(),
+            index: 0,
+            is_final: false,
+            delta: source_string_projection(""),
+        };
+        let hooks = self.hooks.clone();
+        let mut work = Box::pin(async move {
+            let _ = hooks.execute(event, ctx).await;
+        });
+        // Only this result-discarding notification has a short wait budget.
+        // Cancel through the executor's process-owner cleanup path, then leave
+        // it ownership of cleanup/publication instead of dropping that future.
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut work)
+            .await
+            .is_err()
+        {
+            cancellation.cancel();
+            tokio::spawn(work);
+            tracing::warn!("MessageDisplay begin notification exceeded its latency budget");
+        }
     }
 
     /// Fire the `MessageDisplay` completed-message pass and return the hook's
@@ -4585,5 +4598,170 @@ mod prompt_expansion_current_id_tests {
             history_after_pending,
             "idempotent pending restore does not duplicate rendered rows"
         );
+    }
+}
+
+#[cfg(test)]
+mod message_display_begin_budget_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use lingxi_core::host::{ProcessHandle, ProcessRunner, SandboxedCommand};
+    use mobile_linux_api::ProcessError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct DisplayRunner {
+        owner: std::sync::Mutex<Option<String>>,
+        killed: std::sync::Mutex<Vec<String>>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct PendingRun(Arc<AtomicBool>);
+    impl Drop for PendingRun {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessRunner for DisplayRunner {
+        async fn run(
+            &self,
+            command: &SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, ProcessError> {
+            let input: serde_json::Value =
+                serde_json::from_str(command.inner().stdin.as_deref().unwrap()).unwrap();
+            if input["hook_event_name"] == "MessageDisplay" && input["final"] == false {
+                *self.owner.lock().unwrap() = command.process_owner().map(str::to_owned);
+                let _pending = PendingRun(self.dropped.clone());
+                return std::future::pending().await;
+            }
+            let stdout = if input["hook_event_name"] == "MessageDisplay" {
+                r#"{"hookSpecificOutput":{"hookEventName":"MessageDisplay","displayContent":"display override"}}"#
+            } else {
+                r#"{"decision":"block","reason":"keep controlling decision"}"#
+            };
+            Ok(mobile_linux_api::ProcessOutput {
+                stdout: stdout.into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            self.killed.lock().unwrap().push(owner.into());
+            Vec::new()
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_begin_is_cancelled_and_completed_and_controlling_results_survive() {
+        let runner = Arc::new(DisplayRunner::default());
+        let executor = Arc::try_unwrap(noop_hook_executor())
+            .ok()
+            .unwrap()
+            .with_process_runner(
+                runner.clone(),
+                Arc::new(tool_api::test_support::BypassSandbox),
+            );
+        let hooks = Arc::new(executor);
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::ToolRegistry::new()),
+            hooks.clone(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let session_id = orch.session.lock().await.session_id;
+        hooks
+            .upsert_session_named_hook(
+                session_id,
+                "display-budget".into(),
+                hooks::HookDefinition {
+                    id: HookId::new(),
+                    name: "display-budget".into(),
+                    events: vec![
+                        hooks::HookEventType::MessageDisplay,
+                        hooks::HookEventType::Stop,
+                    ],
+                    if_condition: None,
+                    executor: hooks::definition::HookExecutor::Command {
+                        command: "test-hook".into(),
+                        args: vec!["exec-form".into()],
+                        env: Default::default(),
+                        cwd: None,
+                        shell: None,
+                    },
+                    source: hooks::HookSource::Session,
+                    blocking: true,
+                    timeout: None,
+                    priority: 0,
+                    once: false,
+                    status_message: None,
+                    async_rewake: false,
+                    async_timeout: None,
+                    rewake_message: None,
+                    on_failure: None,
+                },
+            )
+            .await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            orch.fire_message_display("turn", MessageId::new()),
+        )
+        .await
+        .expect("begin notification has a bounded wait");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runner.dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("executor cancels and drops the pending command run");
+        let owner = runner
+            .owner
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("begin command has an owner");
+        assert!(owner.starts_with("message-display-begin:"));
+        assert!(runner
+            .killed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|killed| killed == &owner));
+        let displayed = orch
+            .fire_message_display_completed("turn", &source_string_projection("original"))
+            .await
+            .unwrap();
+        assert_eq!(displayed.display, "display override");
+        let controlling = hooks
+            .execute(
+                HookEvent::Stop {
+                    reason: "done".into(),
+                },
+                orch.lifecycle_hook_ctx(false).await,
+            )
+            .await;
+        assert_eq!(controlling.decision, Some(hooks::HookDecision::Block));
     }
 }

@@ -42,7 +42,7 @@ pub(super) fn evaluate_result(
 fn evaluate_projection(
     input: &Utf16JsonProjection,
 ) -> Result<Utf16JsonProjection, hooks::function_hook::FunctionHookError> {
-    let source = format!(
+    static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
         "{}\nconst classifier = (() => {{\n{}\n{}\nreturn {{wZr,Oxn,Hxn,vZr,brs,wrs}};\n}})();\n{}\n{}\n{}",
         include_str!("prompt_suggestion_redactor_native.js"),
         include_str!("prompt_suggestion_classifier_adapter.js"),
@@ -50,7 +50,7 @@ fn evaluate_projection(
         include_str!("prompt_suggestion_background_tail_native.js"),
         include_str!("prompt_suggestion_background_input_native.js"),
         include_str!("prompt_suggestion_background_adapter.js"),
-    );
-    let result = hooks::function_hook::Sandbox::default().eval_abandonable(&source, input)?;
+    ));
+    let result = hooks::function_hook::Sandbox::default().eval_abandonable(&SOURCE, input)?;
     Ok(result)
 }

@@ -387,6 +387,187 @@ pub(super) fn api_projection(
     Ok(projection_array(rows))
 }
 
+// Cache byte offsets rather than raw tool bodies. Metadata includes inode and
+// ctime on Unix so append, truncate, replacement and same-size rewrites retire
+// an index. Bound both the number of sessions and indexed tool IDs.
+#[derive(Clone, PartialEq, Eq)]
+struct ResultFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+fn result_file_stamp(metadata: &std::fs::Metadata) -> ResultFileStamp {
+    ResultFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
+        #[cfg(unix)]
+        identity: {
+            use std::os::unix::fs::MetadataExt as _;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        },
+    }
+}
+
+struct ResultOffsetIndex {
+    stamp: ResultFileStamp,
+    offsets: HashMap<Vec<u16>, u64>,
+}
+
+type ResultOffsetCache =
+    std::collections::VecDeque<(std::path::PathBuf, std::sync::Arc<ResultOffsetIndex>)>;
+
+fn result_offset_cache() -> &'static std::sync::Mutex<ResultOffsetCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<ResultOffsetCache>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn transcript_result_id(record: &Utf16JsonProjection) -> Option<Vec<u16>> {
+    if !record.contains_property("toolUseResult") {
+        return None;
+    }
+    let len = record.array_len("/message/content")?;
+    let mut result_index = None;
+    for index in 0..len {
+        if record.string_at(&format!("/message/content/{index}/type")) == Some("tool_result") {
+            if result_index.is_some() {
+                return None;
+            }
+            result_index = Some(index);
+        }
+    }
+    record.string_units(&format!("/message/content/{}/tool_use_id", result_index?))
+}
+
+fn read_transcript_results(
+    path: &Path,
+    needed: &std::collections::HashSet<Vec<u16>>,
+) -> HashMap<Vec<u16>, Utf16JsonProjection> {
+    use std::io::{Seek, SeekFrom};
+    let mut found = HashMap::new();
+    let Ok(file) = std::fs::File::open(path) else {
+        return found;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return found;
+    };
+    let stamp = result_file_stamp(&metadata);
+    let cached = {
+        let cache = result_offset_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache
+            .iter()
+            .find(|(cached_path, index)| cached_path == path && index.stamp == stamp)
+            .map(|(_, index)| std::sync::Arc::clone(index))
+    };
+    let mut reader = BufReader::new(file);
+    if let Some(index) = cached {
+        let mut valid = true;
+        for id in needed {
+            let Some(offset) = index.offsets.get(id) else {
+                continue;
+            };
+            let mut line = String::new();
+            if reader.seek(SeekFrom::Start(*offset)).is_err()
+                || reader.read_line(&mut line).is_err()
+            {
+                valid = false;
+                break;
+            }
+            let Ok(record) = Utf16JsonProjection::parse(&line) else {
+                valid = false;
+                break;
+            };
+            if transcript_result_id(&record).as_ref() != Some(id) {
+                valid = false;
+                break;
+            }
+            if let Ok(raw) = record.subprojection("/toolUseResult") {
+                found.insert(id.clone(), raw);
+            }
+        }
+        if valid && std::fs::metadata(path).is_ok_and(|meta| result_file_stamp(&meta) == stamp) {
+            return found;
+        }
+        found.clear();
+    }
+    if reader.rewind().is_err() {
+        return found;
+    }
+    let mut offsets = HashMap::new();
+    let mut indexed_units = 0usize;
+    let mut complete = true;
+    let mut position = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let Ok(count) = reader.read_line(&mut line) else {
+            complete = false;
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let offset = position;
+        position += count as u64;
+        if !line.contains("\"toolUseResult\"") {
+            continue;
+        }
+        let Ok(record) = Utf16JsonProjection::parse(&line) else {
+            continue;
+        };
+        let Some(id) = transcript_result_id(&record) else {
+            continue;
+        };
+        let already_indexed = offsets.contains_key(&id);
+        if already_indexed
+            || (offsets.len() < 32_768 && indexed_units.saturating_add(id.len()) <= 1_048_576)
+        {
+            if !already_indexed {
+                indexed_units += id.len();
+            }
+            offsets.insert(id.clone(), offset);
+        } else {
+            complete = false;
+        }
+        if needed.contains(&id) {
+            if let Ok(raw) = record.subprojection("/toolUseResult") {
+                found.insert(id, raw);
+            }
+        }
+    }
+    if complete
+        && position == stamp.len
+        && std::fs::metadata(path).is_ok_and(|meta| result_file_stamp(&meta) == stamp)
+    {
+        let mut cache = result_offset_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.retain(|(cached_path, _)| cached_path != path);
+        cache.push_back((
+            path.to_owned(),
+            std::sync::Arc::new(ResultOffsetIndex {
+                stamp,
+                offsets,
+            }),
+        ));
+        while cache.len() > 4 {
+            cache.pop_front();
+        }
+    }
+    found
+}
+
 /// `toolUseResult` is an on-disk transcript field rather than a model content
 /// block. Read only the requested ids, without loading a long JSONL file into
 /// memory, after the Mod result stage has committed the final tool outcome.
@@ -409,51 +590,8 @@ pub(super) async fn hydrate_results(path: &Path, rows: &mut Utf16JsonProjection)
         return;
     }
     let path = path.to_path_buf();
-    let Ok(results) = tokio::task::spawn_blocking(move || {
-        let mut found = HashMap::<Vec<u16>, Utf16JsonProjection>::new();
-        let Ok(file) = std::fs::File::open(path) else {
-            return found;
-        };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            if !line.contains("\"toolUseResult\"") {
-                continue;
-            }
-            let Ok(record) = Utf16JsonProjection::parse(&line) else {
-                continue;
-            };
-            let Ok(raw) = record.subprojection("/toolUseResult") else {
-                continue;
-            };
-            let Some(content_len) = record.array_len("/message/content") else {
-                continue;
-            };
-            let mut result_index = None;
-            for index in 0..content_len {
-                if record.string_at(&format!("/message/content/{index}/type"))
-                    == Some("tool_result")
-                {
-                    if result_index.is_some() {
-                        result_index = None;
-                        break;
-                    }
-                    result_index = Some(index);
-                }
-            }
-            let Some(result_index) = result_index else {
-                continue;
-            };
-            let Some(id) =
-                record.string_units(&format!("/message/content/{result_index}/tool_use_id"))
-            else {
-                continue;
-            };
-            if needed.contains(&id) {
-                found.insert(id, raw);
-            }
-        }
-        found
-    })
-    .await
+    let Ok(results) =
+        tokio::task::spawn_blocking(move || read_transcript_results(&path, &needed)).await
     else {
         return;
     };
@@ -838,6 +976,53 @@ mod tests {
             projection_to_value(&summarize_projection(&[summary]))[0]["text"],
             "summary"
         );
+    }
+
+    #[test]
+    fn result_offset_cache_invalidates_append_rewrite_and_replacement() {
+        use std::io::Write as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let line = |value| {
+            format!(
+                "{}\n",
+                json!({
+                    "message":{"content":[{"type":"tool_result","tool_use_id":"id"}]},
+                    "toolUseResult":{"value":value}
+                })
+            )
+        };
+        let needed = ["id".encode_utf16().collect::<Vec<_>>()]
+            .into_iter()
+            .collect();
+        let value = || {
+            read_transcript_results(&path, &needed)
+                .values()
+                .next()
+                .unwrap()
+                .number_at("/value")
+                .unwrap()
+        };
+        std::fs::write(&path, line(1)).unwrap();
+        assert_eq!(value(), 1.0);
+        assert_eq!(value(), 1.0, "unchanged file uses indexed offsets");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line(2).as_bytes())
+            .unwrap();
+        assert_eq!(value(), 2.0, "last raw result wins after append");
+        std::fs::write(&path, line(3)).unwrap();
+        assert_eq!(value(), 3.0, "truncation invalidates the prior offsets");
+        std::fs::write(&path, line(4)).unwrap();
+        assert_eq!(value(), 4.0, "same-length rewrite invalidates the index");
+        let replacement = temp.path().join("replacement");
+        std::fs::write(&replacement, line(5)).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert_eq!(value(), 5.0, "replacement inode invalidates the index");
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_transcript_results(&path, &needed).is_empty());
     }
 
     #[tokio::test]

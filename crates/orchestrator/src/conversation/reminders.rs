@@ -1221,8 +1221,8 @@ impl ConversationOrchestrator {
         if self.find_dispatchable_tool("Skill").is_none() {
             return Ok(None);
         }
-        let listing_snapshot = provider.skill_listing_snapshot().await?;
-        let entries = listing_snapshot.entries;
+        let listing_snapshot = crate::prompt::skill_listing::preparation_snapshot(provider).await?;
+        let entries = listing_snapshot.entries.clone();
 
         // DELTA: keep only skills not yet sent this session, then record them as
         // sent. Stable membership emits nothing; additions and withdrawals append
@@ -3460,11 +3460,12 @@ message with multiple tool uses so they run concurrently."
                 }
             }
         }
+        let current_tool_name_set = current_tool_names.iter().collect::<std::collections::HashSet<_>>();
         let revoked = prior_declared
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .filter(|name| !current_tool_names.iter().any(|current| current == *name))
+            .filter(|name| !current_tool_name_set.contains(name))
             .filter_map(|name| {
                 let (server_name, _) = native_mcp_tool_identity(name)?;
                 let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);

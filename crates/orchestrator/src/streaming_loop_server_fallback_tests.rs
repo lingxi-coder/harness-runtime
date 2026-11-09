@@ -145,7 +145,7 @@ async fn fallback_stitch_stops_when_published_tombstone_sidecar_fails() {
     let mut pump = Some(ExecutorPump {
         executor: &mut executor,
         assistant_id: candidate_id,
-        query_history: Vec::new(),
+        query_history: Vec::new().into(),
         model_profile: None,
         record_supersedes: false,
         user_cancel: None,
@@ -330,7 +330,7 @@ async fn pump_with_fallback_controller_for_source(
         ExecutorPump {
             executor: &mut executor,
             assistant_id: lingxi_core::types::MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: native_server_fallback_supersedes_enabled(&orch.config.query_source),
             user_cancel: None,
@@ -707,7 +707,7 @@ async fn accepted_midstream_hop_replaces_completed_rows_with_the_eligible_incomi
         ExecutorPump {
             executor: &mut executor,
             assistant_id,
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -871,7 +871,7 @@ async fn completed_eligible_stitch_is_not_undone_by_a_later_transport_error() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -941,7 +941,7 @@ async fn display_hook_replacement_carries_retained_text_without_rendering_it_ear
         ExecutorPump {
             executor: &mut executor,
             assistant_id,
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1016,7 +1016,7 @@ async fn accepted_hop_without_eligible_text_keeps_original_rows_and_does_not_rep
         ExecutorPump {
             executor: &mut executor,
             assistant_id,
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1096,7 +1096,7 @@ async fn empty_retained_text_removes_only_discarded_tool_cards() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1179,7 +1179,7 @@ async fn repeated_api_block_index_tombstones_only_the_latest_completed_row() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1273,7 +1273,7 @@ async fn later_visible_stitch_seed_replaces_earlier_pending_seed() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1377,7 +1377,7 @@ async fn accepted_visible_hop_without_new_seed_reemits_the_pending_j_begin() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1514,7 +1514,7 @@ async fn reused_block_index_does_not_relabel_an_older_pending_j_original() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1604,7 +1604,7 @@ async fn usage_only_delta_can_set_details_before_a_terminal_reason_exists() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1690,7 +1690,7 @@ async fn terminal_reason_delta_replaces_and_can_clear_prior_stop_details() {
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1825,7 +1825,7 @@ async fn nonvisible_midstream_observation_does_not_replace_display_or_reset_tool
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1905,7 +1905,7 @@ async fn server_fallback_tombstones_tools_by_completed_block_index_and_retains_t
         ExecutorPump {
             executor: &mut executor,
             assistant_id: lingxi_core::types::MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -1989,7 +1989,7 @@ async fn fallback_observation_and_served_model_survive_a_later_stream_failure() 
         ExecutorPump {
             executor: &mut executor,
             assistant_id: MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,
@@ -2107,7 +2107,7 @@ async fn declined_server_fallback_returns_event_and_paid_usage_without_partial_o
         ExecutorPump {
             executor: &mut executor,
             assistant_id: lingxi_core::types::MessageId::new(),
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             model_profile: None,
             record_supersedes: true,
             user_cancel: None,

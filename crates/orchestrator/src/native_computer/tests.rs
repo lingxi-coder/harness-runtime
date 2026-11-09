@@ -1001,7 +1001,7 @@ impl Fixture {
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
                 native_query_depth: 0,
-                query_history: vec![],
+                query_history: vec![].into(),
                 assistant_message,
                 same_turn_tool_uses: vec![],
                 refusal_call_boundary: None,

@@ -107,9 +107,11 @@ fn estimate_block_tokens(block: &ContentBlock) -> u64 {
         ContentBlock::RedactedThinking { data } => estimate_content_tokens(data),
         ContentBlock::Image { .. } | ContentBlock::Document { .. } => 2_000,
         // Remaining provider blocks use the oracle's JSON-string fallback.
-        _ => estimate_content_tokens(
-            &serde_json::to_string(block).expect("content block serializes"),
-        ),
+        _ => {
+            let mut counter = JsonUnitCounter::default();
+            serde_json::to_writer(&mut counter, block).expect("content block serializes");
+            units_to_tokens(counter.0)
+        }
     }
 }
 
@@ -119,7 +121,8 @@ fn units_to_tokens(units: usize) -> u64 {
 
 fn estimate_source_string_tokens(source: &Source, pointer: &str) -> u64 {
     source
-        .string_units(pointer)
+        .at_pointer(pointer)
+        .and_then(|value| value.code_units())
         .map_or(0, |units| units_to_tokens(units.len()))
 }
 
@@ -128,18 +131,49 @@ fn estimate_tool_use_tokens(name: &str, input: &Source) -> u64 {
 }
 
 fn estimate_tool_use_units(name_units: usize, input: &Source) -> u64 {
-    let input = if input.at_pointer("").is_some_and(|value| value.is_null()) {
-        "{}".into()
+    let input_units = if input.at_pointer("").is_some_and(|value| value.is_null()) {
+        2 // The oracle substitutes {} for null tool input.
     } else {
-        input
-            .to_json_string()
-            .expect("tool input source serializes")
+        source_json_units(input)
     };
-    units_to_tokens(name_units.saturating_add(input.encode_utf16().count()))
+    units_to_tokens(name_units.saturating_add(input_units))
+}
+
+/// Count canonical JSON UTF-16 units without allocating the serialized JSON.
+/// UTF-8 continuation bytes contribute zero, ASCII/BMP leads one, and astral
+/// leads two. This works even if a writer splits one character across writes.
+#[derive(Default)]
+struct JsonUnitCounter(usize);
+
+impl std::io::Write for JsonUnitCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        for &byte in bytes {
+            self.0 = self.0.saturating_add(match byte {
+                0x00..=0x7f | 0xc0..=0xef => 1,
+                0xf0..=0xf7 => 2,
+                _ => 0,
+            });
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn source_json_units(source: &Source) -> usize {
+    // Source is mutable and has no stable content revision/identity. Counting
+    // directly avoids both retained input copies and stale ID-based estimates.
+    let mut counter = JsonUnitCounter::default();
+    source
+        .write_json_to(&mut counter)
+        .expect("source serializes");
+    counter.0
 }
 
 fn estimate_json_content_tokens(content: &Source) -> u64 {
-    if let Some(units) = content.string_units("") {
+    if let Some(units) = content.at_pointer("").and_then(|value| value.code_units()) {
         return units_to_tokens(units.len());
     }
     (0..content.array_len("").unwrap_or(0))
@@ -150,7 +184,7 @@ fn estimate_json_content_tokens(content: &Source) -> u64 {
 }
 
 fn estimate_json_block_tokens(block: &Source) -> u64 {
-    if let Some(units) = block.string_units("") {
+    if let Some(units) = block.at_pointer("").and_then(|value| value.code_units()) {
         return units_to_tokens(units.len());
     }
     match block.string_at("/type") {
@@ -162,18 +196,14 @@ fn estimate_json_block_tokens(block: &Source) -> u64 {
             .as_ref()
             .map_or(0, estimate_json_content_tokens),
         Some("tool_use") => estimate_tool_use_units(
-            block.string_units("/name").map_or(0, |units| units.len()),
+            block.at_pointer("/name").and_then(|value| value.code_units()).map_or(0, |units| units.len()),
             &block
                 .subprojection("/input")
                 .unwrap_or_else(|_| Source::parse("null").unwrap()),
         ),
         Some("thinking") => estimate_source_string_tokens(block, "/thinking"),
         Some("redacted_thinking") => estimate_source_string_tokens(block, "/data"),
-        _ => estimate_content_tokens(
-            &block
-                .to_json_string()
-                .expect("content block source serializes"),
-        ),
+        _ => units_to_tokens(source_json_units(block)),
     }
 }
 
@@ -185,6 +215,46 @@ mod tests {
 
     fn source(value: &serde_json::Value) -> Source {
         Source::from_serde_value(value).expect("test value is valid JSON")
+    }
+
+    #[test]
+    fn provider_block_count_matches_serialized_utf16_length() {
+        let block = ContentBlock::ProviderContent {
+            protocol: "test\"protocol".into(),
+            value: Source::parse(r#"{"text":"😀\ud800\n"}"#).unwrap(),
+        };
+        let expected = estimate_content_tokens(&serde_json::to_string(&block).unwrap());
+        assert_eq!(estimate_block_tokens(&block), expected);
+    }
+
+    #[test]
+    fn source_size_tracks_content_changes_and_utf16_json_escaping() {
+        let mut input = Source::parse(r#"{"text":"é😀\ud800\n","n":7}"#).unwrap();
+        let expected = input.to_json_string().unwrap().encode_utf16().count();
+        assert_eq!(source_json_units(&input), expected);
+        assert_eq!(source_json_units(&input.clone()), expected);
+        input
+            .set_field("text", Source::from("different text"))
+            .unwrap();
+        let changed = input.to_json_string().unwrap().encode_utf16().count();
+        assert_eq!(source_json_units(&input), changed);
+        assert_ne!(expected, changed);
+        // Token rounding includes the name, so count units before rounding
+        // and preserve the null-tool-input special case.
+        assert_eq!(
+            estimate_tool_use_units(1, &Source::parse("null").unwrap()),
+            1
+        );
+    }
+
+    #[test]
+    fn json_unit_counter_handles_split_utf8_writes() {
+        use std::io::Write;
+        let mut counter = JsonUnitCounter::default();
+        for byte in "é😀".as_bytes() {
+            counter.write_all(&[*byte]).unwrap();
+        }
+        assert_eq!(counter.0, 3);
     }
 
     #[test]

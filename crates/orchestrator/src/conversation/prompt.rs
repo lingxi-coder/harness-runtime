@@ -799,6 +799,23 @@ impl ConversationOrchestrator {
                 lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units),
             ));
         }
+        // The provider consumes the typed source vector directly. A frozen
+        // hit never builds joined static/display strings or decodes UTF-16.
+        // The provider's owned API still clones its typed vector on egress.
+        if let Some(frozen) = self.frozen_prompt_source_vector().await {
+            let dynamic = self.current_system_context_block().await
+                .map(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string);
+            if record_pending_snapshot {
+                *self.prompt_runtime.pending_prompt_source_vector.lock().await = Some(frozen.elements.clone());
+            }
+            return Ok(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+                frozen.elements.clone(),
+                dynamic,
+                Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    crate::prompt::profile_header(self.conversation_profile().await.mode),
+                )),
+            ));
+        }
         let prompt = self.effective_system_prompt_parts().await?;
         let system_prompt = match prompt.snapshot_system_prompt.clone() {
             Some(snapshot) => snapshot,
@@ -861,6 +878,35 @@ impl ConversationOrchestrator {
         (session.model.clone(), session.model_profile.clone())
     }
 
+    async fn frozen_prompt_source_vector(&self) -> Option<Arc<FrozenPromptSourceVector>> {
+        if !self.prompt_snapshot_eligible() { return None; }
+        let snapshot_guard = self.prompt_runtime.prompt_snapshot.lock().await;
+        let snapshot = snapshot_guard.as_ref().filter(|snapshot| valid_prompt_snapshot(snapshot))?;
+        let mut cache = self.prompt_runtime.frozen_prompt_source_vector.lock().await;
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.source == snapshot.system_prompt && cached.utf16 == snapshot.system_prompt_utf16
+        }) {
+            return Some(Arc::clone(cached));
+        }
+        let elements = snapshot.system_prompt.iter().enumerate().map(|(index, section)| {
+            snapshot.system_prompt_utf16.get(index).and_then(Option::as_ref).map_or_else(
+                || lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(section.clone()),
+                |units| lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units.clone()),
+            )
+        }).collect::<Vec<_>>();
+        let static_text = elements.iter().filter(|section| {
+            !section.equals_ascii(lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY)
+        }).map(|section| section.display_text()).collect::<Vec<_>>().join("\n\n");
+        let frozen = Arc::new(FrozenPromptSourceVector {
+            source: snapshot.system_prompt.clone(),
+            utf16: snapshot.system_prompt_utf16.clone(),
+            elements,
+            static_text: static_text.into(),
+        });
+        *cache = Some(Arc::clone(&frozen));
+        Some(frozen)
+    }
+
     async fn effective_system_prompt_parts(
         &self,
     ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
@@ -878,59 +924,17 @@ impl ConversationOrchestrator {
                 dynamic_system_context: None,
             });
         }
-        if self.prompt_snapshot_eligible() {
-            // Context routing also reads this slot. Drop the guard before
-            // awaiting dynamic context; an if-let temporary retains it through
-            // the entire body and would re-enter the same mutex.
-            let snapshot = { self.prompt_runtime.prompt_snapshot.lock().await.clone() };
-            if let Some(snapshot) = snapshot {
-                if valid_prompt_snapshot(&snapshot) {
-                    // Carved-slate freezes only the static getSystemPrompt
-                    // members. `systemContext` (currently the git-status block
-                    // in this port) is intentionally recomputed for every
-                    // request, so a cwd/context change never gets baked into
-                    // the cacheable prefix.
-                    let snapshot_system_prompt = snapshot
-                        .system_prompt
-                        .iter()
-                        .enumerate()
-                        .map(|(index, section)| {
-                            snapshot
-                                .system_prompt_utf16
-                                .get(index)
-                                .and_then(Option::as_ref)
-                                .map_or_else(
-                                    || {
-                                        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(section.clone())
-                                    },
-                                    |units| {
-                                        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units.clone())
-                                    },
-                                )
-                        })
-                        .collect::<Vec<_>>();
-                    let static_text = snapshot_system_prompt
-                        .iter()
-                        .filter(|section| {
-                            !section.equals_ascii(
-                                lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY,
-                            )
-                        })
-                        .map(|section| section.display_text())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let mut prompt = RenderedPromptSections {
-                        text: static_text.clone(),
-                        static_text,
-                        source_sections: Vec::new(),
-                        snapshot_system_prompt: Some(snapshot_system_prompt),
-                        dynamic_system_context: None,
-                    };
-                    prompt.dynamic_system_context =
-                        self.append_dynamic_system_context(&mut prompt.text).await;
-                    return Ok(prompt);
-                }
-            }
+        if let Some(frozen) = self.frozen_prompt_source_vector().await {
+            let static_text = frozen.static_text.to_string();
+            let mut prompt = RenderedPromptSections {
+                text: static_text.clone(),
+                static_text,
+                source_sections: Vec::new(),
+                snapshot_system_prompt: Some(frozen.elements.clone()),
+                dynamic_system_context: None,
+            };
+            prompt.dynamic_system_context = self.append_dynamic_system_context(&mut prompt.text).await;
+            return Ok(prompt);
         }
         let main_thread_prompt = self
             .lifecycle_runtime
@@ -1664,12 +1668,16 @@ impl ConversationOrchestrator {
     async fn build_prompt_context(
         &self,
     ) -> Result<crate::prompt::SystemPromptContext, lingxi_core::settings::SettingsError> {
-        let memory_files = self
-            .main_instruction_files()
-            .await
+        // Environment facts and skills do not depend on instruction contents.
+        let (memory_files, context) = tokio::join!(
+            self.main_instruction_files(),
+            self.build_prompt_context_from_files(Vec::new()),
+        );
+        let memory_files = memory_files
             .map_err(|error| Self::source_settings_failure("instruction_context", error))?;
-        self.build_prompt_context_from_files(memory_files.as_ref().clone())
-            .await
+        let mut context = context?;
+        context.memory_files = memory_files.as_ref().clone();
+        Ok(context)
     }
 
     async fn build_prompt_context_from_files(
@@ -1709,7 +1717,17 @@ impl ConversationOrchestrator {
         // session lock, so there is no reentrancy.
         let model = self.session.lock().await.model.clone();
 
-        let (git, _) = self.cached_git_status(&probe_cwd).await;
+        let skills = async {
+            match &self.prompt_runtime.skill_listing {
+                Some(provider) => crate::prompt::skill_listing::preparation_snapshot(provider)
+                    .await
+                    .map(|snapshot| !snapshot.entries.is_empty()),
+                None => Ok(false),
+            }
+        };
+        let ((git, _), skills_available) =
+            tokio::join!(self.cached_git_status(&probe_cwd), skills);
+        let skills_available = skills_available?;
 
         // Tool name extraction: ToolRegistry's `all_names()` is the
         // unfiltered set (builtin + plugin + MCP). M5-03 uses the
@@ -1777,10 +1795,7 @@ impl ConversationOrchestrator {
             // `nz()` non-empty: at least one model-invocable prompt skill
             // exists. Sourced from the attached skill-listing provider (same
             // source as the per-turn skill reminder); `None` provider ⇒ false.
-            skills_available: match &self.prompt_runtime.skill_listing {
-                Some(provider) => !provider.skill_listing_snapshot().await?.entries.is_empty(),
-                None => false,
-            },
+            skills_available,
             // A scheduled mobile runtime shares a process with the foreground
             // conversation, so `interactive_session` intentionally remains
             // process-interactive. The typed per-orchestrator launch mode is

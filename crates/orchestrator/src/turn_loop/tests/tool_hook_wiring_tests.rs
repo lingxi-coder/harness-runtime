@@ -659,7 +659,7 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
         Some(assistant_id),
         Some(super::tool_dispatch::ToolUseDispatchFacts {
             native_query_depth: 0,
-            query_history: captured_request_history.clone(),
+            query_history: captured_request_history.clone().into(),
             assistant_message: raw_assistant_row.clone(),
             same_turn_tool_uses: vec![prior_tool.clone()],
             refusal_call_boundary: None,

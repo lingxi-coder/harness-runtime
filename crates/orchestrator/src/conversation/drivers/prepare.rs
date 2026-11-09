@@ -250,6 +250,19 @@ impl ConversationOrchestrator {
         is_regular_user_prompt: bool,
         user_cancel: Option<&CancellationToken>,
     ) -> Result<PreparedTurnStep, OrchestratorError> {
+        crate::prompt::skill_listing::scope_preparation_snapshot(
+            self.prepare_turn_step_inner(path, system, in_human_turn, is_regular_user_prompt, user_cancel),
+        ).await
+    }
+
+    async fn prepare_turn_step_inner(
+        &self,
+        path: ModelCallPath,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        in_human_turn: bool,
+        is_regular_user_prompt: bool,
+        user_cancel: Option<&CancellationToken>,
+    ) -> Result<PreparedTurnStep, OrchestratorError> {
         let prompt_ingress_kind = self
             .prompt_ingress_kind_for_model_step(is_regular_user_prompt)
             .await;
@@ -855,10 +868,13 @@ impl ConversationOrchestrator {
                 let accepted_history = {
                     let session = self.session.lock().await;
                     session
-                        .model_context_history()
-                        .into_iter()
-                        .filter(|row| request_history_ids.contains(&row.id()))
-                        .map(|row| (row.id(), row))
+                        .history
+                        .iter()
+                        .filter(|row| {
+                            request_history_ids.contains(&row.id())
+                                && !session.model_context_excluded_messages.contains(&row.id())
+                        })
+                        .map(|row| (row.id(), row.clone()))
                         .collect::<std::collections::HashMap<_, _>>()
                 };
                 let accepted_ids = accepted_history
@@ -903,12 +919,15 @@ impl ConversationOrchestrator {
                 let missing_tail_rows = {
                     let session = self.session.lock().await;
                     session
-                        .model_context_history()
-                        .into_iter()
+                        .history
+                        .iter()
                         .filter(|message| {
                             let id = message.id();
-                            buffered_tail_ids.contains(&id) && !snapshot_ids.contains(&id)
+                            buffered_tail_ids.contains(&id)
+                                && !snapshot_ids.contains(&id)
+                                && !session.model_context_excluded_messages.contains(&id)
                         })
+                        .cloned()
                         .collect::<Vec<_>>()
                 };
                 snapshot.extend(missing_tail_rows);

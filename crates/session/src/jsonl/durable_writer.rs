@@ -150,6 +150,8 @@ pub struct DurableTranscriptWriter {
     #[cfg(test)]
     fail_next_append_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
+    fail_append_after_writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     duplicate_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Counts `fsync` calls made by this writer, so a regression can assert
     /// which appends pay for durability and which do not.
@@ -536,7 +538,18 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         let fail = self
             .fail_next_append_write
-            .swap(false, std::sync::atomic::Ordering::SeqCst);
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            || self
+                .fail_append_after_writes
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| {
+                        (remaining != usize::MAX)
+                            .then(|| remaining.checked_sub(1).unwrap_or(usize::MAX))
+                    },
+                )
+                .is_ok_and(|remaining| remaining == 0);
         #[cfg(not(test))]
         let fail = false;
         let result = if fail {
@@ -588,6 +601,10 @@ impl DurableTranscriptWriter {
             fail_next_append_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             fail_next_append_write: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_append_after_writes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                usize::MAX,
+            )),
             #[cfg(test)]
             syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -658,6 +675,18 @@ impl DurableTranscriptWriter {
     ) -> Result<(), TranscriptWriterError> {
         self.verify_authoritative_target(root, relative)
             .map_err(TranscriptWriterError::WrittenButNotDurable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_append_after_writes_for_test(&self, successful_writes: usize) {
+        self.fail_append_after_writes
+            .store(successful_writes, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_write_for_test(&self) {
+        self.fail_next_append_write
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]

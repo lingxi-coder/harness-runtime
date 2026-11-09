@@ -30,6 +30,33 @@ use crate::turn_loop::{
 };
 use hooks::attachment::HookPublicationGuard;
 
+// Retain the incremental content assembler instead of every cloned delta and
+// a second replay at MessageStop. Its failure is auxiliary: an invalid response
+// stays absent until the next response boundary, exactly like the old replay.
+fn observe_mod_stream_response(
+    accumulator: &mut Option<llm_runtime::stream_accumulator::ResponseAccumulator>,
+    event: &HistoryEvent,
+) -> Option<llm_runtime::HistoryResponse> {
+    use llm_runtime::stream_accumulator::{ResponseAccumulator, ResponseAccumulatorUpdate};
+    if matches!(event, HistoryEvent::Completed { .. }) {
+        *accumulator = Some(ResponseAccumulator::default());
+        return None;
+    }
+    let result = accumulator.as_mut().map(|value| value.observe(event.clone()));
+    let response = match result {
+        Some(Ok(ResponseAccumulatorUpdate::Completed(response))) => Some(response),
+        Some(Err(_)) => {
+            *accumulator = None;
+            None
+        }
+        _ => None,
+    };
+    if matches!(event, HistoryEvent::MessageStop) {
+        *accumulator = Some(ResponseAccumulator::default());
+    }
+    response
+}
+
 // Cancel request opening before the first response stream exists. This is safe
 // for the foreground turn: no stream event has dispatched tools or produced a
 // partial assistant row yet. Once the stream is open, the pump owns the more
@@ -552,32 +579,21 @@ fn mod_turn_step_stream(
                     let result_wire = wire.clone();
                     let source_refs = Arc::new(StdMutex::new(Vec::new()));
                     let chunk_refs = source_refs.clone();
-                    let response_events = Arc::new(StdMutex::new(Vec::new()));
+                    let response_accumulator = Arc::new(StdMutex::new(Some(
+                        llm_runtime::stream_accumulator::ResponseAccumulator::default(),
+                    )));
                     let stream = stream.then(move |item| {
-                    let response_events = response_events.clone();
+                    let response_accumulator = response_accumulator.clone();
                     let chunk_wire = chunk_wire.clone();
                     let chunk_refs = chunk_refs.clone();
                     let physical_error = physical_error.clone();
                     async move {
                         match item {
                             Ok(event) => {
-                                let stopped = matches!(event, HistoryEvent::MessageStop);
-                                if matches!(event, HistoryEvent::Completed { .. }) {
-                                    response_events.lock().unwrap().clear();
-                                } else {
-                                    response_events.lock().unwrap().push(event.clone());
-                                }
-                                let streamed_response = if stopped {
-                                    let events =
-                                        std::mem::take(&mut *response_events.lock().unwrap());
-                                    llm_runtime::stream_accumulator::accumulate_stream_salvaging(
-                                        futures::stream::iter(events.into_iter().map(Ok)).boxed(),
-                                    )
-                                    .await
-                                    .ok()
-                                } else {
-                                    None
-                                };
+                                let streamed_response = observe_mod_stream_response(
+                                    &mut response_accumulator.lock().unwrap(),
+                                    &event,
+                                );
                                 let held = {
                                     let mut wire = chunk_wire.lock().unwrap();
                                     let held = wire.push(event).clone();
@@ -1608,6 +1624,8 @@ impl StreamingTurnDriver<'_> {
                         .await?;
                         let assistant_message =
                             pumped_assistant_message(&pumped_from_recovery, assistant_id);
+                        let dispatch_query_history: Arc<[ConversationMessage]> =
+                            request_history.clone().into();
                         let mut prior_tool_uses = Vec::new();
                         for tu in &pumped_from_recovery.tool_uses {
                             exec.add_tool_with_context_owned(
@@ -1618,7 +1636,7 @@ impl StreamingTurnDriver<'_> {
                                 assistant_id,
                                 crate::turn_loop::ToolUseDispatchFacts {
                                     native_query_depth: loop_state.native_query_depth,
-                                    query_history: request_history.clone(),
+                                    query_history: Arc::clone(&dispatch_query_history),
                                     assistant_message: assistant_message.clone(),
                                     same_turn_tool_uses: prior_tool_uses.clone(),
                                     refusal_call_boundary: None,
@@ -2049,6 +2067,7 @@ impl StreamingTurnDriver<'_> {
         )
         .await?;
         let assistant_message = pumped_assistant_message(&pumped_from_fallback, assistant_id);
+        let dispatch_query_history: Arc<[ConversationMessage]> = request_history.clone().into();
         let mut prior_tool_uses = Vec::new();
         for tu in &pumped_from_fallback.tool_uses {
             exec.add_tool_with_context_owned(
@@ -2059,7 +2078,7 @@ impl StreamingTurnDriver<'_> {
                 assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: exec.native_query_depth(),
-                    query_history: request_history.clone(),
+                    query_history: Arc::clone(&dispatch_query_history),
                     assistant_message: assistant_message.clone(),
                     same_turn_tool_uses: prior_tool_uses.clone(),
                     refusal_call_boundary: None,
@@ -2192,6 +2211,7 @@ impl StreamingTurnDriver<'_> {
             retry_scope: _,
         } = opened_iteration;
         let mut cache_request_history = query_history.clone();
+        let dispatch_query_history: Arc<[ConversationMessage]> = query_history.clone().into();
         let cache_inline_context = context_announcements.inline_context.clone();
         let mut assistant_session_append_dispatched =
             matches!(&opened, OpenedModelStream::Recovered(_));
@@ -2264,7 +2284,7 @@ impl StreamingTurnDriver<'_> {
                             ExecutorPump {
                                 executor: &mut exec,
                                 assistant_id,
-                                query_history: query_history.clone(),
+                                query_history: Arc::clone(&dispatch_query_history),
                                 model_profile: model_profile.clone(),
                                 record_supersedes:
                                     crate::streaming_loop::native_server_fallback_supersedes_enabled(
@@ -4746,5 +4766,74 @@ impl StreamingTurnDriver<'_> {
             turn_count: loop_state.turn_count,
             final_message_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod mod_response_accumulator_tests {
+    use super::*;
+    use crate::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta,
+    };
+
+    fn text_response(id: &str, text: &str) -> Vec<HistoryEvent> {
+        vec![
+            message_start(id, "model"),
+            content_block_start_text(0),
+            text_delta(0, text),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn incremental_mod_response_matches_replay_for_multiple_messages() {
+        let mut accumulator = Some(llm_runtime::stream_accumulator::ResponseAccumulator::default());
+        for (id, text) in [("first", "hello😀"), ("second", "new response")] {
+            let events = text_response(id, text);
+            let expected = llm_runtime::stream_accumulator::accumulate_stream_salvaging(
+                futures::stream::iter(events.clone().into_iter().map(Ok)).boxed(),
+            )
+            .await
+            .unwrap();
+            let observed = events
+                .iter()
+                .filter_map(|event| observe_mod_stream_response(&mut accumulator, event))
+                .collect::<Vec<_>>();
+            assert_eq!(observed, vec![expected]);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_mod_response_does_not_poison_next_message() {
+        let mut accumulator = Some(llm_runtime::stream_accumulator::ResponseAccumulator::default());
+        let malformed = vec![
+            message_start("bad", "model"),
+            text_delta(0, "delta without start"),
+            message_stop(),
+        ];
+        assert!(
+            llm_runtime::stream_accumulator::accumulate_stream_salvaging(
+                futures::stream::iter(malformed.clone().into_iter().map(Ok)).boxed()
+            )
+            .await
+            .is_err()
+        );
+        for event in &malformed {
+            assert!(observe_mod_stream_response(&mut accumulator, event).is_none());
+        }
+        let events = text_response("good", "recovered");
+        let expected = llm_runtime::stream_accumulator::accumulate_stream_salvaging(
+            futures::stream::iter(events.clone().into_iter().map(Ok)).boxed(),
+        )
+        .await
+        .unwrap();
+        let observed = events
+            .iter()
+            .filter_map(|event| observe_mod_stream_response(&mut accumulator, event))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![expected]);
     }
 }

@@ -1853,7 +1853,11 @@ impl ConversationOrchestrator {
         let publication_guard = settlement.publication_guard.clone();
         let append_guard = publication_guard.clone();
         let append = async {
+            // Match prompt admission's session -> guards lock order. Acquire
+            // each lock once before mutating either collection, so a history
+            // row is never observable without its publication guard.
             let mut session = self.session.lock().await;
+            let mut guarded_messages = self.prompt_runtime.guarded_prompt_messages.lock().await;
             // Skill rows were durably accepted and activated under their
             // publication lease. Put them back in JE order after K without
             // publishing a second copy.
@@ -1873,12 +1877,12 @@ impl ConversationOrchestrator {
                         .injected_message_sources
                         .insert(message.id(), tool_use_id);
                 }
-                session.history.push(message.clone());
                 if let Some(guard) = append_guard.as_ref() {
-                    self.prompt_runtime
-                        .remember_guarded_prompt_message(message.id(), Arc::clone(guard))
-                        .await;
+                    if !guarded_messages.iter().any(|(id, _)| *id == message.id()) {
+                        guarded_messages.push((message.id(), Arc::clone(guard)));
+                    }
                 }
+                session.history.push(message);
             }
         };
         if let Some(guard) = publication_guard {

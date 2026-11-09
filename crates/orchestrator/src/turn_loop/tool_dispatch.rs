@@ -591,7 +591,7 @@ pub(super) fn resolve_tool_file_path(
     })
 }
 
-pub(super) fn memdir_index_notice_for_tool(
+pub(super) async fn memdir_index_notice_for_tool(
     orch: &ConversationOrchestrator,
     tool_name: &str,
     tool_input: &Utf16JsonProjection,
@@ -604,14 +604,20 @@ pub(super) fn memdir_index_notice_for_tool(
         .prompt_runtime
         .memory_prefetch
         .as_ref()?
-        .user_memdir()?;
-    let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));
+        .user_memdir()?
+        .to_path_buf();
     let target = resolve_tool_file_path(tool_input, &orch.current_cwd())?;
-    if canonical_or_normalize(&target) != memory_index {
-        return None;
-    }
-    let content = std::fs::read_to_string(&memory_index).ok()?;
-    memory::memory_index_cap_notice(&content)
+    tokio::task::spawn_blocking(move || {
+        let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));
+        if canonical_or_normalize(&target) != memory_index {
+            return None;
+        }
+        let content = std::fs::read_to_string(&memory_index).ok()?;
+        memory::memory_index_cap_notice(&content)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Fold a tool result's `structuredPatch` (if any) into the session's
@@ -3792,7 +3798,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
 #[derive(Debug, Clone)]
 pub(crate) struct ToolUseDispatchFacts {
     pub(crate) native_query_depth: u32,
-    pub(crate) query_history: Vec<ConversationMessage>,
+    pub(crate) query_history: std::sync::Arc<[ConversationMessage]>,
     pub(crate) assistant_message: ConversationMessage,
     pub(crate) same_turn_tool_uses: Vec<ContentBlock>,
     pub(crate) refusal_call_boundary: Option<std::sync::Arc<RefusalToolCallBoundary>>,
@@ -3861,6 +3867,40 @@ fn dispatch_facts_for_tool_index(
                 }),
         );
     Some(facts)
+}
+
+#[cfg(test)]
+mod dispatch_facts_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_dispatch_facts_share_request_history_but_contexts_can_mutate() {
+        let facts = ToolUseDispatchFacts {
+            native_query_depth: 2,
+            query_history: vec![ConversationMessage::user(MessageId::new(), "request".into())].into(),
+            assistant_message: ConversationMessage::user(MessageId::new(), "row".into()),
+            same_turn_tool_uses: Vec::new(),
+            refusal_call_boundary: None,
+        };
+        let tool_uses = vec![(
+            ToolUseId::new(),
+            "Read".into(),
+            Utf16JsonProjection::parse("{}").unwrap(),
+            None,
+        )];
+        let first = dispatch_facts_for_tool_index(&tool_uses, Some(&facts), 0).unwrap();
+        let second = dispatch_facts_for_tool_index(&tool_uses, Some(&facts), 1).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &first.query_history,
+            &second.query_history
+        ));
+        assert_eq!(first.same_turn_tool_uses.len(), 0);
+        assert_eq!(second.same_turn_tool_uses.len(), 1);
+        let mut physical_context_messages = first.query_history.to_vec();
+        physical_context_messages.push(ConversationMessage::user(MessageId::new(), "consent".into()));
+        assert_eq!(physical_context_messages.len(), 2);
+        assert_eq!(second.query_history.len(), 1);
+    }
 }
 
 pub(crate) async fn streaming_tool_context_base(
@@ -4705,42 +4745,164 @@ fn map_mod_result_for_model(
     (text, blocks, is_error)
 }
 
+/// A bounded model preview that still counts the full serialized suffix for the
+/// existing omission notice. Raw output stays on the result/recovery carrier.
+struct ToolResultPreview {
+    text: String,
+    units: usize,
+    omitted: usize,
+}
+
+impl std::io::Write for ToolResultPreview {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // The projection writer emits complete UTF-8 scalars and ASCII JSON
+        // escapes on each write, including exact lone-surrogate escapes.
+        let chunk = std::str::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        for character in chunk.chars() {
+            if self.omitted == 0 && self.units + character.len_utf16() <= 50_000 {
+                self.units += character.len_utf16();
+                self.text.push(character);
+            } else {
+                self.omitted += 1;
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn source_tool_result_text(result: &Utf16JsonProjection) -> Utf16JsonProjection {
     for pointer in ["", "/model_content", "/content", "/result"] {
-        if result.string_units(pointer).is_some() {
+        if result
+            .at_pointer(pointer)
+            .and_then(JsonValueView::code_units)
+            .is_some()
+        {
             return result
                 .subprojection(pointer)
                 .expect("string pointer exists");
         }
     }
-    let serialized = result
-        .to_json_string()
-        .expect("tool output is a valid source projection");
     if result.at_pointer("").is_some_and(JsonValueView::is_null) || result.array_len("").is_some() {
-        return serialized.into();
+        // Strings and arrays have always bypassed the object preview limit.
+        return result
+            .to_json_string()
+            .expect("tool output is a valid source projection")
+            .into();
     }
-    let mut units = serialized.encode_utf16().collect::<Vec<_>>();
-    if units.len() <= 50_000 {
-        return serialized.into();
+    let mut preview = ToolResultPreview {
+        text: String::new(),
+        units: 0,
+        omitted: 0,
+    };
+    result
+        .write_json_to(&mut preview)
+        .expect("tool output is a valid source projection");
+    if preview.omitted > 0 {
+        preview.text.push_str(&format!(
+            "\n[{} more character{} of this tool result not shown]",
+            preview.omitted,
+            if preview.omitted == 1 { "" } else { "s" }
+        ));
     }
-    let mut end = 0usize;
-    let mut count = 0usize;
-    for (index, character) in serialized.char_indices() {
-        let next = count + character.len_utf16();
-        if next > 50_000 {
-            end = index;
-            break;
+    preview.text.into()
+}
+
+#[cfg(test)]
+mod tool_result_preview_tests {
+    use super::*;
+
+    fn old_projection(result: &Utf16JsonProjection) -> Utf16JsonProjection {
+        for pointer in ["", "/model_content", "/content", "/result"] {
+            if result
+                .at_pointer(pointer)
+                .and_then(JsonValueView::code_units)
+                .is_some()
+            {
+                return result.subprojection(pointer).unwrap();
+            }
         }
-        count = next;
+        let serialized = result.to_json_string().unwrap();
+        if result.at_pointer("").is_some_and(JsonValueView::is_null)
+            || result.array_len("").is_some()
+        {
+            return serialized.into();
+        }
+        let mut units = 0;
+        let end = serialized.char_indices().find_map(|(index, character)| {
+            units += character.len_utf16();
+            (units > 50_000).then_some(index)
+        });
+        match end {
+            None => serialized.into(),
+            Some(end) => {
+                let omitted = serialized[end..].chars().count();
+                format!(
+                    "{}\n[{omitted} more character{} of this tool result not shown]",
+                    &serialized[..end],
+                    if omitted == 1 { "" } else { "s" }
+                )
+                .into()
+            }
+        }
     }
-    let omitted = serialized[end..].chars().count();
-    units.truncate(count);
-    let mut text = String::from_utf16_lossy(&units);
-    text.push_str(&format!(
-        "\n[{omitted} more character{} of this tool result not shown]",
-        if omitted == 1 { "" } else { "s" }
-    ));
-    text.into()
+
+    #[test]
+    fn bounded_preview_matches_existing_unicode_and_escape_semantics() {
+        for body in [
+            "a".repeat(49_990),
+            "a".repeat(49_991),
+            "a".repeat(49_992),
+            format!("{}😀tail", "a".repeat(49_990)),
+            format!("{}😀tail", "a".repeat(49_991)),
+            "\n\"😀".repeat(20_000),
+        ] {
+            let result = Utf16JsonProjection::object(vec![("body".into(), body.into())]).unwrap();
+            assert_eq!(source_tool_result_text(&result), old_projection(&result));
+        }
+        let result = Utf16JsonProjection::parse(r#"{"body":"\ud800\ud801"}"#).unwrap();
+        assert_eq!(source_tool_result_text(&result), old_projection(&result));
+    }
+
+    #[test]
+    fn serialized_prefix_storage_stays_bounded_for_large_objects() {
+        let result =
+            Utf16JsonProjection::object(vec![("body".into(), "😀".repeat(200_000).into())])
+                .unwrap();
+        let mut preview = ToolResultPreview {
+            text: String::new(),
+            units: 0,
+            omitted: 0,
+        };
+        result.write_json_to(&mut preview).unwrap();
+        assert!(preview.units <= 50_000);
+        assert!(preview.text.len() <= 100_000);
+        assert!(preview.omitted > 100_000);
+        assert_eq!(source_tool_result_text(&result), old_projection(&result));
+        assert_eq!(result.string_at("/body").unwrap().chars().count(), 200_000);
+    }
+
+    #[test]
+    fn string_overrides_and_arrays_remain_unbounded_and_exact() {
+        let units = vec![0xd800; 50_001];
+        let raw_string =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap();
+        assert_eq!(source_tool_result_text(&raw_string), raw_string);
+        for field in ["model_content", "content", "result"] {
+            let result =
+                Utf16JsonProjection::object(vec![(field.into(), raw_string.clone())]).unwrap();
+            assert_eq!(source_tool_result_text(&result), raw_string);
+        }
+        let array = Utf16JsonProjection::array(vec!["x".repeat(50_001).into()]).unwrap();
+        assert_eq!(
+            source_tool_result_text(&array).string_at("").unwrap(),
+            array.to_json_string().unwrap()
+        );
+    }
 }
 
 async fn append_mod_tool_context(
@@ -5155,7 +5317,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             let session = orch.session.lock().await;
             tool_dispatch_facts.as_ref().map_or_else(
                 || session.model_context_history(),
-                |facts| facts.query_history.clone(),
+                |facts| facts.query_history.to_vec(),
             )
         };
         let mut ctx = streaming_tool_context_base(orch, messages).await;
@@ -7296,7 +7458,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
         let mut post_additional_contexts = post_agg.additional_contexts.clone();
-        if let Some(notice) = memdir_index_notice_for_tool(orch, name, &effective_input, is_error) {
+        if let Some(notice) = memdir_index_notice_for_tool(orch, name, &effective_input, is_error).await {
             if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
                 let mut metadata = telemetry::LogEventMetadata::new();
                 metadata.insert(

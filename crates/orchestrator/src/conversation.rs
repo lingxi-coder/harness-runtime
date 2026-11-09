@@ -1486,7 +1486,9 @@ pub(crate) struct MainThreadAgentState {
 struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     dynamic_schema_revisions: Vec<(String, String)>,
-    exact_schema_identities: Vec<(String, String)>,
+    // Immutable borrowed schema and owning Tool identities. Retaining the
+    // owners in the single wire cache prevents pointer reuse on a hit.
+    exact_schema_identities: Vec<(usize, usize)>,
     session_id: Option<lingxi_core::types::SessionId>,
     is_scheduled_turn: bool,
     model: String,
@@ -1502,10 +1504,20 @@ struct WireToolSchemaCacheKey {
     mod_tool_description_generation: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+#[allow(dead_code)]
 struct WireToolSchemaCache {
+    owners: Vec<Arc<dyn tool_api::tool_trait::Tool>>,
     key: WireToolSchemaCacheKey,
     wire: Vec<lingxi_core::host::SourceToolWireDefinition>,
+}
+
+/// Typed, shared derivative of the exact durable static source vector.
+struct FrozenPromptSourceVector {
+    source: Vec<String>,
+    utf16: Vec<Option<Vec<u16>>>,
+    elements: Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>,
+    static_text: Arc<str>,
 }
 
 /// `date_change` (cc `Cop`) per-conversation state.

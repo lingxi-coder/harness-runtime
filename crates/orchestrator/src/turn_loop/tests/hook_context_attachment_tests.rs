@@ -1980,7 +1980,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
     );
     let facts = crate::turn_loop::ToolUseDispatchFacts {
         native_query_depth: 0,
-        query_history: vec![prompt.clone()],
+        query_history: vec![prompt.clone()].into(),
         assistant_message: assistant.clone(),
         same_turn_tool_uses: Vec::new(),
         refusal_call_boundary: None,

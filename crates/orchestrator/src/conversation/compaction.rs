@@ -2435,7 +2435,7 @@ impl ConversationOrchestrator {
             let session = self.session.lock().await;
             self.session_plan_file_path(&session.session_id)
         };
-        let content = std::fs::read_to_string(&path).ok()?;
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
         if content.is_empty() {
             return None;
         }
@@ -3414,6 +3414,7 @@ impl ConversationOrchestrator {
         // Compaction rewrites history; a frozen git-status snapshot from the
         // pre-compact conversation would otherwise ride into the next turn.
         *self.prompt_runtime.git_status_snapshot.lock().await = None;
+        crate::prompt::skill_listing::invalidate_preparation_snapshot();
         self.prompt_runtime.invalidate_mod_prompt_context().await;
         *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
         *self.prompt_runtime.pending_skill_prefetch.lock().await = None;
@@ -3445,24 +3446,23 @@ impl ConversationOrchestrator {
             for (message, _) in &retained_context_announcements {
                 self.persist_message_to_jsonl(message).await;
             }
-            for m in &result.messages {
-                self.persist_compact_summary_to_jsonl(m).await;
-            }
+            self.persist_messages_to_jsonl_batch(&result.messages.iter().collect::<Vec<_>>(), true)
+                .await;
         }
         if tail_preserved && !native_exact_preserved {
             if let Some(tail_last) = pre_boundary_last_uuid {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last);
             }
         }
-        for m in &preserved_media_analysis {
-            self.persist_message_to_jsonl(m).await;
-        }
-        for m in &restored_attachments {
-            self.persist_message_to_jsonl(m).await;
-        }
-        for m in &session_start_messages {
-            self.persist_message_to_jsonl(m).await;
-        }
+        // These are new rows after the preserved tail; never include the
+        // native-exact precommit or the already-durable preserved segment.
+        let post_compact_rows = preserved_media_analysis
+            .iter()
+            .chain(&restored_attachments)
+            .chain(&session_start_messages)
+            .collect::<Vec<_>>();
+        self.persist_messages_to_jsonl_batch(&post_compact_rows, false)
+            .await;
 
         // Claude closes the compact command status before the query driver
         // publishes its boundary. Preserve this order for stream-json clients.
@@ -4652,18 +4652,6 @@ impl ConversationOrchestrator {
             session.history.push(marker.clone());
         }
         self.persist_compact_boundary_jsonl_value(&marker, compact_metadata)
-            .await;
-    }
-
-    /// Persist a compaction summary user line, stamping the top-level
-    /// `isVisibleInTranscriptOnly: true` + `isCompactSummary: true` envelope
-    /// flags. 1:1 with claude 2.1.207's summary persist
-    /// (`$r({content: v9r(...), isCompactSummary: !0,
-    /// isVisibleInTranscriptOnly: !0})`, round-tripped by the writer's
-    /// `...f.isCompactSummary===!0&&{isCompactSummary:!0}`); the line chains
-    /// off `last_jsonl_uuid` (the compact-boundary line).
-    pub(crate) async fn persist_compact_summary_to_jsonl(&self, msg: &ConversationMessage) {
-        self.persist_message_to_jsonl_inner(msg, None, None, true)
             .await;
     }
 

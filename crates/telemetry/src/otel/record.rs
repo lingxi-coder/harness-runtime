@@ -189,6 +189,41 @@ pub fn truncate_content(content: &str, max: i64) -> TruncatedContent {
     }
 }
 
+/// Apply the content cap while reading borrowed pieces, without joining the full body.
+#[must_use]
+pub fn truncate_content_chunks<'a>(
+    chunks: impl IntoIterator<Item = &'a str>,
+    max: i64,
+) -> TruncatedContent {
+    let cap = usize::try_from(max.max(0)).unwrap_or(usize::MAX);
+    let mut prefix = String::new();
+    let mut units = 0;
+    for chunk in chunks {
+        for character in chunk.chars() {
+            if character.len_utf16() > cap.saturating_sub(units) {
+                let marker = truncation_marker(cap);
+                let marker_units = utf16_len(&marker);
+                return TruncatedContent {
+                    content: if marker_units >= cap {
+                        prefix
+                    } else {
+                        let mut head = slice_utf16(&prefix, cap - marker_units);
+                        head.push_str(&marker);
+                        head
+                    },
+                    truncated: true,
+                };
+            }
+            units += character.len_utf16();
+            prefix.push(character);
+        }
+    }
+    TruncatedContent {
+        content: prefix,
+        truncated: false,
+    }
+}
+
 /// The CC truncation marker (two leading newlines, per the 2.1.215 binary —
 /// verified `\n\n[TRUNCATED…`, string-table length 0x1f=31): `\n\n[TRUNCATED -
 /// Content exceeds {N}KB limit]` for `t >= 1024`, else `\n\n[TRUNCATED - Content
@@ -514,6 +549,32 @@ pub fn recorder_from_config(config: Option<&OtelConfig>) -> Box<dyn Recorder> {
 mod tests {
     use super::super::config::{DEFAULT_CONTENT_MAX_LENGTH, ENV_ENABLE_TELEMETRY};
     use super::*;
+
+    #[test]
+    fn chunked_truncation_matches_joined_body_at_utf16_boundaries() {
+        let body = "a😀é\n".repeat(600);
+        for split in body.char_indices().map(|(index, _)| index).take(20) {
+            for cap in [0, 1, 2, 3, 4, 50, 100, 1024, 4096] {
+                assert_eq!(
+                    truncate_content_chunks([&body[..split], &body[split..]], cap),
+                    truncate_content(&body, cap),
+                    "split {split}, cap {cap}"
+                );
+            }
+        }
+        assert_eq!(truncate_content_chunks([], 0), truncate_content("", 0));
+    }
+
+    #[test]
+    fn chunked_truncation_stops_reading_after_the_cap() {
+        let pieces = std::iter::once("oversized body").chain(std::iter::from_fn(|| {
+            panic!("truncated body must not consume subsequent chunks")
+        }));
+        assert_eq!(
+            truncate_content_chunks(pieces, 3),
+            truncate_content("oversized body", 3)
+        );
+    }
 
     fn enabled_config() -> OtelConfig {
         OtelConfig::from_lookup(|k| (k == ENV_ENABLE_TELEMETRY).then(|| "1".to_string()))

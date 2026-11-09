@@ -3189,7 +3189,7 @@ mod tests {
             modifiers: Vec::new(),
             post_tool_batch_calls: Vec::new(),
             publications: Vec::new(),
-            dispatch_facts: None,
+            refusal_call_boundary: None,
         };
         let desc = tool_description(&t);
         assert_eq!(desc, format!("Bash({}\u{2026})", "x".repeat(40)));
@@ -3210,7 +3210,7 @@ mod tests {
             modifiers: Vec::new(),
             post_tool_batch_calls: Vec::new(),
             publications: Vec::new(),
-            dispatch_facts: None,
+            refusal_call_boundary: None,
         };
         assert_eq!(tool_description(&t), "Read(/tmp/a.txt)");
 
@@ -3230,7 +3230,7 @@ mod tests {
             modifiers: Vec::new(),
             post_tool_batch_calls: Vec::new(),
             publications: Vec::new(),
-            dispatch_facts: None,
+            refusal_call_boundary: None,
         };
         assert_eq!(tool_description(&t), "Grep(foo)");
 
@@ -3250,7 +3250,7 @@ mod tests {
             modifiers: Vec::new(),
             post_tool_batch_calls: Vec::new(),
             publications: Vec::new(),
-            dispatch_facts: None,
+            refusal_call_boundary: None,
         };
         assert_eq!(tool_description(&t), "SafeTool");
     }
@@ -4299,7 +4299,7 @@ mod tests {
             crate::streaming_loop::ExecutorPump {
                 executor: &mut exec,
                 assistant_id,
-                query_history: Vec::new(),
+                query_history: Vec::new().into(),
                 model_profile: None,
                 record_supersedes: false,
                 user_cancel: Some(&user_cancel),
@@ -4437,7 +4437,7 @@ mod tests {
             crate::streaming_loop::ExecutorPump {
                 executor: &mut executor,
                 assistant_id: MessageId::new(),
-                query_history: Vec::new(),
+                query_history: Vec::new().into(),
                 model_profile: None,
                 record_supersedes: false,
                 user_cancel: None,
@@ -4557,7 +4557,7 @@ mod tests {
             crate::streaming_loop::ExecutorPump {
                 executor: &mut executor,
                 assistant_id: MessageId::new(),
-                query_history: query_history.clone(),
+                query_history: query_history.clone().into(),
                 model_profile: None,
                 record_supersedes: false,
                 user_cancel: None,
@@ -4829,7 +4829,7 @@ mod tests {
             crate::streaming_loop::ExecutorPump {
                 executor: &mut executor,
                 assistant_id: MessageId::new(),
-                query_history: Vec::new(),
+                query_history: Vec::new().into(),
                 model_profile: None,
                 record_supersedes: false,
                 user_cancel: None,
@@ -4940,7 +4940,7 @@ mod tests {
             crate::streaming_loop::ExecutorPump {
                 executor: &mut executor,
                 assistant_id: MessageId::new(),
-                query_history: Vec::new(),
+                query_history: Vec::new().into(),
                 model_profile: None,
                 record_supersedes: false,
                 user_cancel: None,
@@ -5105,7 +5105,7 @@ mod tests {
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
 
-                    query_history: query_history.clone(),
+                    query_history: query_history.clone().into(),
                     assistant_message: full_row.clone(),
                     same_turn_tool_uses: Vec::new(),
                     refusal_call_boundary: None,
@@ -5130,7 +5130,7 @@ mod tests {
                 assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
-                    query_history: query_history.clone(),
+                    query_history: query_history.clone().into(),
                     assistant_message: full_row,
                     same_turn_tool_uses: vec![ContentBlock::ToolUse {
                         id: first_id.clone(),
@@ -5293,7 +5293,7 @@ mod tests {
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
 
-                    query_history: query_history.clone(),
+                    query_history: query_history.clone().into(),
                     assistant_message: first_row,
                     same_turn_tool_uses: Vec::new(),
                     refusal_call_boundary: None,
@@ -5343,7 +5343,7 @@ mod tests {
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
 
-                    query_history: query_history.clone(),
+                    query_history: query_history.clone().into(),
                     assistant_message: second_row,
                     same_turn_tool_uses: Vec::new(),
                     refusal_call_boundary: None,
@@ -5502,7 +5502,7 @@ mod tests {
                     assistant_id,
                     crate::turn_loop::ToolUseDispatchFacts {
                         native_query_depth: 0,
-                        query_history: query_history.clone(),
+                        query_history: query_history.clone().into(),
                         assistant_message: ConversationMessage::Assistant {
                             id: assistant_id,
                             content: vec![ContentBlock::ToolUse {

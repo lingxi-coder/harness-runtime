@@ -3036,6 +3036,110 @@ impl JsonlWriter {
         self.append_with_compaction(msg, local_gc_enabled()).await
     }
 
+    /// Append a prepared contiguous batch under one durable transaction.
+    /// The error carries the number of acknowledged prefix rows. Identity
+    /// reservations precede all transcript writes; unused indexes stay burned.
+    pub async fn append_batch(
+        &self,
+        messages: &[JsonlMessage],
+    ) -> Result<(), (usize, WriterError)> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        if self.active_durable_target().is_none() {
+            for (index, message) in messages.iter().enumerate() {
+                self.append(message).await.map_err(|error| (index, error))?;
+            }
+            return Ok(());
+        }
+        let mut payloads = Vec::with_capacity(messages.len());
+        let mut payload_sizes = Vec::with_capacity(messages.len());
+        for message in messages {
+            let stamped = stamp_session_kind(message);
+            let payload = native_message_projection(stamped.as_ref().unwrap_or(message))
+                .map_err(|error| (0, WriterError::from(error)))?;
+            let bytes = payload
+                .to_json_string()
+                .map_err(crate::jsonl::exact_json::projection_error)
+                .map_err(|error| (0, WriterError::from(error)))?
+                .len()
+                + 1;
+            payload_sizes.push(bytes);
+            payloads.push(payload);
+        }
+        let uuids = messages
+            .iter()
+            .map(|message| message.uuid.clone())
+            .collect::<Vec<_>>();
+        let result = {
+            let _guard = self.lock.lock().await;
+            self.flush_queue_operations_locked()
+                .await
+                .map_err(|error| (0, error))?;
+            let target = self.active_durable_target().ok_or_else(|| {
+                (
+                    0,
+                    WriterError::Fs(FsError::Io(
+                        "durable transcript target is not configured".into(),
+                    )),
+                )
+            })?;
+            let identity_store = self.identity_store.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut appended = 0;
+                let result = target.writer.with_transaction(|transaction| {
+                    let (root, identity, _, mut admitted) =
+                        durable_target_parts(&target.writer, &target.path)?;
+                    if let Some(file) = admitted.as_mut() {
+                        require_complete_transcript_tail(file)?;
+                    }
+                    if let Some(authority) = target.writer.transcript_authority() {
+                        authority.verify_current()?;
+                    }
+                    message_identity::append_row_identities_at(
+                        &identity_store,
+                        &target.path,
+                        &root,
+                        &identity,
+                        &uuids,
+                    )?;
+                    for (payload, uuid) in payloads.into_iter().zip(uuids) {
+                        append_durable_row_in_transaction(
+                            transaction,
+                            &target.writer,
+                            &target.path,
+                            &identity_store,
+                            payload,
+                            Some(&uuid),
+                        )?;
+                        appended += 1;
+                    }
+                    Ok(())
+                });
+                result.map_err(|error| (appended, WriterError::from(error)))
+            })
+            .await
+            .map_err(|error| (0, WriterError::Fs(FsError::Io(error.to_string()))))?
+        };
+        let acknowledged = result
+            .as_ref()
+            .map_or_else(|(prefix, _)| *prefix, |()| messages.len());
+        let bytes = payload_sizes[..acknowledged].iter().sum();
+        self.bytes_since_metadata_re_append
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.bytes_since_compact
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        result?;
+        self.maybe_compact_transcript_with_policy(
+            messages.iter().any(writes_compact_boundary),
+            local_gc_enabled(),
+        )
+        .await
+        .map_err(|error| (messages.len(), error))?;
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
     async fn append_with_compaction(
         &self,
         msg: &JsonlMessage,
@@ -4132,10 +4236,25 @@ impl JsonlWriter {
         content: &str,
         session_id: &str,
     ) -> Result<FixedSessionProfile, String> {
-        let mut lines = content.lines();
+        Self::fixed_session_profile_from_lines(content.lines().map(Ok), session_id)
+    }
+
+    /// Validate the complete transcript while retaining only one line in memory.
+    pub fn fixed_session_profile_from_reader(
+        reader: impl std::io::BufRead,
+        session_id: &str,
+    ) -> Result<FixedSessionProfile, String> {
+        Self::fixed_session_profile_from_lines(reader.lines(), session_id)
+    }
+
+    fn fixed_session_profile_from_lines<S: AsRef<str>>(
+        mut lines: impl Iterator<Item = Result<S, std::io::Error>>,
+        session_id: &str,
+    ) -> Result<FixedSessionProfile, String> {
         let header = lines
             .next()
-            .ok_or_else(|| "missing fixed session mode".to_owned())?;
+            .ok_or_else(|| "missing fixed session mode".to_owned())?
+            .map_err(|error| error.to_string())?;
         // This small ASCII ownership record has a closed schema. Deserialize it
         // directly so duplicate keys cannot be silently collapsed. Other rows
         // still use the exact UTF-16 codec for their user/provider content.
@@ -4148,7 +4267,7 @@ impl JsonlWriter {
             session_mode: String,
             instruction_epoch: u64,
         }
-        let fields: FixedModeHeader = serde_json::from_str(header)
+        let fields: FixedModeHeader = serde_json::from_str(header.as_ref())
             .map_err(|_| "invalid fixed session mode header".to_owned())?;
         let expected_id = uuid::Uuid::parse_str(session_id)
             .map_err(|_| "invalid fixed session mode identity".to_owned())?;
@@ -4164,7 +4283,8 @@ impl JsonlWriter {
             return Err("invalid instruction epoch".into());
         }
         for line in lines {
-            if let Ok(row) = Utf16JsonProjection::parse(line) {
+            let line = line.map_err(|error| error.to_string())?;
+            if let Ok(row) = Utf16JsonProjection::parse(line.as_ref()) {
                 if matches!(
                     row.string_at("/type"),
                     Some("fixed-session-mode" | "session-mode")
@@ -7793,6 +7913,167 @@ mod tests {
         assert_eq!(origin.string_at("/kind"), Some("peer"));
     }
 
+    fn batch_test_rows(session: SessionId) -> Vec<JsonlMessage> {
+        (0..3)
+            .map(|index| {
+                read_message(json!({
+                    "type":"user", "uuid": format!("batch-{index}"),
+                    "parentUuid": (index > 0).then(|| format!("batch-{}", index - 1)),
+                    "sessionId":session.as_uuid(), "isSidechain":false,
+                    "timestamp":"2026-11-09T00:00:00.000Z", "cwd":"/workspace", "version":"test",
+                    "message":{"role":"user","content":format!("body-{index}")}
+                }))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn durable_batch_preserves_chain_and_reserves_identities_before_failed_write() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let rows = batch_test_rows(session);
+        durable.fail_next_append_write_for_test();
+        let (prefix, error) = writer.append_batch(&rows).await.unwrap_err();
+        assert_eq!(prefix, 0);
+        assert!(error.to_string().contains("space") || error.to_string().contains("28"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "partial row is rolled back"
+        );
+        let snapshot = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert!(
+            snapshot.by_uuid.is_empty(),
+            "reservations do not expose unpersisted rows"
+        );
+        assert_eq!(
+            snapshot.next_message_index, 3,
+            "reserved indexes remain burned"
+        );
+        writer.append_batch(&rows).await.unwrap();
+        let snapshot = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.next_message_index, 3);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(snapshot.by_uuid[&row.uuid], index as u64);
+        }
+        let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+        for row in rows {
+            assert_eq!(loaded.by_uuid[&row.uuid].parent_uuid, row.parent_uuid);
+        }
+        assert_eq!(durable.duplicate_scan_count_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn durable_batch_reports_nonzero_prefix_and_retains_reserved_ordinals() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let rows = batch_test_rows(session);
+        durable.fail_append_after_writes_for_test(1);
+        let (prefix, _) = writer.append_batch(&rows).await.unwrap_err();
+        assert_eq!(prefix, 1);
+        let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(loaded.by_uuid.len(), 1);
+        assert_eq!(loaded.messages_in_order[0].uuid, rows[0].uuid);
+        let snapshot = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.next_message_index, 3);
+        assert_eq!(snapshot.by_uuid[&rows[0].uuid], 0);
+        assert_eq!(snapshot.by_uuid.len(), 1);
+        writer.append_batch(&rows[prefix..]).await.unwrap();
+        let snapshot = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.next_message_index, 3);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(snapshot.by_uuid[&row.uuid], index as u64);
+        }
+        let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(loaded.messages_in_order.len(), 3, "prefix was not retried");
+        assert_eq!(
+            loaded.by_uuid[&rows[2].uuid].parent_uuid.as_ref(),
+            Some(&rows[1].uuid)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admitted_batch_finishes_after_waiter_is_cancelled() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_holder = tokio::task::spawn_blocking(move || {
+            durable.with_transaction(|_| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.await.unwrap();
+        let appending = {
+            let writer = writer.clone();
+            tokio::spawn(async move { writer.append_batch(&batch_test_rows(session)).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while writer.lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        appending.abort();
+        assert!(appending.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        lock_holder.await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if std::fs::read_to_string(&path).unwrap().contains("body-2") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.by_uuid.len(), 3);
+    }
+
     #[tokio::test]
     async fn durable_ordinary_append_stays_constant_work_and_last_write_wins() {
         let (dir, path, _) = temp_writer("durable-ordinary-last-write");
@@ -9418,6 +9699,12 @@ mod tests {
             JsonlWriter::fixed_session_mode_from_source(&fixed, id).unwrap(),
             ConversationMode::Chat
         );
+        assert_eq!(
+            JsonlWriter::fixed_session_profile_from_reader(fixed.as_bytes(), id)
+                .unwrap()
+                .mode,
+            ConversationMode::Chat
+        );
         let other = format!(
             r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"code","instructionEpoch":7}}"#
         );
@@ -9433,9 +9720,45 @@ mod tests {
             format!("{fixed}\n{{\"type\":\"session-mode\",\"sessionId\":\"{id}\",\"sessionMode\":\"code\"}}\n"),
         ] {
             assert!(JsonlWriter::fixed_session_mode_from_source(&invalid, id).is_err(), "accepted {invalid}");
+            assert!(
+                JsonlWriter::fixed_session_profile_from_reader(invalid.as_bytes(), id).is_err(),
+                "reader accepted {invalid}"
+            );
         }
         let non_uuid = r#"{"type":"fixed-session-mode","sessionId":"not-a-uuid","sessionMode":"code","instructionEpoch":0}"#;
         assert!(JsonlWriter::fixed_session_mode_from_source(non_uuid, "not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn fixed_mode_reader_checks_the_tail_and_propagates_io_errors() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let header = format!(
+            r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","instructionEpoch":7}}"#
+        );
+        let source = format!("{header}\r\n{{\"type\":\"user\",\"text\":\"\\ud800\"}}\r\n\r\n");
+        let from_source = JsonlWriter::fixed_session_profile_from_source(&source, id).unwrap();
+        let from_reader = JsonlWriter::fixed_session_profile_from_reader(
+            std::io::BufReader::with_capacity(3, source.as_bytes()),
+            id,
+        )
+        .unwrap();
+        assert_eq!(from_source, from_reader);
+
+        let invalid_utf8 = [source.as_bytes(), &[0xff]].concat();
+        assert!(JsonlWriter::fixed_session_profile_from_reader(&invalid_utf8[..], id).is_err());
+
+        struct FailingReader;
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("tail read failed"))
+            }
+        }
+        let reader = std::io::BufReader::new(std::io::Read::chain(
+            std::io::Cursor::new(format!("{header}\n").into_bytes()),
+            FailingReader,
+        ));
+        let error = JsonlWriter::fixed_session_profile_from_reader(reader, id).unwrap_err();
+        assert!(error.contains("tail read failed"), "{error}");
     }
 
     #[tokio::test]

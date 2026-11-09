@@ -56,8 +56,8 @@ iana-time-zone = "0.1"
 # npm lib (gitignore-style globs). Same crate `permission`/`tools/file` use;
 # already in Cargo.lock.
 ignore = "0.4"
-rand = "0.8"
 regex = "1"
+tempfile = "3"
 async-trait.workspace = true
 dirs = "5"
 futures = { workspace = true }
@@ -73,6 +73,9 @@ unicode-width = "=0.1.14"
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", features = ["process", "signal"] }
+
 [dev-dependencies]
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 bytes.workspace = true
@@ -82,7 +85,6 @@ tool-mcp = { path = "../tools/mcp" }
 tool-api = { path = "../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tempfile = "3"
 once_cell = "1"
 platform-posix = { path = "../platforms/posix" }
 tracing = "0.1"

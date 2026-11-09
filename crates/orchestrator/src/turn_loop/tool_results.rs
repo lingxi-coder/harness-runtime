@@ -298,32 +298,57 @@ pub(super) async fn persist_keep_recent_clears(
         session.session_id.as_uuid().to_string()
     };
     let dir = trp::tool_results_dir(home, &orch.current_cwd().to_string_lossy(), &session_uuid);
-    for (tool_use_id, content) in candidates {
-        match trp::persist(
-            home,
-            &dir,
-            tool_use_id.as_str(),
-            &content,
-            false,
-            trp::MAX_PERSIST_UTF16_UNITS,
-        )
-        .await
-        {
-            Ok(persisted) => {
-                out.insert(
-                    tool_use_id,
-                    trp::microcompact_replacement(
-                        &persisted.filepath.to_string_lossy(),
-                        persisted.truncated_at,
-                    ),
-                );
+    use futures::{stream, StreamExt as _};
+    // Serialize candidates sharing a filename. Different tool IDs may persist
+    // concurrently, but the oldest body must still win an exclusive create.
+    let mut grouped = Vec::<(ToolUseId, Vec<Utf16JsonProjection>)>::new();
+    let mut group_indexes = std::collections::HashMap::new();
+    for (id, content) in candidates {
+        let index = *group_indexes.entry(id.clone()).or_insert_with(|| {
+            grouped.push((id, Vec::new()));
+            grouped.len() - 1
+        });
+        grouped[index].1.push(content);
+    }
+    let mut writes = stream::iter(grouped.into_iter().map(|(tool_use_id, contents)| {
+        let dir = &dir;
+        async move {
+            let mut results = Vec::with_capacity(contents.len());
+            for content in contents {
+                let result = trp::persist(
+                    home,
+                    dir,
+                    tool_use_id.as_str(),
+                    &content,
+                    false,
+                    trp::MAX_PERSIST_UTF16_UNITS,
+                )
+                .await;
+                results.push((tool_use_id.clone(), result));
             }
-            Err(error) => {
-                tracing::debug!(
-                    tool_use_id = %tool_use_id.as_str(),
-                    %error,
-                    "keep-recent clear could not persist a tool result; using the bare placeholder"
-                );
+            results
+        }
+    }))
+    .buffered(4);
+    while let Some(results) = writes.next().await {
+        for (tool_use_id, result) in results {
+            match result {
+                Ok(persisted) => {
+                    out.insert(
+                        tool_use_id,
+                        trp::microcompact_replacement(
+                            &persisted.filepath.to_string_lossy(),
+                            persisted.truncated_at,
+                        ),
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        tool_use_id = %tool_use_id.as_str(),
+                        %error,
+                        "keep-recent clear could not persist a tool result; using the bare placeholder"
+                    );
+                }
             }
         }
     }

@@ -888,7 +888,7 @@ pub(crate) struct PromptRuntime {
     /// key as `wire_tool_schema_cache`. `None` is cached too: unsupported
     /// providers must not retry a doomed count endpoint every turn.
     pub(super) deferred_tool_token_cache:
-        Mutex<std::collections::HashMap<WireToolSchemaCacheKey, Option<u64>>>,
+        Mutex<std::collections::HashMap<u64, Option<u64>>>,
     /// `history.len()` captured at each `silent_turn_reminder` emission.
     ///
     /// The oracle keeps its emitted attachments IN the message list, so `Ezm`
@@ -1099,6 +1099,7 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    pub(super) frozen_prompt_source_vector: Mutex<Option<Arc<FrozenPromptSourceVector>>>,
     /// Admitted conversation epoch that produced the static snapshot and
     /// its rendering hint. Legacy transcripts belong to epoch zero.
     pub(crate) prompt_snapshot_epoch: Mutex<Option<u64>>,
@@ -1206,6 +1207,7 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            frozen_prompt_source_vector: Mutex::new(None),
             prompt_snapshot_epoch: Mutex::new(None),
             pending_prompt_source_vector: Mutex::new(None),
             context_rendering_hint: Mutex::new(None),
@@ -1307,6 +1309,7 @@ impl PromptRuntime {
         *self.pending_skill_prefetch.lock().await = None;
         *self.pending_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot.lock().await = None;
+        *self.frozen_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot_epoch.lock().await = None;
         *self.context_rendering_hint.lock().await = None;
         self.prompt_snapshot_resume

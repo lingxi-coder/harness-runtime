@@ -834,11 +834,30 @@ pub fn emit_assistant_response_log(
     output_tokens: u64,
     body: &str,
 ) {
+    emit_assistant_response_log_chunks(
+        request_id,
+        model,
+        stop_reason,
+        input_tokens,
+        output_tokens,
+        std::iter::once(body),
+    );
+}
+
+/// Emit an assistant body from borrowed blocks, allocating only its capped prefix.
+pub fn emit_assistant_response_log_chunks<'a>(
+    request_id: &str,
+    model: &str,
+    stop_reason: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    body: impl IntoIterator<Item = &'a str>,
+) {
     with_runtime(|runtime| {
         if !runtime.config.log_include.assistant_responses {
             return;
         }
-        let truncated = truncate_content(body, runtime.config.content_max_length);
+        let truncated = super::record::truncate_content_chunks(body, runtime.config.content_max_length);
         let attrs = attrs_from_pairs(&[
             ("request_id", AttrValue::from(request_id.to_string())),
             ("model", AttrValue::from(model.to_string())),

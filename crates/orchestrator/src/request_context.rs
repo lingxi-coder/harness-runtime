@@ -372,13 +372,20 @@ async fn current_prompt_ingress_rows_after_user(
     orchestrator: &ConversationOrchestrator,
     prompt_id: MessageId,
 ) -> (Vec<ConversationMessage>, Vec<PromptIngressAttachment>) {
-    let history = orchestrator.session.lock().await.history.clone();
+    let session = orchestrator.session.lock().await;
+    current_prompt_ingress_rows_from_history(orchestrator, &session.history, prompt_id)
+}
+
+fn current_prompt_ingress_rows_from_history(
+    orchestrator: &ConversationOrchestrator,
+    history: &[ConversationMessage],
+    prompt_id: MessageId,
+) -> (Vec<ConversationMessage>, Vec<PromptIngressAttachment>) {
     let attachments = orchestrator
         .transcript
         .model_reminder_attachments
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(prompt_index) = history.iter().position(|message| message.id() == prompt_id) else {
         return (Vec::new(), Vec::new());
     };
@@ -1719,17 +1726,18 @@ pub(crate) async fn prior_history_for_current_prompt(
     else {
         return Vec::new();
     };
-    let history = orchestrator.session.lock().await.history.clone();
+    let session = orchestrator.session.lock().await;
+    let history = &session.history;
     let current_index = history.iter().position(|message| message.id() == prompt_id);
     match current_index {
         Some(index) => {
             let mut prior = history[..index].to_vec();
             let (accepted_rows, _) =
-                current_prompt_ingress_rows_after_user(orchestrator, prompt_id).await;
+                current_prompt_ingress_rows_from_history(orchestrator, history, prompt_id);
             prior.extend(accepted_rows);
             prior
         }
-        None if pending_ingress_prompt_was_compacted() => history,
+        None if pending_ingress_prompt_was_compacted() => history.clone(),
         None => Vec::new(),
     }
 }

@@ -3304,7 +3304,7 @@ impl ConversationOrchestrator {
             }
             if self
                 .persist_message_to_jsonl_inner_with_pending_prompt_identity(
-                    &accepted, None, None, false, None, None, true, None,
+                    &accepted, None, None, false, None, None, true, None, None,
                 )
                 .await
                 .is_err()
@@ -3434,6 +3434,7 @@ impl ConversationOrchestrator {
                         }),
                         false,
                         None,
+                        None,
                     )
                     .await
                     .is_err()
@@ -3544,6 +3545,7 @@ impl ConversationOrchestrator {
             None,
             false,
             None,
+            None,
         )
         .await?
         .ok_or_else(|| {
@@ -3570,6 +3572,7 @@ impl ConversationOrchestrator {
             None,
             false,
             Some(prompt_id),
+            None,
         )
         .await?
         .ok_or_else(|| {
@@ -4431,9 +4434,77 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Batch hook-free linear rows. Middleware retains the original per-row
+    /// durable visibility, including session.messages lookups between rewrites.
+    pub(super) async fn persist_messages_to_jsonl_batch(
+        &self,
+        messages: &[&ConversationMessage],
+        compact_summary: bool,
+    ) {
+        let has_append_mod = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry
+                .read()
+                .await
+                .mod_host()
+                .is_some_and(|host| host.has_event("session.append"))
+        } else {
+            false
+        };
+        let batchable = !has_append_mod
+            && !self.is_persistent_app_chat()
+            && messages
+                .iter()
+                .all(|message| matches!(message, ConversationMessage::User { .. }));
+        let Some(writer) = self.transcript.jsonl_writer.as_ref().filter(|_| batchable) else {
+            for message in messages {
+                self.persist_message_to_jsonl_inner(message, None, None, compact_summary)
+                    .await;
+            }
+            return;
+        };
+        let mut rows = Vec::with_capacity(messages.len());
+        for message in messages {
+            let sanitized = redact_ephemeral_tool_result_images(message);
+            let _ = self
+                .persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                    &sanitized,
+                    None,
+                    None,
+                    compact_summary,
+                    None,
+                    None,
+                    true,
+                    None,
+                    Some(&mut rows),
+                )
+                .await;
+        }
+        let outcomes = self
+            .append_prepared_transcript_rows(writer, &mut rows)
+            .await;
+        for (row, result) in rows.iter().zip(outcomes) {
+            match result {
+                Ok(()) => {
+                    telemetry::emit_session_appended(&row.session_id, &row.uuid);
+                    if let Some(id) = crate::resume::native_zce_message_id(row) {
+                        self.session
+                            .lock()
+                            .await
+                            .native_request_history
+                            .synthetic_closing_ids
+                            .insert(id);
+                    }
+                }
+                Err(error) => {
+                    self.record_transcript_append_failure(&row.session_id, "message", &error)
+                        .await
+                }
+            }
+        }
+    }
+
     /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`],
-    /// [`Self::persist_api_error_message_to_jsonl`] and
-    /// [`Self::persist_compact_summary_to_jsonl`].
+    /// [`Self::persist_api_error_message_to_jsonl`] and compaction summary rows.
     pub(super) async fn persist_message_to_jsonl_inner(
         &self,
         msg: &ConversationMessage,
@@ -4473,6 +4544,7 @@ impl ConversationOrchestrator {
                 preappended,
                 session_append_preaccepted,
                 None,
+                None,
             )
             .await;
     }
@@ -4488,6 +4560,7 @@ impl ConversationOrchestrator {
         preappended: Option<PreappendedRowMetadata<'_>>,
         session_append_preaccepted: bool,
         pending_prompt_id: Option<&str>,
+        prepared_rows: Option<&mut Vec<session::JsonlMessage>>,
     ) -> Result<Option<ConversationMessage>, OrchestratorError> {
         if pending_prompt_id.is_some() && !matches!(msg, ConversationMessage::User { .. }) {
             return Err(OrchestratorError::Internal(
@@ -4832,6 +4905,13 @@ impl ConversationOrchestrator {
                         .expect("generated transcript metadata is valid JSON"),
                 )
                 .expect("extra metadata is an object");
+        }
+        if let Some(rows) = prepared_rows {
+            if let Some(previous) = rows.last() {
+                jmsg.parent_uuid = Some(previous.uuid.clone());
+            }
+            rows.push(jmsg);
+            return Ok(Some(rewritten));
         }
         let uuid_for_chain = jmsg.uuid.clone();
         let append_result = if pending_prompt_id.is_some() {
@@ -5190,6 +5270,150 @@ impl ConversationOrchestrator {
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let persisted_usage = usage.map(without_host_usage_metadata);
+
+        // Streaming rows already crossed session.append one at a time. With
+        // no remaining middleware callbacks, their durable writes can share
+        // one commit lease and identity-sidecar sync without changing what a
+        // Mod observes between rows.
+        let has_append_mod = if run_session_append {
+            if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+                registry
+                    .read()
+                    .await
+                    .mod_host()
+                    .is_some_and(|host| host.has_event("session.append"))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !run_session_append || (!has_append_mod && !self.is_persistent_app_chat()) {
+            if let Some(writer) = writer.as_ref() {
+                let mut rows = Vec::with_capacity(content.len());
+                for (index, block) in content.iter().enumerate() {
+                    let single = ConversationMessage::Assistant {
+                        id: MessageId::new(),
+                        content: vec![block.clone()],
+                        stop_reason: stop_reason.clone(),
+                        resumable: resumable.clone(),
+                        per_turn_effort: per_turn_effort.clone(),
+                    };
+                    let mut row = self.to_jsonl_message_with_inner_id(
+                        &single,
+                        &session_id_str,
+                        None,
+                        git_branch.clone(),
+                        entrypoint.clone(),
+                        None,
+                        Some(&inner_id),
+                        Some(&model),
+                        persisted_usage.as_ref(),
+                        request_id,
+                        None,
+                    );
+                    row.uuid = Self::assistant_block_derived_uuid(&inner_id, index, block);
+                    row.extra
+                        .set_field(
+                            "modelProfile",
+                            Source::from_serde_value(
+                                &model_profile
+                                    .clone()
+                                    .map_or(serde_json::Value::Null, serde_json::Value::String),
+                            )
+                            .expect("generated metadata is JSON"),
+                        )
+                        .expect("metadata is an object");
+                    rows.push(row);
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let persist = async {
+                    // Preaccepted content may differ from the row originally
+                    // inserted into history. Publish the accepted merged row
+                    // once under the same lease as its durable block batch.
+                    self.replace_session_history_row(*turn_id, msg.clone())
+                        .await;
+                    let mut parent = self.transcript.last_jsonl_uuid.lock().await.clone();
+                    for row in &mut rows {
+                        row.parent_uuid = parent;
+                        parent = Some(row.uuid.clone());
+                    }
+                    let outcomes = self
+                        .append_prepared_transcript_rows(writer, &mut rows)
+                        .await;
+                    let mut accepted = std::collections::HashMap::new();
+                    let mut text_rows = Vec::new();
+                    for ((block, row), result) in content.iter().zip(&rows).zip(outcomes) {
+                        let written = result.is_ok();
+                        if let ContentBlock::ToolUse { id, name, .. } = block {
+                            if written {
+                                self.record_source_tool_assistant_uuid(id, row.uuid.clone())
+                                    .await;
+                                accepted.insert(id.clone(), row.uuid.clone());
+                            }
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &inner_id,
+                                    if written {
+                                        Ok(row.uuid.clone())
+                                    } else {
+                                        Err("assistant transcript write failed".into())
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        if matches!(
+                            block,
+                            ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. }
+                        ) {
+                            text_rows.push(written.then(|| row.uuid.clone()));
+                        }
+                        match result {
+                            Ok(()) => telemetry::emit_session_appended(&session_id_str, &row.uuid),
+                            Err(error) => {
+                                self.record_transcript_append_failure(
+                                    &session_id_str,
+                                    "assistant_block",
+                                    &error,
+                                )
+                                .await
+                            }
+                        }
+                    }
+                    self.note_assistant_commit(msg).await;
+                    let _ = tx.send((accepted, text_rows));
+                };
+                let committed = if let Some(fence) = publication_fence.as_ref() {
+                    fence.commit_if_current(Box::pin(persist)).await
+                } else {
+                    persist.await;
+                    true
+                };
+                if !committed {
+                    self.fail_local_app_publication_origins(
+                        content,
+                        &inner_id,
+                        "assistant publication fence closed",
+                    )
+                    .await;
+                    return map;
+                }
+                if let Ok((accepted, text_rows)) = rx.await {
+                    let publish = self
+                        .output
+                        .emit_assistant_transcript_row_uuids(turn_id, &text_rows);
+                    if let Some(fence) = publication_fence.as_ref() {
+                        fence.publish_if_current(Box::pin(publish)).await;
+                    } else {
+                        publish.await;
+                    }
+                    return accepted;
+                }
+                return map;
+            }
+        }
 
         let mut text_row_uuids = Vec::new();
         let mut block_groups = content

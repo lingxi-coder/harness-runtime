@@ -2832,18 +2832,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if self.prompt_runtime.host_environment_probes_disabled {
             return (None, None);
         }
-        {
-            let cache = self.prompt_runtime.git_status_snapshot.lock().await;
-            if let Some(snap) = cache.as_ref() {
-                return (snap.probe.clone(), snap.block.clone());
-            }
+        // Hold this cache's own gate across the bounded blocking probe. This
+        // avoids duplicate cold probes and serializes compaction invalidation
+        // with publication of the old snapshot.
+        let mut cache = self.prompt_runtime.git_status_snapshot.lock().await;
+        if let Some(snap) = cache.as_ref() {
+            return (snap.probe.clone(), snap.block.clone());
         }
-        let probe = crate::prompt::git_status::probe(cwd);
-        let block = crate::prompt::git_status::render_git_status_block(cwd);
-        *self.prompt_runtime.git_status_snapshot.lock().await = Some(GitStatusSnapshot {
-            probe: probe.clone(),
-            block: block.clone(),
-        });
+        let cwd = cwd.to_owned();
+        let (probe, block) = tokio::task::spawn_blocking(move || {
+            crate::prompt::git_status::snapshot(&cwd)
+        }).await.unwrap_or_default();
+        *cache = Some(GitStatusSnapshot { probe: probe.clone(), block: block.clone() });
         (probe, block)
     }
 

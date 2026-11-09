@@ -264,11 +264,6 @@ pub(super) fn process_visible_response<'a>(
         // with the byte-faithful `ct` truthy semantics (1/true/yes/on, trimmed,
         // case-insensitive). Default (var unset) keeps the locked turn fixtures OFF.
         if !orch.side_chat && telemetry::otel::logs::assistant_responses_enabled() {
-            let text: String = assistant_blocks
-                .iter()
-                .filter_map(ContentBlock::visible_text)
-                .collect::<Vec<_>>()
-                .join("");
             tracing::info!(
                 event = "assistant_response",
                 request_id = orch.api.last_request_id().unwrap_or_default(),
@@ -276,9 +271,9 @@ pub(super) fn process_visible_response<'a>(
                 stop_reason = response.stop_reason.as_deref().unwrap_or(""),
                 input_tokens = response.usage.counts().input_tokens,
                 output_tokens = response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
-                body = %text,
+                body_len = assistant_blocks.iter().filter_map(ContentBlock::visible_text).map(str::len).sum::<usize>(),
             );
-            telemetry::otel::emit_assistant_response_log(
+            telemetry::otel::emit_assistant_response_log_chunks(
                 orch.api.last_request_id().as_deref().unwrap_or_default(),
                 &model,
                 response.stop_reason.as_deref().unwrap_or(""),
@@ -288,7 +283,9 @@ pub(super) fn process_visible_response<'a>(
                     .counts()
                     .output_tokens
                     .saturating_sub(response.usage.counts().reasoning_tokens),
-                &text,
+                assistant_blocks
+                    .iter()
+                    .filter_map(ContentBlock::visible_text),
             );
         }
 
@@ -369,7 +366,7 @@ pub(super) fn process_visible_response<'a>(
                         assistant_id,
                         super::tool_dispatch::ToolUseDispatchFacts {
                             native_query_depth: query_depth,
-                            query_history: request_history,
+                            query_history: request_history.into(),
                             assistant_message: assistant_msg.clone(),
                             same_turn_tool_uses,
                             refusal_call_boundary: None,
@@ -470,6 +467,7 @@ pub(super) fn process_visible_response<'a>(
                     .collect::<Vec<_>>();
                 let append_rows = async {
                     let mut s = orch.session.lock().await;
+                    let mut guards = orch.prompt_runtime.guarded_prompt_messages.lock().await;
                     s.history.push(tool_result_msg.clone());
                     for (message, source_id) in &result_injected {
                         if compaction::invoked_skills::is_individual_skill_activation(message) {
@@ -479,20 +477,10 @@ pub(super) fn process_visible_response<'a>(
                         s.injected_message_sources
                             .insert(message.id(), source_id.clone());
                     }
-                    drop(s);
-                    orch.prompt_runtime
-                        .remember_guarded_prompt_message(
-                            tool_result_msg.id(),
-                            Arc::clone(&publication_guard),
-                        )
-                        .await;
-                    for message_id in injected_ids {
-                        orch.prompt_runtime
-                            .remember_guarded_prompt_message(
-                                message_id,
-                                Arc::clone(&publication_guard),
-                            )
-                            .await;
+                    for message_id in std::iter::once(tool_result_msg.id()).chain(injected_ids) {
+                        if !guards.iter().any(|(id, _)| *id == message_id) {
+                            guards.push((message_id, Arc::clone(&publication_guard)));
+                        }
                     }
                 };
                 if !publication_fence

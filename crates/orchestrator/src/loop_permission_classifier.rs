@@ -115,21 +115,24 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
                 message: permission::loop_llm::unavailable_message(name, "The classifier", ""),
             };
         };
-        let (main_model, profile, history) = {
+        let (main_model, profile, main_loop_tokens, blocks) = {
             let session = orch.session.lock().await;
+            let history = session
+                .history
+                .iter()
+                .filter(|message| !session.model_context_excluded_messages.contains(&message.id()))
+                .collect::<Vec<_>>();
+            // Render only the classifier's filtered view while borrowing the
+            // current session version, rather than cloning every tool result
+            // and assistant body just to discard them in transcript_blocks.
+            let tokens = history.iter().map(|message| {
+                compaction::grouping::estimate_tokens_for_range(std::slice::from_ref(*message))
+            }).sum();
             (
                 session.model.clone(),
                 session.model_profile.clone(),
-                session
-                    .history
-                    .iter()
-                    .filter(|message| {
-                        !session
-                            .model_context_excluded_messages
-                            .contains(&message.id())
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                tokens,
+                transcript_blocks(&history, name, input, host_context),
             )
         };
         let available = self
@@ -156,14 +159,14 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             service: self.service.clone(),
             model,
             profile,
-            main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&history),
+            main_loop_tokens,
             system: classifier_system_snapshot(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
         loop_llm::classify(
             &transport,
             name,
-            transcript_blocks(&history, name, input, host_context),
+            blocks,
         )
         .await
     }
@@ -352,7 +355,7 @@ fn is_read_only_tool(name: &str) -> bool {
 }
 
 fn transcript_blocks(
-    history: &[ConversationMessage],
+    history: &[impl std::borrow::Borrow<ConversationMessage>],
     name: &str,
     input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     host_context: &[permission::host_context::HostContextRecord],
@@ -394,7 +397,7 @@ fn report_transcript_blocks(request: &ClassifierOnlyReviewRequest) -> Vec<Utf16J
 }
 
 fn transcript_blocks_with_action(
-    history: &[ConversationMessage],
+    history: &[impl std::borrow::Borrow<ConversationMessage>],
     name: &str,
     input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     host_context: &[permission::host_context::HostContextRecord],
@@ -403,10 +406,11 @@ fn transcript_blocks_with_action(
     let mut blocks = vec!["<transcript>\n".into()];
     // Default priorAssistantContext=false: prose from the assistant is not
     // treated as user authorization. Synthetic meta prompts are also hidden.
-    let pending = history.iter().rposition(|message| matches!(message,
+    let pending = history.iter().rposition(|message| matches!(std::borrow::Borrow::<ConversationMessage>::borrow(message),
             ConversationMessage::Assistant { content, .. } if content.iter().any(|block|
                 matches!(block, ContentBlock::ToolUse { name: called, input: value, .. } if called == name && value == input))));
     for (index, message) in history.iter().enumerate() {
+        let message = std::borrow::Borrow::<ConversationMessage>::borrow(message);
         if let ConversationMessage::User { content, .. } = message {
             for block in content {
                 if let ContentBlock::ToolResult {
@@ -506,6 +510,52 @@ fn line(name: &str, text: &Utf16JsonProjection) -> Utf16JsonProjection {
 }
 
 fn sanitize(text: &str) -> String {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Mutex, OnceLock};
+    const MAX_ENTRIES: usize = 128;
+    const MAX_BYTES: usize = 256 * 1024;
+    #[derive(Default)]
+    struct Cache {
+        values: HashMap<String, String>,
+        order: VecDeque<String>,
+        bytes: usize,
+    }
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Cache::default()));
+    if let Some(sanitized) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values
+        .get(text)
+    {
+        return sanitized.clone();
+    }
+    let sanitized = sanitize_uncached(text);
+    // The queue owns a second key copy; include it in the retention budget.
+    let weight = text.len().saturating_mul(2).saturating_add(sanitized.len());
+    if weight <= MAX_BYTES {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !guard.values.contains_key(text) {
+            while guard.values.len() >= MAX_ENTRIES || guard.bytes + weight > MAX_BYTES {
+                let key = guard
+                    .order
+                    .pop_front()
+                    .expect("cached entry has an eviction key");
+                if let Some(value) = guard.values.remove(&key) {
+                    guard.bytes -= key.len() * 2 + value.len();
+                }
+            }
+            guard.order.push_back(text.to_owned());
+            guard.values.insert(text.to_owned(), sanitized.clone());
+            guard.bytes += weight;
+        }
+    }
+    sanitized
+}
+
+fn sanitize_uncached(text: &str) -> String {
     static INVISIBLE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"[\p{Cf}\p{Default_Ignorable_Code_Point}]").unwrap()
     });
@@ -1523,6 +1573,48 @@ mod tests {
         assert!(
             full_text.contains("agent-authored untrusted output"),
             "{full_text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod optimizer_regressions {
+    use super::*;
+
+    #[test]
+    fn sanitizer_cache_keys_exact_content_and_neutralizes_changed_injections() {
+        for text in [
+            "plain",
+            "<transcript>first</transcript>",
+            "＜transcript＞second",
+            "zero\u{200b}width\u{2028}line",
+        ] {
+            let expected = sanitize_uncached(text);
+            assert_eq!(sanitize(text), expected);
+            assert_eq!(sanitize(text), expected);
+        }
+        assert_ne!(
+            sanitize("<transcript>first"),
+            sanitize("<transcript>second")
+        );
+    }
+
+    #[test]
+    fn borrowed_transcript_preserves_per_action_current_input() {
+        let history = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "do the requested action".into(),
+        )];
+        let borrowed = history.iter().collect::<Vec<_>>();
+        let first = Utf16JsonProjection::parse(r#"{"command":"echo first"}"#).unwrap();
+        let second = Utf16JsonProjection::parse(r#"{"command":"echo second"}"#).unwrap();
+        assert_eq!(
+            transcript_blocks(&history, "Bash", &first, &[]),
+            transcript_blocks(&borrowed, "Bash", &first, &[])
+        );
+        assert_ne!(
+            transcript_blocks(&borrowed, "Bash", &first, &[]),
+            transcript_blocks(&borrowed, "Bash", &second, &[])
         );
     }
 }

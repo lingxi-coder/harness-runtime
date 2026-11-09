@@ -54,15 +54,18 @@ pub const MAX_PERSIST_UTF16_UNITS: usize = 1_073_741_824;
 /// trim [`preview_utf16`] applies. A preview may end on a tidy line; a
 /// truncated persisted body must keep every unit that fits.
 #[must_use]
-fn truncate_utf16_units(source: &[u16], limit: usize) -> Vec<u16> {
+fn truncate_utf16_units(source: &[u16], limit: usize) -> &[u16] {
     if source.len() <= limit {
-        return source.to_vec();
+        return source;
     }
-    let mut units = source[..limit].to_vec();
-    if units.last().is_some_and(|u| (0xd800..=0xdbff).contains(u)) {
-        units.pop();
+    let mut end = limit;
+    if source[..end]
+        .last()
+        .is_some_and(|u| (0xd800..=0xdbff).contains(u))
+    {
+        end -= 1;
     }
-    units
+    &source[..end]
 }
 
 /// `M0u`'s ceiling fold (2.1.220 @ 230269046):
@@ -156,11 +159,10 @@ pub fn preview(s: &str, limit: usize) -> (String, bool) {
 /// JavaScript `slice` and newline midpoint measured in UTF-16 code units.
 #[must_use]
 pub fn preview_utf16(source: &[u16], limit: usize) -> (Vec<u16>, bool) {
-    let mut units = source.to_vec();
-    if units.len() <= limit {
-        return (units, false);
+    if source.len() <= limit {
+        return (source.to_vec(), false);
     }
-    units.truncate(limit);
+    let mut units = source[..limit].to_vec();
     if let Some(index) = units.iter().rposition(|unit| *unit == u16::from(b'\n')) {
         if index > limit / 2 {
             units.truncate(index);
@@ -377,14 +379,14 @@ pub async fn persist(
     // the FULL length (`p.length`), which is what makes the envelope able to
     // say how much was dropped.
     let units = body
-        .string_units("")
+        .at_pointer("")
+        .and_then(|value| value.code_units())
         .ok_or_else(|| "persisted tool body must be a JSON string".to_owned())?;
-    let capped = truncate_utf16_units(&units, cap_utf16_units);
+    let capped = truncate_utf16_units(units, cap_utf16_units);
     let truncated_at = (capped.len() != units.len()).then_some(cap_utf16_units);
     let original_size = units.len();
     // The OS byte boundary follows JS UTF-8 encoding; preview and lengths
     // remain based on the source string before this conversion.
-    let encoded_body = String::from_utf16_lossy(&capped);
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
@@ -410,9 +412,21 @@ pub async fn persist(
     {
         Ok(mut file) => {
             use tokio::io::AsyncWriteExt as _;
-            if let Err(e) = file.write_all(encoded_body.as_bytes()).await {
-                return Err(e.to_string());
+            // Decode continuously (including pairs crossing chunk boundaries),
+            // but retain only a bounded UTF-8 chunk while awaiting disk I/O.
+            let mut encoded = String::with_capacity(16 * 1024);
+            for decoded in char::decode_utf16(capped.iter().copied()) {
+                encoded.push(decoded.unwrap_or(char::REPLACEMENT_CHARACTER));
+                if encoded.len() >= 16 * 1024 {
+                    file.write_all(encoded.as_bytes())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    encoded.clear();
+                }
             }
+            file.write_all(encoded.as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
             if let Err(e) = file.flush().await {
                 return Err(e.to_string());
             }
@@ -430,7 +444,7 @@ pub async fn persist(
 
     // `Ytt(c, …)` — the preview comes off the WRITTEN body, not the original,
     // so a capped result previews what the file actually contains.
-    let (preview_utf16, has_more) = preview_utf16(&capped, PREVIEW_CHARS);
+    let (preview_utf16, has_more) = preview_utf16(capped, PREVIEW_CHARS);
     Ok(Persisted {
         filepath,
         original_size,
@@ -870,6 +884,29 @@ mod tests {
             truncate_utf16_units(&"abc".encode_utf16().collect::<Vec<_>>(), 99),
             "abc".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn chunked_utf8_persistence_keeps_pairs_lone_units_and_exact_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("tool-results");
+        let mut units = vec![u16::from(b'a'); 16 * 1024 - 1];
+        units.extend([0xd83d, 0xde00, 0xd800, u16::from(b'z'), 0xdc00]);
+        let body = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units.clone(),
+        )
+        .unwrap();
+        let persisted = persist(temp.path(), &dir, "chunked", &body, false, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&persisted.filepath).unwrap(),
+            String::from_utf16_lossy(&units)
+        );
+        assert_eq!(persisted.original_size, units.len());
+        assert_eq!(persisted.preview_utf16, units[..PREVIEW_CHARS]);
+        assert!(persisted.has_more);
     }
 
     #[tokio::test]

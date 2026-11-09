@@ -168,10 +168,6 @@ pub(crate) struct ReadyToolMeta {
     /// through result release; ownership is intentionally kept on the record.
     #[allow(dead_code)]
     pub(crate) assistant_id: MessageId,
-    /// Retains the dispatch facts snapshot through ordered result release; the
-    /// current result consumer reads the tracked tool's separate facts copy.
-    #[allow(dead_code)]
-    pub(crate) facts: Option<ToolUseDispatchFacts>,
     pub(crate) resolved_tool: Option<Arc<dyn Tool>>,
     pub(crate) concurrency_safe: bool,
     pub(crate) is_agent: bool,
@@ -186,7 +182,6 @@ impl From<&OwnedToolCall> for ReadyToolMeta {
             input: call.input.clone(),
             provider_id: call.provider_id.clone(),
             assistant_id: call.assistant_id,
-            facts: Some(call.facts.clone()),
             resolved_tool: Some(Arc::clone(&call.resolved_tool)),
             concurrency_safe: call.concurrency_safe,
             is_agent: call.canonical_name == "Agent",
@@ -1455,7 +1450,7 @@ mod tests {
             assistant_id,
             facts: ToolUseDispatchFacts {
                 native_query_depth: 0,
-                query_history: Vec::new(),
+                query_history: Vec::new().into(),
                 assistant_message: ConversationMessage::Assistant {
                     per_turn_effort: None,
                     id: assistant_id,

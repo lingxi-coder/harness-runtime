@@ -1372,7 +1372,7 @@ pub(crate) struct ExecutorPump<'a, 'e> {
     pub(crate) assistant_id: MessageId,
     /// Frozen request messages from before the current assistant row. Late
     /// queued tool starts must use this same query snapshot.
-    pub(crate) query_history: Vec<ConversationMessage>,
+    pub(crate) query_history: Arc<[ConversationMessage]>,
     /// Profile captured with the API request route for per-row persistence.
     pub(crate) model_profile: Option<String>,
     /// Native `Je` source gate for persisted `supersedesUuids`. The bare pump

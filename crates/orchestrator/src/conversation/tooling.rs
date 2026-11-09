@@ -695,7 +695,7 @@ impl ConversationOrchestrator {
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
                 (true, Some(provider)) => {
-                    let snapshot = provider.skill_listing_snapshot().await?;
+                    let snapshot = crate::prompt::skill_listing::preparation_snapshot(provider).await?;
                     provider.bash_precommit_skills(&snapshot.entries).await?
                 }
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
@@ -720,10 +720,8 @@ impl ConversationOrchestrator {
                 .iter()
                 .map(|tool| {
                     (
-                        tool.name().to_owned(),
-                        tool.input_schema()
-                            .to_json_string()
-                            .unwrap_or_else(|error| format!("invalid:{error}")),
+                        Arc::as_ptr(tool) as *const () as usize,
+                        tool.input_schema() as *const _ as usize,
                     )
                 })
                 .collect(),
@@ -748,23 +746,31 @@ impl ConversationOrchestrator {
             mod_tool_description_generation,
         };
         let mut wire = {
-            let cached = self
-                .prompt_runtime
-                .wire_tool_schema_cache
-                .lock()
-                .await
-                .clone();
-            if let Some(cached) = cached.filter(|entry| entry.key == cache_key) {
-                cached.wire
+            let cached_wire = {
+                let cache = self.prompt_runtime.wire_tool_schema_cache.lock().await;
+                cache.as_ref().filter(|entry| entry.key == cache_key).map(|entry| entry.wire.clone())
+            };
+            if let Some(wire) = cached_wire {
+                wire
             } else {
                 let wire = tool_api::wire::tools_to_wire(&tools, &prompt_options).await;
                 *self.prompt_runtime.wire_tool_schema_cache.lock().await =
                     Some(WireToolSchemaCache {
+                        owners: tools.clone(),
                         key: cache_key.clone(),
                         wire: wire.clone(),
                     });
+                // Token counts belong to this exact wire generation. Clearing
+                // on replacement also rules out ABA reuse of an old pointer key.
+                self.prompt_runtime.deferred_tool_token_cache.lock().await.clear();
                 wire
             }
+        };
+        let token_cache_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            cache_key.hash(&mut hasher);
+            hasher.finish()
         };
         // Structured-output strict mode (claude-code `tengu_structured_output_strict`
         // + `strictInputJSONSchema`): when the flag is on, mark the forced
@@ -846,7 +852,7 @@ impl ConversationOrchestrator {
                 .deferred_tool_token_cache
                 .lock()
                 .await
-                .get(&cache_key)
+                .get(&token_cache_key)
                 .copied();
             if let Some(cached) = cached {
                 cached
@@ -884,11 +890,11 @@ impl ConversationOrchestrator {
                     }
                     Ok(_) | Err(_) => None,
                 };
-                self.prompt_runtime
-                    .deferred_tool_token_cache
-                    .lock()
-                    .await
-                    .insert(cache_key.clone(), counted);
+                let mut cache = self.prompt_runtime.deferred_tool_token_cache.lock().await;
+                // Bounded even if concurrent request routes replace the wire
+                // cache while exact token-count requests are in flight.
+                if cache.len() >= 16 { cache.clear(); }
+                cache.insert(token_cache_key, counted);
                 counted
             }
         } else {

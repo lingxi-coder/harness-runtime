@@ -1183,7 +1183,7 @@ pub(crate) async fn dispatch_tools(
 ) -> Result<crate::turn_loop::DeferredToolDispatch, OrchestratorError> {
     let work = orch.computer_runtime.work.lock().await.clone();
     let mut ctx =
-        crate::turn_loop::streaming_tool_context_base(orch, facts.query_history.clone()).await;
+        crate::turn_loop::streaming_tool_context_base(orch, facts.query_history.to_vec()).await;
     ctx.available_tool_names = available_tool_names;
     ctx.cancel = current_turn_cancel();
     ctx.native_query_depth = Some(facts.native_query_depth);

@@ -11514,7 +11514,7 @@ mod pre_tool_hook_tests {
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
                 native_query_depth: 0,
-                query_history: vec![],
+                query_history: vec![].into(),
                 assistant_message: ConversationMessage::Assistant {
                     id: assistant_id,
                     content: vec![ContentBlock::ToolUse {

@@ -215,8 +215,25 @@ fn append_entry_at(
     sidecar_relative: &Path,
     entry: &IdentityLogEntry,
 ) -> Result<(), FsError> {
+    append_encoded_at(
+        store,
+        transcript_path,
+        root,
+        identity,
+        sidecar_relative,
+        &encode_entry(entry)?,
+    )
+}
+
+fn append_encoded_at(
+    store: &IdentityLogStore,
+    transcript_path: &Path,
+    root: &Path,
+    identity: &RootIdentity,
+    sidecar_relative: &Path,
+    encoded: &[u8],
+) -> Result<(), FsError> {
     refresh_cache_at(store, transcript_path, root, identity, sidecar_relative)?;
-    let encoded = encode_entry(entry)?;
     let mut stores = store.lock().map_err(|_| cache_lock_error())?;
     let cache = stores.entry(transcript_path.to_path_buf()).or_default();
     let (existed, actual_len) = match open_read_file_pinned(root, sidecar_relative, Some(identity))
@@ -241,14 +258,14 @@ fn append_entry_at(
         truncate_file_pinned(root, sidecar_relative, cache.log_bytes, Some(identity))?;
     }
     let mut file = open_append_file_pinned(root, sidecar_relative, Some(identity))?;
-    file.write_all(&encoded)
+    file.write_all(encoded)
         .map_err(|error| FsError::Io(error.to_string()))?;
     file.sync_all()
         .map_err(|error| FsError::Io(error.to_string()))?;
     if !existed || actual_len == 0 {
         sync_parent_pinned(root, sidecar_relative, Some(identity))?;
     }
-    apply_entries(cache, &encoded, false)
+    apply_entries(cache, encoded, false)
 }
 
 /// Reserve and persist a row identity before the corresponding JSONL append.
@@ -287,18 +304,20 @@ pub(crate) fn append_row_identity_at(
             Err(error) => return Err(error),
         }
     }
-    let snapshot = {
-        refresh_cache_at(store, transcript_path, root, identity, &sidecar_relative)?;
+    refresh_cache_at(store, transcript_path, root, identity, &sidecar_relative)?;
+    let (index, existing_index) = {
         let stores = store.lock().map_err(|_| cache_lock_error())?;
-        stores
+        let snapshot = &stores
             .get(transcript_path)
-            .cloned()
-            .unwrap_or_default()
-            .snapshot
+            .ok_or_else(cache_lock_error)?
+            .snapshot;
+        (
+            snapshot.next_message_index,
+            snapshot.by_uuid.get(uuid).copied(),
+        )
     };
-    let index = snapshot.next_message_index;
-    if let Some(existing_index) = snapshot.by_uuid.get(uuid) {
-        return Ok(*existing_index);
+    if let Some(existing_index) = existing_index {
+        return Ok(existing_index);
     }
     append_entry_at(
         store,
@@ -312,6 +331,87 @@ pub(crate) fn append_row_identity_at(
         },
     )?;
     Ok(index)
+}
+
+/// Reserve the entire batch before any transcript row is published. A failed
+/// transcript append may burn unused indexes, just like a failed single append.
+pub(crate) fn append_row_identities_at(
+    store: &IdentityLogStore,
+    transcript_path: &Path,
+    root: &Path,
+    identity: &RootIdentity,
+    uuids: &[String],
+) -> Result<(), FsError> {
+    if uuids.is_empty() {
+        return Ok(());
+    }
+    let sidecar_relative = log_path_at(transcript_path, root)?;
+    if matches!(
+        open_read_file_pinned(root, &sidecar_relative, Some(identity)),
+        Err(FsError::NotFound(_))
+    ) {
+        let transcript_relative = transcript_relative_at(transcript_path, root)?;
+        match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
+            Ok(transcript)
+                if transcript
+                    .metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len()
+                    > 0 =>
+            {
+                return Err(FsError::Io(
+                    "nonempty Native transcript requires explicit Host identity bootstrap before append".into(),
+                ));
+            }
+            Ok(_) | Err(FsError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    refresh_cache_at(store, transcript_path, root, identity, &sidecar_relative)?;
+    let (mut next_index, mut existing) = {
+        let stores = store.lock().map_err(|_| cache_lock_error())?;
+        let snapshot = &stores
+            .get(transcript_path)
+            .ok_or_else(cache_lock_error)?
+            .snapshot;
+        (
+            snapshot.next_message_index,
+            uuids
+                .iter()
+                .filter(|uuid| snapshot.by_uuid.contains_key(*uuid))
+                .cloned()
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let mut encoded = Vec::new();
+    for uuid in uuids {
+        if uuid.is_empty() {
+            return Err(FsError::Io("session message UUID must not be empty".into()));
+        }
+        if existing.contains(uuid) {
+            continue;
+        }
+        let index = next_index;
+        encoded.extend(encode_entry(&IdentityLogEntry::Append {
+            uuid: uuid.clone(),
+            message_index: index,
+        })?);
+        existing.insert(uuid.clone());
+        next_index = index
+            .checked_add(1)
+            .ok_or_else(|| FsError::Io("session message index overflow".into()))?;
+    }
+    if !encoded.is_empty() {
+        append_encoded_at(
+            store,
+            transcript_path,
+            root,
+            identity,
+            &sidecar_relative,
+            &encoded,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn remove_row_identity_at(

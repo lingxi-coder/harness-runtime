@@ -23,6 +23,7 @@
 
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
+use futures::StreamExt;
 use hooks::mods::ModSessionContext;
 use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
@@ -3489,8 +3490,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
             Some(n) => vec![n.to_string()],
         };
         let (mut ok, mut failed) = (Vec::new(), Vec::new());
-        for server in targets {
-            match reg.reconnect(&server).await {
+        let mut reconnects = futures::stream::iter(targets.into_iter().map(|server| async move {
+            let result = reg.reconnect(&server).await;
+            (server, result)
+        }))
+        .buffered(4);
+        while let Some((server, result)) = reconnects.next().await {
+            match result {
                 Ok(()) => ok.push(server),
                 Err(e) => failed.push((server, e.to_string())),
             }
@@ -3559,15 +3565,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // a settled `Failed`, letting the handler emit the "…but it isn't
         // connected yet." variant instead of a hard error.
         let mut outcomes: Vec<lingxi_core::host::McpToggleOutcome> = Vec::new();
-        for name in &targets {
-            let outcome = match registry.set_disabled(name, disabled).await {
+        let mut toggles = futures::stream::iter(targets.into_iter().map(|name| async move {
+            let result = registry.set_disabled(&name, disabled).await;
+            (name, result)
+        }))
+        .buffered(4);
+        while let Some((name, result)) = toggles.next().await {
+            let outcome = match result {
                 Ok(None) => continue,
                 Ok(state @ Some(_)) => lingxi_core::host::McpToggleOutcome {
-                    name: name.clone(),
+                    name,
                     state,
                 },
                 Err(_) => lingxi_core::host::McpToggleOutcome {
-                    name: name.clone(),
+                    name,
                     state: None,
                 },
             };
@@ -4339,11 +4350,14 @@ fn list_resumable_session_ids(
         {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
-        if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
-            .is_ok_and(|profile| profile == mode)
+        if !session::JsonlWriter::fixed_session_profile_from_reader(
+            std::io::BufReader::new(file),
+            stem,
+        )
+        .is_ok_and(|profile| profile.mode == mode)
         {
             continue;
         }

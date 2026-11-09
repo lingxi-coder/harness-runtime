@@ -165,9 +165,9 @@ pub(crate) struct TrackedTool {
     /// fire one `PostToolBatch` for the complete model-response batch.
     pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
     pub(crate) publications: Vec<crate::turn_loop::ToolResultPublication>,
-    /// Immutable request/row facts captured when this live streamed row
-    /// completed. Queued tools must not reread a later session snapshot.
-    pub(crate) dispatch_facts: Option<crate::turn_loop::ToolUseDispatchFacts>,
+    /// The only dispatch fact needed after admission: the refusal call boundary.
+    pub(crate) refusal_call_boundary:
+        Option<Arc<crate::turn_loop::tool_dispatch::RefusalToolCallBoundary>>,
 }
 
 // ============================================================================
@@ -434,7 +434,6 @@ impl<'a> StreamingToolExecutor<'a> {
                     input: input.clone(),
                     provider_id: provider_id.clone(),
                     assistant_id,
-                    facts: Some(dispatch_facts.clone()),
                     resolved_tool: None,
                     concurrency_safe: true,
                     is_agent: false,
@@ -456,7 +455,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     modifiers: Vec::new(),
                     post_tool_batch_calls: post_tool_batch_calls.clone(),
                     publications: Vec::new(),
-                    dispatch_facts: Some(dispatch_facts),
+                    refusal_call_boundary: dispatch_facts.refusal_call_boundary,
                 });
                 let publication = unknown_tool_publication(self.orch, &id, &name, &block);
                 let outcome = Ok(ToolDispatchPayload {
@@ -500,7 +499,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     modifiers: Vec::new(),
                     post_tool_batch_calls: Vec::new(),
                     publications: Vec::new(),
-                    dispatch_facts: Some(dispatch_facts.clone()),
+                    refusal_call_boundary: Some(Arc::clone(&refusal_call_boundary)),
                 });
                 let (dispatch_started_tx, dispatch_started_rx) = tokio::sync::oneshot::channel();
                 let started = scheduler
@@ -562,7 +561,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ) {
         let facts = crate::turn_loop::ToolUseDispatchFacts {
             native_query_depth: self.native_query_depth,
-            query_history: Vec::new(),
+            query_history: Vec::new().into(),
             assistant_message: ConversationMessage::Assistant {
                 per_turn_effort: None,
                 id: assistant_id,
@@ -778,11 +777,7 @@ impl<'a> StreamingToolExecutor<'a> {
             .iter()
             .filter(|tool| matches!(tool.status, ToolStatus::Queued | ToolStatus::Executing))
         {
-            if let Some(boundary) = tool
-                .dispatch_facts
-                .as_ref()
-                .and_then(|facts| facts.refusal_call_boundary.as_ref())
-            {
+            if let Some(boundary) = tool.refusal_call_boundary.as_ref() {
                 boundary.close_for_refusal();
             }
         }
@@ -802,9 +797,8 @@ impl<'a> StreamingToolExecutor<'a> {
                     tool.assistant_id,
                     tool.status == ToolStatus::Executing
                         && tool
-                            .dispatch_facts
+                            .refusal_call_boundary
                             .as_ref()
-                            .and_then(|facts| facts.refusal_call_boundary.as_ref())
                             .is_some_and(|boundary| boundary.was_started()),
                 )
             })

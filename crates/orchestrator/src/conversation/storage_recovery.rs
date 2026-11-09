@@ -73,6 +73,101 @@ impl ConversationOrchestrator {
         result
     }
 
+    /// Preserve the same ENOSPC queue boundary as individual appends while
+    /// allowing already-accepted rows to share their durable transaction.
+    pub(crate) async fn append_transcript_batch(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        rows: &[JsonlMessage],
+    ) -> Result<(), (usize, session::jsonl::writer::WriterError)> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let _append = self.transcript.storage_append_lock.lock().await;
+        let pending = self
+            .transcript
+            .storage_pauses
+            .lock()
+            .await
+            .get(&rows[0].session_id)
+            .is_some_and(|pause| !pause.rows.is_empty());
+        if pending {
+            for row in rows {
+                self.retain_storage_row(row).await;
+            }
+            return Err((
+                0,
+                lingxi_core::host::FsError::Io(DISK_FULL_PAUSE.into()).into(),
+            ));
+        }
+        let result = writer.append_batch(rows).await;
+        if let Err((prefix, error)) = &result {
+            if cost::persistence::is_disk_full(&error.to_string()) {
+                for row in &rows[*prefix..] {
+                    self.retain_storage_row(row).await;
+                }
+            }
+        }
+        result
+    }
+
+    /// Settle a linear, already-prepared chain. On a non-ENOSPC failure,
+    /// subsequent rows chain from the last acknowledged row as they do in the
+    /// single-row path; ENOSPC retains the original suffix and logical tip.
+    pub(crate) async fn append_prepared_transcript_rows(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        rows: &mut [JsonlMessage],
+    ) -> Vec<Result<(), session::jsonl::writer::WriterError>> {
+        let result = self.append_transcript_batch(writer, rows).await;
+        self.settle_prepared_transcript_rows(writer, rows, result)
+            .await
+    }
+
+    async fn settle_prepared_transcript_rows(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        rows: &mut [JsonlMessage],
+        result: Result<(), (usize, session::jsonl::writer::WriterError)>,
+    ) -> Vec<Result<(), session::jsonl::writer::WriterError>> {
+        let (prefix, failed) = match result {
+            Ok(()) => (rows.len(), None),
+            Err((prefix, error)) => (prefix, Some(error)),
+        };
+        let mut outcomes = (0..prefix).map(|_| Ok(())).collect::<Vec<_>>();
+        let disk_full = failed
+            .as_ref()
+            .is_some_and(|error| cost::persistence::is_disk_full(&error.to_string()));
+        if prefix > 0 && (!disk_full || prefix == rows.len()) {
+            *self.transcript.last_jsonl_uuid.lock().await = Some(rows[prefix - 1].uuid.clone());
+        }
+        if let Some(error) = failed {
+            if prefix < rows.len() {
+                let failure = error.to_string();
+                outcomes.push(Err(error));
+                for row in rows.iter_mut().skip(prefix + 1) {
+                    if disk_full {
+                        outcomes.push(Err(lingxi_core::host::FsError::Io(failure.clone()).into()));
+                        continue;
+                    }
+                    row.parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
+                    let result = self.append_transcript_row(writer, row).await;
+                    if result.is_ok() {
+                        *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                    }
+                    outcomes.push(result);
+                }
+            } else if let Some(row) = rows.last() {
+                // The rows were acknowledged before a maintenance rewrite
+                // failed. Keep their durable tip and report the uncertainty
+                // independently; replaying them would duplicate the batch.
+                self.record_transcript_append_failure(&row.session_id, "batch_maintenance", &error)
+                    .await;
+            }
+        }
+        outcomes
+    }
+
     pub(crate) async fn append_pending_transcript_row(
         &self,
         writer: &session::jsonl::JsonlWriter,
@@ -265,6 +360,207 @@ mod tests {
             assert!(error.to_string().contains("rewrite is uncertain"));
             assert_eq!(std::fs::read(&path).unwrap(), rewritten);
         }
+    }
+
+    #[tokio::test]
+    async fn partial_batch_repairs_non_disk_failure_chain_and_keeps_disk_full_suffix_chain() {
+        for disk_full in [false, true] {
+            let (_dir, orch, writer, path) = fixture();
+            let first = row(&orch, "first acknowledged").await;
+            let mut second = row(&orch, "second failed").await;
+            second.parent_uuid = Some(first.uuid.clone());
+            let mut third = row(&orch, "third pending").await;
+            third.parent_uuid = Some(second.uuid.clone());
+            let mut rows = [first.clone(), second.clone(), third.clone()];
+            writer.append_batch(&rows[..1]).await.unwrap();
+            if disk_full {
+                // Model the exact suffix retained by append_transcript_batch
+                // when the durable writer reports a nonzero prefix.
+                orch.retain_storage_row(&second).await;
+                orch.retain_storage_row(&third).await;
+            }
+            let error = lingxi_core::host::FsError::Io(if disk_full {
+                "ENOSPC after acknowledged prefix".into()
+            } else {
+                "permission denied after acknowledged prefix".into()
+            });
+            let outcomes = orch
+                .settle_prepared_transcript_rows(&writer, &mut rows, Err((1, error.into())))
+                .await;
+            assert!(outcomes[0].is_ok());
+            assert!(outcomes[1].is_err());
+            let loaded =
+                session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+            if disk_full {
+                assert!(outcomes[2].is_err());
+                assert_eq!(loaded.by_uuid.len(), 1);
+                assert_eq!(
+                    *orch.transcript.last_jsonl_uuid.lock().await,
+                    Some(third.uuid.clone())
+                );
+                orch.recover_session_storage().await.unwrap();
+                let loaded =
+                    session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+                assert_eq!(
+                    loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+                    Some(&second.uuid)
+                );
+            } else {
+                assert!(outcomes[2].is_ok());
+                assert_eq!(loaded.by_uuid.len(), 2);
+                assert_eq!(
+                    loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+                    Some(&first.uuid)
+                );
+                let snapshot = writer
+                    .read_session_message_identity_snapshot(&path)
+                    .await
+                    .unwrap();
+                assert_eq!(snapshot.by_uuid[&first.uuid], 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledged_batch_keeps_tip_and_reports_postappend_maintenance_failure() {
+        for disk_full in [false, true] {
+            let (_dir, orch, writer, _path) = fixture();
+            let first = row(&orch, "acknowledged first").await;
+            let mut second = row(&orch, "acknowledged second").await;
+            second.parent_uuid = Some(first.uuid.clone());
+            let mut rows = [first, second.clone()];
+            writer.append_batch(&rows).await.unwrap();
+            let error = session::jsonl::writer::WriterError::Durable(
+                session::jsonl::TranscriptWriterError::WrittenButNotDurable(
+                    lingxi_core::host::FsError::Io(if disk_full {
+                        "ENOSPC: uncertain maintenance rewrite".into()
+                    } else {
+                        "uncertain maintenance rewrite".into()
+                    }),
+                ),
+            );
+            let result = Err((rows.len(), error));
+            let outcomes = orch
+                .settle_prepared_transcript_rows(&writer, &mut rows, result)
+                .await;
+            assert!(outcomes.iter().all(Result::is_ok));
+            assert_eq!(
+                *orch.transcript.last_jsonl_uuid.lock().await,
+                Some(second.uuid)
+            );
+            if disk_full {
+                assert!(orch.check_storage_pause().await.is_err());
+                assert!(
+                    orch.transcript
+                        .storage_pauses
+                        .lock()
+                        .await
+                        .values()
+                        .all(|pause| pause.rows.is_empty()),
+                    "acknowledged rows are never queued again"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_batch_keeps_original_chain_and_logical_tip_until_recovery() {
+        let (_dir, orch, writer, path) = fixture();
+        let first = row(&orch, "pending first").await;
+        orch.retain_storage_row(&first).await;
+        let second = row(&orch, "pending second").await;
+        let mut third = row(&orch, "pending third").await;
+        third.parent_uuid = Some(second.uuid.clone());
+        let mut rows = [second.clone(), third.clone()];
+        let outcomes = orch
+            .append_prepared_transcript_rows(&writer, &mut rows)
+            .await;
+        assert!(outcomes.iter().all(Result::is_err));
+        assert_eq!(
+            *orch.transcript.last_jsonl_uuid.lock().await,
+            Some(third.uuid.clone())
+        );
+        let sid = orch.session.lock().await.session_id.as_uuid().to_string();
+        let pauses = orch.transcript.storage_pauses.lock().await;
+        let retained = &pauses[&sid].rows;
+        assert_eq!(retained.len(), 3);
+        assert_eq!(retained[1].parent_uuid.as_ref(), Some(&first.uuid));
+        assert_eq!(retained[2].parent_uuid.as_ref(), Some(&second.uuid));
+        drop(pauses);
+        orch.recover_session_storage().await.unwrap();
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        assert_eq!(loaded.by_uuid.len(), 3);
+        assert_eq!(
+            loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+            Some(&second.uuid)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_free_assistant_batch_preserves_block_parents_and_tool_origins() {
+        use lingxi_core::types::{ContentBlock, ToolUseId};
+        let (_dir, orch, writer, path) = fixture();
+        let saved = row(&orch, "saved").await;
+        writer.append(&saved).await.unwrap();
+        *orch.transcript.last_jsonl_uuid.lock().await = Some(saved.uuid.clone());
+        let tool_id = ToolUseId::from("local-app-batch");
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                    citations: None,
+                },
+                ContentBlock::ToolUse {
+                    id: tool_id.clone(),
+                    name: "LocalApp".into(),
+                    input: Utf16JsonProjection::parse("{}").unwrap(),
+                    provider_id: None,
+                },
+                ContentBlock::Text {
+                    text: "after".into(),
+                    citations: None,
+                },
+            ],
+            stop_reason: None,
+            resumable: None,
+            per_turn_effort: None,
+        };
+        orch.session.lock().await.history.push(assistant.clone());
+        let origins = orch
+            .persist_assistant_per_block(&assistant, None, None, None)
+            .await;
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        let rows = loaded
+            .messages_in_order
+            .iter()
+            .filter(|row| row.message_type == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].parent_uuid.as_ref(), Some(&saved.uuid));
+        assert_eq!(rows[1].parent_uuid.as_ref(), Some(&rows[0].uuid));
+        assert_eq!(rows[2].parent_uuid.as_ref(), Some(&rows[1].uuid));
+        assert_eq!(origins[&tool_id], rows[1].uuid);
+        assert_eq!(
+            orch.source_tool_assistant_uuid(&tool_id).await.as_ref(),
+            Some(&rows[1].uuid)
+        );
+        assert_eq!(
+            *orch.transcript.last_jsonl_uuid.lock().await,
+            Some(rows[2].uuid.clone())
+        );
+        let assistant_id = assistant.id().as_uuid().to_string();
+        assert_eq!(
+            orch.transcript
+                .tool_persisted_origins
+                .lock()
+                .await
+                .get(&(tool_id.to_string(), assistant_id))
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+            &rows[1].uuid
+        );
     }
 
     #[tokio::test]

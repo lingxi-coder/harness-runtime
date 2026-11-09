@@ -11,28 +11,91 @@ use tool_api::native_schema::{
 use tool_api::Tool;
 
 fn compiled_schema_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
+    // Bound retained text as well as entry count. Long legal expressions still
+    // compile; they are simply uncached when one exceeds the entire budget.
     const MAX_CACHED: usize = 64;
-    const MAX_PATTERN_LEN: usize = 4096;
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, regex::Regex>>> =
+    const MAX_PATTERN_BYTES: usize = 256 * 1024;
+    static CACHE: std::sync::OnceLock<Mutex<VecDeque<(String, regex::Regex)>>> =
         std::sync::OnceLock::new();
-    if pattern.len() > MAX_PATTERN_LEN {
-        return regex::Regex::new(pattern);
+    let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some((_, compiled)) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(key, _)| key == pattern)
+    {
+        return Ok(compiled.clone());
     }
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Compilation and validation never hold the shared cache lock.
+    let compiled = regex::Regex::new(pattern)?;
+    if pattern.len() <= MAX_PATTERN_BYTES {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !guard.iter().any(|(key, _)| key == pattern) {
+            while guard.len() >= MAX_CACHED
+                || guard.iter().map(|(key, _)| key.len()).sum::<usize>() + pattern.len()
+                    > MAX_PATTERN_BYTES
+            {
+                guard.pop_front();
+            }
+            guard.push_back((pattern.to_owned(), compiled.clone()));
+        }
+    }
+    Ok(compiled)
+}
+
+struct CompiledInputSchema {
+    schemas: Schemas,
+    index: boon::SchemaIndex,
+}
+
+fn compiled_input_schema(
+    schema: &serde_json::Value,
+) -> Option<std::sync::Arc<CompiledInputSchema>> {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex, OnceLock};
+    const URL: &str = "mem://tool-input-schema";
+    const MAX_CACHED: usize = 32;
+    static CACHE: OnceLock<Mutex<VecDeque<(serde_json::Value, Arc<CompiledInputSchema>)>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some((_, compiled)) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(key, _)| key == schema)
+    {
+        return Some(Arc::clone(compiled));
+    }
+    let mut schemas = Schemas::new();
+    let mut compiler = Compiler::new();
+    if let Err(error) = compiler.add_resource(URL, schema.clone()) {
+        tracing::warn!(error = %error, "tool input_schema failed to load (treating as PASS — host schema bug)");
+        return None;
+    }
+    let index = match compiler.compile(URL, &mut schemas) {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::warn!(error = %error, "tool input_schema failed to compile (treating as PASS — host schema bug)");
+            return None;
+        }
+    };
+    let compiled = Arc::new(CompiledInputSchema { schemas, index });
     let mut guard = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(cached) = guard.get(pattern) {
-        return Ok(cached.clone());
+    // Concurrent cold misses may compile twice, but only retain one entry.
+    if let Some((_, existing)) = guard.iter().find(|(key, _)| key == schema) {
+        return Some(Arc::clone(existing));
     }
-    let compiled = regex::Regex::new(pattern)?;
     if guard.len() >= MAX_CACHED {
-        guard.clear();
+        guard.pop_front();
     }
-    guard.insert(pattern.to_string(), compiled.clone());
-    Ok(compiled)
+    guard.push_back((schema.clone(), Arc::clone(&compiled)));
+    Some(compiled)
 }
 
 fn js_keys(object: &serde_json::Map<String, serde_json::Value>) -> Vec<&String> {
@@ -238,21 +301,10 @@ pub(crate) fn validate_tool_input_schema(
     schema: &serde_json::Value,
     input: &serde_json::Value,
 ) -> Result<(), String> {
-    const URL: &str = "mem://tool-input-schema";
-    let mut schemas = Schemas::new();
-    let mut compiler = Compiler::new();
-    if let Err(error) = compiler.add_resource(URL, schema.clone()) {
-        tracing::warn!(error = %error, "tool input_schema failed to load (treating as PASS — host schema bug)");
+    let Some(compiled) = compiled_input_schema(schema) else {
         return Ok(());
-    }
-    let schema_index = match compiler.compile(URL, &mut schemas) {
-        Ok(index) => index,
-        Err(error) => {
-            tracing::warn!(error = %error, "tool input_schema failed to compile (treating as PASS — host schema bug)");
-            return Ok(());
-        }
     };
-    if let Err(error) = schemas.validate(input, schema_index) {
+    if let Err(error) = compiled.schemas.validate(input, compiled.index) {
         let mut messages = Vec::new();
         flatten(&error, &mut messages);
         if messages.is_empty() {
@@ -821,7 +873,8 @@ pub(crate) fn validate_tool_output_schema(
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_tool_input_schema, validate_tool_output_schema, validate_tool_schema_detailed,
+        compiled_input_schema, compiled_schema_pattern, validate_tool_input_schema,
+        validate_tool_output_schema, validate_tool_schema_detailed,
     };
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::{json, Value};
@@ -925,6 +978,28 @@ mod tests {
                 .expect("schema validation display is a string")
                 .to_owned()
         })
+    }
+
+    #[test]
+    fn compiled_schema_cache_reuses_schema_but_revalidates_changed_inputs() {
+        let schema = json!({"type": "object", "properties": {"x": {"const": 7}}, "required": ["x"]});
+        let first = compiled_input_schema(&schema).unwrap();
+        let second = compiled_input_schema(&schema.clone()).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(validate_tool_input_schema(&schema, &json!({"x": 7})).is_ok());
+        assert!(validate_tool_input_schema(&schema, &json!({"x": 8})).is_err());
+        let changed = json!({"type": "object", "properties": {"x": {"const": 8}}, "required": ["x"]});
+        assert!(validate_tool_input_schema(&changed, &json!({"x": 8})).is_ok());
+        assert!(validate_tool_input_schema(&changed, &json!({"x": 7})).is_err());
+    }
+
+    #[test]
+    fn long_legal_patterns_remain_supported() {
+        let pattern = format!("^(?:{})$", "a".repeat(5000));
+        let regex = compiled_schema_pattern(&pattern).unwrap();
+        assert!(regex.is_match(&"a".repeat(5000)));
+        assert!(!compiled_schema_pattern(&pattern).unwrap().is_match("a"));
+        assert!(compiled_schema_pattern("[").is_err());
     }
 
     #[test]

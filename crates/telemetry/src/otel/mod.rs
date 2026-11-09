@@ -41,7 +41,8 @@ pub use record::{
 };
 pub use runtime::{
     bind_current_trace_context, capture_current_trace_context, disable_process,
-    disable_process_async, emit_assistant_response_log, emit_hook_lifecycle, emit_named_log_event,
+    disable_process_async, emit_assistant_response_log, emit_assistant_response_log_chunks,
+    emit_hook_lifecycle, emit_named_log_event,
     emit_user_prompt_log, install_process, install_process_with_config,
     install_process_with_config_async, prometheus_text, record_counter,
     record_git_operation_counters, record_histogram, record_lines_of_code_change,

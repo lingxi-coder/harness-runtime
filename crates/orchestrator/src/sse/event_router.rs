@@ -20,6 +20,7 @@ use lingxi_llm_client::protocol::JsonPayload;
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
 };
+#[cfg(test)]
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -127,27 +128,7 @@ pub async fn dispatch_event(
             // stream-json P4: emit the reconstructed SSE event for
             // --include-partial-messages BEFORE the normal handling.
             if output.wants_partial_stream_events() {
-                let usage_val = json!({
-                    "input_tokens": response.usage.counts().input_tokens,
-                    "cache_creation_input_tokens": response.usage.counts().cache_write_tokens,
-                    "cache_read_input_tokens": response.usage.counts().cache_read_tokens,
-                    "output_tokens": response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
-                    "service_tier": "standard"
-                });
-                let event_json = serde_json::to_string(&json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": response.id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": response.model,
-                        "content": [],
-                        "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": usage_val
-                    }
-                }))
-                .unwrap_or_default();
+                let event_json = reconstruct_message_start_event_json(&response.id, &response.model, &response.usage);
                 output.emit_stream_event(&event_json, true).await;
             }
             output
@@ -414,11 +395,7 @@ pub async fn dispatch_event(
         HistoryEvent::ContentBlockStop { index } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
-                let event_json = serde_json::to_string(&json!({
-                    "type": "content_block_stop",
-                    "index": index
-                }))
-                .unwrap_or_default();
+                let event_json = format!("{{\"type\":\"content_block_stop\",\"index\":{index}}}");
                 output.emit_stream_event(&event_json, false).await;
             }
             let completed = acc.stop_block(index)?;
@@ -490,24 +467,7 @@ pub async fn dispatch_event(
         HistoryEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
-                let usage_val = usage.as_ref().map(|u| {
-                    json!({
-                        "output_tokens": u.counts().output_tokens.saturating_sub(u.counts().reasoning_tokens)
-                    })
-                });
-                let mut delta_obj = serde_json::Map::new();
-                if let Some(sr) = &delta.stop_reason {
-                    delta_obj.insert("stop_reason".into(), json!(sr));
-                } else {
-                    delta_obj.insert("stop_reason".into(), Value::Null);
-                }
-                delta_obj.insert("stop_sequence".into(), Value::Null);
-                let event_json = serde_json::to_string(&json!({
-                    "type": "message_delta",
-                    "delta": Value::Object(delta_obj),
-                    "usage": usage_val.unwrap_or(Value::Null)
-                }))
-                .unwrap_or_default();
+                let event_json = reconstruct_message_delta_event_json(delta.stop_reason.as_deref(), usage.as_ref());
                 output.emit_stream_event(&event_json, false).await;
             }
             // §0.7 "light up thinking/usage": `message_delta` carries the
@@ -558,11 +518,8 @@ pub async fn dispatch_event(
         HistoryEvent::MessageStop | HistoryEvent::Completed { .. } => {
             // stream-json P4: emit message_stop for --include-partial-messages.
             if output.wants_partial_stream_events() {
-                let event_json = serde_json::to_string(&json!({
-                    "type": "message_stop"
-                }))
-                .unwrap_or_default();
-                output.emit_stream_event(&event_json, false).await;
+                let event_json = r#"{"type":"message_stop"}"#;
+                output.emit_stream_event(event_json, false).await;
             }
             Ok(RouterAction::EndOfStream)
         }
@@ -571,6 +528,37 @@ pub async fn dispatch_event(
 
 // ── SSE reconstruction helpers ───────────────────────────────────────────────
 
+fn reconstruct_message_start_event_json(id: &str, model: &str, usage: &Usage) -> String {
+    let counts = usage.counts();
+    format!(
+        "{{\"type\":\"message_start\",\"message\":{{\"id\":{},\"type\":\"message\",\"role\":\"assistant\",\"model\":{},\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{{\"input_tokens\":{},\"cache_creation_input_tokens\":{},\"cache_read_input_tokens\":{},\"output_tokens\":{},\"service_tier\":\"standard\"}}}}}}",
+        encoded_json(id), encoded_json(model),
+        counts.input_tokens, counts.cache_write_tokens, counts.cache_read_tokens,
+        counts.output_tokens.saturating_sub(counts.reasoning_tokens),
+    )
+}
+
+fn reconstruct_message_delta_event_json(
+    stop_reason: Option<&str>,
+    usage: Option<&Usage>,
+) -> String {
+    let usage_source = usage.map_or_else(
+        || "null".to_owned(),
+        |u| {
+            format!(
+                "{{\"output_tokens\":{}}}",
+                u.counts()
+                    .output_tokens
+                    .saturating_sub(u.counts().reasoning_tokens)
+            )
+        },
+    );
+    format!(
+        "{{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":{},\"stop_sequence\":null}},\"usage\":{usage_source}}}",
+        encoded_json(&stop_reason),
+    )
+}
+
 /// Reconstruct the JSON value for an `LlmContentBlock` at stream start
 /// (used in the `content_block_start` SSE event for P4 partial-messages).
 fn reconstruct_content_block_event_json(index: u32, block: &LlmContentBlock) -> String {
@@ -578,122 +566,100 @@ fn reconstruct_content_block_event_json(index: u32, block: &LlmContentBlock) -> 
         LlmContentBlock::ProviderContent { value, .. } => value.as_json_source().to_owned(),
         LlmContentBlock::Text { citations, .. }
         | LlmContentBlock::TextJsUtf16 { citations, .. } => {
-            let mut payload = JsonPayload::parse(r#"{"type":"text","text":""}"#)
-                .expect("static text block is valid JSON");
-            if let Some(citations) = citations {
-                let citations = citations
-                    .clone()
-                    .unwrap_or_else(|| JsonPayload::parse("null").expect("null is valid JSON"));
-                payload = payload
-                    .with_object_field("citations", &citations)
-                    .expect("text block is an object payload");
-            }
-            payload.as_json_source().to_owned()
+            let citations_source = match citations {
+                None => String::new(),
+                Some(None) => ",\"citations\":null".to_owned(),
+                Some(Some(value)) => format!(",\"citations\":{}", value.as_json_source()),
+            };
+            format!("{{\"type\":\"text\",\"text\":\"\"{citations_source}}}")
         }
-        LlmContentBlock::ToolCall { id, name, .. } => generated_payload_source(
-            &json!({"type": "tool_use", "id": id, "name": name, "input": {}}),
+        LlmContentBlock::ToolCall { id, name, .. } => format!(
+            "{{\"type\":\"tool_use\",\"id\":{},\"name\":{},\"input\":{{}}}}",
+            encoded_json(id),
+            encoded_json(name),
         ),
-        LlmContentBlock::Reasoning { .. } => {
-            generated_payload_source(&json!({"type": "thinking", "thinking": ""}))
-        }
-        LlmContentBlock::RedactedThinking { data } => {
-            generated_payload_source(&json!({"type": "redacted_thinking", "data": data}))
-        }
-        LlmContentBlock::ServerToolUse { id, name, input } => {
-            let mut payload = JsonPayload::from_generated_value(
-                &json!({"type": "server_tool_use", "id": id, "name": name, "input": null}),
-            )
-            .expect("host-generated server tool block is valid JSON");
-            payload = payload
-                .with_object_field("input", input)
-                .expect("server tool block is an object payload");
-            payload.as_json_source().to_owned()
-        }
+        LlmContentBlock::Reasoning { .. } => r#"{"type":"thinking","thinking":""}"#.to_owned(),
+        LlmContentBlock::RedactedThinking { data } => format!(
+            "{{\"type\":\"redacted_thinking\",\"data\":{}}}",
+            encoded_json(data),
+        ),
+        LlmContentBlock::ServerToolUse { id, name, input } => format!(
+            "{{\"type\":\"server_tool_use\",\"id\":{},\"name\":{},\"input\":{}}}",
+            encoded_json(id),
+            encoded_json(name),
+            input.as_json_source(),
+        ),
         LlmContentBlock::ConnectorText {
             connector_text,
             signature,
-        } => generated_payload_source(&json!({
-            "type": "connector_text",
-            "connector_text": connector_text,
-            "signature": signature
-        })),
+        } => format!(
+            "{{\"type\":\"connector_text\",\"connector_text\":{},\"signature\":{}}}",
+            encoded_json(connector_text),
+            encoded_json(signature),
+        ),
         LlmContentBlock::AdvisorToolResult {
             tool_use_id,
             content,
             is_error,
-        } => {
-            let mut payload = JsonPayload::from_generated_value(&json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": null,
-                "is_error": is_error
-            }))
-            .expect("host-generated advisor result is valid JSON");
-            payload = payload
-                .with_object_field("content", content)
-                .expect("advisor result block is an object payload");
-            payload.as_json_source().to_owned()
-        }
-        _ => generated_payload_source(&json!({"type": "unknown"})),
+        } => format!(
+            "{{\"type\":\"tool_result\",\"tool_use_id\":{},\"content\":{},\"is_error\":{}}}",
+            encoded_json(tool_use_id),
+            content.as_json_source(),
+            encoded_json(is_error),
+        ),
+        _ => r#"{"type":"unknown"}"#.to_owned(),
     };
     format!(
         "{{\"type\":\"content_block_start\",\"index\":{index},\"content_block\":{block_source}}}"
     )
 }
 
-fn generated_payload_source(value: &Value) -> String {
-    JsonPayload::from_generated_value(value)
-        .expect("host-generated stream event block is valid JSON")
-        .as_json_source()
-        .to_owned()
+fn encoded_json(value: &(impl serde::Serialize + ?Sized)) -> String {
+    serde_json::to_string(value).expect("host-generated stream scalar serializes")
 }
 
 fn reconstruct_delta_event_json(index: u32, delta: &HistoryContentDelta) -> Option<String> {
-    if let HistoryContentDelta::TextJsUtf16Delta {
-        utf16_code_units, ..
-    } = delta
-    {
-        let value = json!({
-            "type": "content_block_delta",
-            "index": index,
-            "delta": reconstruct_delta_json(delta)?
-        });
-        let mut projection = Utf16JsonProjection::from_serde_value(&value).ok()?;
-        projection
-            .set_string_units("/delta/text", utf16_code_units)
-            .ok()?;
-        return Some(projection.to_json_string().unwrap_or_default());
-    }
-    let exact_delta_source = match delta {
-        HistoryContentDelta::InputJsonDelta { partial_json } => Some(format!(
+    // Compose the envelope directly. String encoding remains delegated to JSON
+    // serializers, including the exact UTF-16 path for unpaired surrogates.
+    let delta_source = match delta {
+        HistoryContentDelta::TextDelta { text } => format!(
+            "{{\"type\":\"text_delta\",\"text\":{}}}",
+            serde_json::to_string(text).expect("text serializes")
+        ),
+        HistoryContentDelta::TextJsUtf16Delta {
+            utf16_code_units, ..
+        } => format!(
+            "{{\"type\":\"text_delta\",\"text\":{}}}",
+            JsonPayload::string_from_utf16_code_units(utf16_code_units).as_json_source()
+        ),
+        HistoryContentDelta::InputJsonDelta { partial_json } => format!(
             "{{\"type\":\"input_json_delta\",\"partial_json\":{}}}",
             JsonPayload::string_from_utf16_code_units(partial_json.utf16_code_units())
                 .as_json_source()
-        )),
-        HistoryContentDelta::CitationsDelta { citation } => Some(format!(
+        ),
+        HistoryContentDelta::ThinkingDelta { thinking } => format!(
+            "{{\"type\":\"thinking_delta\",\"thinking\":{}}}",
+            serde_json::to_string(thinking).expect("thinking serializes")
+        ),
+        HistoryContentDelta::SignatureDelta { signature } => format!(
+            "{{\"type\":\"signature_delta\",\"signature\":{}}}",
+            serde_json::to_string(signature).expect("signature serializes")
+        ),
+        HistoryContentDelta::CitationsDelta { citation } => format!(
             "{{\"type\":\"citations_delta\",\"citation\":{}}}",
             citation.as_json_source()
-        )),
-        HistoryContentDelta::ConnectorTextDelta { connector_text } => Some(format!(
+        ),
+        HistoryContentDelta::ConnectorTextDelta { connector_text } => format!(
             "{{\"type\":\"connector_text_delta\",\"connector_text\":{}}}",
             JsonPayload::string_from_utf16_code_units(connector_text.utf16_code_units())
                 .as_json_source()
-        )),
-        _ => None,
+        ),
+        HistoryContentDelta::TextCitations { .. }
+        | HistoryContentDelta::ProviderContentSnapshot { .. } => return None,
     };
-    if let Some(delta_source) = exact_delta_source {
-        return Some(format!(
-            "{{\"type\":\"content_block_delta\",\"index\":{index},\"delta\":{delta_source}}}"
-        ));
-    }
-    reconstruct_delta_json(delta).map(|delta| {
-        serde_json::to_string(&json!({
-            "type": "content_block_delta",
-            "index": index,
-            "delta": delta
-        }))
-        .unwrap_or_default()
-    })
+    Some(format!(
+        "{{\"type\":\"content_block_delta\",\"index\":{index},\"delta\":{delta_source}}}"
+    ))
 }
 
 fn core_projection_from_payload(payload: &JsonPayload) -> Utf16JsonProjection {
@@ -705,28 +671,6 @@ fn citations_to_core(
     citations: Option<Option<JsonPayload>>,
 ) -> Option<Option<Utf16JsonProjection>> {
     citations.map(|citation| citation.map(|payload| core_projection_from_payload(&payload)))
-}
-
-/// Reconstruct the JSON value for a `HistoryContentDelta`
-/// (used in the `content_block_delta` SSE event for P4 partial-messages).
-fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Option<Value> {
-    Some(match delta {
-        HistoryContentDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
-        HistoryContentDelta::TextJsUtf16Delta { text, .. } => {
-            json!({"type": "text_delta", "text": text})
-        }
-        HistoryContentDelta::InputJsonDelta { .. } => return None,
-        HistoryContentDelta::ThinkingDelta { thinking } => {
-            json!({"type": "thinking_delta", "thinking": thinking})
-        }
-        HistoryContentDelta::SignatureDelta { signature } => {
-            json!({"type": "signature_delta", "signature": signature})
-        }
-        HistoryContentDelta::CitationsDelta { .. }
-        | HistoryContentDelta::ConnectorTextDelta { .. } => return None,
-        HistoryContentDelta::TextCitations { .. }
-        | HistoryContentDelta::ProviderContentSnapshot { .. } => return None,
-    })
 }
 
 /// Surface an SSE `usage` snapshot to the output sink as a live usage
@@ -798,6 +742,108 @@ mod tests {
         }
 
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    }
+
+    #[test]
+    fn generated_envelopes_match_previous_json_value_bytes() {
+        let usage = Usage::default();
+        let counts = usage.counts();
+        let expected_start = json!({
+            "type": "message_start", "message": {
+                "id": "id\"", "type": "message", "role": "assistant", "model": "model\n", "content": [],
+                "stop_reason": null, "stop_sequence": null,
+                "usage": { "input_tokens": counts.input_tokens, "cache_creation_input_tokens": counts.cache_write_tokens,
+                    "cache_read_input_tokens": counts.cache_read_tokens, "output_tokens": counts.output_tokens.saturating_sub(counts.reasoning_tokens), "service_tier": "standard" }
+            }
+        }).to_string();
+        assert_eq!(
+            reconstruct_message_start_event_json("id\"", "model\n", &usage),
+            expected_start
+        );
+        for reason in [None, Some("end_turn"), Some("quote\"")] {
+            for reported_usage in [None, Some(&usage)] {
+                let usage_value = reported_usage.map(|u| json!({ "output_tokens": u.counts().output_tokens.saturating_sub(u.counts().reasoning_tokens) }));
+                let expected = json!({ "type": "message_delta", "delta": { "stop_reason": reason, "stop_sequence": null }, "usage": usage_value }).to_string();
+                assert_eq!(
+                    reconstruct_message_delta_event_json(reason, reported_usage),
+                    expected
+                );
+            }
+        }
+        let text = "quote\"\n😀";
+        let expected = json!({ "type": "content_block_delta", "index": 7, "delta": { "type": "text_delta", "text": text } }).to_string();
+        assert_eq!(
+            reconstruct_delta_event_json(7, &HistoryContentDelta::TextDelta { text: text.into() })
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn content_start_envelopes_keep_payloads_and_nullable_citations() {
+        let input = JsonPayload::parse(r#"{"raw":"\ud800","n":7}"#).unwrap();
+        let encoded = reconstruct_content_block_event_json(
+            3,
+            &LlmContentBlock::ServerToolUse {
+                id: "id\"".into(),
+                name: "tool\nname".into(),
+                input,
+            },
+        );
+        let value = Utf16JsonProjection::parse(&encoded).unwrap();
+        assert_eq!(
+            value.string_units("/content_block/input/raw"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(value.string_at("/content_block/id"), Some("id\""));
+        assert_eq!(value.string_at("/content_block/name"), Some("tool\nname"));
+        let absent = reconstruct_content_block_event_json(
+            0,
+            &LlmContentBlock::Text {
+                text: "ignored at start".into(),
+                citations: None,
+                cache_control: None,
+            },
+        );
+        let nullable = reconstruct_content_block_event_json(
+            0,
+            &LlmContentBlock::Text {
+                text: "".into(),
+                citations: Some(None),
+                cache_control: None,
+            },
+        );
+        let absent: Value = serde_json::from_str(&absent).unwrap();
+        let nullable: Value = serde_json::from_str(&nullable).unwrap();
+        assert!(absent["content_block"].get("citations").is_none());
+        assert!(nullable["content_block"]
+            .get("citations")
+            .unwrap()
+            .is_null());
+        assert_eq!(absent["content_block"]["text"], "");
+    }
+
+    #[test]
+    fn delta_envelopes_escape_strings_and_preserve_exact_utf16() {
+        let text = "quote\" newline\n emoji😀";
+        let encoded =
+            reconstruct_delta_event_json(9, &HistoryContentDelta::TextDelta { text: text.into() })
+                .unwrap();
+        let value: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["index"], 9);
+        assert_eq!(value["delta"]["text"], text);
+        let units = vec![0xd800, 0x22, 0x0a, 0xd83d, 0xde00, 0xdc00];
+        let encoded = reconstruct_delta_event_json(
+            4,
+            &HistoryContentDelta::TextJsUtf16Delta {
+                text: String::from_utf16_lossy(&units),
+                utf16_code_units: units.clone(),
+            },
+        )
+        .unwrap();
+        let value = Utf16JsonProjection::parse(&encoded).unwrap();
+        assert_eq!(value.string_units("/delta/text"), Some(units));
+        assert_eq!(value.number_at("/index"), Some(4.0));
     }
 
     #[tokio::test]

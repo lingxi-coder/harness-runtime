@@ -121,6 +121,7 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
         "history belonging to the resumed generation".to_owned(),
     )];
     let switch_history = resumed_history.clone();
+    let fixed_mode = root.conversation_profile().await.mode;
     let switching = {
         let root = root.clone();
         tokio::spawn(async move {
@@ -130,7 +131,19 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
                     switch_history,
                     None,
                     None,
-                    ResumeRuntimeSnapshot::default(),
+                    ResumeRuntimeSnapshot {
+                        transcript_metadata: Some(vec![
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                                &serde_json::json!({
+                                    "type": "fixed-session-mode",
+                                    "sessionId": initial_id.as_uuid().to_string(),
+                                    "sessionMode": fixed_mode.as_str(),
+                                    "instructionEpoch": 0,
+                                }),
+                            ).unwrap(),
+                        ]),
+                        ..Default::default()
+                    },
                 )
                 .await
             } else {

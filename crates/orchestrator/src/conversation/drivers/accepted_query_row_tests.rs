@@ -244,7 +244,7 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
         accepted_row.id(),
         crate::turn_loop::ToolUseDispatchFacts {
             native_query_depth: 0,
-            query_history: prequery.clone(),
+            query_history: prequery.clone().into(),
             assistant_message: accepted_row.clone(),
             same_turn_tool_uses: Vec::new(),
             refusal_call_boundary: None,
