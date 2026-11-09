@@ -276,6 +276,51 @@ pub fn tool_results_dir(config_home: &Path, cwd: &str, session_uuid: &str) -> Pa
     p
 }
 
+fn result_file_stem(id: &str) -> std::borrow::Cow<'_, str> {
+    let windows_device = id.len() <= 4
+        && matches!(
+            id.to_ascii_uppercase().as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+    // Keep ordinary provider filenames, but reserve the encoded namespace even
+    // on case-insensitive filesystems. The canonical message ID stays verbatim.
+    if !id.is_empty()
+        && id.len() <= 200
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !windows_device
+        && !id
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("opaque-"))
+    {
+        return std::borrow::Cow::Borrowed(id);
+    }
+    use sha2::Digest as _;
+    std::borrow::Cow::Owned(format!("opaque-{:x}", sha2::Sha256::digest(id.as_bytes())))
+}
+
 /// Check descendants of the configured root (`PIn`). The root itself may be
 /// a symlink; paths outside it are not checked by the oracle helper.
 async fn check_directory(config_home: &Path, dir: &Path) -> Result<(), String> {
@@ -390,7 +435,8 @@ pub async fn persist(
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
-    let filepath = dir.join(format!("{id}.{}", if is_json { "json" } else { "txt" }));
+    let stem = result_file_stem(id);
+    let filepath = dir.join(format!("{stem}.{}", if is_json { "json" } else { "txt" }));
     match tokio::fs::symlink_metadata(&filepath).await {
         Ok(meta) if meta.file_type().is_symlink() => {
             match tokio::fs::remove_file(&filepath).await {
@@ -596,6 +642,87 @@ mod tests {
             std::fs::read_to_string(&p.filepath).expect("read back"),
             body
         );
+    }
+
+    #[tokio::test]
+    async fn opaque_ids_stay_inside_the_result_directory_and_do_not_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("config");
+        let dir = home.join("projects/project/session/tool-results");
+        let absolute = root.path().join("outside").to_string_lossy().into_owned();
+        let mut ids = vec![
+            absolute,
+            "../../../../../outside".into(),
+            "nested/../../../../../outside".into(),
+            r"..\..\outside".into(),
+            r"C:\outside".into(),
+            r"\\server\share\outside".into(),
+            "name:stream".into(),
+            "CON".into(),
+            "nul".into(),
+            "COM1".into(),
+            "lpt9".into(),
+            "..".into(),
+            String::new(),
+            "nul\0byte".into(),
+            "opaque-provider-id".into(),
+            "OPAQUE-provider-id".into(),
+            "名字😀".into(),
+            "x".repeat(300),
+        ];
+        let generated = result_file_stem(&ids[1]).into_owned();
+        ids.push(generated.clone());
+        ids.push(generated.to_ascii_uppercase());
+        let mut names = std::collections::HashSet::new();
+        for (index, id) in ids.iter().enumerate() {
+            for is_json in [false, true] {
+                let body = format!("body-{index}-{is_json}");
+                let result = persist(&home, &dir, id, &body.clone().into(), is_json, 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(result.filepath.parent(), Some(dir.as_path()));
+                assert!(result
+                    .filepath
+                    .canonicalize()
+                    .unwrap()
+                    .starts_with(home.canonicalize().unwrap()));
+                let name = result.filepath.file_name().unwrap().to_str().unwrap();
+                assert!(
+                    names.insert(name.to_ascii_lowercase()),
+                    "filename alias for {id:?}"
+                );
+                assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), body);
+            }
+        }
+        assert!(!root.path().join("outside.txt").exists());
+        assert!(!root.path().join("outside.json").exists());
+    }
+
+    #[tokio::test]
+    async fn encoded_id_keeps_the_first_file_and_conventional_ids_keep_their_names() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tool-results");
+        for id in ["toolu_abc", "call-42", "computer-a1b2"] {
+            let result = persist(root.path(), &dir, id, &"body".into(), false, 1024)
+                .await
+                .unwrap();
+            assert_eq!(result.filepath, dir.join(format!("{id}.txt")));
+        }
+        let first = persist(root.path(), &dir, "../opaque", &"first".into(), false, 1024)
+            .await
+            .unwrap();
+        let second = persist(
+            root.path(),
+            &dir,
+            "../opaque",
+            &"second".into(),
+            false,
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.filepath, second.filepath);
+        assert_eq!(std::fs::read_to_string(first.filepath).unwrap(), "first");
     }
 
     #[tokio::test]
