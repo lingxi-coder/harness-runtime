@@ -265,7 +265,10 @@ fn run_git(cwd: &Path, deadline: Instant, args: &[&str]) -> Option<String> {
         return None;
     }
     let mut command = Command::new("git");
-    command.args(args).current_dir(cwd);
+    command
+        .args(permission::auto_mode_producers::GIT_HARDENING_FLAGS)
+        .args(args)
+        .current_dir(cwd);
     run_command_with_deadline(&mut command, deadline)
 }
 
@@ -346,6 +349,73 @@ fn git_ok(cwd: &Path, deadline: Instant, args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_probes_ignore_repository_fsmonitor_commands() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(permission::auto_mode_producers::GIT_HARDENING_FLAGS)
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("tracked.txt"), "original\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ]);
+        std::fs::write(repo.join("changed.txt"), "new\n").unwrap();
+
+        let script = dir.path().join("fsmonitor");
+        let marker = dir.path().join("fsmonitor.marker");
+        std::fs::write(&script, "#!/bin/sh\nprintf called >> \"$0.marker\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git(&[
+            "config",
+            "--local",
+            "core.fsmonitor",
+            script.to_str().unwrap(),
+        ]);
+
+        // Establish that this local fixture really executes its configured
+        // monitor without the automatic probe's hardening overrides.
+        let output = Command::new("git")
+            .args(["--no-optional-locks", "status", "--short"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(marker.exists(), "fixture must exercise the fsmonitor hook");
+        std::fs::remove_file(&marker).unwrap();
+
+        let probe = probe(&repo).expect("safe probe retains repository facts");
+        assert!(!probe.working_dir_clean);
+        let (snapshot_probe, block) = snapshot(&repo);
+        assert_eq!(snapshot_probe.unwrap().branch, probe.branch);
+        let block = block.unwrap();
+        assert!(block.contains(&format!("Current branch: {}", probe.branch)));
+        assert!(block.contains("?? changed.txt"));
+        assert!(block.contains("initial"));
+        assert!(
+            !marker.exists(),
+            "automatic probes must not execute fsmonitor"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

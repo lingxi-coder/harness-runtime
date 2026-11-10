@@ -3249,6 +3249,8 @@ mod tests {
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),
             (json!(1), json!(2)),
+            // `autoCompactWindow` accepts integral windows from 100k to 1M.
+            (json!(100000), json!(200000)),
             // `skillListingMaxDescChars` is modeled as f64, so its typed
             // serde round trip preserves the float-form JSON numbers. Use
             // integer-valued floats to meet Native's positive-integer schema.

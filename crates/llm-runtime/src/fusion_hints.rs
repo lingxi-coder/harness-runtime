@@ -86,36 +86,6 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
             true,
         ),
     ),
-    (
-        "openai-chatgpt",
-        "gpt-5.6-sol",
-        q(
-            100,
-            FusionLatencyClass::Slow,
-            FusionCostClass::Subscription,
-            true,
-        ),
-    ),
-    (
-        "openai-chatgpt",
-        "gpt-5.6-terra",
-        q(
-            90,
-            FusionLatencyClass::Standard,
-            FusionCostClass::Subscription,
-            true,
-        ),
-    ),
-    (
-        "openai-chatgpt",
-        "gpt-5.6-luna",
-        q(
-            75,
-            FusionLatencyClass::Fast,
-            FusionCostClass::Subscription,
-            false,
-        ),
-    ),
     // DeepSeek
     (
         "deepseek",

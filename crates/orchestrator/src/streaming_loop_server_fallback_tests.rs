@@ -1951,17 +1951,28 @@ async fn server_fallback_tombstones_tools_by_completed_block_index_and_retains_t
     assert_eq!(drained.len(), 1);
     assert!(matches!(
         &drained[0].block,
-        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == new_tool.as_str()
+        Some(ContentBlock::ToolResult { tool_use_id, .. }) if tool_use_id.as_str() == new_tool.as_str()
     ));
 }
 
 #[tokio::test]
 async fn fallback_observation_and_served_model_survive_a_later_stream_failure() {
+    for error in [
+        Some(LlmError::Transport {
+            message: "connection closed".into(),
+        }),
+        None,
+    ] {
+        assert_fallback_observation_survives_stream_failure(error).await;
+    }
+}
+
+async fn assert_fallback_observation_survives_stream_failure(error: Option<LlmError>) {
     let orch = orchestrator_with_fallback_allowlist(vec!["fallback-model".into()]);
     let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
         .await
         .expect("fallback test binds the streaming scheduler owner");
-    let events = vec![
+    let mut events = vec![
         Ok(message_start("old-attempt", "requested-model")),
         Ok(content_block_start_text(0)),
         Ok(text_delta(0, "retained text")),
@@ -1976,10 +1987,10 @@ async fn fallback_observation_and_served_model_survive_a_later_stream_failure() 
         Ok(message_start("fallback-attempt", "fallback-model")),
         Ok(content_block_start_text(5)),
         Ok(text_delta(5, "partial fallback answer")),
-        Err(LlmError::Transport {
-            message: "connection closed".into(),
-        }),
     ];
+    if let Some(error) = error {
+        events.push(Err(error));
+    }
     let sink = Arc::new(RecordingFallbackOutput::default());
     let output: Arc<dyn OutputStream> = sink.clone();
 
@@ -1999,7 +2010,7 @@ async fn fallback_observation_and_served_model_survive_a_later_stream_failure() 
         },
     )
     .await
-    .expect_err("transport close should remain a stream failure");
+    .expect_err("transport close or EOF should remain a stream failure");
 
     assert_eq!(
         failure.partial.served_model.as_deref(),
@@ -2032,6 +2043,19 @@ async fn fallback_observation_and_served_model_survive_a_later_stream_failure() 
     assert_eq!(texts, ["retained text", "partial fallback answer"]);
     assert!(failure.partial.tool_uses.is_empty());
     assert!(failure.partial.replacement_message_id.is_none());
+    let row_texts: Vec<&str> = failure
+        .partial
+        .assistant_rows
+        .iter()
+        .flat_map(|row| row.content.iter())
+        .filter_map(ContentBlock::visible_text)
+        .collect();
+    assert_eq!(row_texts, ["retained text", "partial fallback answer"]);
+    assert!(failure
+        .partial
+        .assistant_rows
+        .iter()
+        .all(|row| row.supersedes_row_ids.is_empty()));
     let retained_row_id = failure
         .partial
         .assistant_rows

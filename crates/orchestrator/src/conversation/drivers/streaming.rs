@@ -152,6 +152,31 @@ enum OpenedModelStream {
     Recovered(crate::streaming_loop::PumpedTurn),
 }
 
+#[derive(Clone)]
+struct CapturedNativeModelSource {
+    route: crate::query_model::ModelRoute,
+    source: Option<Utf16JsonProjection>,
+}
+
+impl CapturedNativeModelSource {
+    fn for_route(
+        &self,
+        orch: &ConversationOrchestrator,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<Utf16JsonProjection> {
+        let source = self.source.clone()?;
+        ConversationOrchestrator::configured_source_for_effective_route(
+            orch.api.as_ref(),
+            model,
+            profile,
+            &self.route.model,
+            self.route.profile.as_deref(),
+            Some(source),
+        )
+    }
+}
+
 /// Only a host-classified external delivery enters `session.receive` before
 /// prompt admission. Composer and plugin prompts have their own events; an
 /// unclassified local continuation must not be relabeled as bridge input.
@@ -190,6 +215,7 @@ struct OpenedStreamingIteration<'a> {
     retry_scope: ModelCallRetryScope,
     model: String,
     model_profile: Option<String>,
+    native_model_source: CapturedNativeModelSource,
     outgoing_history_rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
     turn_reminders: Vec<ConversationMessage>,
     tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
@@ -360,6 +386,7 @@ fn mod_turn_step_stream(
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
     >,
     snapshot: Vec<ConversationMessage>,
+    user_cancel: Option<CancellationToken>,
     chat_dispatch_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     guarded_async_hook_reminders: Vec<(
         MessageId,
@@ -400,7 +427,8 @@ fn mod_turn_step_stream(
     let worker_decoder = decoder.clone();
     let worker_model = effective_model.clone();
     let worker_error = physical_error.clone();
-    tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+    let worker_cancel = user_cancel.clone().unwrap_or_default();
+    let dispatch = lingxi_core::host::model_safety::bind_current_model_safety(
         telemetry::otel::bind_current_trace_context(async move {
             let finish_wire = worker_wire.clone();
             let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -901,15 +929,42 @@ fn mod_turn_step_stream(
                 }
             }
         }),
-    ));
+    );
+    let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            () = worker_cancel.cancelled() => {}
+            () = dispatch => {}
+        }
+    }));
     let stream = futures::stream::unfold(
-        (receiver, None::<tokio::sync::oneshot::Sender<()>>),
-        |(mut receiver, previous_ack)| async move {
+        (
+            receiver,
+            None::<tokio::sync::oneshot::Sender<()>>,
+            worker,
+            user_cancel,
+        ),
+        |(mut receiver, previous_ack, mut worker, cancel)| async move {
             if let Some(ack) = previous_ack {
                 let _ = ack.send(());
             }
-            let (item, ack) = receiver.recv().await?;
-            Some((item, (receiver, Some(ack))))
+            let frame = if let Some(cancel) = cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    frame = receiver.recv() => frame,
+                }
+            } else {
+                receiver.recv().await
+            };
+            let Some((item, ack)) = frame else {
+                // Join cancellation before the turn's accounting/terminal
+                // epilogue. Consumer drop also aborts this owned worker.
+                worker.abort();
+                let _ = (&mut worker).await;
+                return None;
+            };
+            Some((item, (receiver, Some(ack), worker, cancel)))
         },
     )
     .fuse()
@@ -1191,27 +1246,41 @@ impl StreamingTurnDriver<'_> {
             profile: prepared.step.model_profile.clone(),
         };
         let policy = Arc::clone(&prepared.step.prompt_policy);
-        Box::pin(crate::query_model::ROUTE.scope(
-            Some(route.clone()),
-            super::super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
-                (route, policy),
-                crate::turn_loop::boxed_turn_future(|| {
-                    StreamingTurnDriver::<'orch>::open_iteration_inner(
-                        orch,
-                        prepared,
-                        system_prompt,
-                        user_cancel,
-                        loop_state,
-                        retry_scope,
-                    )
-                }),
-            ),
-        ))
+        Box::pin(async move {
+            // Capture the source owner before this driver's policy scope.
+            // A real outer query route still suppresses the parent source.
+            let native_model_source = CapturedNativeModelSource {
+                source: orch
+                    .main_model_source_for_request(&route.model, route.profile.as_deref())
+                    .await,
+                route: route.clone(),
+            };
+            crate::query_model::ROUTE
+                .scope(
+                    Some(route.clone()),
+                    super::super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                        (route, policy),
+                        crate::turn_loop::boxed_turn_future(|| {
+                            StreamingTurnDriver::<'orch>::open_iteration_inner(
+                                orch,
+                                prepared,
+                                native_model_source,
+                                system_prompt,
+                                user_cancel,
+                                loop_state,
+                                retry_scope,
+                            )
+                        }),
+                    ),
+                )
+                .await
+        })
     }
 
     async fn open_iteration_inner<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
+        native_model_source: CapturedNativeModelSource,
         _system_prompt: &Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
         >,
@@ -1428,10 +1497,10 @@ impl StreamingTurnDriver<'_> {
                 orch.config.model.clone(),
                 input,
                 model_profile.clone(),
-                orch.main_model_source_for_request(&model, model_profile.as_deref())
-                    .await,
+                native_model_source.for_route(orch, &model, model_profile.as_deref()),
                 system_prompt.clone(),
                 snapshot,
+                user_cancel.clone(),
                 orch.chat_dispatch_check(user_cancel.as_ref()),
                 guarded_async_hook_reminders.clone(),
                 tool_declarations.clone(),
@@ -1534,11 +1603,11 @@ impl StreamingTurnDriver<'_> {
                                     native_anthropic_request_context.clone(),
                                     typed_attachment_ids,
                                     task_deliveries,
-                                    orch.main_model_source_for_request(
+                                    native_model_source.for_route(
+                                        orch,
                                         &model,
                                         model_profile.as_deref(),
-                                    )
-                                    .await,
+                                    ),
                                 ),
                             ),
                         ),
@@ -1607,6 +1676,7 @@ impl StreamingTurnDriver<'_> {
                     available_tool_names.clone(),
                     skip_global_cache_for_system_prompt,
                     native_anthropic_request_context.clone(),
+                    &native_model_source,
                     system_prompt,
                     user_cancel,
                     display_hook_active,
@@ -1954,6 +2024,7 @@ impl StreamingTurnDriver<'_> {
             retry_scope: retry_scope.clone(),
             model,
             model_profile,
+            native_model_source,
             outgoing_history_rewriter,
             turn_reminders,
             tool_result_reminder_suffixes,
@@ -1997,6 +2068,7 @@ impl StreamingTurnDriver<'_> {
         available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         skip_global_cache_for_system_prompt: bool,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
+        native_model_source: &CapturedNativeModelSource,
         system_prompt: &Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
         >,
@@ -2113,12 +2185,11 @@ impl StreamingTurnDriver<'_> {
                                     crate::config::sanitize_query_source(&orch.config.query_source)
                                         .to_string(),
                                 );
-                                request.opts.model_source = orch
-                                    .main_model_source_for_request(
-                                        &non_stream_model,
-                                        non_stream_profile.as_deref(),
-                                    )
-                                    .await;
+                                request.opts.model_source = native_model_source.for_route(
+                                    orch,
+                                    &non_stream_model,
+                                    non_stream_profile.as_deref(),
+                                );
                                 request.opts.initial_consecutive_overloaded = Some(seed);
                                 request.opts.failed_stream_outlasted_timeout =
                                     failed_stream_outlasted_timeout;
@@ -2421,6 +2492,7 @@ impl StreamingTurnDriver<'_> {
             query_history,
             model,
             model_profile,
+            native_model_source,
             outgoing_history_rewriter,
             mut turn_reminders,
             tool_result_reminder_suffixes,
@@ -2786,11 +2858,11 @@ impl StreamingTurnDriver<'_> {
                                                     native_anthropic_request_context.clone(),
                                                     typed_attachment_ids,
                                                     task_deliveries,
-                                                    orch.main_model_source_for_request(
+                                                    native_model_source.for_route(
+                                                        orch,
                                                         &re_model,
                                                         re_profile.as_deref(),
-                                                    )
-                                                    .await,
+                                                    ),
                                                 ),
                                             ),
                                         ),
@@ -3116,6 +3188,7 @@ impl StreamingTurnDriver<'_> {
                                 available_tool_names.clone(),
                                 skip_global_cache_for_system_prompt,
                                 native_anthropic_request_context.clone(),
+                                &native_model_source,
                                 system_prompt,
                                 user_cancel,
                                 display_hook_active,
@@ -3259,6 +3332,7 @@ impl StreamingTurnDriver<'_> {
                         retry_scope: retry_scope.clone(),
                         model: model.clone(),
                         model_profile: model_profile.clone(),
+                        native_model_source,
                         outgoing_history_rewriter,
                         turn_reminders,
                         tool_result_reminder_suffixes,
@@ -4472,6 +4546,9 @@ impl StreamingTurnDriver<'_> {
                     let mut admitted = Vec::with_capacity(inputs.len());
                     let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
                     for (index, mut input) in inputs.into_iter().enumerate() {
+                        if index == image_owner {
+                            input.images.extend(std::mem::take(&mut images));
+                        }
                         if let Some(kind) =
                             input.mod_origin.as_ref().and_then(external_receive_kind)
                         {
@@ -4489,7 +4566,7 @@ impl StreamingTurnDriver<'_> {
                         match orch
                             .screen_mod_prompt_submit(
                                 &input.text,
-                                if index == image_owner { &images } else { &[] },
+                                &input.images,
                                 input.mod_origin.clone(),
                             )
                             .await
@@ -5104,6 +5181,10 @@ impl StreamingTurnDriver<'_> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "mod_stream_cancellation_tests.rs"]
+mod cancellation_regression_tests;
 
 #[cfg(test)]
 mod mod_response_accumulator_tests {

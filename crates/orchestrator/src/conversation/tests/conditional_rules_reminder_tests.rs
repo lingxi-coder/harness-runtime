@@ -405,6 +405,39 @@ fn rule_reminder_texts(messages: &[(usize, ConversationMessage)], rule: &Path) -
 }
 
 #[tokio::test]
+async fn nested_project_rule_discovery_matches_an_absolute_project_file() {
+    let mut fixture = FilesystemRuleFixture::new(
+        LingxiMdTier::Project,
+        "src/**/*.ts",
+        "nested typescript rule",
+    );
+    let nested_rule = fixture.cwd.join(".lingxi/rules/security/typescript.md");
+    std::fs::create_dir_all(nested_rule.parent().unwrap()).unwrap();
+    std::fs::rename(&fixture.rule, &nested_rule).unwrap();
+    fixture.rule = nested_rule;
+    let (orch, _) = fixture.orchestrator();
+    push_touched(&orch, &fixture.trigger("src/deep/a.ts"));
+
+    let reminders = orch
+        .collect_turn_reminders(true, false, None, &[])
+        .await
+        .unwrap();
+    let matching = rule_reminder_texts(&reminders.model_reminders, &fixture.rule);
+    assert_eq!(
+        matching.len(),
+        1,
+        "the nested rule must be discovered and activated"
+    );
+    assert!(matching[0].contains("nested typescript rule"));
+    push_touched(&orch, &fixture.trigger("src/deep/b.ts"));
+    let next = orch
+        .collect_turn_reminders(true, false, None, &[])
+        .await
+        .unwrap();
+    assert!(rule_reminder_texts(&next.model_reminders, &fixture.rule).is_empty());
+}
+
+#[tokio::test]
 async fn unsent_rule_body_changes_are_fresh_across_all_rule_tiers() {
     for tier in [
         LingxiMdTier::Managed,

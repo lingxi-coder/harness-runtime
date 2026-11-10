@@ -1453,6 +1453,7 @@ async fn changed_file_attachment_persists_original_and_screens_warm_and_resumed_
             filesystem.clone(),
         )))
         .with_hook_registry(hook_registry);
+    orch.initialize_conversation_mode().await.unwrap();
     seed(&orch, &path, "old bytes\n", 0, full_read("old bytes\n"));
 
     orch.run_turn("inspect the file").await.unwrap();

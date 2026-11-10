@@ -20,6 +20,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 struct InMemoryFs {
     files: TokioMutex<StdHashMap<String, String>>,
+    missing_files_are_errors: bool,
 }
 
 #[test]
@@ -88,6 +89,7 @@ impl InMemoryFs {
     fn new() -> Self {
         Self {
             files: TokioMutex::new(StdHashMap::new()),
+            missing_files_are_errors: false,
         }
     }
 }
@@ -100,7 +102,11 @@ impl FileSystem for InMemoryFs {
         _limit: Option<u64>,
     ) -> Result<FileContent, FsError> {
         let map = self.files.lock().await;
-        let content = map.get(path).cloned().unwrap_or_default();
+        let content = match map.get(path) {
+            Some(content) => content.clone(),
+            None if self.missing_files_are_errors => return Err(FsError::NotFound(path.into())),
+            None => String::new(),
+        };
         let total_lines = content.lines().count() as u64;
         Ok(FileContent {
             content,
@@ -3501,6 +3507,199 @@ async fn build_context_keeps_session_transcript_storage() {
         .unwrap();
     assert_eq!(context.transcript_subdir, directory);
     assert!(Arc::ptr_eq(context.transcript_fs.as_ref().unwrap(), &fs));
+}
+
+#[derive(Default)]
+struct SpawnOwnerHookRecorder(StdMutex<Vec<hooks::HookContext>>);
+
+#[async_trait]
+impl hooks::BuiltinHookHandler for SpawnOwnerHookRecorder {
+    fn id(&self) -> &str {
+        "teammate-spawn-owner"
+    }
+
+    async fn handle(
+        &self,
+        _: &hooks::HookEvent,
+        context: &hooks::HookContext,
+    ) -> hooks::HookResult {
+        self.0.lock().unwrap().push(context.clone());
+        hooks::HookResult {
+            outcome: hooks::HookOutcome::Success,
+            stdout: "".into(),
+            stderr: "".into(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+struct SpawnOwnerStopFirer(lingxi_core::types::MessageId);
+
+#[async_trait]
+impl lingxi_core::host::subagent_spawn::SubagentStopHookFirer for SpawnOwnerStopFirer {
+    fn epoch_id(&self) -> lingxi_core::types::MessageId {
+        self.0
+    }
+    fn retire(&self) {}
+    fn is_current(&self) -> bool {
+        true
+    }
+    async fn fire(
+        &self,
+        _: lingxi_core::types::AgentId,
+        _: &str,
+        _: lingxi_core::host::subagent_spawn::SubagentStopStatus,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn post_switch_teammate_hooks_and_transcript_use_the_captured_spawn_owner() {
+    let (dir, fs, runtime, handler) = make_handler(ScriptedApiClient::new(vec!["owned answer"]));
+    // Transcript journals distinguish an absent sidecar from a corrupt empty
+    // one. Keep the spool fixture's permissive polling behavior independent.
+    let transcript_fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs {
+        files: TokioMutex::new(StdHashMap::new()),
+        missing_files_are_errors: true,
+    });
+    let boot = lingxi_core::types::SessionId::new();
+    let current = lingxi_core::types::SessionId::new();
+    let boot_cwd = dir.path().join("boot");
+    let current_cwd = dir.path().join("current");
+    let boot_transcripts = boot_cwd.join("subagents");
+    let current_transcripts = current_cwd.join(current.to_string()).join("subagents");
+    let recorder = Arc::new(SpawnOwnerHookRecorder::default());
+    let mut registry = hooks::HookRegistry::new();
+    registry.register(hooks::HookDefinition {
+        id: lingxi_core::types::HookId::new(),
+        name: "teammate-spawn-owner".into(),
+        events: vec![hooks::HookEventType::SubagentStart],
+        if_condition: None,
+        executor: hooks::HookExecutor::Builtin {
+            handler_id: "teammate-spawn-owner".into(),
+        },
+        source: hooks::HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        blocking: true,
+        timeout: None,
+        priority: 0,
+        once: false,
+        status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
+        on_failure: None,
+    });
+    let mut executor = hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        runtime.clone(),
+    );
+    executor.register_builtin(recorder.clone());
+    let executor = Arc::new(executor);
+    let boot_epoch = lingxi_core::types::MessageId::new();
+    let current_epoch = lingxi_core::types::MessageId::new();
+    executor.bind_subagent_stop_firer(boot, Arc::new(SpawnOwnerStopFirer(boot_epoch)));
+    executor.bind_subagent_stop_firer(current, Arc::new(SpawnOwnerStopFirer(current_epoch)));
+    let provider_calls = Arc::new(StdMutex::new(Vec::new()));
+    let captured_calls = provider_calls.clone();
+    let expected_directory = current_transcripts.clone();
+    let handler = handler
+        .with_hook_context(boot, boot_cwd.clone())
+        .with_hook_executor(executor)
+        .with_transcript(transcript_fs.clone(), boot_transcripts.clone())
+        .with_subagents_dir_for_session_provider(Arc::new(move |session_id, cwd| {
+            captured_calls
+                .lock()
+                .unwrap()
+                .push((session_id, cwd.to_path_buf()));
+            Ok(expected_directory.clone())
+        }));
+    let request = lingxi_core::host::SubagentSpawnRequest {
+        origin_session_id: Some(current),
+        cwd: Some(current_cwd.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let agent_id = lingxi_core::types::AgentId::new();
+    let definition = DefaultTeammateDefinition
+        .resolve(&agent_id, "worker")
+        .await
+        .unwrap();
+    let mut captured = handler
+        .build_context(agent_id, "worker", "team", "work", definition)
+        .await
+        .unwrap();
+    assert_eq!(captured.hook_session_id, boot);
+    assert_eq!(
+        captured.subagent_stop_firer.as_ref().unwrap().epoch_id(),
+        boot_epoch
+    );
+    handler
+        .apply_spawn_context(&mut captured, request.clone())
+        .unwrap();
+    assert_eq!(captured.hook_session_id, current);
+    assert_eq!(captured.hook_cwd, current_cwd);
+    assert_eq!(captured.transcript_subdir, current_transcripts);
+    assert_eq!(
+        captured.subagent_stop_firer.as_ref().unwrap().epoch_id(),
+        current_epoch
+    );
+
+    // Exercise the actual handler -> pool -> runner path, not only the seed.
+    let context = ctx(fs.clone(), runtime);
+    let task = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(request),
+                inheritance: None,
+                agent_id,
+                name: "worker".into(),
+                team_name: "team".into(),
+                description: "work".into(),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    let spool = dir.path().join(format!("{}.output", task.task_id));
+    let body = await_spool(&fs, spool.to_str().unwrap(), |body| {
+        body.contains("completed:") && body.contains("owned answer")
+    })
+    .await;
+    assert!(
+        body.contains("completed:") && body.contains("owned answer"),
+        "{body}"
+    );
+    {
+        let hooks = recorder.0.lock().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].session_id, current);
+        assert_eq!(hooks[0].cwd, current_cwd);
+        assert_eq!(hooks[0].agent_id, Some(agent_id));
+    }
+    assert!(provider_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(owner, cwd)| { *owner == current && *cwd == current_cwd }));
+    let transcript = current_transcripts.join(format!("agent-{agent_id}.jsonl"));
+    let persisted = transcript_fs
+        .read_file(transcript.to_str().unwrap(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        persisted.content.contains("owned answer"),
+        "{}",
+        persisted.content
+    );
+    let boot_transcript = boot_transcripts.join(format!("agent-{agent_id}.jsonl"));
+    assert!(matches!(
+        transcript_fs
+            .read_file(boot_transcript.to_str().unwrap(), None, None)
+            .await,
+        Err(FsError::NotFound(_))
+    ));
+    handler.kill(&task.task_id, context).await.unwrap();
 }
 
 #[tokio::test]

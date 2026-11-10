@@ -836,7 +836,7 @@ async fn resumed_concrete_agent_model_recovers_a_retired_saved_model() {
                 model_profile: Some("profile-a".into()),
                 main_thread_agent_type: Some(definition.agent_type.clone()),
                 main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
-                ..Default::default()
+                ..crate::test_support::code_resume_runtime_snapshot(resumed_session)
             },
         )
         .await
@@ -908,10 +908,11 @@ async fn resumed_relative_agent_alias_uses_the_saved_profiles_catalog() {
     orch.session.lock().await.model_profile = Some("profile-b".into());
     calls.lock().unwrap().clear();
     let definition = resumed_agent_with_model(agent::AgentModel::Alias("sonnet".into()));
+    let resumed_session = lingxi_core::types::SessionId::new();
 
     lingxi_core::host::OrchestratorHandle::resume_session(
         &orch,
-        lingxi_core::types::SessionId::new(),
+        resumed_session,
         Vec::new(),
         None,
         None,
@@ -920,7 +921,7 @@ async fn resumed_relative_agent_alias_uses_the_saved_profiles_catalog() {
             model_profile: Some("profile-a".into()),
             main_thread_agent_type: Some(definition.agent_type.clone()),
             main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
-            ..Default::default()
+            ..crate::test_support::code_resume_runtime_snapshot(resumed_session)
         },
     )
     .await

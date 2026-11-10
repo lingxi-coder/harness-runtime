@@ -1,6 +1,18 @@
 use super::parse_generated_session_name;
 
 #[test]
+fn rejects_reversed_braces_without_panicking() {
+    for raw in ["}{", "}x{", "closed } then open {", "```json\n}x{\n```"] {
+        assert_eq!(parse_generated_session_name(&raw.into()), None, "{raw:?}");
+    }
+    assert_eq!(
+        parse_generated_session_name(&"prose {\"name\":\"valid\"} tail".into())
+            .and_then(|name| name.string_at("").map(str::to_owned)),
+        Some("valid".into()),
+    );
+}
+
+#[test]
 fn parses_plain_and_fenced_json_but_rejects_empty_or_prose() {
     assert_eq!(
         parse_generated_session_name(&r#"{"name":"fix-login-bug"}"#.into())

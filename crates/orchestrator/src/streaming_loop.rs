@@ -17,7 +17,7 @@ use lingxi_core::host::{OutputStream, ServerFallbackTombstoneMessage};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use llm_runtime::{ExecutionUsage as LlmUsage, HistoryEvent, LlmError};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -338,7 +338,26 @@ pub(crate) enum StreamEventJournalEntry {
         /// identifies a user row from outside the tool-completion `je` set.
         tool_completion_id: Option<ToolUseId>,
     },
+    PersistHookAttachment(StreamHookAttachment),
     FlushHookAttachments(ToolUseId),
+}
+
+pub(crate) struct StreamHookAttachment {
+    pub(crate) tool_completion_id: ToolUseId,
+    pub(crate) id: Option<MessageId>,
+    pub(crate) payload: Utf16JsonProjection,
+    pub(crate) publication_guard:
+        Option<std::sync::Arc<dyn hooks::attachment::HookPublicationGuard>>,
+}
+
+impl std::fmt::Debug for StreamHookAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamHookAttachment")
+            .field("tool_completion_id", &self.tool_completion_id)
+            .field("id", &self.id)
+            .field("payload", &self.payload)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamToolSettlement {
@@ -355,6 +374,9 @@ impl StreamToolSettlement {
         let mut removed_tools = HashSet::new();
         let mut tombstones = Vec::new();
         for entry in &self.journal {
+            if let StreamEventJournalEntry::PersistHookAttachment(attachment) = entry {
+                removed_tools.insert(attachment.tool_completion_id.clone());
+            }
             if let StreamEventJournalEntry::UserRow {
                 stored,
                 timestamp,
@@ -419,6 +441,7 @@ impl StreamToolSettlement {
                 StreamEventJournalEntry::FlushHookAttachments(tool_use_id) => {
                     removed_tools.contains(tool_use_id)
                 }
+                StreamEventJournalEntry::PersistHookAttachment(_) => true,
                 _ => false,
             };
             if !remove {
@@ -450,8 +473,9 @@ impl StreamToolSettlement {
 }
 
 /// Native accepted-midstream `J` state. Source rows remain untouched until a
-/// non-error assistant text block with visible text arrives; if the stream
-/// terminates first, those original rows remain the only durable content.
+/// completed provider text block with visible text arrives. A terminal stream
+/// failure leaves those original rows intact; independently salvaged visible
+/// text may still be persisted without superseding them.
 #[derive(Debug, Clone)]
 struct PendingServerStitch {
     retained_text: String,
@@ -995,6 +1019,216 @@ fn creates_assistant_row(content_block: &llm_runtime::ContentBlock) -> bool {
     )
 }
 
+/// Terminal snapshots use the ordinary block-stop admission path, including
+/// Mod append, tool dispatch, row identities and the persistence journal.
+struct PendingStreamEvent {
+    event: HistoryEvent,
+    completed_block: Option<ContentBlock>,
+}
+
+impl From<HistoryEvent> for PendingStreamEvent {
+    fn from(event: HistoryEvent) -> Self {
+        Self {
+            event,
+            completed_block: None,
+        }
+    }
+}
+
+async fn next_stream_event(
+    stream: &mut BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    pending: &mut VecDeque<PendingStreamEvent>,
+) -> Option<Result<PendingStreamEvent, LlmError>> {
+    match pending.pop_front() {
+        Some(event) => Some(Ok(event)),
+        None => stream.next().await.map(|item| item.map(Into::into)),
+    }
+}
+
+fn queue_visible_transport_tail(
+    acc: &BlockAccumulator,
+    pending: &mut VecDeque<PendingStreamEvent>,
+) -> bool {
+    for (index, block) in acc.incomplete_text_blocks_with_indices() {
+        pending.push_back(PendingStreamEvent {
+            event: HistoryEvent::ContentBlockStop { index },
+            completed_block: Some(block),
+        });
+    }
+    !pending.is_empty()
+}
+
+fn queue_completed_response(
+    response: &llm_runtime::HistoryResponse,
+    acc: &BlockAccumulator,
+    current_rows: &HashMap<u32, MessageId>,
+    observed_indices: &HashSet<u32>,
+    companion_blocks: &HashMap<u32, ContentBlock>,
+    accepted_tools: &HashSet<ToolUseId>,
+    pending: &mut VecDeque<PendingStreamEvent>,
+) {
+    let mut source_indices: Vec<_> = observed_indices.iter().copied().collect();
+    source_indices.sort_unstable_by_key(|index| llm_runtime::stream_content_order(*index));
+    let companion_indices: Vec<_> = source_indices
+        .iter()
+        .copied()
+        .filter(|index| index & 0x8000_0000 != 0)
+        .collect();
+    // Runtime replay companions have high-bit indexes but occupy ordinary
+    // positions in the final content list. A complete observed list supplies
+    // that mapping; ordinary sparse/missing callbacks retain their API index.
+    let use_observed_order =
+        source_indices.len() == response.content.len() && !companion_indices.is_empty();
+    let open: HashSet<_> = acc.open_indices().collect();
+    let visible: HashMap<_, _> = acc
+        .incomplete_text_blocks_with_indices()
+        .into_iter()
+        .collect();
+    let mut tool_ids = accepted_tools.clone();
+    let mut matched_companions = HashSet::new();
+    let mut next_source_index = 0u32;
+    for (position, source) in response.content.iter().enumerate() {
+        let Some(block) = crate::turn_loop::translate_response_blocks(std::slice::from_ref(source))
+            .into_iter()
+            .next()
+        else {
+            // Ignored input-only variants still occupy a provider slot.
+            if !use_observed_order {
+                next_source_index = next_source_index.saturating_add(1);
+            }
+            continue;
+        };
+        let index = if use_observed_order {
+            source_indices[position]
+        } else if let Some(index) = companion_indices.iter().copied().find(|index| {
+            (index & 0x7fff_ffff) <= next_source_index
+                && !matched_companions.contains(index)
+                && companion_blocks.get(index) == Some(&block)
+        }) {
+            matched_companions.insert(index);
+            next_source_index = next_source_index.max((index & 0x7fff_ffff).saturating_add(1));
+            index
+        } else {
+            let index = next_source_index;
+            let Some(next) = next_source_index.checked_add(1) else {
+                break;
+            };
+            next_source_index = next;
+            index
+        };
+        if let ContentBlock::ToolUse { id, .. } = &block {
+            if !tool_ids.insert(id.clone()) {
+                continue;
+            }
+        }
+        // Accepted rows retain their Mod-approved content. Replaying the final
+        // snapshot must not append them again or repeat an executed tool.
+        if current_rows.contains_key(&index) {
+            continue;
+        }
+        if open.contains(&index) {
+            if let Some(final_text) = visible_text_projection(&block) {
+                let final_units = final_text.string_units("").unwrap_or_default();
+                let previous_units = visible
+                    .get(&index)
+                    .and_then(visible_text_projection)
+                    .and_then(|text| text.string_units(""))
+                    .unwrap_or_default();
+                if let Some(suffix) = final_units.strip_prefix(previous_units.as_slice()) {
+                    if !suffix.is_empty() {
+                        pending.push_back(
+                            HistoryEvent::ContentBlockDelta {
+                                index,
+                                delta: llm_runtime::HistoryContentDelta::TextJsUtf16Delta {
+                                    text: String::from_utf16_lossy(suffix),
+                                    utf16_code_units: suffix.to_vec(),
+                                },
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+        } else {
+            pending.push_back(
+                HistoryEvent::ContentBlockStart {
+                    index,
+                    content_block: source.clone(),
+                }
+                .into(),
+            );
+        }
+        if let llm_runtime::ContentBlock::Reasoning { text, .. } = source {
+            // A newly synthesized start renders its complete initial snapshot.
+            // Only an already-open block needs the missing terminal suffix.
+            if open.contains(&index) {
+                if let Some(suffix) = text.strip_prefix(acc.thinking_text(index).unwrap_or("")) {
+                    if !suffix.is_empty() {
+                        pending.push_back(
+                            HistoryEvent::ContentBlockDelta {
+                                index,
+                                delta: llm_runtime::HistoryContentDelta::ThinkingDelta {
+                                    thinking: suffix.to_owned(),
+                                },
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+        }
+        pending.push_back(PendingStreamEvent {
+            event: HistoryEvent::ContentBlockStop { index },
+            completed_block: Some(block),
+        });
+    }
+    let mut usage = response.usage.clone();
+    usage.cost_estimate = None;
+    pending.push_back(
+        HistoryEvent::MessageDelta {
+            delta: llm_runtime::HistoryMessageDelta {
+                stop_reason: response.stop_reason.clone(),
+                stop_details: response.stop_details.clone(),
+                resumable: response.resumable.clone(),
+            },
+            usage: Some(usage),
+        }
+        .into(),
+    );
+    pending.push_back(HistoryEvent::MessageStop.into());
+}
+
+fn order_completed_rows(turn: &mut PumpedTurn, current_rows: &HashMap<u32, MessageId>) {
+    let source_order: HashMap<_, _> = current_rows
+        .iter()
+        .map(|(index, id)| (*id, llm_runtime::stream_content_order(*index)))
+        .collect();
+    let mut active: Vec<_> = turn
+        .assistant_rows
+        .iter()
+        .filter(|row| source_order.contains_key(&row.row_id))
+        .map(|row| row.row_id)
+        .collect();
+    active.sort_unstable_by_key(|id| source_order[id]);
+    let mut active = active.into_iter();
+    let ranks: HashMap<_, _> = turn
+        .assistant_rows
+        .iter()
+        .enumerate()
+        .map(|(position, row)| {
+            let id = if source_order.contains_key(&row.row_id) {
+                active.next().expect("every active row has a source index")
+            } else {
+                row.row_id
+            };
+            (id, position)
+        })
+        .collect();
+    // Earlier fallback rows keep their slots. Only this response's rows are
+    // reordered, without replaying row append or the event journal.
+    turn.assistant_rows.sort_by_key(|row| ranks[&row.row_id]);
+}
+
 /// Consume the given stream to completion, routing events through the
 /// accumulator + output sink. Returns the per-block summary; the
 /// streaming-loop caller is responsible for tool dispatch + appending
@@ -1511,6 +1745,12 @@ async fn pump_stream_inner(
     // Providers close tool blocks before reporting why generation stopped.
     // Do not abort on incomplete JSON until the terminal reason is available.
     let mut pending_tool_json_error = None;
+    let mut pending_events = VecDeque::new();
+    let mut pending_failure = None;
+    let mut observed_block_indices = HashSet::new();
+    let mut companion_blocks = HashMap::new();
+    let mut admitted_tool_ids = HashSet::new();
+    let mut completed_reconciled = false;
 
     macro_rules! stop_on_transcript_error {
         ($result:expr) => {
@@ -1541,6 +1781,19 @@ async fn pump_stream_inner(
 
     loop {
         check_transcript_owner!();
+        if pending_events.is_empty() {
+            if let Some(error) = pending_failure.take() {
+                return Err(build_failure(
+                    turn,
+                    &acc,
+                    &message_start_usage,
+                    error,
+                    real_content_started,
+                    partial_close,
+                    any_event,
+                ));
+            }
+        }
         // Owned dispatches continue independently while the provider waits.
         // Completion advances the scheduler immediately; results become
         // query-visible only at the post-event Tn poll below.
@@ -1567,15 +1820,32 @@ async fn pump_stream_inner(
                     poll_ready_stream_tool_results(&mut pump).await;
                     return Ok((turn, futures::stream::empty().boxed()));
                 }
-                next = stream.next() => next,
+                next = next_stream_event(&mut stream, &mut pending_events) => next,
             },
-            None => stream.next().await,
+            None => next_stream_event(&mut stream, &mut pending_events).await,
         };
         let Some(item) = next else {
             poll_ready_stream_tool_results(&mut pump).await;
+            if pending_tool_json_error.is_none()
+                && !turn.assistant_rows.is_empty()
+                && queue_visible_transport_tail(&acc, &mut pending_events)
+            {
+                // Transport salvage is durable visible text, not a completed
+                // provider row eligible for J. This pump is terminal, so retire
+                // the pending stitch while preserving its retained source rows.
+                pending_server_stitch = None;
+                pending_failure = Some(OrchestratorError::StreamEndedWithoutStop);
+                continue;
+            }
             break;
         };
-        let (mut event, event_received_at) = match item {
+        let (
+            PendingStreamEvent {
+                mut event,
+                completed_block,
+            },
+            event_received_at,
+        ) = match item {
             Ok(ev) => (ev, std::time::Instant::now()),
             Err(e) => {
                 poll_ready_stream_tool_results(&mut pump).await;
@@ -1606,11 +1876,23 @@ async fn pump_stream_inner(
                     partial_close.close_complete(output.as_ref()).await;
                     return Ok((turn, stream));
                 }
+                let error = OrchestratorError::Streaming(e);
+                if matches!(&error, OrchestratorError::Streaming(error) if matches!(
+                    error.classification_source(), LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                )) && !turn.assistant_rows.is_empty()
+                    && queue_visible_transport_tail(&acc, &mut pending_events)
+                {
+                    // Do not turn a transport-salvaged tail into a J replacement.
+                    // Retained originals remain canonical alongside the tail.
+                    pending_server_stitch = None;
+                    pending_failure = Some(error);
+                    continue;
+                }
                 return Err(build_failure(
                     turn,
                     &acc,
                     &message_start_usage,
-                    OrchestratorError::Streaming(e),
+                    error,
                     real_content_started,
                     partial_close,
                     any_event,
@@ -1618,7 +1900,69 @@ async fn pump_stream_inner(
             }
         };
         any_event = true;
-        if let HistoryEvent::NativeStreamFrame { event, thinking_display } = &event {
+        if let HistoryEvent::Completed { response } = &event {
+            completed_reconciled = true;
+            // Completed is an authoritative response, including for clients
+            // that do not emit any incremental callbacks. Only missing/open
+            // source blocks enter the admission path; accepted rows and tool
+            // ids remain untouched.
+            provider_message_id.clone_from(&response.id);
+            assistant_row_model.clone_from(&response.model);
+            turn.response_message_id = Some(response.id.clone());
+            turn.served_model = Some(response.model.clone());
+            turn.per_turn_effort = response.per_turn_effort().or(turn.per_turn_effort);
+            turn.stop_reason.clone_from(&response.stop_reason);
+            turn.stop_details.clone_from(&response.stop_details);
+            turn.output_tokens = response
+                .usage
+                .counts()
+                .output_tokens
+                .saturating_sub(response.usage.counts().reasoning_tokens);
+            let mut usage = response.usage.clone();
+            usage.cost_estimate = None;
+            message_start_usage = Some(usage);
+            if !turn.cost_quote_observed {
+                turn.cost_quote = response
+                    .cost
+                    .clone()
+                    .or_else(|| response.usage.cost_estimate.clone());
+            }
+            if let Some(resumable) = &response.resumable {
+                turn.resumable = Some(resumable_projection(resumable));
+            }
+            let active_rows: HashSet<_> = current_row_by_api_index.values().copied().collect();
+            for row in &mut turn.assistant_rows {
+                if active_rows.contains(&row.row_id) {
+                    row.provider_message_id.clone_from(&response.id);
+                    row.model.clone_from(&response.model);
+                    row.per_turn_effort.clone_from(&turn.per_turn_effort);
+                }
+            }
+            if !completion.message_started {
+                let mut start = response.clone();
+                start.content.clear();
+                start.usage.cost_estimate = None;
+                pending_events.push_back(HistoryEvent::MessageStart { response: start }.into());
+            }
+            queue_completed_response(
+                response,
+                &acc,
+                &current_row_by_api_index,
+                &observed_block_indices,
+                &companion_blocks,
+                &admitted_tool_ids,
+                &mut pending_events,
+            );
+            // A valid final tool snapshot supersedes a truncated JSON delta.
+            pending_tool_json_error = None;
+            turn.tool_input_issues.clear();
+            continue;
+        }
+        if let HistoryEvent::NativeStreamFrame {
+            event,
+            thinking_display,
+        } = &event
+        {
             authoritative_partial_frames = true;
             if output.wants_partial_stream_events() {
                 let message_start = event.string_at("/type").as_deref() == Some("message_start");
@@ -1628,8 +1972,15 @@ async fn pump_stream_inner(
                         event_received_at,
                     );
                 }
-                let metadata = partial_close.observe_native_frame(event, thinking_display.as_deref());
-                output.emit_stream_event_with_metadata(event.as_json_source(), message_start, &metadata).await;
+                let metadata =
+                    partial_close.observe_native_frame(event, thinking_display.as_deref());
+                output
+                    .emit_stream_event_with_metadata(
+                        event.as_json_source(),
+                        message_start,
+                        &metadata,
+                    )
+                    .await;
             }
             poll_ready_stream_tool_results(&mut pump).await;
             continue;
@@ -2012,11 +2363,6 @@ async fn pump_stream_inner(
                 turn.resumable = Some(resumable_projection(resumable));
             }
         }
-        if let HistoryEvent::Completed { response } = &event {
-            if let Some(resumable) = &response.resumable {
-                turn.resumable = Some(resumable_projection(resumable));
-            }
-        }
         if let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = &mut event
@@ -2062,6 +2408,16 @@ async fn pump_stream_inner(
             content_block,
         } = &event
         {
+            observed_block_indices.insert(*index);
+            if index & 0x8000_0000 != 0 {
+                if let Some(block) =
+                    crate::turn_loop::translate_response_blocks(std::slice::from_ref(content_block))
+                        .into_iter()
+                        .next()
+                {
+                    companion_blocks.insert(*index, block);
+                }
+            }
             if matches!(
                 content_block,
                 llm_runtime::ContentBlock::ServerToolUse { .. }
@@ -2076,12 +2432,19 @@ async fn pump_stream_inner(
                 output.emit_assistant_block_start(block_key).await;
             }
         }
-        let partial_metadata = if !authoritative_partial_frames && output.wants_partial_stream_events() {
-            partial_close.observe(&event)
-        } else {
-            Default::default()
-        };
+        let partial_metadata =
+            if !authoritative_partial_frames && output.wants_partial_stream_events() {
+                partial_close.observe(&event)
+            } else {
+                Default::default()
+            };
         completion.observe(&event);
+        if let (Some(index), Some(block)) = (completed_block_index, completed_block) {
+            // The terminal snapshot has already been translated, including
+            // exact UTF-16 and tool-input repair. Discard partial assembly.
+            acc.replace_completed_block(index, block)
+                .expect("registering a terminal block cannot fail");
+        }
         let action = match dispatch_event_with_metadata(
             event,
             &mut acc,
@@ -2117,7 +2480,18 @@ async fn pump_stream_inner(
         };
         let completed_block_key =
             completed_block_index.and_then(|index| open_block_keys.remove(&index));
-        if matches!(&action, RouterAction::AppendAssistantBlock(_) | RouterAction::DispatchToolUse { .. }) {
+        if let (Some(index), RouterAction::AppendAssistantBlock(block)) =
+            (completed_block_index, &action)
+        {
+            if index & 0x8000_0000 != 0 {
+                // Capture source content before Mod append rewrites the row.
+                companion_blocks.insert(index, block.clone());
+            }
+        }
+        if matches!(
+            &action,
+            RouterAction::AppendAssistantBlock(_) | RouterAction::DispatchToolUse { .. }
+        ) {
             if let Some(index) = completed_block_index {
                 partial_close.record_completed_block(index);
             }
@@ -2339,6 +2713,7 @@ async fn pump_stream_inner(
                     input: input.clone(),
                     provider_id: provider_id.clone(),
                 });
+                admitted_tool_ids.insert(id.clone());
                 tool_use_row_ids.push(row_id);
                 turn.assistant_rows.push(row);
                 turn.assistant_row_identity = Some(row_id);
@@ -2453,6 +2828,9 @@ async fn pump_stream_inner(
                     .await
                 );
                 poll_ready_stream_tool_results(&mut pump).await;
+                if completed_reconciled {
+                    order_completed_rows(&mut turn, &current_row_by_api_index);
+                }
                 return Ok((turn, stream));
             }
         }
@@ -2568,6 +2946,491 @@ mod tests {
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    fn final_response(
+        content: Vec<llm_runtime::ContentBlock>,
+        stop: &str,
+    ) -> Box<llm_runtime::HistoryResponse> {
+        let HistoryEvent::MessageStart { mut response } = message_start("final", "served-model")
+        else {
+            unreachable!();
+        };
+        response.content = content;
+        response.stop_reason = Some(stop.into());
+        response
+    }
+
+    fn final_text(text: &str) -> llm_runtime::ContentBlock {
+        llm_runtime::ContentBlock::Text {
+            text: text.into(),
+            citations: None,
+            cache_control: None,
+        }
+    }
+
+    fn final_tool(id: &str) -> llm_runtime::ContentBlock {
+        llm_runtime::ContentBlock::ToolCall {
+            id: id.into(),
+            name: "Read".into(),
+            input: lingxi_llm_client::protocol::JsonPayload::parse(r#"{"file_path":"final.rs"}"#)
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_only_consumes_signed_content_and_authoritative_terminal_metadata() {
+        let output = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = output.clone();
+        let mut response = final_response(
+            vec![
+                llm_runtime::ContentBlock::Reasoning {
+                    text: "signed thought".into(),
+                    signature: Some("signature".into()),
+                },
+                llm_runtime::ContentBlock::TextJsUtf16 {
+                    text: "answer\u{fffd}".into(),
+                    utf16_code_units: vec![97, 110, 115, 119, 101, 114, 0xd800],
+                    citations: None,
+                    cache_control: None,
+                },
+                final_tool("completed-tool"),
+            ],
+            "tool_use",
+        );
+        response.usage = LlmUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 37,
+                    output_tokens: 11,
+                    reasoning_tokens: 3,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
+            ..Default::default()
+        };
+        response.resumable = Some(
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"checkpoint":"\ud800"}"#).unwrap(),
+        );
+        response.stop_details = Some(
+            serde_json::from_str(r#"{"category":"bio","explanation":"detail\ud800"}"#).unwrap(),
+        );
+        let turn = pump_stream(boxed(vec![HistoryEvent::Completed { response }]), &out)
+            .await
+            .unwrap();
+        assert_eq!(turn.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(turn.response_message_id.as_deref(), Some("final"));
+        assert_eq!(turn.served_model.as_deref(), Some("served-model"));
+        assert_eq!(turn.output_tokens, 8);
+        assert_eq!(turn.usage.as_ref().unwrap().counts().input_tokens, 37);
+        assert_eq!(turn.tool_uses.len(), 1);
+        assert_eq!(
+            turn.tool_uses[0].input.string_at("/file_path"),
+            Some("final.rs")
+        );
+        assert!(
+            matches!(&turn.assistant_blocks[0], ContentBlock::Thinking { thinking, signature } if thinking == "signed thought" && signature.as_deref() == Some("signature"))
+        );
+        assert_eq!(
+            visible_text_projection(&turn.assistant_blocks[1])
+                .unwrap()
+                .string_units(""),
+            Some(vec![97, 110, 115, 119, 101, 114, 0xd800])
+        );
+        assert_eq!(
+            turn.resumable.unwrap().string_units("/checkpoint"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(turn.assistant_rows.len(), 3);
+        assert!(turn
+            .assistant_rows
+            .iter()
+            .all(|row| row.stop_reason.as_deref() == Some("tool_use")
+                && row.usage.as_ref().unwrap().counts().input_tokens == 37
+                && row.stop_details.is_some()));
+        assert_eq!(output.text_events().await, vec!["answer\u{fffd}"]);
+        assert!(output.snapshot().await.iter().any(|event| matches!(event,
+            lingxi_core::host::OutputEvent::Thinking { thinking, .. } if thinking == "signed thought"
+        )));
+    }
+
+    #[tokio::test]
+    async fn public_start_snapshots_and_completed_payload_reconstruct_exact_partial_events() {
+        let text = llm_runtime::ContentBlock::Text {
+            text: "initial tail".into(),
+            citations: None,
+            cache_control: None,
+        };
+        let exact = llm_runtime::ContentBlock::TextJsUtf16 {
+            text: "\u{fffd}x".into(),
+            utf16_code_units: vec![0xd800, 120],
+            citations: None,
+            cache_control: None,
+        };
+        let input =
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"path":"\ud800","count":1}"#)
+                .unwrap();
+        let tool = llm_runtime::ContentBlock::ToolCall {
+            id: "snapshot-tool".into(),
+            name: "SnapshotTool".into(),
+            input: input.clone(),
+        };
+        for mode in ["initial_only", "initial_and_delta", "completed_only"] {
+            let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+            let out: Arc<dyn OutputStream> = output.clone();
+            let events = if mode == "completed_only" {
+                vec![HistoryEvent::Completed {
+                    response: final_response(
+                        vec![text.clone(), exact.clone(), tool.clone()],
+                        "tool_use",
+                    ),
+                }]
+            } else {
+                let mut events = vec![message_start("snapshot", "served-model")];
+                for (index, final_block) in [text.clone(), exact.clone(), tool.clone()]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let index = index as u32;
+                    let start = if mode == "initial_and_delta" {
+                        match index {
+                            0 => llm_runtime::ContentBlock::Text {
+                                text: "initial ".into(),
+                                citations: None,
+                                cache_control: None,
+                            },
+                            1 => llm_runtime::ContentBlock::TextJsUtf16 {
+                                text: "\u{fffd}".into(),
+                                utf16_code_units: vec![0xd800],
+                                citations: None,
+                                cache_control: None,
+                            },
+                            _ => llm_runtime::ContentBlock::ToolCall {
+                                id: "snapshot-tool".into(),
+                                name: "SnapshotTool".into(),
+                                input: lingxi_llm_client::protocol::JsonPayload::parse("{}")
+                                    .unwrap(),
+                            },
+                        }
+                    } else {
+                        final_block
+                    };
+                    events.push(HistoryEvent::ContentBlockStart {
+                        index,
+                        content_block: start,
+                    });
+                    if mode == "initial_and_delta" {
+                        events.push(match index {
+                            0 => text_delta(index, "tail"),
+                            1 => HistoryEvent::ContentBlockDelta {
+                                index,
+                                delta: llm_runtime::HistoryContentDelta::TextJsUtf16Delta {
+                                    text: "x".into(),
+                                    utf16_code_units: vec![120],
+                                },
+                            },
+                            _ => input_json_delta(index, input.as_json_source()),
+                        });
+                    }
+                    events.push(content_block_stop(index));
+                }
+                events.extend([message_delta_stop("tool_use"), message_stop()]);
+                events
+            };
+            let turn = pump_stream(boxed(events), &out).await.unwrap();
+            assert_eq!(turn.tool_uses.len(), 1, "{mode}");
+            assert_eq!(
+                turn.tool_uses[0].input.string_units("/path"),
+                Some(vec![0xd800])
+            );
+            let mut partial_text = std::collections::BTreeMap::<u32, Vec<u16>>::new();
+            let mut tool_input = None;
+            let mut tool_json = Vec::new();
+            let mut starts = 0;
+            let mut text_deltas = 0;
+            let mut input_deltas = 0;
+            for source in output.partial_stream_event_snapshot().await {
+                let event = Utf16JsonProjection::parse(&source).unwrap();
+                let index = event.number_at("/index").unwrap_or_default() as u32;
+                match event.string_at("/type") {
+                    Some("content_block_start") => {
+                        starts += 1;
+                        match event.string_at("/content_block/type") {
+                            Some("text") => {
+                                partial_text.insert(
+                                    index,
+                                    event.string_units("/content_block/text").unwrap(),
+                                );
+                            }
+                            Some("tool_use") => {
+                                tool_input =
+                                    Some(event.subprojection("/content_block/input").unwrap());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some("content_block_delta") => match event.string_at("/delta/type") {
+                        Some("text_delta") => {
+                            text_deltas += 1;
+                            partial_text
+                                .entry(index)
+                                .or_default()
+                                .extend(event.string_units("/delta/text").unwrap());
+                        }
+                        Some("input_json_delta") => {
+                            input_deltas += 1;
+                            tool_json.extend(event.string_units("/delta/partial_json").unwrap());
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            assert_eq!(starts, 3, "{mode}");
+            assert_eq!(
+                text_deltas,
+                if mode == "initial_and_delta" { 2 } else { 0 },
+                "{mode}"
+            );
+            assert_eq!(
+                input_deltas,
+                usize::from(mode == "initial_and_delta"),
+                "{mode}"
+            );
+            assert_eq!(
+                partial_text[&0],
+                "initial tail".encode_utf16().collect::<Vec<_>>(),
+                "{mode}"
+            );
+            assert_eq!(partial_text[&1], vec![0xd800, 120], "{mode}");
+            let tool_input = if tool_json.is_empty() {
+                tool_input.unwrap()
+            } else {
+                Utf16JsonProjection::parse_utf16_json(&tool_json).unwrap()
+            };
+            assert_eq!(
+                tool_input.string_units("/path"),
+                Some(vec![0xd800]),
+                "{mode}"
+            );
+            assert_eq!(tool_input.number_at("/count"), Some(1.0), "{mode}");
+            assert_eq!(
+                output.text_events().await.concat(),
+                "initial tail\u{fffd}x",
+                "{mode}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_reconciles_open_text_and_tools_without_replaying_accepted_blocks() {
+        let output = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = output.clone();
+        let accepted = ToolUseId::from("accepted-tool");
+        let response = final_response(
+            vec![
+                final_text("prefix"),
+                final_tool("accepted-tool"),
+                final_tool("open-tool"),
+                final_text("tail"),
+            ],
+            "tool_use",
+        );
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "initial-model"),
+                content_block_start_text(0),
+                text_delta(0, "prefix"),
+                content_block_stop(0),
+                content_block_start_tool_use(1, accepted, "Read"),
+                input_json_delta(1, r#"{"file_path":"final.rs"}"#),
+                content_block_stop(1),
+                content_block_start_tool_use(2, ToolUseId::from("open-tool"), "Read"),
+                input_json_delta(2, r#"{"file_path":"par"#),
+                HistoryEvent::Completed { response },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            turn.tool_uses
+                .iter()
+                .map(|tool| tool.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["accepted-tool", "open-tool"]
+        );
+        assert_eq!(
+            turn.tool_uses[1].input.string_at("/file_path"),
+            Some("final.rs")
+        );
+        assert_eq!(turn.assistant_rows.len(), 4);
+        assert_eq!(output.text_events().await, vec!["prefix", "tail"]);
+
+        let output = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = output.clone();
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "model"),
+                content_block_start_text(0),
+                text_delta(0, "pre"),
+                HistoryEvent::Completed {
+                    response: final_response(vec![final_text("prefix")], "end_turn"),
+                },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.text_events().await, vec!["pre", "fix"]);
+        assert_eq!(turn.assistant_rows.len(), 1);
+        assert!(
+            matches!(&turn.assistant_blocks[0], ContentBlock::Text { text, .. } if text == "prefix")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_preserves_partial_companion_identity_and_missing_prefix_order() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let companion = llm_runtime::ContentBlock::ProviderContent {
+            protocol: "open_ai_responses".into(),
+            value: lingxi_llm_client::protocol::JsonPayload::parse(
+                r#"{"type":"reasoning","encrypted_content":"opaque"}"#,
+            )
+            .unwrap(),
+        };
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "model"),
+                content_block_start_text(0),
+                text_delta(0, "prefix"),
+                content_block_stop(0),
+                HistoryEvent::ContentBlockStart {
+                    index: 0x8000_0000,
+                    content_block: companion.clone(),
+                },
+                content_block_stop(0x8000_0000),
+                HistoryEvent::Completed {
+                    response: final_response(
+                        vec![final_text("prefix"), companion, final_text("tail")],
+                        "end_turn",
+                    ),
+                },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            turn.assistant_rows.len(),
+            3,
+            "accepted companion must retain its single row"
+        );
+        assert_eq!(
+            turn.assistant_blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::ProviderContent { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(&turn.assistant_blocks[2], ContentBlock::Text { text, .. } if text == "tail")
+        );
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "model"),
+                content_block_start_text(1),
+                text_delta(1, "second"),
+                content_block_stop(1),
+                HistoryEvent::Completed {
+                    response: final_response(
+                        vec![final_text("first"), final_text("second")],
+                        "end_turn",
+                    ),
+                },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn.assistant_rows.len(), 2);
+        assert!(
+            matches!(&turn.assistant_rows[0].content[0], ContentBlock::Text { text, .. } if text == "first")
+        );
+        assert!(
+            matches!(&turn.assistant_rows[1].content[0], ContentBlock::Text { text, .. } if text == "second")
+        );
+
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "model"),
+                content_block_start_text(1),
+                text_delta(1, "second"),
+                content_block_stop(1),
+                HistoryEvent::Completed {
+                    response: final_response(
+                        vec![
+                            llm_runtime::ContentBlock::ImageUrl {
+                                url: "https://example.invalid/image".into(),
+                            },
+                            final_text("second"),
+                        ],
+                        "end_turn",
+                    ),
+                },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            turn.assistant_rows.len(),
+            1,
+            "ignored input-only content retains its index slot"
+        );
+
+        let preserved = llm_runtime::ContentBlock::ProviderContent {
+            protocol: "open_ai_responses".into(),
+            value: lingxi_llm_client::protocol::JsonPayload::parse(
+                r#"{"type":"reasoning","encrypted_content":"same"}"#,
+            )
+            .unwrap(),
+        };
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("initial", "model"),
+                HistoryEvent::ContentBlockStart {
+                    index: 0x8000_0001,
+                    content_block: preserved.clone(),
+                },
+                content_block_stop(0x8000_0001),
+                content_block_start_text(2),
+                text_delta(2, "last"),
+                content_block_stop(2),
+                HistoryEvent::Completed {
+                    response: final_response(
+                        vec![preserved.clone(), preserved, final_text("last")],
+                        "end_turn",
+                    ),
+                },
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            turn.assistant_rows.len(),
+            3,
+            "identical earlier content must not steal a future companion identity"
+        );
+        assert_eq!(
+            turn.assistant_blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Text { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -120,7 +120,7 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
     let session_uuid = Uuid::new_v4();
     let session_id = SessionId::from_uuid(session_uuid);
     let id = MessageId::new();
-    let path = directory.path().join("nested-memory.jsonl");
+    let path = directory.path().join(format!("{session_uuid}.jsonl"));
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(directory.path().to_owned()));
     let writer = Arc::new(JsonlWriter::new(path.clone(), fs));
     let root = Arc::new(
@@ -138,6 +138,7 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
         .with_jsonl_writer(writer),
     );
     root.attach_owned_session_switches();
+    root.initialize_conversation_mode().await.unwrap();
     let attachment = native_attachment();
     let projection = ConversationOrchestrator::nested_memory_attachment_projection(id, &attachment)
         .expect("current native nested memory projects to one message");
@@ -146,7 +147,10 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
         .await;
     assert_eq!(hot, projection);
     let bytes = tokio::fs::read(&path).await.unwrap();
-    let row: JsonlMessage = serde_json::from_slice(&bytes).unwrap();
+    let mut loaded = session::jsonl::route_lines(std::str::from_utf8(&bytes).unwrap());
+    assert_eq!(loaded.malformed_line_count, 0);
+    assert_eq!(loaded.messages_in_order.len(), 1);
+    let row = loaded.messages_in_order.pop().unwrap();
     assert_eq!(row.message_type, "attachment");
     assert_eq!(row.uuid, id.as_uuid().to_string());
     assert!(row
@@ -164,7 +168,7 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
         None,
         ResumeRuntimeSnapshot {
             model_reminder_attachments: raw_sidecars.into_iter().collect(),
-            ..Default::default()
+            ..crate::test_support::code_resume_runtime_snapshot(session_id)
         },
     )
     .await

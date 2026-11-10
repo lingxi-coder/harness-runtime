@@ -159,6 +159,120 @@ async fn memory_prefetch_follows_live_model_and_profile_switches() {
     );
 }
 
+#[derive(Default)]
+struct MemoryIntentClient {
+    prompts: std::sync::Mutex<Vec<String>>,
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl sidequery::SideQueryClient for MemoryIntentClient {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.prompts
+            .lock()
+            .unwrap()
+            .push(request.messages[0].text_content());
+        self.entered.notify_one();
+        Ok(sidequery::SideQueryResponse {
+            text: None,
+            structured: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({ "filenames": [] }),
+                )
+                .unwrap(),
+            ),
+            tool_calls: Vec::new(),
+            usage: Default::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn memory_selector_uses_latest_admitted_source_prompt_without_changing_its_units() {
+    let ordinary = "current admitted request α"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let mut unpaired = "current admitted request "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    unpaired.push(0xd800);
+    unpaired.extend(" question".encode_utf16());
+    for units in [ordinary, unpaired] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("repo");
+        std::fs::create_dir(&cwd).unwrap();
+        let roots = memory::memdir::paths::memdir_roots_at(root.path(), &cwd, false);
+        std::fs::create_dir_all(&roots.user_memdir).unwrap();
+        std::fs::write(roots.user_memdir.join("guide.md"), "candidate memory").unwrap();
+        let client = Arc::new(MemoryIntentClient::default());
+        let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::new(
+            Arc::new(memory::selector::MemorySelector::new(client.clone())),
+            Arc::new(InlineRuntime),
+            roots,
+        ));
+        let api = Arc::new(MockApiClient::new(vec![
+            crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    citations: None,
+                    cache_control: None,
+                }],
+                Some("end_turn"),
+            ),
+        ]));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_memory_prefetch(prefetch);
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(ConversationMessage::user(
+                MessageId::new(),
+                "obsolete prior request".into(),
+            ));
+        let display = String::from_utf16_lossy(&units);
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            display.clone(),
+            units.clone(),
+        )
+        .unwrap();
+        orch.run_turn(source).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.entered.notified())
+            .await
+            .expect("the real memory selector receives the admitted query");
+        assert_eq!(client.prompts.lock().unwrap().len(), 1);
+        assert!(client.prompts.lock().unwrap()[0]
+            .starts_with(&format!("Query: {display}\n\nAvailable memory files:\n")));
+        let requests = api.captured_msgs().await;
+        let admitted = requests[0]
+            .iter()
+            .find(|message| !message.is_meta() && message.text_content() == display)
+            .expect("the current user prompt reaches the real request");
+        let ConversationMessage::User { content, .. } = admitted else {
+            panic!("the admitted prompt is a user row");
+        };
+        assert!(matches!(
+            &content[0],
+            lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &units
+        ));
+    }
+}
+
 #[tokio::test]
 async fn no_prefetch_wired_yields_none() {
     let orch = orch_bare();

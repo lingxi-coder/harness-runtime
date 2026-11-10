@@ -434,19 +434,24 @@ pub(super) async fn apply_tool_result_persistence(
         session.session_id.as_uuid().to_string()
     };
     let dir = trp::tool_results_dir(home, &orch.current_cwd().to_string_lossy(), &session_uuid);
-    // The on-disk stem is the port's INTERNAL `ToolUseId`, matching the
-    // oracle's `${e.tool_use_id}.txt` — claude-code's internal block-param id
-    // likewise differs from the `toolu_…` id it records in the transcript.
-    let persisted = match trp::persist(
-        home,
-        &dir,
-        tool_use_id.as_str(),
-        &body,
-        is_json,
-        trp::MAX_PERSIST_BYTES,
-    )
-    .await
+    // Ordinary calls retain exact-ID first-write behavior. Each physical Mod
+    // retry instead owns a separate file while keeping the logical tool-use
+    // ID unchanged in results, hooks, frames, and transcript metadata.
+    let persisted = match if let Some(run_id) =
+        crate::conversation::ModResultStage::persistence_run_id(tool_use_id).await
     {
+        trp::persist_mod_run(home, &dir, run_id, &body, is_json, trp::MAX_PERSIST_BYTES).await
+    } else {
+        trp::persist(
+            home,
+            &dir,
+            tool_use_id.as_str(),
+            &body,
+            is_json,
+            trp::MAX_PERSIST_BYTES,
+        )
+        .await
+    } {
         Ok(p) => p,
         Err(msg) => {
             tracing::error!(

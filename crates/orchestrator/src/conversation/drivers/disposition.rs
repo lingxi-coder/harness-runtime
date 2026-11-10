@@ -20,18 +20,35 @@ impl ConversationOrchestrator {
     ///
     /// Like `take_lone_wakeup_turn_end`, this CONSUMES by being called: the swap
     /// runs whether or not a request was pending, so a driver that calls it
-    /// speculatively has already cleared the slot. Unlike the wakeup flag,
-    /// nothing guards this call today — both drivers reach it unconditionally on
-    /// the tool-round path, so the slot never survives a turn that got that far.
+    /// speculatively has already cleared the direct-call slot. Dispatched
+    /// requests retain their generation guard through this consumption point,
+    /// so a reset after metadata publication cannot end a later turn.
     ///
     /// WHERE it is called is the driver's business and is not shared: batched
     /// calls it after resolving the lone wakeup, streaming before, and that
     /// asymmetry decides whether a wakeup arming survives the turn.
     pub(crate) async fn take_end_conversation_request(&self) -> bool {
-        let requested = self
+        let direct_request = self
             .end_conversation_slot
             .as_ref()
             .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+        let pending = std::mem::take(
+            &mut *self
+                .transcript
+                .pending_end_conversation_requests
+                .lock()
+                .await,
+        );
+        let requested = direct_request
+            || pending.into_values().any(|request| {
+                self.end_conversation_slot
+                    .as_ref()
+                    .is_some_and(|slot| std::sync::Arc::ptr_eq(slot, &request.slot))
+                    && request
+                        .publication_guard
+                        .as_ref()
+                        .is_none_or(|guard| guard.is_current())
+            });
         if requested {
             let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
                 crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE,

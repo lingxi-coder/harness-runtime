@@ -35,7 +35,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hooks::events::HookEvent;
-use hooks::registry::HookContext;
 use hooks::task_created_firer::{TaskCreatedFire, TaskCreatedFirer};
 use hooks::HookExecutorImpl;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -50,18 +49,17 @@ fn empty_source_string() -> Utf16JsonProjection {
 pub struct OrchestratorTaskCreatedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `TaskCreated` hook payload (`cwd`) and the
-    /// per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `TaskCreated` hook payload's
-    /// `transcript_path`. Computed once at the composition root from the
-    /// boot-canonical session id; empty path for builds that wire neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorTaskCreatedFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `TaskCreated` hook rides the identical registry /
@@ -70,15 +68,25 @@ impl OrchestratorTaskCreatedFirer {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 }
 
 #[async_trait]
 impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
+    async fn capture_origin(&self, task_id: &str) {
+        let _ = self.context_source.capture_task_origin(task_id).await;
+    }
+
+    async fn discard_origin(&self, task_id: &str) {
+        self.context_source.discard_task_origin(task_id);
+    }
+
     async fn fire(&self, fire: TaskCreatedFire) {
+        let Some(ctx) = self.context_source.capture_task_origin(&fire.task_id).await else {
+            return;
+        };
         // The `HookEvent::TaskCreated` variant names its subject field
         // `task_type` (the taxonomy bucket the envelope builder serializes as
         // the wire `task_subject`) and its detail field `description` (wire
@@ -92,16 +100,8 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
             teammate_name: fire.teammate_name,
             team_name: fire.team_name,
         };
-        // Context-light: a task-creation transition has no live per-turn session
-        // here, so we thread the engine cwd (also the LINGXI_PROJECT_DIR fallback)
-        // and the main session's `transcript_path` (FIX B — claude-code's
-        // `createBaseHookInput` ALWAYS stamps it). Everything else defaults —
-        // matching the `OrchestratorTaskCompletedFirer`.
-        let ctx = HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
-        };
+        // The registry captures this task's originating owner before any
+        // detached lifecycle job can cross a foreground session transition.
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the
         // caller's task creation. The aggregate result is intentionally dropped

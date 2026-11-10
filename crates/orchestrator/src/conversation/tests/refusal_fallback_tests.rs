@@ -385,13 +385,14 @@ async fn resume_session_resets_refusal_fallback_latch() {
         "first session swaps"
     );
 
+    let resumed_session = SessionId::new();
     <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::resume_session(
         &orch,
-        SessionId::new(),
+        resumed_session,
         vec![],
         None,
         None,
-        lingxi_core::host::ResumeRuntimeSnapshot::default(),
+        crate::test_support::code_resume_runtime_snapshot(resumed_session),
     )
     .await
     .expect("resume_session succeeds");

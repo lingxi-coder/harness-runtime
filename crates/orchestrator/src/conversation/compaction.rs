@@ -5,11 +5,20 @@ use super::*;
 /// Current Ake/aW text read: bound disk bytes, decode lossily, then normalize
 /// the complete retained body before the caller applies its token budget.
 pub(super) async fn read_restored_text_prefix(
-    path: &std::path::Path,
+    file: std::fs::File,
     max_bytes: usize,
-) -> std::io::Result<(String, bool)> {
+) -> std::io::Result<(String, bool, i64)> {
     use tokio::io::AsyncReadExt as _;
-    let file = tokio::fs::File::open(path).await?;
+    let file = tokio::fs::File::from_std(file);
+    // Associate the contents with metadata from this opened file before the
+    // read. A later editor write must advance beyond this timestamp rather
+    // than blessing the earlier bytes with its new mtime.
+    let mtime_ms = file
+        .metadata()
+        .await?
+        .modified()
+        .map(tool_api::read_file_state::mtime_ms_floor)
+        .unwrap_or(i64::MIN);
     let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
     file.take(u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)
@@ -24,7 +33,7 @@ pub(super) async fn read_restored_text_prefix(
     if content.ends_with('\r') {
         content.pop();
     }
-    Ok((content, truncated))
+    Ok((content, truncated, mtime_ms))
 }
 
 /// Which side of the surviving messages the fresh summary lands on.
@@ -156,6 +165,14 @@ impl SessionCompactRowCodec {
 fn recorded_handle_key(handle: &str) -> String {
     handle.to_string()
 }
+
+#[cfg(test)]
+#[path = "tests/persistence_boundary_regression_tests.rs"]
+mod persistence_boundary_regression_tests;
+
+#[cfg(test)]
+#[path = "tests/post_compact_file_authority_tests.rs"]
+mod post_compact_file_authority_tests;
 
 fn compact_source_object(fields: Vec<(String, CompactSource)>) -> CompactSource {
     CompactSource::object(fields).expect("compact event fields form a JSON object")
@@ -2690,6 +2707,7 @@ impl ConversationOrchestrator {
             Content {
                 path: std::path::PathBuf,
                 content: String,
+                mtime_ms: i64,
             },
             Reference {
                 path: std::path::PathBuf,
@@ -2702,14 +2720,28 @@ impl ConversationOrchestrator {
         // stale snapshot content the model would otherwise have carried across the
         // boundary).
         let mut fresh = Vec::with_capacity(selected.len());
+        let reader = self.tools.find_by_name("Read");
         for candidate in selected {
-            let read = read_restored_text_prefix(
-                &candidate.path,
-                tool_file::read::MAX_FILE_READ_SIZE as usize,
-            )
-            .await;
+            // The cached spelling is model-owned and may have been retargeted
+            // or translated since the original Read. Reuse the registered
+            // reader's current authority; never fall back to opening it here.
+            let read = match reader.as_ref() {
+                Some(reader) => match reader.open_file_for_compaction(&candidate.path).await {
+                    Ok(Some(file)) => {
+                        read_restored_text_prefix(
+                            file,
+                            tool_file::read::MAX_FILE_READ_SIZE as usize,
+                        )
+                        .await
+                    }
+                    Ok(None) | Err(_) => {
+                        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                    }
+                },
+                None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            };
             match read {
-                Ok((content, truncated)) => {
+                Ok((content, truncated, mtime_ms)) => {
                     // Native Ake/aW normalizes a full text read before token
                     // budgeting and counting lines, including its empty final
                     // fragment. Apply the same body to the restored Read state.
@@ -2734,30 +2766,10 @@ impl ConversationOrchestrator {
                         });
                     } else {
                         self.fire_post_compact_file_restore(true).await;
-                        if let Ok(metadata) = tokio::fs::metadata(&candidate.path).await {
-                            let mtime_ms = metadata
-                                .modified()
-                                .map(tool_api::read_file_state::mtime_ms_floor)
-                                .unwrap_or(0);
-                            tool_api::read_file_state::set_with_requested_path(
-                                read_state_map,
-                                candidate.path.clone(),
-                                tool_api::read_file_state::ReadFileEntry {
-                                    content: content.clone(),
-                                    mtime_ms,
-                                    offset: None,
-                                    limit: None,
-                                    from_read: true,
-                                    seeded_from_context: false,
-                                    is_partial_view: false,
-                                },
-                                true,
-                                Some(candidate.path.clone()),
-                            );
-                        }
                         fresh.push(FreshFileAttachment::Content {
                             path: candidate.path,
                             content,
+                            mtime_ms,
                         });
                     }
                 }
@@ -2772,8 +2784,21 @@ impl ConversationOrchestrator {
         let mut running_tokens = 0u64;
         let mut restored = Vec::new();
         for attachment in fresh {
-            let (path, data) = match attachment {
-                FreshFileAttachment::Content { path, content } => {
+            let (path, data, read_entry) = match attachment {
+                FreshFileAttachment::Content {
+                    path,
+                    content,
+                    mtime_ms,
+                } => {
+                    let entry = tool_api::read_file_state::ReadFileEntry {
+                        content: content.clone(),
+                        mtime_ms,
+                        offset: None,
+                        limit: None,
+                        from_read: true,
+                        seeded_from_context: false,
+                        is_partial_view: false,
+                    };
                     let lines = content.bytes().filter(|&byte| byte == b'\n').count() + 1;
                     let value = serde_json::json!({
                         "type": "file", "filename": path,
@@ -2785,7 +2810,7 @@ impl ConversationOrchestrator {
                     });
                     let data = CompactSource::from_serde_value(&value)
                         .expect("new file attachment is valid JSON");
-                    (path, data)
+                    (path, data, Some(entry))
                 }
                 FreshFileAttachment::Reference { path } => {
                     let value = serde_json::json!({
@@ -2793,7 +2818,7 @@ impl ConversationOrchestrator {
                     });
                     let data = CompactSource::from_serde_value(&value)
                         .expect("new file reference is valid JSON");
-                    (path, data)
+                    (path, data, None)
                 }
             };
             // yXo budgets JSON.stringify(pn(attachment)), including JSON
@@ -2843,6 +2868,17 @@ impl ConversationOrchestrator {
                 continue;
             }
             running_tokens = running_tokens.saturating_add(cost);
+            // Only attachments admitted to the model context may establish a
+            // full Read. A budget-dropped file must remain eligible for Read.
+            if let Some(entry) = read_entry {
+                tool_api::read_file_state::set_with_requested_path(
+                    read_state_map,
+                    path.clone(),
+                    entry,
+                    true,
+                    Some(path.clone()),
+                );
+            }
             let message = Self::file_attachment_projection(id, &data)
                 .expect("new current file restore payload");
             self.transcript
@@ -3020,25 +3056,17 @@ impl ConversationOrchestrator {
         // anchor is the last of `result.messages` (the summary set). When the
         // tail is empty, `create_compact_boundary_with_preserved_tail` yields
         // `preserved_segment: None`, identical to the plain constructor.
-        // `preserved_segment` exists so a session loader can re-splice a
-        // preserved TAIL back after the summary (`WAo`). Under `AfterKept`
-        // there is no tail: the kept messages are the conversation's own HEAD
-        // and they are already in their original order. Describing them as a
-        // preserved tail would make a cold resume splice them after the summary
-        // — the exact reordering this placement exists to avoid — so the
-        // boundary is built with no preserved segment at all.
-        let boundary_tail: &[lingxi_core::types::ConversationMessage] = match placement {
-            SummaryPlacement::BeforeKept => &preserved_tail,
-            SummaryPlacement::AfterKept => &[],
-        };
-        let anchor_uuid = if boundary_tail.is_empty() {
-            None
-        } else {
-            result
-                .messages
-                .last()
-                .map(lingxi_core::types::ConversationMessage::id)
-        };
+        // A kept head uses the same relink contract with the boundary as its
+        // anchor. Its summary then follows the kept segment on cold resume.
+        let anchor_uuid =
+            if preserved_tail.is_empty() || matches!(placement, SummaryPlacement::AfterKept) {
+                None
+            } else {
+                result
+                    .messages
+                    .last()
+                    .map(lingxi_core::types::ConversationMessage::id)
+            };
         // RV6 (parity 2.1.208): the full auto/manual compaction path — the only
         // one this port implements — builds its boundary via the 3-arg
         // `U6r(trigger, preTokens, lastUuid)`, leaving `messagesSummarized` (and
@@ -3063,9 +3091,16 @@ impl ConversationOrchestrator {
                 .as_ref()
                 .map(|selector| selector.messages_summarized),
             &discovered_tools,
-            boundary_tail,
+            &preserved_tail,
             anchor_uuid.as_ref(),
         );
+        if matches!(placement, SummaryPlacement::AfterKept) {
+            let anchor = marker.id();
+            metadata.preserved_segment =
+                compaction::preserved_segment_for_tail(&preserved_tail, Some(&anchor));
+            metadata.preserved_messages =
+                compaction::preserved_messages_for_tail(&preserved_tail, Some(&anchor));
+        }
         if native_exact_preserved {
             metadata.native_exact_preserved = Some(true);
         }
@@ -3437,16 +3472,15 @@ impl ConversationOrchestrator {
         //    / `content` / `level:"info"` / `compactMetadata` envelope.
         // 2. The summary user line(s) (`isCompactSummary` +
         //    `isVisibleInTranscriptOnly`), chained off the boundary.
-        // 3. The preserved verbatim tail is NOT rewritten — its lines are
+        // 3. The preserved verbatim segment is NOT rewritten — its lines are
         //    already on disk (claude doesn't rewrite them either); the
         //    boundary's `preservedSegment`/`preservedMessages` metadata carries
-        //    the loader's re-splice info. The chain pointer is reset to the
-        //    tail's LAST on-disk line so subsequent lines parent off the kept
-        //    tail, exactly like claude (whose writer chains off the in-memory
-        //    array `[boundary, ...summary, ...messagesToKeep, ...]`, skipping
-        //    already-persisted members).
+        //    the loader's re-splice info. For a kept suffix, the chain pointer
+        //    is reset to its LAST on-disk line; for a kept prefix, it remains
+        //    at the new summary after that prefix. Subsequent lines therefore
+        //    follow the final member of the post-compact in-memory history.
         // 4. Preserved vision sidecars, then restored file attachments, chained
-        //    after the tail (the `attachments` slot of
+        //    after the kept suffix or summary (the `attachments` slot of
         //    `buildPostCompactMessages`).
         if !native_exact_preserved {
             self.persist_compact_boundary_to_jsonl(&marker, &metadata)
@@ -3457,7 +3491,10 @@ impl ConversationOrchestrator {
             self.persist_messages_to_jsonl_batch(&result.messages.iter().collect::<Vec<_>>(), true)
                 .await;
         }
-        if tail_preserved && !native_exact_preserved {
+        if tail_preserved
+            && !native_exact_preserved
+            && matches!(placement, SummaryPlacement::BeforeKept)
+        {
             if let Some(tail_last) = pre_boundary_last_uuid {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last);
             }
@@ -4774,32 +4811,42 @@ impl ConversationOrchestrator {
             turn_origin_projection: None,
         };
         let uuid_for_chain = jmsg.uuid.clone();
-        let append = if exact_native {
-            match writer.append_native_message_once(&jmsg).await {
-                Ok((_, true)) => Ok(()),
-                Ok((_, false)) => {
-                    Err("native compact boundary is not the transcript tip".to_string())
+        let (persisted, notices) = self
+            .with_deferred_storage_notifications(async {
+                let append = if exact_native {
+                    match writer.append_native_message_once(&jmsg).await {
+                        Ok((_, true)) => Ok(()),
+                        Ok((_, false)) => {
+                            Err("native compact boundary is not the transcript tip".to_string())
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    self.append_transcript_row(writer, &jmsg)
+                        .await
+                        .map_err(|error| error.to_string())
+                };
+                match append {
+                    Ok(()) => {
+                        *self.transcript.last_jsonl_uuid.lock().await =
+                            Some(uuid_for_chain.clone());
+                        telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+                        true
+                    }
+                    Err(e) => {
+                        self.record_transcript_append_failure(
+                            &session_id_str,
+                            "compact_boundary",
+                            &e,
+                        )
+                        .await;
+                        false
+                    }
                 }
-                Err(error) => Err(error.to_string()),
-            }
-        } else {
-            writer
-                .append(&jmsg)
-                .await
-                .map_err(|error| error.to_string())
-        };
-        match append {
-            Ok(()) => {
-                *self.transcript.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
-                telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
-                true
-            }
-            Err(e) => {
-                self.record_transcript_append_failure(&session_id_str, "compact_boundary", &e)
-                    .await;
-                false
-            }
-        }
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
+        persisted
     }
 
     /// Fire the `PreCompact` lifecycle hooks immediately BEFORE a compaction

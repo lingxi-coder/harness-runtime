@@ -237,6 +237,1743 @@ mod tests {
         }
     }
 
+    struct ModOutcomeTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        retry_permission_gate: Option<Arc<ModRetryPermissionGate>>,
+    }
+
+    #[derive(Default)]
+    struct ModRetryPermissionGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl Tool for ModOutcomeTool {
+        fn name(&self) -> &str {
+            "ModOutcome"
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| source_json!({"type":"object","properties":{}}));
+            &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn persistence_threshold(&self) -> Option<usize> {
+            Some(64 * 1024)
+        }
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &Utf16JsonProjection,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            input: &Utf16JsonProjection,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            if input
+                .get_property("holdRetry")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                let gate = self
+                    .retry_permission_gate
+                    .as_ref()
+                    .expect("retry test owns its gate");
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+            if input.get_property("deny").and_then(|value| value.as_bool()) == Some(true) {
+                return permission::PermissionResult::Deny {
+                    reason: permission::PermissionDecisionReason::Other {
+                        reason: "core denied".into(),
+                    },
+                    explanation: None,
+                    metadata: Default::default(),
+                };
+            }
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: Default::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "Count real Mod core executions and return end-turn metadata".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
+        }
+        async fn call(
+            &self,
+            input: Utf16JsonProjection,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let attempt = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let text = if input
+                .get_property("large")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                format!("core-{attempt}\n").repeat(10_000)
+            } else {
+                format!("core-{attempt}")
+            };
+            Ok(ToolCallResult {
+                data: source_json!({"attempt":attempt}),
+                model_content: Some(text.into()),
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                subagent_hooks_fired: false,
+                mcp_meta: Some(source_json!({"attempt":attempt,"_meta":{"claude/endTurn":true}})),
+            })
+        }
+    }
+
+    async fn mod_outcome_fixture(
+        body: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<ConversationOrchestrator>,
+        Arc<MockOutputStream>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        mod_outcome_fixture_with_retry_gate(body, None).await
+    }
+
+    async fn mod_outcome_fixture_with_retry_gate(
+        body: &str,
+        retry_permission_gate: Option<Arc<ModRetryPermissionGate>>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<ConversationOrchestrator>,
+        Arc<MockOutputStream>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("mod-outcome.js");
+        std::fs::write(
+            &module,
+            format!("export function register(on) {{ on('tool.call', {{tool:'ModOutcome'}}, async ($, e, next) => {{ {body} }}); }}"),
+        ).unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("mod-outcome", dir.path(), &module, source_json!({}))
+            .await
+            .unwrap();
+        let mut hooks = hooks::HookRegistry::new();
+        hooks.set_mod_host(host);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(ModOutcomeTool {
+            calls: calls.clone(),
+            retry_permission_gate,
+        }));
+        let sink = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tools),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                sink.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks))),
+        );
+        orch.set_tool_frame_buffering(true).await;
+        (dir, orch, sink, calls)
+    }
+
+    async fn assert_mod_outcome_unpublished(
+        orch: &ConversationOrchestrator,
+        sink: &MockOutputStream,
+    ) {
+        assert!(orch.transcript.tool_use_results.lock().await.is_empty());
+        assert!(orch.transcript.tool_use_mcp_meta.lock().await.is_empty());
+        assert!(orch
+            .transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .is_empty());
+        assert!(orch.transcript.tool_denial_kinds.lock().await.is_empty());
+        assert!(orch.permission_denials().await.is_empty());
+        assert!(sink
+            .snapshot()
+            .await
+            .iter()
+            .all(|event| !matches!(event, lingxi_core::host::OutputEvent::ToolResult { .. })));
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_replacement_and_deny_discard_core_sidecars_before_publication() {
+        for (answer, expected, is_error, deny_core) in [
+            (
+                "return {result:'replacement'};",
+                "replacement",
+                false,
+                false,
+            ),
+            (
+                "return {deny:'denied',ref:core.ref};",
+                "<tool_use_error>denied</tool_use_error>",
+                true,
+                false,
+            ),
+            ("return {result:'replacement'};", "replacement", false, true),
+        ] {
+            let (_dir, orch, sink, calls) =
+                mod_outcome_fixture(&format!("const core = await next(e); {answer}")).await;
+            let id = ToolUseId::new();
+            let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+                .await
+                .unwrap();
+            executor
+                .add_tool(
+                    id.clone(),
+                    "ModOutcome".into(),
+                    source_json!({"deny":deny_core}),
+                    None,
+                    MessageId::new(),
+                )
+                .await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(results.len(), 1);
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(!deny_core)
+            );
+            assert!(
+                matches!(results[0].block.as_ref().expect("expected ToolResult block"), ContentBlock::ToolResult { content, is_error: error, .. }
+                if content.string_at("") == Some(expected) && error.unwrap_or(false) == is_error)
+            );
+            assert_mod_outcome_unpublished(&orch, &sink).await;
+
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            orch.settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            assert_eq!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(id.as_str())
+                    .and_then(|raw| raw.string_at("")),
+                Some(expected)
+            );
+            assert!(orch.transcript.tool_use_mcp_meta.lock().await.is_empty());
+            assert!(orch.transcript.tool_denial_kinds.lock().await.is_empty());
+            assert!(orch.permission_denials().await.is_empty());
+            assert!(orch
+                .take_pending_tool_result_turn_ends(&[id.clone()])
+                .await
+                .is_none());
+            let frames = sink
+                .snapshot()
+                .await
+                .into_iter()
+                .filter_map(|event| match event {
+                    lingxi_core::host::OutputEvent::ToolResult {
+                        id: event_id,
+                        model_text,
+                        ..
+                    } if event_id == id => Some(model_text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(frames, vec![Utf16JsonProjection::from(expected)]);
+            assert_eq!(sink.tool_result_mcp_meta_snapshot().await, vec![None]);
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_retry_executes_both_runs_and_publishes_only_selected_sidecars() {
+        for (selected, expected_attempt) in [("first", 1), ("second", 2)] {
+            let (_dir, orch, sink, calls) = mod_outcome_fixture(&format!(
+                "const first = await next(e); const second = await next(e); return {selected};"
+            ))
+            .await;
+            let id = ToolUseId::new();
+            let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+                .await
+                .unwrap();
+            executor
+                .add_tool(
+                    id.clone(),
+                    "ModOutcome".into(),
+                    source_json!({}),
+                    None,
+                    MessageId::new(),
+                )
+                .await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(results.len(), 1);
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "both next calls execute Tool::call"
+            );
+            assert_mod_outcome_unpublished(&orch, &sink).await;
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            orch.settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            let expected = source_json!({"attempt":expected_attempt});
+            let meta = source_json!({"attempt":expected_attempt,"_meta":{"claude/endTurn":true}});
+            assert_eq!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(id.as_str()),
+                Some(&expected)
+            );
+            assert_eq!(
+                orch.transcript
+                    .tool_use_mcp_meta
+                    .lock()
+                    .await
+                    .get(id.as_str()),
+                Some(&meta)
+            );
+            assert_eq!(sink.tool_result_mcp_meta_snapshot().await, vec![Some(meta)]);
+            assert_eq!(
+                orch.take_pending_tool_result_turn_ends(&[id])
+                    .await
+                    .map(|end| end.source),
+                Some(tool_api::tool_trait::ToolResultTurnEndSource::McpMeta)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_refusal_closure_suppresses_retry_before_generation_cancellation() {
+        let gate = Arc::new(ModRetryPermissionGate::default());
+        let (_dir, orch, sink, calls) = mod_outcome_fixture_with_retry_gate(
+            "const first = await next(e); await next({...e,holdRetry:true}); return first;",
+            Some(gate.clone()),
+        )
+        .await;
+        let id = ToolUseId::new();
+        let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        executor
+            .add_tool(
+                id.clone(),
+                "ModOutcome".into(),
+                source_json!({}),
+                None,
+                MessageId::new(),
+            )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+            .await
+            .expect("first core finished and the real retry reached permission admission");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let boundary = executor.tools[0].refusal_call_boundary.as_ref().unwrap();
+        // Model the window after settle_refused_tool_uses closes each boundary
+        // and before its scheduler awaits reset/cancel the owning generation.
+        assert!(boundary.close_for_refusal());
+        assert!(
+            boundary.was_started(),
+            "the first physical call still counts as entered"
+        );
+        gate.release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "closed refusal authority suppresses a new physical retry even before cancellation"
+        );
+        let results = executor.take_newly_completed();
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0].block.as_ref().expect("expected ToolResult block"), ContentBlock::ToolResult { content, is_error, .. }
+            if content.string_at("") == Some("core-1") && !is_error.unwrap_or(false))
+        );
+        assert_mod_outcome_unpublished(&orch, &sink).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_ref_rewrite_retains_selected_core_metadata_until_publication() {
+        let (_dir, orch, sink, calls) =
+            mod_outcome_fixture("const core = await next(e); return {...core,result:'rewritten'};")
+                .await;
+        let id = ToolUseId::new();
+        let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        executor
+            .add_tool(
+                id.clone(),
+                "ModOutcome".into(),
+                source_json!({}),
+                None,
+                MessageId::new(),
+            )
+            .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        let results = executor.take_newly_completed();
+        assert_eq!(results.len(), 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_mod_outcome_unpublished(&orch, &sink).await;
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+            .await;
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(id.as_str()),
+            Some(&Utf16JsonProjection::from("rewritten"))
+        );
+        let meta = source_json!({"attempt":1,"_meta":{"claude/endTurn":true}});
+        assert_eq!(
+            orch.transcript
+                .tool_use_mcp_meta
+                .lock()
+                .await
+                .get(id.as_str()),
+            Some(&meta)
+        );
+        assert_eq!(sink.tool_result_mcp_meta_snapshot().await, vec![Some(meta)]);
+        assert_eq!(
+            orch.take_pending_tool_result_turn_ends(&[id])
+                .await
+                .map(|end| end.source),
+            Some(tool_api::tool_trait::ToolResultTurnEndSource::McpMeta)
+        );
+    }
+
+    struct ModPublicationEffectsFixture {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+        orch: Arc<ConversationOrchestrator>,
+        end_slot: crate::end_conversation_tool::EndConversationSlot,
+        post_calls: Arc<std::sync::atomic::AtomicUsize>,
+        pre_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct PerRunPostToolContextHook(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl hooks::executor::BuiltinHookHandler for PerRunPostToolContextHook {
+        async fn handle(
+            &self,
+            _event: &hooks::events::HookEvent,
+            _ctx: &hooks::registry::HookContext,
+        ) -> hooks::HookResult {
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            hooks::HookResult {
+                outcome: hooks::HookOutcome::Success,
+                stdout: "".into(),
+                stderr: "".into(),
+                exit_code: Some(0),
+                response: Some(hooks::response::HookResponse {
+                    additional_context: Some(format!("POST-RUN-{attempt}").into()),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn id(&self) -> &str {
+            "per-run-post-context"
+        }
+    }
+
+    struct PerRunPreToolDeferHook(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl hooks::executor::BuiltinHookHandler for PerRunPreToolDeferHook {
+        async fn handle(
+            &self,
+            _event: &hooks::events::HookEvent,
+            _ctx: &hooks::registry::HookContext,
+        ) -> hooks::HookResult {
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            hooks::HookResult {
+                outcome: hooks::HookOutcome::Success,
+                stdout: "".into(),
+                stderr: "".into(),
+                exit_code: Some(0),
+                response: Some(hooks::response::HookResponse {
+                    decision: Some(hooks::response::HookDecision::Defer),
+                    updated_input: Some(source_json!({"attempt":attempt})),
+                    additional_context: Some(format!("PRE-DEFER-RUN-{attempt}").into()),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn id(&self) -> &str {
+            "per-run-pre-defer"
+        }
+    }
+
+    async fn mod_publication_effects_fixture(
+        tool: &str,
+        body: &str,
+    ) -> ModPublicationEffectsFixture {
+        mod_publication_effects_fixture_with_defer(tool, body, false).await
+    }
+
+    async fn mod_publication_effects_fixture_with_defer(
+        tool: &str,
+        body: &str,
+        pre_defer: bool,
+    ) -> ModPublicationEffectsFixture {
+        mod_publication_effects_fixture_with_stream(
+            tool,
+            body,
+            pre_defer,
+            Arc::new(MockStreamingApiClient::empty()),
+        )
+        .await
+    }
+
+    async fn mod_publication_effects_fixture_with_stream(
+        tool: &str,
+        body: &str,
+        pre_defer: bool,
+        streaming: Arc<dyn crate::conversation::StreamingApiClient>,
+    ) -> ModPublicationEffectsFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let session_id = lingxi_core::types::SessionId::new();
+        let path = cwd.join(format!("{}.jsonl", session_id.as_uuid()));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone())),
+        ));
+        let module = cwd.join("publication-effects.js");
+        std::fs::write(
+            &module,
+            format!("export function register(on) {{ on('tool.call', {{tool:'{tool}'}}, async ($, e, next) => {{ {body} }}); }}"),
+        ).unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("publication-effects", &cwd, &module, source_json!({}))
+            .await
+            .unwrap();
+        let mut mod_registry = hooks::HookRegistry::new();
+        mod_registry.set_mod_host(host);
+
+        let mut hook_registry = hooks::HookRegistry::new();
+        hook_registry.register(hooks::HookDefinition {
+            id: lingxi_core::types::HookId::new(),
+            name: "per-run-post-context".into(),
+            events: vec![hooks::HookEventType::PostToolUse],
+            if_condition: None,
+            executor: hooks::definition::HookExecutor::Builtin {
+                handler_id: "per-run-post-context".into(),
+            },
+            source: hooks::definition::HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+            on_failure: None,
+        });
+        if pre_defer {
+            hook_registry.register(hooks::HookDefinition {
+                id: lingxi_core::types::HookId::new(),
+                name: "per-run-pre-defer".into(),
+                events: vec![hooks::HookEventType::PreToolUse],
+                if_condition: None,
+                executor: hooks::definition::HookExecutor::Builtin {
+                    handler_id: "per-run-pre-defer".into(),
+                },
+                source: hooks::definition::HookSource::Session,
+                blocking: true,
+                timeout: None,
+                priority: 0,
+                once: false,
+                status_message: None,
+                async_rewake: false,
+                async_timeout: None,
+                rewake_message: None,
+                on_failure: None,
+            });
+        }
+        let post_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pre_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hook_executor = hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(hook_registry)),
+            Arc::new(UnusedHookHttp),
+            Arc::new(UnusedHookRuntime),
+        );
+        hook_executor.register_builtin(Arc::new(PerRunPostToolContextHook(post_calls.clone())));
+        hook_executor.register_builtin(Arc::new(PerRunPreToolDeferHook(pre_calls.clone())));
+        let end_slot = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(ModOutcomeTool {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            retry_permission_gate: None,
+        }));
+        tools.register_builtin(Arc::new(
+            crate::end_conversation_tool::EndConversationTool::new(true, end_slot.clone()),
+        ));
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                streaming,
+                Arc::new(tools),
+                Arc::new(hook_executor),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                cwd.clone(),
+            )
+            .with_config_home(cwd.join("config"))
+            .with_session_id(session_id)
+            .with_jsonl_writer(writer)
+            .with_end_conversation_slot(end_slot.clone())
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(mod_registry)))
+            .without_host_environment_probes(),
+        );
+        orch.initialize_conversation_mode().await.unwrap();
+        orch.set_tool_frame_buffering(true).await;
+        ModPublicationEffectsFixture {
+            _dir: dir,
+            path,
+            orch,
+            end_slot,
+            post_calls,
+            pre_calls,
+        }
+    }
+
+    fn prior_end_conversation_turn() -> ConversationMessage {
+        ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "EndConversation".into(),
+                input: source_json!({}),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            resumable: None,
+        }
+    }
+
+    async fn add_end_tool_with_request_history(
+        executor: &mut StreamingToolExecutor<'_>,
+        history: Vec<ConversationMessage>,
+    ) {
+        let tool_id = ToolUseId::new();
+        let assistant_id = MessageId::new();
+        let input = source_json!({});
+        let facts = crate::turn_loop::ToolUseDispatchFacts {
+            native_query_depth: executor.native_query_depth(),
+            query_history: history.into(),
+            assistant_message: ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: assistant_id,
+                content: vec![ContentBlock::ToolUse {
+                    id: tool_id.clone(),
+                    name: "EndConversation".into(),
+                    input: input.clone(),
+                    provider_id: None,
+                }],
+                stop_reason: Some("tool_use".into()),
+                resumable: None,
+            },
+            same_turn_tool_uses: Vec::new(),
+            refusal_call_boundary: None,
+        };
+        executor
+            .add_tool_with_context_owned(
+                tool_id,
+                "EndConversation".into(),
+                input,
+                None,
+                assistant_id,
+                facts,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_retry_persisted_output_matches_the_selected_physical_run() {
+        for (selected, attempt) in [("first", 1), ("second", 2)] {
+            let fixture = mod_publication_effects_fixture(
+                "ModOutcome",
+                &format!(
+                    "const first = await next(e); const second = await next(e); return {selected};"
+                ),
+            )
+            .await;
+            let id = ToolUseId::from("toolu_selected_output");
+            let mut executor = StreamingToolExecutor::try_new(&fixture.orch, Vec::new(), 0)
+                .await
+                .unwrap();
+            executor
+                .add_tool(
+                    id.clone(),
+                    "ModOutcome".into(),
+                    source_json!({"large":true}),
+                    Some("provider-Exact-ID".into()),
+                    MessageId::new(),
+                )
+                .await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(results.len(), 1);
+            assert_eq!(
+                fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "both physical core executions finish before selection"
+            );
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                provider_tool_use_id,
+                content,
+                ..
+            } = results[0].block.as_ref().expect("selected core result")
+            else {
+                panic!("selected core returns a ToolResult")
+            };
+            assert_eq!(tool_use_id, &id);
+            assert_eq!(provider_tool_use_id.as_deref(), Some("provider-Exact-ID"));
+            let envelope = content.string_at("").expect("persisted output envelope");
+            assert!(envelope.starts_with("<persisted-output>\n"));
+            let output_path = PathBuf::from(
+                envelope
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once("Full output saved to: ")
+                            .map(|(_, path)| path)
+                    })
+                    .expect("envelope contains the complete output read path"),
+            );
+            let expected = format!("core-{attempt}\n").repeat(10_000);
+            assert!(envelope.contains(&format!("Preview (first 2KB):\ncore-{attempt}\n")));
+            assert_eq!(std::fs::read_to_string(&output_path).unwrap(), expected);
+            let persisted_bodies = std::fs::read_dir(output_path.parent().unwrap())
+                .unwrap()
+                .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(persisted_bodies.len(), 2);
+            for physical_attempt in [1, 2] {
+                assert!(
+                    persisted_bodies.contains(&format!("core-{physical_attempt}\n").repeat(10_000))
+                );
+            }
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            fixture
+                .orch
+                .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            assert_eq!(
+                fixture
+                    .orch
+                    .transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(id.as_str()),
+                Some(&source_json!({"attempt":attempt})),
+                "persistence identities do not replace raw tool-use metadata keys"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_selected_defer_publishes_only_its_eager_marker_and_context() {
+        for (body, selected_attempt, attempts) in [
+            ("return await next(e);", Some(1), 1),
+            (
+                "const first = await next(e); await next(e); return first;",
+                Some(1),
+                2,
+            ),
+            ("await next(e); return await next(e);", Some(2), 2),
+            ("await next(e); return {deny:'blocked'};", None, 1),
+            ("await next(e); return {result:'synthetic'};", None, 1),
+        ] {
+            let fixture =
+                mod_publication_effects_fixture_with_defer("ModOutcome", body, true).await;
+            let id = ToolUseId::from("toolu_deferred_exact");
+            let assistant_id = MessageId::new();
+            let assistant = ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: assistant_id,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "ModOutcome".into(),
+                    input: source_json!({}),
+                    provider_id: None,
+                }],
+                stop_reason: Some("tool_use".into()),
+                resumable: None,
+            };
+            fixture
+                .orch
+                .session
+                .lock()
+                .await
+                .history
+                .push(assistant.clone());
+            fixture.orch.persist_message_to_jsonl(&assistant).await;
+            let mut executor = StreamingToolExecutor::try_new(&fixture.orch, Vec::new(), 0)
+                .await
+                .unwrap();
+            executor
+                .add_tool(
+                    id.clone(),
+                    "ModOutcome".into(),
+                    source_json!({}),
+                    None,
+                    assistant_id,
+                )
+                .await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].block.is_none(), selected_attempt.is_some());
+            assert_eq!(
+                fixture.pre_calls.load(std::sync::atomic::Ordering::SeqCst),
+                attempts
+            );
+            assert_eq!(
+                fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            let before = std::fs::read_to_string(&fixture.path).unwrap();
+            assert!(!before.contains("hook_deferred_tool"));
+            assert!(!before.contains("PRE-DEFER-RUN-"));
+            assert!(fixture
+                .orch
+                .transcript
+                .pending_hook_attachments
+                .lock()
+                .await
+                .is_empty());
+            assert!(fixture
+                .orch
+                .prompt_runtime
+                .mod_persisted_attachments
+                .lock()
+                .await
+                .is_empty());
+
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            fixture
+                .orch
+                .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            assert_eq!(settlement.prevent_continuation, selected_attempt.is_some());
+            let hot_contexts = settlement
+                .query_rows
+                .iter()
+                .map(|(row, _)| row.text_content())
+                .filter(|text| text.contains("PRE-DEFER-RUN-"))
+                .collect::<Vec<_>>();
+            assert!(
+                !std::fs::read_to_string(&fixture.path)
+                    .unwrap()
+                    .contains("hook_deferred_tool"),
+                "Tn leaves eager raw metadata in the pending event journal"
+            );
+            fixture
+                .orch
+                .flush_stream_event_journal(&mut settlement, &mut [])
+                .await;
+            let rows =
+                session::jsonl::route_lines(&std::fs::read_to_string(&fixture.path).unwrap())
+                    .messages_in_order;
+            let markers = rows
+                .iter()
+                .filter_map(|row| row.attachment_projection.as_ref())
+                .filter(|attachment| attachment.string_at("/type") == Some("hook_deferred_tool"))
+                .collect::<Vec<_>>();
+            let contexts = rows
+                .iter()
+                .filter_map(|row| row.attachment_projection.as_ref())
+                .filter(|attachment| {
+                    attachment.string_at("/type") == Some("hook_additional_context")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(markers.len(), usize::from(selected_attempt.is_some()));
+            assert_eq!(contexts.len(), usize::from(selected_attempt.is_some()));
+            assert_eq!(hot_contexts.len(), usize::from(selected_attempt.is_some()));
+            assert_eq!(
+                fixture
+                    .orch
+                    .prompt_runtime
+                    .mod_persisted_attachments
+                    .lock()
+                    .await
+                    .len(),
+                usize::from(selected_attempt.is_some())
+            );
+            if let Some(attempt) = selected_attempt {
+                assert_eq!(markers[0].string_at("/toolUseID"), Some(id.as_str()));
+                assert_eq!(
+                    markers[0].number_at("/toolInput/attempt"),
+                    Some(f64::from(attempt))
+                );
+                assert_eq!(
+                    contexts[0].string_at("/content/0"),
+                    Some(format!("PRE-DEFER-RUN-{attempt}").as_str())
+                );
+                assert!(hot_contexts[0].contains(&format!("PRE-DEFER-RUN-{attempt}")));
+                let replay = crate::resume::deferred_tool_replays_from_messages(&rows);
+                assert_eq!(replay.len(), 1);
+                assert_eq!(replay[0].tool_use_id, id.as_str());
+                assert_eq!(replay[0].assistant_message_id, Some(assistant_id));
+                assert_eq!(
+                    replay[0].tool_input.number_at("/attempt"),
+                    Some(f64::from(attempt))
+                );
+            } else {
+                assert!(crate::resume::deferred_tool_replays_from_messages(&rows).is_empty());
+            }
+            let cold = crate::resume::state_from_messages(
+                fixture.orch.session.lock().await.session_id.as_uuid(),
+                &rows,
+            );
+            let cold_contexts = cold
+                .history
+                .iter()
+                .map(ConversationMessage::text_content)
+                .filter(|text| text.contains("PRE-DEFER-RUN-"))
+                .collect::<Vec<_>>();
+            assert_eq!(cold_contexts, hot_contexts);
+            assert!(
+                fixture
+                    .orch
+                    .transcript
+                    .pending_hook_attachments
+                    .lock()
+                    .await
+                    .is_empty(),
+                "a selected no-result Defer does not strand a result-keyed attachment queue"
+            );
+        }
+    }
+
+    struct DelayedDeferStream {
+        inner: MockStreamingApiClient,
+        tail_waiting: Arc<Notify>,
+        poll_tick: Arc<Notify>,
+        release_tail: Arc<Notify>,
+    }
+
+    impl DelayedDeferStream {
+        fn delay_tail(
+            &self,
+            events: futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+        ) -> futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>> {
+            let waiting = self.tail_waiting.clone();
+            let poll_tick = self.poll_tick.clone();
+            let release = self.release_tail.clone();
+            stream::unfold((events, 0, false), move |(mut events, index, tail_open)| {
+                let waiting = waiting.clone();
+                let poll_tick = poll_tick.clone();
+                let release = release.clone();
+                async move {
+                    let mut tail_open = tail_open;
+                    if index == 4 && !tail_open {
+                        waiting.notify_one();
+                        tokio::select! {
+                            () = release.notified() => tail_open = true,
+                            () = poll_tick.notified() => {
+                                // Native Tn runs after provider events, not
+                                // on an actor-completion wake. A neutral
+                                // delta polls ready tools while real stop
+                                // metadata and message_stop remain held.
+                                return Some((Ok(HistoryEvent::MessageDelta {
+                                    delta: llm_runtime::HistoryMessageDelta {
+                                        stop_reason: None,
+                                        stop_details: None,
+                                        resumable: None,
+                                    },
+                                    usage: None,
+                                }), (events, index, false)));
+                            }
+                        }
+                    }
+                    events
+                        .next()
+                        .await
+                        .map(|event| (event, (events, index + 1, tail_open)))
+                }
+            })
+            .boxed()
+        }
+    }
+
+    #[async_trait]
+    impl crate::conversation::StreamingApiClient for DelayedDeferStream {
+        async fn stream(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+            system: Option<
+                &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+            >,
+            messages: Vec<ConversationMessage>,
+            tools: Vec<llm_runtime::ToolDeclaration>,
+            query_source: &str,
+            skip_global_cache_for_system_prompt: bool,
+            request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+        ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
+        {
+            let events = crate::conversation::StreamingApiClient::stream(
+                &self.inner,
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                query_source,
+                skip_global_cache_for_system_prompt,
+                request_dispatch_admission,
+            )
+            .await?;
+            Ok(self.delay_tail(events))
+        }
+
+        async fn stream_with_effort_override(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+            system: Option<
+                &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+            >,
+            messages: Vec<ConversationMessage>,
+            tools: Vec<llm_runtime::ToolDeclaration>,
+            max_tokens: Option<u32>,
+            effort: Option<&str>,
+            tool_result_reminder_suffixes: Vec<
+                llm_runtime::convert::AnthropicToolResultReminderSuffix,
+            >,
+            query_source: &str,
+            skip_global_cache_for_system_prompt: bool,
+            request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+            request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
+            native_anthropic_request_context: Option<
+                lingxi_llm_client::NativeAnthropicRequestContext,
+            >,
+            typed_attachment_ids: std::collections::HashSet<MessageId>,
+            task_deliveries: std::collections::HashMap<
+                MessageId,
+                lingxi_core::host::task_delivery::TaskDeliveryRequest,
+            >,
+            model_source: Option<Utf16JsonProjection>,
+        ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
+        {
+            let events = crate::conversation::StreamingApiClient::stream_with_effort_override(
+                &self.inner,
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                max_tokens,
+                effort,
+                tool_result_reminder_suffixes,
+                query_source,
+                skip_global_cache_for_system_prompt,
+                request_dispatch_admission,
+                request_dispatch_observer,
+                native_anthropic_request_context,
+                typed_attachment_ids,
+                task_deliveries,
+                model_source,
+            )
+            .await?;
+            Ok(self.delay_tail(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_defer_outer_context_waits_for_assistant_journal_and_matches_cold_order()
+    {
+        let tool_id = ToolUseId::from("toolu_pending_defer_context");
+        let streaming = Arc::new(DelayedDeferStream {
+            inner: MockStreamingApiClient::with_turns(vec![vec![
+                message_start("deferred-with-outer-context", "claude-opus-4-7"),
+                content_block_start_tool_use(0, tool_id.clone(), "ModOutcome"),
+                input_json_delta(0, "{}"),
+                content_block_stop(0),
+                crate::test_support_stream::message_delta_stop("tool_use"),
+                message_stop(),
+            ]]),
+            tail_waiting: Arc::new(Notify::new()),
+            poll_tick: Arc::new(Notify::new()),
+            release_tail: Arc::new(Notify::new()),
+        });
+        let fixture = mod_publication_effects_fixture_with_stream(
+            "ModOutcome",
+            "const r = await next(e); return {...r, context:['OUTER-DEFER-CONTEXT']};",
+            true,
+            streaming.clone(),
+        )
+        .await;
+        let selected_context_count = || async {
+            fixture
+                .orch
+                .prompt_runtime
+                .mod_persisted_attachments
+                .lock()
+                .await
+                .values()
+                .filter(|(kind, origin)| {
+                    kind == "hook_additional_context"
+                        && matches!(
+                            (
+                                origin.get("kind").and_then(serde_json::Value::as_str),
+                                origin.get("event").and_then(serde_json::Value::as_str),
+                            ),
+                            (Some("hook"), Some("PreToolUse"))
+                                | (Some("plugin"), Some("tool.call"))
+                        )
+                })
+                .count()
+        };
+        let turn_orch = fixture.orch.clone();
+        let turn = tokio::spawn(async move {
+            turn_orch
+                .run_turn_streaming("defer with selected outer context")
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            streaming.tail_waiting.notified(),
+        )
+        .await
+        .expect("provider tail remains open after ToolUseStop");
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for _ in 0..400 {
+                if selected_context_count().await == 2 {
+                    return true;
+                }
+                streaming.poll_tick.notify_one();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            selected_context_count().await == 2
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            accepted,
+            "Tn must accept selected descriptors before the real tail: pre={}, post={}, selected={}, descriptors={:?}, turn_finished={}",
+            fixture.pre_calls.load(std::sync::atomic::Ordering::SeqCst),
+            fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+            selected_context_count().await,
+            fixture.orch.prompt_runtime.mod_persisted_attachments.lock().await,
+            turn.is_finished(),
+        );
+        assert_eq!(
+            fixture.pre_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let pending_raw = std::fs::read_to_string(&fixture.path).unwrap();
+        assert!(!pending_raw.contains("hook_deferred_tool"));
+        assert!(!pending_raw.contains("PRE-DEFER-RUN-1"));
+        assert!(!pending_raw.contains("OUTER-DEFER-CONTEXT"));
+        let pending_rows = session::jsonl::route_lines(&pending_raw).messages_in_order;
+        assert!(
+            pending_rows
+                .iter()
+                .all(|row| row.message_type != "assistant"),
+            "the source assistant is pending until real stream completion"
+        );
+
+        streaming.release_tail.notify_one();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::ConversationOutcome::EndTurn { turn_count: 1, .. }
+        ));
+        assert_eq!(streaming.inner.captured_calls().await.len(), 1);
+        let rows = session::jsonl::route_lines(&std::fs::read_to_string(&fixture.path).unwrap())
+            .messages_in_order;
+        let assistant_index = rows
+            .iter()
+            .position(|row| {
+                row.message_type == "assistant"
+                    && row
+                        .message
+                        .to_json_string()
+                        .unwrap()
+                        .contains(tool_id.as_str())
+            })
+            .expect("owning assistant row is durable");
+        let attachment_index = |kind: &str, text: Option<&str>| {
+            rows.iter()
+                .position(|row| {
+                    row.attachment_projection
+                        .as_ref()
+                        .is_some_and(|attachment| {
+                            attachment.string_at("/type") == Some(kind)
+                                && text.is_none_or(|text| {
+                                    attachment.string_at("/content/0") == Some(text)
+                                })
+                        })
+                })
+                .expect("selected attachment is durable")
+        };
+        let marker_index = attachment_index("hook_deferred_tool", None);
+        let pre_index = attachment_index("hook_additional_context", Some("PRE-DEFER-RUN-1"));
+        let outer_index = attachment_index("hook_additional_context", Some("OUTER-DEFER-CONTEXT"));
+        assert!(
+            assistant_index < marker_index && marker_index < pre_index && pre_index < outer_index
+        );
+        assert_eq!(
+            rows[marker_index].parent_uuid.as_deref(),
+            Some(rows[marker_index - 1].uuid.as_str())
+        );
+        assert_eq!(
+            fixture
+                .orch
+                .source_tool_assistant_uuid(&tool_id)
+                .await
+                .as_deref(),
+            Some(rows[assistant_index].uuid.as_str())
+        );
+
+        let replay_trace = |history: &[ConversationMessage]| {
+            history
+                .iter()
+                .filter_map(|message| {
+                    if matches!(message, ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|block| matches!(block,
+                    ContentBlock::ToolUse { id, .. } if id == &tool_id)))
+                    {
+                        Some(format!("assistant:{}", tool_id.as_str()))
+                    } else {
+                        let text = message.text_content();
+                        (text.contains("PRE-DEFER-RUN-") || text.contains("OUTER-DEFER-CONTEXT"))
+                            .then_some(text)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let hot = fixture.orch.session.lock().await.history.clone();
+        let cold = crate::resume::state_from_messages(
+            fixture.orch.session.lock().await.session_id.as_uuid(),
+            &rows,
+        );
+        let hot_trace = replay_trace(&hot);
+        assert_eq!(hot_trace.len(), 3);
+        assert_eq!(
+            replay_trace(&cold.history),
+            hot_trace,
+            "cold resume keeps assistant -> Pre context -> outer Mod context order"
+        );
+        assert_eq!(
+            crate::resume::deferred_tool_replays_from_messages(&rows).len(),
+            1
+        );
+        assert!(fixture
+            .orch
+            .transcript
+            .pending_hook_attachments
+            .lock()
+            .await
+            .is_empty());
+        assert_eq!(selected_context_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_cancelled_defer_does_not_survive_terminal_settlement_or_cold_resume() {
+        let fixture =
+            mod_publication_effects_fixture_with_defer("ModOutcome", "return await next(e);", true)
+                .await;
+        let mut executor = StreamingToolExecutor::try_new(&fixture.orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        executor
+            .add_tool(
+                ToolUseId::new(),
+                "ModOutcome".into(),
+                source_json!({}),
+                None,
+                MessageId::new(),
+            )
+            .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        let results = executor.take_newly_completed();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].block.is_none());
+        executor.reset_after_server_fallback(None).await;
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        fixture
+            .orch
+            .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+            .await;
+        fixture
+            .orch
+            .settle_stream_error_attempt(
+                &mut executor,
+                &mut Default::default(),
+                &mut settlement,
+                MessageId::new(),
+                "cancelled deferred generation",
+            )
+            .await;
+        let raw = std::fs::read_to_string(&fixture.path).unwrap();
+        assert!(!raw.contains("hook_deferred_tool"));
+        assert!(!raw.contains("PRE-DEFER-RUN-"));
+        let rows = session::jsonl::route_lines(&raw).messages_in_order;
+        assert!(crate::resume::deferred_tool_replays_from_messages(&rows).is_empty());
+        let cold = crate::resume::state_from_messages(
+            fixture.orch.session.lock().await.session_id.as_uuid(),
+            &rows,
+        );
+        assert!(cold
+            .history
+            .iter()
+            .all(|row| !row.text_content().contains("PRE-DEFER-RUN-")));
+        assert!(fixture
+            .orch
+            .transcript
+            .pending_hook_attachments
+            .lock()
+            .await
+            .is_empty());
+        assert!(fixture
+            .orch
+            .prompt_runtime
+            .mod_persisted_attachments
+            .lock()
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_end_request_requires_selected_core_and_current_consumption() {
+        for (body, expected_end, attempts) in [
+            (
+                "const core = await next(e); return {deny:'blocked',ref:core.ref};",
+                false,
+                1,
+            ),
+            (
+                "await next(e); return {result:{ended:false,message:'synthetic'}};",
+                false,
+                1,
+            ),
+            ("const core = await next(e); return core;", true, 1),
+            (
+                "const first = await next(e); await next(e); return first;",
+                true,
+                2,
+            ),
+        ] {
+            let fixture = mod_publication_effects_fixture("EndConversation", body).await;
+            let history = vec![prior_end_conversation_turn()];
+            fixture.orch.session.lock().await.history = history.clone();
+            let mut executor = StreamingToolExecutor::try_new(&fixture.orch, history.clone(), 0)
+                .await
+                .unwrap();
+            add_end_tool_with_request_history(&mut executor, history).await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(
+                fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+                attempts
+            );
+            assert!(!fixture.end_slot.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(fixture
+                .orch
+                .transcript
+                .pending_end_conversation_requests
+                .lock()
+                .await
+                .is_empty());
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            fixture
+                .orch
+                .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            assert!(
+                !fixture.end_slot.load(std::sync::atomic::Ordering::SeqCst),
+                "production requests keep their generation guard until consumption"
+            );
+            assert_eq!(
+                fixture.orch.take_end_conversation_request().await,
+                expected_end
+            );
+            assert!(
+                !fixture.orch.take_end_conversation_request().await,
+                "a request is consumed only once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_reset_revokes_end_request_before_and_after_metadata_commit() {
+        for commit_before_reset in [false, true] {
+            let fixture =
+                mod_publication_effects_fixture("EndConversation", "return await next(e);").await;
+            let history = vec![prior_end_conversation_turn()];
+            fixture.orch.session.lock().await.history = history.clone();
+            let mut executor = StreamingToolExecutor::try_new(&fixture.orch, history.clone(), 0)
+                .await
+                .unwrap();
+            add_end_tool_with_request_history(&mut executor, history).await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let mut results = executor.take_newly_completed();
+            assert_eq!(
+                fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            if commit_before_reset {
+                fixture
+                    .orch
+                    .settle_stream_tool_results(
+                        &mut settlement,
+                        std::mem::take(&mut results),
+                        &Default::default(),
+                        &None,
+                    )
+                    .await;
+                assert_eq!(
+                    fixture
+                        .orch
+                        .transcript
+                        .pending_end_conversation_requests
+                        .lock()
+                        .await
+                        .len(),
+                    1
+                );
+            }
+            executor.reset_after_server_fallback(None).await;
+            if !commit_before_reset {
+                fixture
+                    .orch
+                    .settle_stream_tool_results(
+                        &mut settlement,
+                        std::mem::take(&mut results),
+                        &Default::default(),
+                        &None,
+                    )
+                    .await;
+            }
+            assert!(!fixture.end_slot.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                !fixture.orch.take_end_conversation_request().await,
+                "a revoked generation cannot terminate the next tool round"
+            );
+            assert!(fixture
+                .orch
+                .transcript
+                .pending_end_conversation_requests
+                .lock()
+                .await
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_selected_hook_attachments_match_hot_query_and_cold_jsonl() {
+        for (body, expected_context, attempts) in [
+            ("await next(e); return {deny:'blocked'};", None, 1),
+            ("await next(e); return {result:'synthetic'};", None, 1),
+            (
+                "const first = await next(e); await next(e); return first;",
+                Some("POST-RUN-1"),
+                2,
+            ),
+            (
+                "await next(e); return await next(e);",
+                Some("POST-RUN-2"),
+                2,
+            ),
+        ] {
+            let fixture = mod_publication_effects_fixture("ModOutcome", body).await;
+            let mut executor = StreamingToolExecutor::try_new(&fixture.orch, Vec::new(), 0)
+                .await
+                .unwrap();
+            executor
+                .add_tool(
+                    ToolUseId::new(),
+                    "ModOutcome".into(),
+                    source_json!({}),
+                    None,
+                    MessageId::new(),
+                )
+                .await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                    .await
+                    .unwrap(),
+                Some(0)
+            );
+            let results = executor.take_newly_completed();
+            assert_eq!(
+                fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+                attempts
+            );
+            assert!(fixture
+                .orch
+                .transcript
+                .pending_hook_attachments
+                .lock()
+                .await
+                .is_empty());
+            assert!(fixture
+                .orch
+                .prompt_runtime
+                .mod_persisted_attachments
+                .lock()
+                .await
+                .is_empty());
+            let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+            fixture
+                .orch
+                .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+                .await;
+            let hot_contexts = settlement
+                .query_rows
+                .iter()
+                .map(|(row, _)| row.text_content())
+                .filter(|text| text.contains("POST-RUN-"))
+                .collect::<Vec<_>>();
+            assert_eq!(hot_contexts.len(), usize::from(expected_context.is_some()));
+            assert_eq!(
+                fixture
+                    .orch
+                    .prompt_runtime
+                    .mod_persisted_attachments
+                    .lock()
+                    .await
+                    .len(),
+                usize::from(expected_context.is_some())
+            );
+            if let Some(expected) = expected_context {
+                assert!(hot_contexts[0].contains(expected));
+            }
+
+            // The real terminal finalizer flushes this accepted result and its
+            // selected hook attachments through the production journal.
+            fixture
+                .orch
+                .settle_stream_error_attempt(
+                    &mut executor,
+                    &mut Default::default(),
+                    &mut settlement,
+                    MessageId::new(),
+                    "provider stopped after tool result",
+                )
+                .await;
+            let raw = std::fs::read_to_string(&fixture.path).unwrap();
+            let rows = session::jsonl::route_lines(&raw).messages_in_order;
+            let raw_contexts = rows
+                .iter()
+                .filter_map(|row| row.attachment_projection.as_ref())
+                .filter(|attachment| {
+                    attachment.string_at("/type") == Some("hook_additional_context")
+                })
+                .filter_map(|attachment| attachment.string_at("/content/0").map(str::to_owned))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                raw_contexts,
+                expected_context
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            );
+            let cold = crate::resume::state_from_messages(
+                fixture.orch.session.lock().await.session_id.as_uuid(),
+                &rows,
+            );
+            let cold_contexts = cold
+                .history
+                .iter()
+                .map(ConversationMessage::text_content)
+                .filter(|text| text.contains("POST-RUN-"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cold_contexts, hot_contexts,
+                "cold resume must not resurrect an unselected run's hook context"
+            );
+            if let Some(expected) = expected_context {
+                let attempt = if expected.ends_with('1') { "1" } else { "2" };
+                assert!(
+                    rows.iter()
+                        .filter_map(|row| row.mcp_meta_projection.as_ref())
+                        .any(|meta| meta
+                            .subprojection("/attempt")
+                            .ok()
+                            .and_then(|value| value.to_json_string().ok())
+                            .as_deref()
+                            == Some(attempt)),
+                    "selected result retains its original MCP metadata"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_mod_cancelled_result_cannot_publish_hook_attachments_on_cold_resume() {
+        let fixture = mod_publication_effects_fixture("ModOutcome", "return await next(e);").await;
+        let mut executor = StreamingToolExecutor::try_new(&fixture.orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        executor
+            .add_tool(
+                ToolUseId::new(),
+                "ModOutcome".into(),
+                source_json!({}),
+                None,
+                MessageId::new(),
+            )
+            .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), executor.drain_one())
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        let results = executor.take_newly_completed();
+        assert_eq!(
+            fixture.post_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        executor.reset_after_server_fallback(None).await;
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        fixture
+            .orch
+            .settle_stream_tool_results(&mut settlement, results, &Default::default(), &None)
+            .await;
+        assert!(fixture
+            .orch
+            .transcript
+            .pending_hook_attachments
+            .lock()
+            .await
+            .is_empty());
+        assert!(fixture
+            .orch
+            .prompt_runtime
+            .mod_persisted_attachments
+            .lock()
+            .await
+            .is_empty());
+        fixture
+            .orch
+            .settle_stream_error_attempt(
+                &mut executor,
+                &mut Default::default(),
+                &mut settlement,
+                MessageId::new(),
+                "cancelled generation",
+            )
+            .await;
+        let raw = std::fs::read_to_string(&fixture.path).unwrap();
+        let rows = session::jsonl::route_lines(&raw).messages_in_order;
+        let cold = crate::resume::state_from_messages(
+            fixture.orch.session.lock().await.session_id.as_uuid(),
+            &rows,
+        );
+        assert!(cold
+            .history
+            .iter()
+            .all(|row| !row.text_content().contains("POST-RUN-")));
+    }
+
     #[derive(Clone)]
     struct CapturedW1Context {
         messages: Vec<lingxi_core::types::ConversationMessage>,
@@ -2086,7 +3823,7 @@ mod tests {
         let results = exec.take_newly_completed();
         assert_eq!(results.len(), 1);
         assert!(matches!(
-            &results[0].block,
+            results[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, is_error, .. }
                 if tool_use_id == &id && !is_error.unwrap_or(false)
         ));
@@ -3184,6 +4921,7 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: false,
             result: None,
+            result_siblings: Vec::new(),
             prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
@@ -3205,6 +4943,7 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            result_siblings: Vec::new(),
             prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
@@ -3225,6 +4964,7 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            result_siblings: Vec::new(),
             prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
@@ -3245,6 +4985,7 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            result_siblings: Vec::new(),
             prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
@@ -3345,7 +5086,7 @@ mod tests {
         let finished = exec.take_newly_completed();
         assert_eq!(finished.len(), 1);
         assert!(matches!(
-            &finished[0].block,
+            finished[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, is_error: None, .. }
                 if tool_use_id.as_str() == completed_id.as_str()
         ));
@@ -3381,7 +5122,7 @@ mod tests {
                 is_error,
                 provider_tool_use_id,
                 ..
-            } = &result.block
+            } = result.block.as_ref().expect("expected ToolResult block")
             else {
                 panic!("expected ToolResult block")
             };
@@ -3422,7 +5163,11 @@ mod tests {
         assert_eq!(results.len(), 1, "unknown tool result should be drained");
         assert_eq!(exec.tools[0].status, ToolStatus::Yielded);
 
-        let ContentBlock::ToolResult { is_error, .. } = &results[0].block else {
+        let ContentBlock::ToolResult { is_error, .. } = results[0]
+            .block
+            .as_ref()
+            .expect("expected ToolResult block")
+        else {
             panic!("expected ToolResult block")
         };
         assert!(
@@ -3474,7 +5219,7 @@ mod tests {
         let first = exec.take_newly_completed();
         assert_eq!(first.len(), 1);
         assert!(matches!(
-            &first[0].block,
+            first[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == first_id.as_str()
         ));
 
@@ -3496,11 +5241,11 @@ mod tests {
         let tail = exec.take_newly_completed();
         assert_eq!(tail.len(), 2);
         assert!(matches!(
-            &tail[0].block,
+            tail[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == exclusive_id.as_str()
         ));
         assert!(matches!(
-            &tail[1].block,
+            tail[1].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == tail_id.as_str()
         ));
     }
@@ -3543,7 +5288,7 @@ mod tests {
         let ready = exec.take_newly_completed();
         assert_eq!(ready.len(), 1);
         assert!(matches!(
-            &ready[0].block,
+            ready[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == completed_id.as_str()
         ));
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
@@ -3554,7 +5299,7 @@ mod tests {
         let finished = exec.take_newly_completed();
         assert_eq!(finished.len(), 1);
         assert!(matches!(
-            &finished[0].block,
+            finished[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.as_str() == running_id.as_str()
         ));
     }
@@ -5652,7 +7397,7 @@ mod tests {
         let results = rebuilt_executor.take_newly_completed();
         assert_eq!(results.len(), 1);
         assert!(matches!(
-            &results[0].block,
+            results[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &new_id
         ));
         rebuilt_executor.finish_context_layers().await.unwrap();
@@ -6784,7 +8529,7 @@ mod tests {
         let ready = executor.take_newly_completed();
         assert_eq!(ready.len(), 1);
         assert!(matches!(
-            ready[0].block,
+            ready[0].block.as_ref().expect("expected ToolResult block"),
             ContentBlock::ToolResult { ref tool_use_id, .. } if tool_use_id.as_str() == first_id.as_str()
         ));
         assert_eq!(executor.tools[0].status, ToolStatus::Yielded);

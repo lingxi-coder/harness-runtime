@@ -17,6 +17,8 @@
 //! on another), and the file-history epilogue, which only the streaming loop
 //! runs.
 
+#[cfg(test)]
+mod admission_regression_tests;
 mod disposition;
 mod loop_state;
 mod prepare;
@@ -1370,7 +1372,17 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.cancel_idle_compaction();
-        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
+        let turn_guard = match self.lock_turn_unless_cancelled(&cancel).await {
+            Some(guard) => guard,
+            None => match self.turn_gate.clone().try_lock_owned() {
+                // The host reserved this idle notification lifecycle. Close
+                // it under our own gate even when cancellation was immediate.
+                Ok(guard) => Arc::new(guard),
+                // Cancellation behind a running owner must not close that
+                // owner's lifecycle or clear its completed-query bookkeeping.
+                Err(_) => return Ok(TurnOutcome::Cancelled),
+            },
+        };
         // The caller may have observed a pending task notification before a
         // different owner consumed it. Keep that no-work recheck from exposing
         // the preceding query's yielded-user count to headless publication.
@@ -1511,7 +1523,7 @@ impl ConversationOrchestrator {
             });
             let row_uuid = drained.assistant_id.as_uuid().to_string();
             let parent_uuid = match &drained.block {
-                ContentBlock::ToolResult { tool_use_id, .. } => tool_use_parent_uuids
+                Some(ContentBlock::ToolResult { tool_use_id, .. }) => tool_use_parent_uuids
                     .get(tool_use_id)
                     .or_else(|| settlement.tool_use_parent_uuids.get(tool_use_id))
                     .cloned()
@@ -1523,7 +1535,7 @@ impl ConversationOrchestrator {
 
             let mut publication_frame = None;
             for publication in &drained.publications {
-                let commit = publication.commit_metadata(self);
+                let commit = publication.commit_stream_metadata(self);
                 if let Some(guard) = drained.publication_guard.as_ref() {
                     guard.commit_if_current(Box::pin(commit)).await;
                 } else {
@@ -1532,13 +1544,25 @@ impl ConversationOrchestrator {
                 if publication.frame.is_some() {
                     publication_frame = publication.frame.clone();
                 }
+                for (id, payload) in &publication.persisted_hook_attachments {
+                    settlement.journal.push(
+                        crate::streaming_loop::StreamEventJournalEntry::PersistHookAttachment(
+                            crate::streaming_loop::StreamHookAttachment {
+                                tool_completion_id: publication.tool_use_id.clone(),
+                                id: *id,
+                                payload: payload.clone(),
+                                publication_guard: drained.publication_guard.clone(),
+                            },
+                        ),
+                    );
+                }
             }
-            if let ContentBlock::ToolResult {
+            if let Some(ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
                 ..
-            } = &drained.block
+            }) = &drained.block
             {
                 if let Some(result) = drained.tool_use_result.as_ref() {
                     let commit = self.record_tool_use_result(tool_use_id, result.clone());
@@ -1562,43 +1586,58 @@ impl ConversationOrchestrator {
                 }
             }
             let drained_tool_use_id = match &drained.block {
-                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                Some(ContentBlock::ToolResult { tool_use_id, .. }) => Some(tool_use_id.clone()),
+                // No-result Defer still owns an explicit attachment flush.
+                // Its metadata-only publication retains the logical tool ID
+                // even though there is no ToolResult block from which to read it.
+                None if drained.prevent_continuation => drained
+                    .publications
+                    .first()
+                    .map(|publication| publication.tool_use_id.clone()),
                 _ => None,
             };
-            let result_timestamp = crate::streaming_loop::assistant_row_timestamp();
-            let raw_result = ConversationMessage::User {
-                api_message_override: None,
-                interrupted_by_shutdown: None,
-                refused_message_id: None,
-                id: MessageId::new(),
-                content: vec![drained.block],
-                is_meta: false,
-                is_compact_summary: false,
-                is_visible_in_transcript_only: false,
-                turn_companion: None,
-                usage_limit_note: None,
-                origin: None,
-                turn_origin: None,
-            };
-            // Native's through-wrapper yields the same accepted row object into
-            // query-local `je`. `session.history` remains separately assembled
-            // from K followed by JE after the stream finishes.
-            let stored_result = self
-                .append_streamed_query_row(&raw_result, drained.publication_guard.clone())
-                .await;
-            // Native's append-through yields the same accepted user row into
-            // JE; keep query history and the deferred storage journal on that
-            // accepted row while preserving K/JE grouping.
-            settlement.query_rows.push((stored_result.clone(), None));
-            settlement
-                .journal
-                .push(crate::streaming_loop::StreamEventJournalEntry::UserRow {
-                    stored: stored_result,
-                    parent_uuid,
-                    persist: true,
-                    timestamp: result_timestamp,
-                    tool_completion_id: drained_tool_use_id.clone(),
-                });
+            // A headless defer publishes its control/metadata/injected effects
+            // without inventing a resolving ToolResult or a user result row.
+            if let Some(block) = drained.block {
+                let mut content = vec![block];
+                for (position, sibling) in drained.result_siblings {
+                    content.insert(position, sibling);
+                }
+                let result_timestamp = crate::streaming_loop::assistant_row_timestamp();
+                let raw_result = ConversationMessage::User {
+                    api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
+                    id: MessageId::new(),
+                    content,
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
+                };
+                // Native's through-wrapper yields the same accepted row object into
+                // query-local `je`. `session.history` remains separately assembled
+                // from K followed by JE after the stream finishes.
+                let stored_result = self
+                    .append_streamed_query_row(&raw_result, drained.publication_guard.clone())
+                    .await;
+                // Native's append-through yields the same accepted user row into
+                // JE; keep query history and the deferred storage journal on that
+                // accepted row while preserving K/JE grouping.
+                settlement.query_rows.push((stored_result.clone(), None));
+                settlement
+                    .journal
+                    .push(crate::streaming_loop::StreamEventJournalEntry::UserRow {
+                        stored: stored_result,
+                        parent_uuid,
+                        persist: true,
+                        timestamp: result_timestamp,
+                        tool_completion_id: drained_tool_use_id.clone(),
+                    });
+            }
 
             // Read `toolUseResult` before JSONL persistence consumes its
             // side-table entry, matching the existing single-result writer.
@@ -1786,7 +1825,7 @@ impl ConversationOrchestrator {
         self.set_tool_frame_buffering(false).await;
     }
 
-    async fn flush_stream_event_journal(
+    pub(crate) async fn flush_stream_event_journal(
         &self,
         settlement: &mut crate::streaming_loop::StreamToolSettlement,
         assistant_rows: &mut [crate::streaming_loop::CompletedAssistantRow],
@@ -1842,6 +1881,27 @@ impl ConversationOrchestrator {
                 }
                 crate::streaming_loop::StreamEventJournalEntry::FlushHookAttachments(id) => {
                     self.flush_hook_attachments(id).await;
+                }
+                crate::streaming_loop::StreamEventJournalEntry::PersistHookAttachment(
+                    attachment,
+                ) => {
+                    let persist = async {
+                        if let Some(id) = attachment.id {
+                            self.persist_hook_attachment_to_jsonl_with_id(
+                                id,
+                                attachment.payload.clone(),
+                            )
+                            .await;
+                        } else {
+                            self.persist_hook_attachment_to_jsonl(attachment.payload.clone())
+                                .await;
+                        }
+                    };
+                    if let Some(guard) = attachment.publication_guard.as_ref() {
+                        guard.commit_if_current(Box::pin(persist)).await;
+                    } else {
+                        persist.await;
+                    }
                 }
             }
             settlement.journal_cursor += 1;
@@ -1986,26 +2046,6 @@ impl ConversationOrchestrator {
                         break;
                     }
                     exec.drain_one().await;
-                }
-            }
-        }
-        self.flush_stream_event_journal(settlement, &mut pumped.assistant_rows)
-            .await;
-        // Readiness follows the accepted model output, including Mods edits to
-        // screenshots. Discarded generations must not confirm observations.
-        if settlement
-            .publication_guard
-            .as_ref()
-            .is_none_or(|guard| guard.is_current())
-        {
-            for (message, _) in &settlement.query_rows {
-                if let ConversationMessage::User { content, .. } = message {
-                    if let Err(error) =
-                        crate::native_computer::final_model_result(self, content).await
-                    {
-                        self.set_tool_frame_buffering(false).await;
-                        return Err(error);
-                    }
                 }
             }
         }
@@ -3394,7 +3434,8 @@ impl ConversationOrchestrator {
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled)
                 {
-                    self.spawn_prompt_suggestion().await;
+                    self.spawn_prompt_suggestion(completion_cancel.clone())
+                        .await;
                 }
             }
             result
@@ -3643,6 +3684,10 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         turn_guard: &ProfileTurnGuard,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        let in_human_turn = queued_inputs
+            .as_ref()
+            .is_none_or(|inputs| inputs.iter().any(|input| !input.is_meta));
+        self.recover_streaming_query_storage(in_human_turn).await?;
         self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt (same as non-cancelable path).
@@ -3663,8 +3708,12 @@ impl ConversationOrchestrator {
         let (screened_text, _user_msg) = if let Some(inputs) = queued_inputs {
             let requires_skill_header = inputs.iter().any(|input| input.skill_identity.is_some());
             let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+            let mut outer_images = Some(images);
             let mut admitted = Vec::with_capacity(inputs.len());
             for (index, mut input) in inputs.into_iter().enumerate() {
+                if index == image_owner {
+                    input.images.extend(outer_images.take().unwrap_or_default());
+                }
                 if let Some(kind) = input
                     .mod_origin
                     .as_ref()
@@ -3679,43 +3728,33 @@ impl ConversationOrchestrator {
                     input.text = received;
                 }
                 match self
-                    .screen_mod_prompt_submit(
-                        &input.text,
-                        if index == image_owner { &images } else { &[] },
-                        input.mod_origin.clone(),
-                    )
+                    .screen_mod_prompt_submit(&input.text, &input.images, input.mod_origin.clone())
                     .await
                 {
                     ModPromptScreen::Admit { text, context } => {
                         input.text = text;
-                        admitted.push((index, input, context));
+                        admitted.push((input, context));
                     }
                     ModPromptScreen::Drop(reason) => self.emit_mod_prompt_drop(&reason).await,
                 }
             }
             if admitted.is_empty()
-                || (requires_skill_header && !admitted.iter().any(|(_, input, _)| !input.is_meta))
+                || (requires_skill_header && !admitted.iter().any(|(input, _)| !input.is_meta))
             {
                 return Ok(TurnOutcome::EndTurn);
             }
             let primary = admitted
                 .iter()
-                .position(|(_, input, _)| !input.is_meta)
+                .position(|(input, _)| !input.is_meta)
                 .unwrap_or(0);
-            let screened_text = admitted[primary].1.text.clone();
-            let mut attached_images = Some(images);
+            let screened_text = admitted[primary].0.text.clone();
             let mut submissions = Vec::with_capacity(admitted.len());
-            for (source_index, input, context) in admitted {
-                let message_images = if source_index == image_owner {
-                    attached_images.take().unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
+            for (input, context) in admitted {
                 let mut message = user_message_from_projection(
                     input.message_id.unwrap_or_else(MessageId::new),
                     &input.text,
                     input.is_meta,
-                    message_images,
+                    input.images.clone(),
                     self.is_persistent_app_chat(),
                 );
                 if input.turn_companion {
@@ -4569,6 +4608,11 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() && !cancelled_direct_bash_no_query {
             return self.cancel_unstarted_streaming_query().await;
         }
+        if crate::scheduled_turn::current().is_some() {
+            // Scheduled callers own this live-output lifecycle only after
+            // admission. An earlier cancellation must leave no open start.
+            self.output.emit_turn_started().await;
+        }
         // DEFERRED-3: GRANULAR user-ESC interrupt — do NOT race-drop the turn.
         // Previously this `select!`'d `try_run_turn_streaming` against
         // `cancel.cancelled()` and on cancel DROPPED the whole turn future, so
@@ -4607,6 +4651,17 @@ impl ConversationOrchestrator {
         )
         .await;
         let r = r.and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
+        if crate::scheduled_turn::current().is_some()
+            && matches!(
+                &r,
+                Ok(ConversationOutcome::StopHookPrevented { turn_count: 0, .. })
+            )
+        {
+            // Prompt screening can finish without entering the model loop,
+            // which otherwise owns the terminal for this announced turn.
+            self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await)
+                .await;
+        }
         if cancel.is_cancelled() {
             self.reset_goal_interruption();
         }
@@ -4895,7 +4950,7 @@ pub(super) fn parse_generated_session_name(
         .or_else(|| {
             let start = candidate.iter().position(|unit| *unit == b'{' as u16)?;
             let end = candidate.iter().rposition(|unit| *unit == b'}' as u16)?;
-            Utf16JsonProjection::parse_utf16_json(&candidate[start..=end]).ok()
+            Utf16JsonProjection::parse_utf16_json(candidate.get(start..=end)?).ok()
         })?;
     let name = object.string_units("/name")?;
     let name = trim_utf16_whitespace(&name);

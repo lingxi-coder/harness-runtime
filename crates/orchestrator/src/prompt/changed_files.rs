@@ -277,7 +277,14 @@ pub fn truncate_snippet(snippet: &str) -> String {
     // `Jd(o,"\n",s.length+1)+1`: JS's `s.length + a` with `a = 1` skips the
     // newline the head was cut at, and `l = 1` counts the final unterminated
     // line.
-    let count_from = head_end.saturating_add(1).min(snippet.len());
+    // Advancing one byte is valid only for the ASCII newline itself. A hard
+    // cutoff may instead point at a multi-byte scalar; leaving it in the tail
+    // does not change the newline count and keeps the slice on a UTF-8 boundary.
+    let count_from = if snippet.as_bytes().get(head_end) == Some(&b'\n') {
+        head_end + 1
+    } else {
+        head_end
+    };
     let truncated_lines = snippet[count_from..].matches('\n').count() + 1;
     format!("{head}\n\n... [{truncated_lines} lines truncated] ...")
 }
@@ -524,6 +531,30 @@ mod tests {
     #[test]
     fn short_snippets_are_returned_unchanged() {
         assert_eq!(truncate_snippet("a\nb"), "a\nb");
+    }
+
+    #[test]
+    fn hard_snippet_cutoff_before_multibyte_text_keeps_tail_line_count() {
+        let head = "a".repeat(SNIPPET_CHAR_LIMIT);
+        for tail in ["éé", "中文", "🦀🦀", "é\n中文\n🦀"] {
+            let snippet = format!("{head}{tail}");
+            let lines = tail.matches('\n').count() + 1;
+            assert_eq!(
+                truncate_snippet(&snippet),
+                format!("{head}\n\n... [{lines} lines truncated] ..."),
+                "tail {tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn changed_file_diff_with_a_long_unicode_line_renders_without_panicking() {
+        let head = format!("1\t{}", "a".repeat(SNIPPET_CHAR_LIMIT - 2));
+        let after = format!("{}éé", "a".repeat(SNIPPET_CHAR_LIMIT - 2));
+        assert_eq!(
+            render_snippet("", &after, false),
+            format!("{head}\n\n... [1 lines truncated] ...")
+        );
     }
 
     #[test]

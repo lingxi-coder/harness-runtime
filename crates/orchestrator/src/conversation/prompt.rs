@@ -966,6 +966,9 @@ impl ConversationOrchestrator {
                 lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units),
             ));
         }
+        // This layer belongs to the current request, not the durable base.
+        // Capture it once so later host updates cannot alter an owned prompt.
+        let app_profile = self.current_app_agent_prompt_profile();
         // The provider consumes the typed source vector directly. A frozen
         // hit never builds joined static/display strings or decodes UTF-16.
         // The provider's owned API still clones its typed vector on egress.
@@ -983,8 +986,10 @@ impl ConversationOrchestrator {
                     .lock()
                     .await = Some(frozen.elements.clone());
             }
+            let mut elements = frozen.elements.clone();
+            self.append_app_agent_prompt_profile(&mut elements, app_profile);
             return Ok(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
-                frozen.elements.clone(),
+                elements,
                 dynamic,
                 Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
                     crate::prompt::profile_header(self.conversation_profile().await.mode),
@@ -992,7 +997,7 @@ impl ConversationOrchestrator {
             ));
         }
         let prompt = self.effective_system_prompt_parts().await?;
-        let system_prompt = match prompt.snapshot_system_prompt.clone() {
+        let mut system_prompt = match prompt.snapshot_system_prompt.clone() {
             Some(snapshot) => snapshot,
             None if !prompt.source_sections.is_empty() => {
                 let (model, profile) = self.current_prompt_route().await;
@@ -1021,19 +1026,12 @@ impl ConversationOrchestrator {
         let dynamic_context = prompt
             .dynamic_system_context
             .map(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string);
-        let input = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
-            system_prompt.clone(),
-            dynamic_context,
-            Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
-                crate::prompt::profile_header(self.conversation_profile().await.mode),
-            )),
-        );
         if record_pending_snapshot {
             self.replace_memory_prompt_snapshot(&system_prompt).await;
         }
         let pending = self
             .prompt_snapshot_eligible()
-            .then_some(system_prompt)
+            .then(|| system_prompt.clone())
             .filter(|vector| !vector.is_empty());
         if record_pending_snapshot {
             crate::request_context::set_pending_prompt_source_vector(pending.clone());
@@ -1043,7 +1041,55 @@ impl ConversationOrchestrator {
                 .lock()
                 .await = pending;
         }
-        Ok(input)
+        self.append_app_agent_prompt_profile(&mut system_prompt, app_profile);
+        Ok(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            system_prompt,
+            dynamic_context,
+            Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                crate::prompt::profile_header(self.conversation_profile().await.mode),
+            )),
+        ))
+    }
+
+    fn current_app_agent_prompt_profile(
+        &self,
+    ) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        let profile = self.prompt_runtime.app_agent_prompt_profile.read().ok()?;
+        let profile = profile
+            .as_ref()
+            .filter(|profile| !profile.instructions.trim().is_empty())?;
+        Some(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                format!(
+                    "# App Agent Profile\nRevision: {}\n{}",
+                    profile.revision, profile.instructions
+                ),
+            ),
+        )
+    }
+
+    fn append_app_agent_prompt_profile(
+        &self,
+        elements: &mut Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>,
+        profile: Option<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>,
+    ) {
+        let Some(profile) = profile else { return };
+        // Preserve the existing profile-before-append order when the frozen
+        // vector ends in this exact configured append member. Never parse or
+        // rewrite opaque restored source strings to locate a profile layer.
+        let before_append = self
+            .config
+            .append_system_prompt
+            .as_ref()
+            .and_then(|source| source.string_units(""))
+            .filter(|units| !units.is_empty())
+            .is_some_and(|units| {
+                elements
+                    .last()
+                    .is_some_and(|last| last.utf16_code_units() == units.as_slice())
+            });
+        let index = elements.len() - usize::from(before_append);
+        elements.insert(index, profile);
     }
 
     pub(crate) async fn current_prompt_route(&self) -> (String, Option<String>) {
@@ -1162,27 +1208,6 @@ impl ConversationOrchestrator {
             }
             None => self.build_static_system_prompt_parts().await?,
         };
-        if let Ok(profile) = self.prompt_runtime.app_agent_prompt_profile.read() {
-            if let Some(profile) = profile.as_ref() {
-                if !profile.instructions.trim().is_empty() {
-                    let profile_section = format!(
-                        "# App Agent Profile\nRevision: {}\n{}",
-                        profile.revision, profile.instructions
-                    );
-                    prompt.text.push_str("\n\n");
-                    prompt.text.push_str(&profile_section);
-                    prompt.static_text.push_str("\n\n");
-                    prompt.static_text.push_str(&profile_section);
-                    prompt.source_sections.push(crate::prompt::PromptSection {
-                        id: "app_agent_profile".to_owned(),
-                        text: profile_section,
-                        scope: crate::prompt::PromptSectionScope::Session,
-                        id_utf16_code_units: None,
-                        text_utf16_code_units: None,
-                    });
-                }
-            }
-        }
         self.append_native_append_system_prompt(&mut prompt);
         if is_default_prompt {
             prompt.dynamic_system_context =
@@ -2223,8 +2248,8 @@ impl ConversationOrchestrator {
         &self,
     ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
         use crate::prompt::{
-            named_prompt_sections_for_mode, prompt_section_slots, render_prompt_sections_scoped,
-            ActiveOutputStyle, PromptSectionScope,
+            prompt_section_slots, render_prompt_sections_scoped, ActiveOutputStyle,
+            PromptSectionScope,
         };
         let ctx = self.build_prompt_context().await?;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
@@ -2264,20 +2289,7 @@ impl ConversationOrchestrator {
                 cache.answers.clear();
             }
         }
-        let mode = ctx
-            .prompt_policy
-            .as_ref()
-            .map(|policy| policy.target.mode)
-            .unwrap_or(self.conversation_profile().await.mode);
-        let mut sections = named_prompt_sections_for_mode(&ctx, style, mode);
-        let epoch = self.profile_epoch().await;
-        if epoch > 0 {
-            sections.push(crate::prompt::PromptSection::new(
-                "conversation_profile_state",
-                format!("Current conversation profile: {} (context epoch {}). Follow the current user request and currently applicable user/project constraints. Earlier profile directives and expired skill requests in history or summaries are historical context. They do not authorize repeating earlier actions. Apply only skills activated for this context; restored active skill guidance does not rerun setup or one-time operations.", mode.as_str(), epoch),
-                PromptSectionScope::Session,
-            ));
-        }
+        let sections = self.prompt_sections_for_current_profile(&ctx, style).await;
         let resolved_sections = if let Some(host) = host.as_ref() {
             futures::future::join_all(prompt_section_slots(sections, &ctx).into_iter().map(
                 |slot| async move {
@@ -2323,6 +2335,28 @@ impl ConversationOrchestrator {
             resolved_sections
         };
         Ok(render_prompt_sections_scoped(&composed))
+    }
+
+    async fn prompt_sections_for_current_profile(
+        &self,
+        ctx: &crate::prompt::SystemPromptContext,
+        style: Option<crate::prompt::ActiveOutputStyle<'_>>,
+    ) -> Vec<crate::prompt::PromptSection> {
+        let mode = ctx
+            .prompt_policy
+            .as_ref()
+            .map(|policy| policy.target.mode)
+            .unwrap_or(self.conversation_profile().await.mode);
+        let mut sections = crate::prompt::named_prompt_sections_for_mode(ctx, style, mode);
+        let epoch = self.profile_epoch().await;
+        if epoch > 0 {
+            sections.push(crate::prompt::PromptSection::new(
+                "conversation_profile_state",
+                format!("Current conversation profile: {} (context epoch {}). Follow the current user request and currently applicable user/project constraints. Earlier profile directives and expired skill requests in history or summaries are historical context. They do not authorize repeating earlier actions. Apply only skills activated for this context; restored active skill guidance does not rerun setup or one-time operations.", mode.as_str(), epoch),
+                crate::prompt::PromptSectionScope::Session,
+            ));
+        }
+        sections
     }
 
     async fn dispatch_mod_prompt_section(
@@ -2679,7 +2713,7 @@ impl ConversationOrchestrator {
                 prompt: &style.prompt,
                 keep_coding_instructions: style.keep_coding_instructions,
             });
-        let sections = crate::prompt::named_prompt_sections_with_style(&ctx, style);
+        let sections = self.prompt_sections_for_current_profile(&ctx, style).await;
         let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
         } else {

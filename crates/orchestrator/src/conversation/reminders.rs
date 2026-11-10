@@ -3035,7 +3035,8 @@ message with multiple tool uses so they run concurrently."
                     let text = content
                         .iter()
                         .filter_map(|block| match block {
-                            lingxi_core::types::ContentBlock::Text { text, .. } => {
+                            lingxi_core::types::ContentBlock::Text { text, .. }
+                            | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
                                 Some(text.as_str())
                             }
                             _ => None,

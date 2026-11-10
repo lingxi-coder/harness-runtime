@@ -1168,6 +1168,10 @@ pub enum ModelSwitchProjectionError {
 /// `Block` decision wins and stops further folding.
 #[derive(Debug, Clone, Default)]
 pub struct AggregateHookResult {
+    /// Host-only identities of the named runtime session hooks actually folded
+    /// into this result. Captured dispatch roles survive later replacement or
+    /// removal of their registry entries.
+    pub session_hook_ids: std::collections::HashMap<String, lingxi_core::types::HookId>,
     /// Final aggregated decision (latest non-`None` wins until a `Block`).
     pub decision: Option<HookDecision>,
     /// Source of the hook whose decision currently owns [`Self::decision`].
@@ -1725,6 +1729,7 @@ impl AggregateHookResult {
         self.prevent_continuation |= later.prevent_continuation;
         self.attachments.append(&mut later.attachments);
         self.all_results.append(&mut later.all_results);
+        self.session_hook_ids.extend(later.session_hook_ids.drain());
         self.prompt_expansion_history_rows
             .append(&mut later.prompt_expansion_history_rows);
         self.progress.append(&mut later.progress);

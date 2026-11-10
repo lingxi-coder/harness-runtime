@@ -116,9 +116,23 @@ mod terminal_api_error_tests {
     use crate::turn_loop::terminal_api_error_text;
     use llm_runtime::HistoryStopDetails;
 
-    fn text(request_id: Option<&str>, message_id: Option<&str>, details: Option<&HistoryStopDetails>) -> String {
-        terminal_api_error_text("claude-opus-4-8", true, "refusal", request_id, details, message_id)
-            .unwrap().string_at("").unwrap().to_owned()
+    fn text(
+        request_id: Option<&str>,
+        message_id: Option<&str>,
+        details: Option<&HistoryStopDetails>,
+    ) -> String {
+        terminal_api_error_text(
+            "claude-opus-4-8",
+            true,
+            "refusal",
+            request_id,
+            details,
+            message_id,
+        )
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .to_owned()
     }
 
     #[test]
@@ -129,9 +143,14 @@ mod terminal_api_error_tests {
 
     #[test]
     fn refusal_appends_both_validated_ids_after_sanitized_details() {
-        let details = HistoryStopDetails::parse(r#"{"category":"[bio]`","explanation":"provider explanation"}"#).unwrap();
+        let details = HistoryStopDetails::parse(
+            r#"{"category":"[bio]`","explanation":"provider explanation"}"#,
+        )
+        .unwrap();
         let text = text(Some("req_319"), Some("msg_319"), Some(&details));
-        assert!(text.ends_with("\n\nDetails: `[bio]`\n\nRequest ID: req_319\n\nMessage ID: msg_319"));
+        assert!(
+            text.ends_with("\n\nDetails: `[bio]`\n\nRequest ID: req_319\n\nMessage ID: msg_319")
+        );
         assert!(!text.contains("provider explanation"));
     }
 
@@ -150,8 +169,15 @@ mod terminal_api_error_tests {
     #[test]
     fn non_refusal_terminals_have_no_identifier_suffix() {
         for reason in ["max_tokens", "model_context_window_exceeded"] {
-            let text = terminal_api_error_text("claude-opus-4-8", true, reason,
-                Some("req_ok"), None, Some("msg_ok")).unwrap();
+            let text = terminal_api_error_text(
+                "claude-opus-4-8",
+                true,
+                reason,
+                Some("req_ok"),
+                None,
+                Some("msg_ok"),
+            )
+            .unwrap();
             assert!(!text.string_at("").unwrap().contains("ID:"));
         }
     }
@@ -4861,14 +4887,34 @@ mod read_file_state_tests {
         )
     }
 
+    fn restoration_read_tool(
+        cwd: &std::path::Path,
+        shared: tool_api::read_file_state::ReadFileStateMap,
+    ) -> Arc<dyn Tool> {
+        let mut context = tool_api::test_support::ctx_for_file_tools(
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.to_path_buf())),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![cwd.to_path_buf()],
+        );
+        context.read_file_state = shared;
+        Arc::new(tool_file::FileReadTool::new(context))
+    }
+
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_rebuilds_read_state() {
         use lingxi_core::host::OrchestratorHandle;
         use lingxi_core::types::{ConversationMessage, MessageId};
 
         // Compaction with a tiny threshold so a small seeded history compacts.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let shared = tool_api::read_file_state::new_read_file_state_map();
         let (compactor, slot) = wired_compaction(10);
-        let mut orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        let mut orch = orch_with_tools(
+            cwd.clone(),
+            vec![restoration_read_tool(&cwd, shared.clone())],
+        )
+        .with_read_state_map(shared);
         orch = orch.with_compaction(compactor).with_cache_safe_slot(slot);
         let orch = Arc::new(orch);
 
@@ -4902,7 +4948,6 @@ mod read_file_state_tests {
         // Seed the read-file-state registry with two files at distinct mtimes.
         // P2-12: the restore RE-READS from disk (not the snapshot content), so
         // the files must exist on disk with the asserted content.
-        let dir = tempfile::tempdir().expect("tempdir");
         let old_path = dir.path().join("old.rs");
         let new_path = dir.path().join("new.rs");
         std::fs::write(&old_path, "fn old() {}\n").expect("write old.rs");
@@ -5033,12 +5078,17 @@ mod read_file_state_tests {
         use lingxi_core::types::{ConversationMessage, MessageId};
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
         let shared = tool_api::read_file_state::new_read_file_state_map();
         let (compactor, slot) = wired_compaction(10);
-        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
-            .with_compaction(compactor)
-            .with_cache_safe_slot(slot)
-            .with_read_state_map(shared.clone());
+        let orch = orch_with_tools(
+            cwd.clone(),
+            vec![restoration_read_tool(&cwd, shared.clone())],
+        )
+        .with_compaction(compactor)
+        .with_cache_safe_slot(slot)
+        .with_read_state_map(shared.clone());
         let orch = Arc::new(orch);
 
         {
@@ -5071,7 +5121,6 @@ mod read_file_state_tests {
         // real `FileReadTool` does via its `BuiltinToolContext.read_file_state`).
         // P2-12: the post-compact restore RE-READS from disk, so the file must
         // exist on disk with the asserted content.
-        let dir = tempfile::tempdir().expect("tempdir");
         let tool_read_path = dir.path().join("tool_read.rs");
         std::fs::write(&tool_read_path, "fn tool_read() {}\n").expect("write tool_read.rs");
         tool_api::read_file_state::set(
@@ -6115,8 +6164,8 @@ mod malformed_and_thinking_only_tests {
     use crate::turn_loop::{
         execute_one_turn_with_recovery_tracked, prior_assistant_used_structured_output,
         RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-        MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, STRUCTURED_OUTPUT_TOOL_NAME,
-        THINKING_ONLY_NUDGE,
+        MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+        STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
@@ -6234,10 +6283,18 @@ mod malformed_and_thinking_only_tests {
                 assert!(matches!(outcome, TurnStepOutcome::Continue(_)));
                 assert_eq!(state.malformed_tool_use_retry_count, retry_count + 1);
                 let h = history(&orch).await;
-                assert_eq!(last_user_text(&h).as_deref(), Some(MALFORMED_TOOL_USE_RETRY_NUDGE));
-                assert!(matches!(h.last(), Some(ConversationMessage::User {
-                    is_meta: true, turn_companion: Some(Some(true)), ..
-                })));
+                assert_eq!(
+                    last_user_text(&h).as_deref(),
+                    Some(MALFORMED_TOOL_USE_RETRY_NUDGE)
+                );
+                assert!(matches!(
+                    h.last(),
+                    Some(ConversationMessage::User {
+                        is_meta: true,
+                        turn_companion: Some(Some(true)),
+                        ..
+                    })
+                ));
             } else {
                 assert!(matches!(outcome, TurnStepOutcome::Ended { stop_reason, .. }
                     if stop_reason == case["expected"]["outcome"]["reason"].as_str().unwrap()));
@@ -6262,7 +6319,10 @@ mod malformed_and_thinking_only_tests {
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert_eq!(state.malformed_tool_use_retry_count, 1, "first retry counted");
+        assert_eq!(
+            state.malformed_tool_use_retry_count, 1,
+            "first retry counted"
+        );
         assert_eq!(
             state.max_output_tokens_recovery_count, 0,
             "recovery reset on retry transition"
@@ -6383,7 +6443,10 @@ mod malformed_and_thinking_only_tests {
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert_eq!(state.malformed_tool_use_retry_count, 0, "normal tools reset allowance");
+        assert_eq!(
+            state.malformed_tool_use_retry_count, 0,
+            "normal tools reset allowance"
+        );
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,

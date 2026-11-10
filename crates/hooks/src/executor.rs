@@ -1283,7 +1283,7 @@ impl HookExecutorImpl {
         ctx: HookContext,
         partition: HookSourcePartition,
     ) -> AggregateHookResult {
-        self.execute_partitioned_excluding_hook(event, ctx, None, partition)
+        self.execute_partitioned_excluding_hook(event, ctx, None, None, partition)
             .await
     }
 
@@ -1306,8 +1306,32 @@ impl HookExecutorImpl {
         ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
     ) -> AggregateHookResult {
-        self.execute_partitioned_excluding_hook(event, ctx, excluded, HookSourcePartition::All)
-            .await
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            excluded,
+            None,
+            HookSourcePartition::All,
+        )
+        .await
+    }
+
+    /// Exclude one named runtime session role at the actual registry match,
+    /// including a replacement installed while context preparation awaited.
+    pub async fn execute_excluding_session_named_hook(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        excluded_name: Option<&str>,
+    ) -> AggregateHookResult {
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            None,
+            excluded_name,
+            HookSourcePartition::All,
+        )
+        .await
     }
 
     async fn execute_partitioned_excluding_hook(
@@ -1315,6 +1339,7 @@ impl HookExecutorImpl {
         event: HookEvent,
         mut ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
+        excluded_session_name: Option<&str>,
         partition: HookSourcePartition,
     ) -> AggregateHookResult {
         self.prepare_context(&mut ctx).await;
@@ -1328,6 +1353,10 @@ impl HookExecutorImpl {
             .match_event_partition(&event, &ctx, partition)
             .into_iter()
             .filter(|hook| Some(hook.id) != excluded)
+            .filter(|hook| {
+                !(hook.source == crate::definition::HookSource::Session
+                    && excluded_session_name == Some(hook.name.as_str()))
+            })
             .cloned()
             .collect();
         drop(reg);
@@ -3225,6 +3254,9 @@ impl HookExecutorImpl {
         eval_confined: bool,
         outputs: &PreparedHookOutputs,
     ) {
+        if hook.source == crate::definition::HookSource::Session {
+            agg.session_hook_ids.insert(hook.name.clone(), hook.id);
+        }
         let mut r = r;
         // PreModelSwitch is a gate: execution failures before a hook can
         // answer must stop the switch. A command's explicit non-2 exit remains

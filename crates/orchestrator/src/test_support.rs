@@ -15,6 +15,24 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Valid mode metadata for fixtures that mount an existing Code conversation.
+pub fn code_resume_runtime_snapshot(
+    session_id: lingxi_core::types::SessionId,
+) -> lingxi_core::host::ResumeRuntimeSnapshot {
+    lingxi_core::host::ResumeRuntimeSnapshot {
+        transcript_metadata: Some(vec![Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({
+                "type": "fixed-session-mode",
+                "sessionId": session_id.as_uuid(),
+                "sessionMode": "code",
+                "instructionEpoch": 0,
+            }),
+        )
+        .expect("valid fixed conversation mode fixture")]),
+        ..Default::default()
+    }
+}
+
 /// Attach the real forced-compaction pipeline with a deterministic summarizer.
 /// Host integration tests can exercise transcript commits without adding
 /// compaction/sidequery dependency edges or making provider calls.
@@ -478,7 +496,8 @@ pub fn mock_message_response(
 pub struct MockOutputStream {
     tool_result_mcp_meta: Arc<Mutex<Vec<Option<Utf16JsonProjection>>>>,
     partial_stream_events: Arc<Mutex<Vec<String>>>,
-    partial_stream_metadata: Arc<Mutex<Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata>>>,
+    partial_stream_metadata:
+        Arc<Mutex<Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata>>>,
     include_partial_stream_events: bool,
     lifecycle_events: Arc<Mutex<Vec<Utf16JsonProjection>>>,
     model_fallback_frames: Arc<Mutex<Vec<Utf16JsonProjection>>>,
@@ -548,7 +567,9 @@ impl MockOutputStream {
         self.partial_stream_events.lock().await.clone()
     }
 
-    pub async fn partial_stream_metadata_snapshot(&self) -> Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata> {
+    pub async fn partial_stream_metadata_snapshot(
+        &self,
+    ) -> Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata> {
         self.partial_stream_metadata.lock().await.clone()
     }
 
@@ -640,7 +661,10 @@ impl OutputStream for MockOutputStream {
         is_message_start: bool,
         metadata: &lingxi_core::host::orchestrator::PartialStreamEventMetadata,
     ) {
-        self.partial_stream_metadata.lock().await.push(metadata.clone());
+        self.partial_stream_metadata
+            .lock()
+            .await
+            .push(metadata.clone());
         self.emit_stream_event(event_json, is_message_start).await;
     }
 

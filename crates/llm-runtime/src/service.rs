@@ -8590,7 +8590,12 @@ impl ApiService {
                 }
                 prepared.before_computer_submit().await?;
                 if let Some(quota) = &self.scope_output_quota {
-                    quota.authorize_dispatch().await?;
+                    if let Err(error) = quota.authorize_dispatch().await {
+                        // Scope revocation is a host admission rejection even
+                        // when it precedes the physical dispatch callback.
+                        admission_rejected |= quota.is_revoked();
+                        return Err(error);
+                    }
                 }
                 let mut api_attempt_reservation = None;
                 let received = conversation_lease
@@ -10707,7 +10712,12 @@ impl ApiService {
                         });
                     }
                     if let Some(quota) = &self.scope_output_quota {
-                        quota.authorize_dispatch().await?;
+                        if let Err(error) = quota.authorize_dispatch().await {
+                            // Preserve unrelated host authorizer errors while
+                            // normalizing revocation through attempt settlement.
+                            admission_rejected |= quota.is_revoked();
+                            return Err(error);
+                        }
                     }
                     request_client
                         .open_shared_stream(prepared, responses_ws_session, &mut || {

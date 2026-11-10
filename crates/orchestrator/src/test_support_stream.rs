@@ -113,6 +113,31 @@ impl MockStreamingApiClient {
     pub async fn captured_calls(&self) -> Vec<CapturedStreamCall> {
         self.captured.lock().await.clone()
     }
+    async fn open_scripted_stream(
+        &self,
+        call: CapturedStreamCall,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if request_dispatch_admission
+            .as_ref()
+            .is_some_and(|admission| !admission.is_admitted())
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false,
+            });
+        }
+        self.captured.lock().await.push(call);
+        // One-shot connect-phase error (see `with_open_error`).
+        if let Some(e) = self.open_error.lock().await.take() {
+            return Err(e);
+        }
+        let mut queue = self.turns.lock().await;
+        let next = queue.pop_front().ok_or_else(|| LlmError::Transport {
+            message: "streaming script exhausted".into(),
+        })?;
+        let s = stream::iter(next).boxed();
+        Ok(s)
+    }
 }
 
 #[async_trait]
@@ -128,36 +153,22 @@ impl StreamingApiClient for MockStreamingApiClient {
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if request_dispatch_admission
-            .as_ref()
-            .is_some_and(|admission| !admission.is_admitted())
-        {
-            return Err(LlmError::RequestDispatchRejected {
-                prior_dispatch: false,
-            });
-        }
-        self.captured.lock().await.push(CapturedStreamCall {
-            model: model.to_string(),
-            profile: profile.map(str::to_string),
-            effort_override: None,
-            output_budget: None,
-            system: system.cloned(),
-            messages,
-            tools,
-            query_source: query_source.to_string(),
-            skip_global_cache_for_system_prompt,
-            native_anthropic_request_context: None,
-        });
-        // One-shot connect-phase error (see `with_open_error`).
-        if let Some(e) = self.open_error.lock().await.take() {
-            return Err(e);
-        }
-        let mut queue = self.turns.lock().await;
-        let next = queue.pop_front().ok_or_else(|| LlmError::Transport {
-            message: "streaming script exhausted".into(),
-        })?;
-        let s = stream::iter(next).boxed();
-        Ok(s)
+        self.open_scripted_stream(
+            CapturedStreamCall {
+                model: model.to_string(),
+                profile: profile.map(str::to_string),
+                effort_override: None,
+                output_budget: None,
+                system: system.cloned(),
+                messages,
+                tools,
+                query_source: query_source.to_string(),
+                skip_global_cache_for_system_prompt,
+                native_anthropic_request_context: None,
+            },
+            request_dispatch_admission,
+        )
+        .await
     }
 
     async fn stream_with_effort_override(
@@ -186,24 +197,22 @@ impl StreamingApiClient for MockStreamingApiClient {
         let _ = request_dispatch_observer;
         let _ = typed_attachment_ids;
         let _ = task_deliveries;
-        let stream = self
-            .stream(
-                model,
-                profile,
-                system,
+        self.open_scripted_stream(
+            CapturedStreamCall {
+                model: model.to_string(),
+                profile: profile.map(str::to_string),
+                effort_override: effort.map(str::to_owned),
+                output_budget: max_tokens,
+                system: system.cloned(),
                 messages,
                 tools,
-                query_source,
+                query_source: query_source.to_string(),
                 skip_global_cache_for_system_prompt,
-                request_dispatch_admission,
-            )
-            .await?;
-        if let Some(last) = self.captured.lock().await.last_mut() {
-            last.effort_override = effort.map(str::to_owned);
-            last.output_budget = max_tokens;
-            last.native_anthropic_request_context = native_anthropic_request_context;
-        }
-        Ok(stream)
+                native_anthropic_request_context,
+            },
+            request_dispatch_admission,
+        )
+        .await
     }
 }
 
@@ -527,5 +536,62 @@ mod tests {
             calls[0].system.as_ref().map(|system| system.display_text()),
             Some("sys".to_owned())
         );
+    }
+    #[tokio::test]
+    async fn concurrent_stream_overrides_are_captured_on_their_own_call() {
+        let mock = Arc::new(MockStreamingApiClient::with_turns(vec![vec![], vec![]]));
+        // Both calls record their metadata before the queue opens. This makes
+        // an update of last_mut() deterministically target the wrong row.
+        let held_queue = mock.turns.lock().await;
+        let open = |model: &'static str, effort: &'static str, budget| {
+            let mock = mock.clone();
+            tokio::spawn(async move {
+                mock.stream_with_effort_override(
+                    model,
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                    Some(budget),
+                    Some(effort),
+                    vec![],
+                    "sdk",
+                    false,
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let first = open("first", "low", 111);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while mock.captured_calls().await.len() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let second = open("second", "high", 222);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while mock.captured_calls().await.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(held_queue);
+        drop(first.await.unwrap());
+        drop(second.await.unwrap());
+        let calls = mock.captured_calls().await;
+        for (model, effort, budget) in [("first", "low", 111), ("second", "high", 222)] {
+            let call = calls.iter().find(|call| call.model == model).unwrap();
+            assert_eq!(call.effort_override.as_deref(), Some(effort));
+            assert_eq!(call.output_budget, Some(budget));
+        }
     }
 }

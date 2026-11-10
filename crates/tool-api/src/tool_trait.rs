@@ -74,6 +74,18 @@ pub trait Tool: Send + Sync {
     /// Canonical tool name (e.g. `"Read"`, `"Bash"`).
     fn name(&self) -> &str;
 
+    /// Open an already-read file for bounded post-compaction restoration.
+    /// Implementations must apply their current model-path translation and
+    /// read-root policy and return a regular-file handle without reopening an
+    /// approved pathname. Unsupported tools fail closed: callers must not
+    /// replace `None` with direct filesystem access.
+    async fn open_file_for_compaction(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<Option<std::fs::File>, ToolError> {
+        Ok(None)
+    }
+
     /// Host-derived MCP provenance, never reconstructed from an FQN or alias.
     fn mcp_tool_identity(&self) -> Option<&crate::McpToolIdentity> {
         None

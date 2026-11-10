@@ -79,10 +79,18 @@ async fn orch_with_bus(
         plans_directory: Some("plans".to_string()),
         ..OrchestratorConfig::default()
     };
+    let mut context = tool_api::test_support::ctx_for_file_tools(
+        Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone())),
+        bus.clone(),
+        vec![cwd.clone()],
+    );
+    context.read_file_state = map.clone();
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(tool_file::FileReadTool::new(context)));
     ConversationOrchestrator::new(
         config,
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(tools),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
@@ -455,7 +463,7 @@ async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
     }
     let orch = orch_with_bus(
         dir.path().to_path_buf(),
-        map,
+        map.clone(),
         Arc::new(telemetry::InMemorySink::new()),
     )
     .await;
@@ -473,6 +481,28 @@ async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
     assert!(all.contains("first.txt"));
     assert!(!all.contains("overflow.txt"));
     assert!(all.contains("small.txt"));
+    let omitted = dir.path().join("overflow.txt");
+    assert!(
+        tool_api::read_file_state::get(&map, &omitted).is_none(),
+        "a budget-dropped attachment must not count as model-visible Read"
+    );
+    let reread = orch
+        .tools
+        .find_by_name("Read")
+        .unwrap()
+        .call(
+            source_json(&serde_json::json!({"file_path": omitted})),
+            tool_api::test_support::fresh_ctx(),
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reread.data.string_at("/type"), Some("text"));
+    assert_eq!(
+        reread.data.string_at("/file/content"),
+        Some("\u{0001}".repeat(20_000).as_str()),
+        "the next real Read must return the content omitted by compaction"
+    );
 }
 
 #[tokio::test]

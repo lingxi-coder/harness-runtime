@@ -203,9 +203,10 @@ async fn clear_rolls_usage_and_hot_resume_retains_the_root_ledger() {
     assert_eq!(used(&orch, 0), 900);
     seed_usage(&orch, 200);
     assert_eq!(used(&orch, 200), 1_100);
+    let resumed_session = lingxi_core::types::SessionId::new();
     OrchestratorHandle::resume_session(
         &orch,
-        lingxi_core::types::SessionId::new(),
+        resumed_session,
         Vec::new(),
         None,
         None,
@@ -214,7 +215,7 @@ async fn clear_rolls_usage_and_hot_resume_retains_the_root_ledger() {
                 input_tokens: 300,
                 ..CurrentUsageSnapshot::default()
             }),
-            ..lingxi_core::host::ResumeRuntimeSnapshot::default()
+            ..crate::test_support::code_resume_runtime_snapshot(resumed_session)
         },
     )
     .await

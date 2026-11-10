@@ -57,6 +57,13 @@ pub struct TaskCreatedFire {
 /// strict no-op; the orchestrator provides the real impl.
 #[async_trait]
 pub trait TaskCreatedFirer: Send + Sync {
+    /// Capture immutable event ownership before creation work can detach.
+    /// The default is inert for firers that do not need session context.
+    async fn capture_origin(&self, _task_id: &str) {}
+
+    /// Release ownership for a provisional identity discarded without creation.
+    async fn discard_origin(&self, _task_id: &str) {}
+
     /// Fire the `TaskCreated` hook for a newly-created task.
     ///
     /// Best-effort: implementations MUST NOT propagate hook failures — a

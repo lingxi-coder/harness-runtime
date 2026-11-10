@@ -4,7 +4,7 @@
 //! crossing this module boundary.
 
 use boon::{Compiler, Schemas, ValidationError};
-use lingxi_core::types::utf16_json::{Utf16JsonConsumer, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonConsumer, Utf16JsonProjection};
 use tool_api::native_schema::{
     format_issues as format_source_issues, format_raw_issues, NativeSchemaError,
 };
@@ -466,25 +466,209 @@ fn has_unpaired_source_units(value: &Utf16JsonProjection) -> bool {
 }
 
 fn schema_uses_regex(schema: &Utf16JsonProjection) -> bool {
+    fn local_pointer(reference: &str) -> Option<String> {
+        let fragment = if reference.is_empty() {
+            ""
+        } else {
+            reference.strip_prefix('#')?
+        };
+        let hex = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let mut source = fragment.bytes();
+        let mut decoded = Vec::with_capacity(fragment.len());
+        while let Some(byte) = source.next() {
+            decoded.push(if byte == b'%' {
+                hex(source.next()?)? * 16 + hex(source.next()?)?
+            } else {
+                byte
+            });
+        }
+        let pointer = String::from_utf8(decoded).ok()?;
+        (pointer.is_empty() || pointer.starts_with('/')).then_some(pointer)
+    }
+
+    fn target_in_resource<'a>(
+        mut value: JsonValueView<'a>,
+        pointer: &str,
+    ) -> Option<(JsonValueView<'a>, JsonValueView<'a>)> {
+        let resource = value;
+        if pointer.is_empty() {
+            return Some((value, resource));
+        }
+        let mut tokens = pointer.strip_prefix('/')?.split('/').peekable();
+        while let Some(token) = tokens.next() {
+            let mut escapes = token.bytes();
+            while let Some(byte) = escapes.next() {
+                if byte == b'~' && !matches!(escapes.next(), Some(b'0' | b'1')) {
+                    return None;
+                }
+            }
+            let token = token.replace("~1", "/").replace("~0", "~");
+            value = value.get_property(&token).or_else(|| {
+                let index = token.parse::<usize>().ok()?;
+                (index.to_string() == token)
+                    .then(|| value.get_index(index))
+                    .flatten()
+            })?;
+            if tokens.peek().is_some()
+                && value
+                    .get_property("$id")
+                    .and_then(|id| id.as_str())
+                    .is_some()
+            {
+                // A pointer may cross either a real subschema resource or
+                // annotation data with a lookalike $id. Do not guess its scope.
+                return None;
+            }
+        }
+        Some((value, resource))
+    }
+
+    fn contains_regex_candidate(root: JsonValueView<'_>) -> bool {
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            if value
+                .get_property("pattern")
+                .and_then(|pattern| pattern.as_str())
+                .is_some()
+                || value
+                    .get_property("patternProperties")
+                    .and_then(|patterns| patterns.object_entries())
+                    .is_some_and(|patterns| {
+                        !patterns.is_empty()
+                            && patterns.iter().all(|pattern| {
+                                pattern.value.object_entries().is_some()
+                                    || pattern.value.as_bool().is_some()
+                            })
+                    })
+            {
+                return true;
+            }
+            if let Some(entries) = value.object_entries() {
+                pending.extend(entries.into_iter().map(|entry| entry.value));
+            }
+            pending.extend(
+                (0..value.array_len().unwrap_or_default())
+                    .filter_map(|index| value.get_index(index)),
+            );
+        }
+        false
+    }
+
     let Some(root) = schema.at_pointer("") else {
         return false;
     };
-    let pattern = "pattern".encode_utf16().collect::<Vec<_>>();
-    let pattern_properties = "patternProperties".encode_utf16().collect::<Vec<_>>();
-    let mut pending = vec![root];
-    while let Some(value) = pending.pop() {
-        if let Some(entries) = value.object_entries() {
-            for entry in entries {
-                if entry.code_units == pattern || entry.code_units == pattern_properties {
-                    return true;
+    let mut pending = vec![(root, root)];
+    let mut resources = vec![root];
+    let mut followed = std::collections::HashSet::from([(0usize, String::new())]);
+    let mut unresolved_reference = false;
+    while let Some((value, mut resource)) = pending.pop() {
+        // Drafts differ on empty IDs and ID siblings of $ref. Keep tentative
+        // scope traversal bounded, but never trust it to exclude a regex.
+        if value.get_property("$id").is_some() || value.get_property("id").is_some() {
+            unresolved_reference = true;
+        }
+        if value
+            .get_property("$id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| !id.is_empty())
+        {
+            resource = value;
+        }
+        if value.get_property("pattern").is_some()
+            || value
+                .get_property("patternProperties")
+                .and_then(|node| node.object_entries())
+                .is_some_and(|entries| !entries.is_empty())
+        {
+            return true;
+        }
+        // A local reference can promote any document location to a schema,
+        // including a value normally treated only as annotation/instance data.
+        for key in ["$ref", "$dynamicRef", "$recursiveRef"] {
+            if let Some(reference) = value.get_property(key) {
+                // This guard is not a general schema URI/anchor resolver.
+                // Unknown scope uses the conservative regex-shape check below.
+                let Some(pointer) = reference.as_str().and_then(local_pointer) else {
+                    unresolved_reference = true;
+                    continue;
+                };
+                let resource_id = resources
+                    .iter()
+                    .position(|root| root.same_node_as(resource))
+                    .unwrap_or_else(|| {
+                        resources.push(resource);
+                        resources.len() - 1
+                    });
+                if followed.insert((resource_id, pointer.clone())) {
+                    let Some(target) = target_in_resource(resource, &pointer) else {
+                        unresolved_reference = true;
+                        continue;
+                    };
+                    pending.push(target);
                 }
-                pending.push(entry.value);
             }
-        } else if let Some(length) = value.array_len() {
-            pending.extend((0..length).filter_map(|index| value.get_index(index)));
+        }
+        // Inspect schemas rather than arbitrary JSON values. In particular,
+        // property names and const/enum/default data are not schema keywords.
+        for key in [
+            "properties",
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "dependencies",
+        ] {
+            if let Some(entries) = value
+                .get_property(key)
+                .and_then(|node| node.object_entries())
+            {
+                pending.extend(entries.into_iter().map(|entry| (entry.value, resource)));
+            }
+        }
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(schemas) = value.get_property(key) {
+                pending.extend(
+                    (0..schemas.array_len().unwrap_or_default())
+                        .filter_map(|index| schemas.get_index(index))
+                        .map(|schema| (schema, resource)),
+                );
+            }
+        }
+        for key in [
+            "additionalProperties",
+            "unevaluatedProperties",
+            "additionalItems",
+            "unevaluatedItems",
+            "contains",
+            "propertyNames",
+            "not",
+            "if",
+            "then",
+            "else",
+            "contentSchema",
+            "items",
+        ] {
+            if let Some(schema) = value.get_property(key) {
+                if key == "items" && schema.array_len().is_some() {
+                    pending.extend(
+                        (0..schema.array_len().unwrap_or_default())
+                            .filter_map(|index| schema.get_index(index))
+                            .map(|schema| (schema, resource)),
+                    );
+                } else {
+                    pending.push((schema, resource));
+                }
+            }
         }
     }
-    false
+    // With unresolved scope, any regex-shaped data may be the effective
+    // referenced schema. Plain nonregex schemas still use the reversible
+    // namespace; ambiguous candidates retain the exact-regex refusal.
+    unresolved_reference && contains_regex_candidate(root)
 }
 
 fn restore_issues(
@@ -647,11 +831,29 @@ fn collect_issues(
     }) {
         return false;
     }
-    if let Some(branches) = schema
-        .get("anyOf")
-        .or_else(|| schema.get("oneOf"))
-        .and_then(Value::as_array)
+    // This collector models Zod unions/enums for diagnostics, not every
+    // JSON-Schema applicator. In particular oneOf requires exactly one match,
+    // and validation siblings still apply after a union/enum matches. Let the
+    // full validator decide these schemas instead of accepting an empty set
+    // of reduced diagnostic issues. Native parsers have already returned above.
+    let annotations_only = |allowed: &[&str]| {
+        object.keys().all(|key| {
+            allowed.contains(&key.as_str())
+                || matches!(
+                    key.as_str(),
+                    "title" | "description" | "$schema" | "default"
+                )
+        })
+    };
+    if object.contains_key("oneOf")
+        || (object.contains_key("anyOf") && !annotations_only(&["anyOf"]))
+        || ((object.contains_key("enum") || object.contains_key("const"))
+            && !annotations_only(&["type", "enum", "const"]))
+        || (object.contains_key("enum") && object.contains_key("const"))
     {
+        return false;
+    }
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
         let mut errors = Vec::new();
         let mut dirty = None;
         for branch in branches {
@@ -692,10 +894,10 @@ fn collect_issues(
         .cloned()
         .or_else(|| schema.get("const").map(|value| vec![value.clone()]));
     if let Some(values) = values {
-        if !values
+        let matches = values
             .iter()
-            .any(|value| input.is_some_and(|input| js_value_eq(input, value)))
-        {
+            .any(|value| input.is_some_and(|input| js_value_eq(input, value)));
+        if !matches {
             let message = if values.len() == 1 {
                 format!("Invalid input: expected {}", js_json(&values[0], false))
             } else {
@@ -707,6 +909,8 @@ fn collect_issues(
             issues.push(
                 json!({"code":"invalid_value","values":values,"path":path,"message":message}),
             );
+        } else if let Some(expected) = schema.get("type") {
+            return collect_issues(&json!({"type":expected}), input, path, issues);
         }
         return true;
     }
@@ -843,6 +1047,17 @@ fn collect_issues(
             ("exclusiveMinimum", true, false),
             ("exclusiveMaximum", false, false),
         ] {
+            if !matches!(
+                (kind, key),
+                ("string", "minLength" | "maxLength")
+                    | ("array", "minItems" | "maxItems")
+                    | (
+                        "number",
+                        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum"
+                    )
+            ) {
+                continue;
+            }
             let Some(limit) = schema.get(key) else {
                 continue;
             };
@@ -1035,13 +1250,15 @@ mod tests {
 
     #[test]
     fn compiled_schema_cache_reuses_schema_but_revalidates_changed_inputs() {
-        let schema = json!({"type": "object", "properties": {"x": {"const": 7}}, "required": ["x"]});
+        let schema =
+            json!({"type": "object", "properties": {"x": {"const": 7}}, "required": ["x"]});
         let first = compiled_input_schema(&schema).unwrap();
         let second = compiled_input_schema(&schema.clone()).unwrap();
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert!(validate_tool_input_schema(&schema, &json!({"x": 7})).is_ok());
         assert!(validate_tool_input_schema(&schema, &json!({"x": 8})).is_err());
-        let changed = json!({"type": "object", "properties": {"x": {"const": 8}}, "required": ["x"]});
+        let changed =
+            json!({"type": "object", "properties": {"x": {"const": 8}}, "required": ["x"]});
         assert!(validate_tool_input_schema(&changed, &json!({"x": 8})).is_ok());
         assert!(validate_tool_input_schema(&changed, &json!({"x": 7})).is_err());
     }
@@ -1556,6 +1773,198 @@ mod tests {
         .unwrap_err();
         let issues: serde_json::Value = serde_json::from_str(&error).unwrap();
         assert_eq!(issues[0]["code"], "too_big");
+    }
+
+    #[test]
+    fn projected_gate_does_not_treat_property_names_or_instance_data_as_regexes() {
+        let input = Utf16JsonProjection::parse(
+            r#"{"pattern":"ok","patternProperties":"ok","text":"\ud800"}"#,
+        )
+        .unwrap();
+        let schema = Utf16JsonProjection::parse(r#"{"$id":"mem://no-regex","type":"object","properties":{"pattern":{"type":"string"},"patternProperties":{"type":"string"},"text":{"type":"string"}},"patternProperties":{}}"#).unwrap();
+        for native_input_validation in [false, true] {
+            let tool = NativeCronSchema {
+                name: "Exact".into(),
+                schema: schema.clone(),
+                refinement_issue: None,
+                native_input_validation,
+            };
+            assert!(super::validate_tool_schema_projected(&tool, &input).is_ok());
+        }
+        let tool = NativeCronSchema {
+            name: "Exact".into(),
+            schema: Utf16JsonProjection::parse(r#"{"const":{"pattern":"ok","patternProperties":"ok","text":"\ud800"},"default":{"pattern":"annotation"}}"#).unwrap(),
+            refinement_issue: None, native_input_validation: false,
+        };
+        assert!(super::validate_tool_schema_projected(&tool, &input).is_ok());
+
+        for schema in [
+            r#"{"type":"object","properties":{"text":{"type":"string","pattern":"^x"}}}"#,
+            r#"{"patternProperties":{"^text$":{"type":"string"}}}"#,
+            r#"{"allOf":[{"properties":{"text":{"pattern":"^x"}}}]}"#,
+            r##"{"$ref":"#/$defs/check","$defs":{"check":{"properties":{"text":{"pattern":"^x"}}}}}"##,
+        ] {
+            let tool = NativeCronSchema {
+                name: "Exact".into(),
+                schema: Utf16JsonProjection::parse(schema).unwrap(),
+                refinement_issue: None,
+                native_input_validation: false,
+            };
+            let error = super::validate_tool_schema_projected(&tool, &input).unwrap_err();
+            assert_eq!(
+                error.display.string_at(""),
+                Some("Exact UTF-16 schema regex validation is unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn projected_regex_guard_follows_local_schema_references_into_annotation_values() {
+        let input = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+        for schema in [
+            r##"{"$ref":"#/default","default":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}"##,
+            r##"{"$ref":"#%2Fdefault","default":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}"##,
+            r##"{"$ref":"#/default/a~1b","default":{"a/b":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}}"##,
+            r##"{"$ref":"#/const/0","const":[{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}]}"##,
+            r##"{"$ref":"#/$defs/inner","$defs":{"inner":{"$id":"mem://inner","$ref":"#/default","default":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}}}"##,
+            r##"{"$ref":"#/$defs/inner/default/check","$defs":{"inner":{"$id":"mem://inner","default":{"check":{"$ref":"#/default/regex"},"regex":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}}}}"##,
+            r##"{"$ref":"mem://inner#/default","$defs":{"inner":{"$id":"mem://inner","default":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}}}"##,
+            r##"{"$ref":"#/default/path","default":{"$id":"mem://decoy","path":{"$ref":"#/regex"},"regex":{"type":"string"}},"regex":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}"##,
+            r##"{"$ref":"#/default","default":{"$id":"","$ref":"#/regex","regex":{"type":"string"}},"regex":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}"##,
+            r##"{"$schema":"http://json-schema.org/draft-07/schema#","$ref":"#/default","default":{"$id":"mem://ignored-id","$ref":"#/regex","regex":{"type":"string"}},"regex":{"type":"string","pattern":"^[\\uE000-\\uF8FF]$"}}"##,
+        ] {
+            for native_input_validation in [false, true] {
+                let tool = NativeCronSchema {
+                    name: "Exact".into(),
+                    schema: Utf16JsonProjection::parse(schema).unwrap(),
+                    refinement_issue: None,
+                    native_input_validation,
+                };
+                let error = super::validate_tool_schema_projected(&tool, &input).unwrap_err();
+                assert_eq!(
+                    error.display.string_at(""),
+                    Some("Exact UTF-16 schema regex validation is unavailable")
+                );
+            }
+        }
+        // Without a reference the same private-use-looking data is annotation
+        // only and must not reject the reversible source namespace.
+        let tool = NativeCronSchema {
+            name: "Exact".into(),
+            schema: Utf16JsonProjection::parse(
+                r#"{"type":"string","default":{"pattern":"^[\\uE000-\\uF8FF]$"}}"#,
+            )
+            .unwrap(),
+            refinement_issue: None,
+            native_input_validation: false,
+        };
+        assert!(super::validate_tool_schema_projected(&tool, &input).is_ok());
+        for schema in [
+            r##"{"$ref":"#/default","default":{"type":"string"}}"##,
+            r##"{"$ref":"#/$defs/inner","$defs":{"inner":{"$id":"mem://inner","$ref":"#/default","default":{"type":"string"}}}}"##,
+            r##"{"$ref":"#plain","$defs":{"s":{"$anchor":"plain","type":"string"}}}"##,
+            r##"{"$ref":"mem://inner","$defs":{"inner":{"$id":"mem://inner","type":"string"}}}"##,
+        ] {
+            let tool = NativeCronSchema {
+                name: "Exact".into(),
+                schema: Utf16JsonProjection::parse(schema).unwrap(),
+                refinement_issue: None,
+                native_input_validation: false,
+            };
+            assert!(super::validate_tool_schema_projected(&tool, &input).is_ok());
+        }
+    }
+
+    #[test]
+    fn regex_schema_reference_walk_terminates_on_local_cycles() {
+        for schema in [
+            r##"{"$ref":"#","type":"string"}"##,
+            r##"{"$ref":"#/default/a","default":{"a":{"$ref":"#/default/b"},"b":{"$ref":"#/default/a"}}}"##,
+        ] {
+            assert!(!super::schema_uses_regex(
+                &Utf16JsonProjection::parse(schema).unwrap()
+            ));
+        }
+        let schema = Utf16JsonProjection::parse(r##"{"$ref":"#/default/a","default":{"a":{"$ref":"#/default/b"},"b":{"$ref":"#/default/a","pattern":"x"}}}"##).unwrap();
+        assert!(super::schema_uses_regex(&schema));
+    }
+
+    #[test]
+    fn rich_gate_applies_size_and_numeric_bounds_only_to_matching_instance_types() {
+        for (schema, input) in [
+            (
+                json!({"type":"number","minLength":3,"minItems":3}),
+                json!(1),
+            ),
+            (
+                json!({"type":"number","maxLength":1,"maxItems":1}),
+                json!(7),
+            ),
+            (
+                json!({"type":"string","minimum":100,"exclusiveMinimum":100}),
+                json!("x"),
+            ),
+            (
+                json!({"type":"string","maximum":0,"exclusiveMaximum":0}),
+                json!("x"),
+            ),
+            (json!({"type":"array","minLength":3,"minimum":3}), json!([])),
+            (
+                json!({"type":"array","maxLength":0,"maximum":0}),
+                json!([1, 2]),
+            ),
+        ] {
+            assert!(validate_tool_input_schema(&schema, &input).is_ok());
+            assert!(
+                validate_rich_input_schema("Custom", &schema, &input).is_ok(),
+                "inapplicable constraints must not reject {input} against {schema}"
+            );
+        }
+        for (schema, input) in [
+            (json!({"type":"number","minimum":3}), json!(1)),
+            (json!({"type":"string","minLength":3}), json!("x")),
+            (json!({"type":"array","minItems":3}), json!([])),
+            (json!({"type":"number","exclusiveMaximum":1}), json!(1)),
+            (json!({"type":"string","maxLength":1}), json!("xx")),
+            (json!({"type":"array","maxItems":1}), json!([1, 2])),
+        ] {
+            assert!(
+                validate_rich_input_schema("Custom", &schema, &input).is_err(),
+                "applicable constraints must still reject {input} against {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_schema_gate_enforces_one_of_and_union_enum_siblings() {
+        let one_of = json!({"type":"object", "oneOf":[
+            {"required":["path"]}, {"required":["url"]}
+        ]});
+        assert!(validate_rich_input_schema("Custom", &one_of, &json!({"path":"a"})).is_ok());
+        assert!(
+            validate_rich_input_schema("Custom", &one_of, &json!({"path":"a", "url":"b"})).is_err(),
+            "matching both branches must fail oneOf exclusivity"
+        );
+        for (schema, input) in [
+            (
+                json!({"type":"object", "required":["token"],
+                "anyOf":[{"required":["path"]},{"required":["url"]}]}),
+                json!({"path":"a"}),
+            ),
+            (
+                json!({"anyOf":[{"type":"string"}],"minLength":3}),
+                json!("a"),
+            ),
+            (json!({"enum":["a"],"minLength":3}), json!("a")),
+            (json!({"const":"a","pattern":"^b"}), json!("a")),
+            (json!({"type":"string","enum":[1]}), json!(1)),
+            (json!({"enum":[1,2],"const":1}), json!(2)),
+        ] {
+            assert!(
+                validate_rich_input_schema("Custom", &schema, &input).is_err(),
+                "a matching branch/value must not bypass siblings: {schema}"
+            );
+        }
     }
 
     #[test]

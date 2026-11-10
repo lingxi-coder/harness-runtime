@@ -1,5 +1,16 @@
 use super::*;
 use session::JsonlMessage;
+use std::future::Future;
+
+#[derive(Clone)]
+pub(crate) struct DeferredStorageNotification {
+    session: String,
+}
+
+tokio::task_local! {
+    static DEFERRED_STORAGE_NOTIFICATIONS:
+        Arc<std::sync::Mutex<Vec<DeferredStorageNotification>>>;
+}
 
 const DISK_FULL_PAUSE: &str = "Session paused because disk space is insufficient (ENOSPC). Free disk space, then retry in this same session. Existing history is retained; pending records will be saved before continuing.";
 
@@ -9,6 +20,61 @@ pub(crate) struct StoragePause {
 }
 
 impl ConversationOrchestrator {
+    /// Retain storage state immediately, but publish callbacks after the
+    /// caller's state transaction has released its locks. Nested owners share
+    /// the outer collector and leave publication to that outermost owner.
+    pub(crate) async fn with_deferred_storage_notifications<F: Future>(
+        &self,
+        future: F,
+    ) -> (F::Output, Vec<DeferredStorageNotification>) {
+        if DEFERRED_STORAGE_NOTIFICATIONS.try_with(|_| ()).is_ok() {
+            return (future.await, Vec::new());
+        }
+        let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let value = DEFERRED_STORAGE_NOTIFICATIONS
+            .scope(notices.clone(), future)
+            .await;
+        let notices = std::mem::take(
+            &mut *notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        (value, notices)
+    }
+
+    pub(crate) async fn emit_deferred_storage_notifications(
+        &self,
+        notices: Vec<DeferredStorageNotification>,
+    ) {
+        for notice in notices {
+            let active =
+                self.session.lock().await.session_id.as_uuid().to_string() == notice.session;
+            let paused = self
+                .transcript
+                .storage_pauses
+                .lock()
+                .await
+                .contains_key(&notice.session);
+            if active && paused {
+                self.output.emit_session_storage_state(true).await;
+                // The first callback may itself switch/recover the session.
+                let active =
+                    self.session.lock().await.session_id.as_uuid().to_string() == notice.session;
+                let paused = self
+                    .transcript
+                    .storage_pauses
+                    .lock()
+                    .await
+                    .contains_key(&notice.session);
+                if active && paused {
+                    self.output
+                        .emit_system_notice(&DISK_FULL_PAUSE.into(), true)
+                        .await;
+                }
+            }
+        }
+    }
+
     pub(crate) async fn pause_for_disk_full(&self) {
         let session = self.session.lock().await.session_id.as_uuid().to_string();
         self.mark_storage_paused(session).await;
@@ -18,7 +84,8 @@ impl ConversationOrchestrator {
         let active = self.session.lock().await.session_id.as_uuid().to_string() == session;
         let newly_paused = {
             let mut pauses = self.transcript.storage_pauses.lock().await;
-            if let std::collections::hash_map::Entry::Vacant(entry) = pauses.entry(session) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = pauses.entry(session.clone())
+            {
                 entry.insert(StoragePause::default());
                 true
             } else {
@@ -26,10 +93,18 @@ impl ConversationOrchestrator {
             }
         };
         if newly_paused && active {
-            self.output.emit_session_storage_state(true).await;
-            self.output
-                .emit_system_notice(&DISK_FULL_PAUSE.into(), true)
-                .await;
+            let notice = DeferredStorageNotification { session };
+            if DEFERRED_STORAGE_NOTIFICATIONS
+                .try_with(|notices| {
+                    notices
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(notice.clone());
+                })
+                .is_err()
+            {
+                self.emit_deferred_storage_notifications(vec![notice]).await;
+            }
         }
     }
 
@@ -225,18 +300,18 @@ impl ConversationOrchestrator {
                 OrchestratorError::Internal("storage recovery has no transcript writer".into())
             })?;
             while let Some(row) = pause.rows.front() {
-                let (_, is_tip) =
-                    writer
-                        .append_native_message_once(row)
-                        .await
-                        .map_err(|error| {
-                            OrchestratorError::Internal(format!(
-                                "{DISK_FULL_PAUSE} History could not be saved: {error}"
-                            ))
-                        })?;
-                if is_tip {
-                    *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
-                }
+                writer
+                    .append_native_message_once(row)
+                    .await
+                    .map_err(|error| {
+                        OrchestratorError::Internal(format!(
+                            "{DISK_FULL_PAUSE} History could not be saved: {error}"
+                        ))
+                    })?;
+                // Retention already advanced the accepted logical cursor.
+                // Compaction can then relink it to a kept suffix, whose last
+                // row precedes the summary physically. Flushing must preserve
+                // that cursor, including when a later retry append fails.
                 pause.rows.pop_front();
             }
         }
@@ -247,6 +322,10 @@ impl ConversationOrchestrator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "storage_notification_tests.rs"]
+mod notification_tests;
 
 #[cfg(test)]
 mod tests {

@@ -253,6 +253,7 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
     }
     let unacknowledged = std::fs::read(sidecar(temp.path(), session_id)).unwrap();
     std::fs::remove_dir(&path).unwrap();
+    orch.initialize_conversation_mode().await.unwrap();
     {
         let _gate = orch.turn_gate.lock().await;
         assert!(orch.consume_main_reports().await.unwrap());
@@ -358,6 +359,7 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
     )
     .unwrap();
     assert_eq!(cold_overrides["/messages/0/content/0/text"], expected_units);
+    let fixed_header = jsonl.lines().next().unwrap();
     for corruption in ["human_meta", "missing_sender", "mismatched_peer_body"] {
         let mut value = row.value.clone();
         let mut exact = row.utf16_overrides.clone();
@@ -370,8 +372,8 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
             }
             _ => unreachable!(),
         }
-        let mut invalid =
-            session::jsonl::exact_json::to_vec_with_overrides(&value, &exact).unwrap();
+        let mut invalid = format!("{fixed_header}\n").into_bytes();
+        invalid.extend(session::jsonl::exact_json::to_vec_with_overrides(&value, &exact).unwrap());
         invalid.push(b'\n');
         std::fs::write(&loader_path, invalid).unwrap();
         let rejected = session::jsonl::load_session(
@@ -677,7 +679,7 @@ async fn clear_and_hot_resume_reject_old_scope_and_wake_without_leaking_reports(
         Vec::new(),
         None,
         None,
-        lingxi_core::host::ResumeRuntimeSnapshot::default(),
+        crate::test_support::code_resume_runtime_snapshot(cleared.session_id),
     )
     .await
     .unwrap();
@@ -866,7 +868,8 @@ async fn hot_resume_requeues_pending_reports_after_the_old_wake_becomes_stale_wi
 {
     let temp = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();
-    let (orch, api, _) = fixture_with_switcher(temp.path(), session_id, true, true);
+    let (orch, api, path) = fixture_with_switcher(temp.path(), session_id, true, true);
+    orch.initialize_conversation_mode().await.unwrap();
     let wake = Arc::new(WakeProbe::default());
     orch.set_main_report_waker(wake.clone());
     let original_scope = orch.main_scope().await.unwrap();
@@ -889,10 +892,18 @@ async fn hot_resume_requeues_pending_reports_after_the_old_wake_becomes_stale_wi
         Vec::new(),
         None,
         None,
-        lingxi_core::host::ResumeRuntimeSnapshot::default(),
+        lingxi_core::host::ResumeRuntimeSnapshot {
+            transcript_path: Some(path.clone()),
+            ..crate::test_support::code_resume_runtime_snapshot(session_id)
+        },
     )
     .await
     .unwrap();
+    assert_eq!(
+        orch.transcript.jsonl_writer.as_ref().unwrap().active_path(),
+        path,
+        "same-session resume preserves the fixture's admitted transcript target"
+    );
     tokio::time::timeout(Duration::from_secs(1), wake.changed.notified())
         .await
         .unwrap();

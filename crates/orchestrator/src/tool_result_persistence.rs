@@ -309,17 +309,20 @@ fn result_file_stem(id: &str) -> std::borrow::Cow<'_, str> {
                 | "LPT8"
                 | "LPT9"
         );
-    // Keep ordinary provider filenames, but reserve the encoded namespace even
-    // on case-insensitive filesystems. The canonical message ID stays verbatim.
+    // Keep lowercase provider filenames. Any uppercase byte must enter the
+    // reserved encoded namespace so distinct exact IDs cannot alias on a
+    // case-insensitive filesystem. Reserve that namespace for all provider IDs,
+    // including ones that already look like an encoded stem.
     if !id.is_empty()
         && id.len() <= 200
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
         && !windows_device
         && !id
             .get(..7)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("opaque-"))
+        && !id.starts_with("mod-run-")
     {
         return std::borrow::Cow::Borrowed(id);
     }
@@ -425,6 +428,33 @@ pub async fn persist(
     is_json: bool,
     cap_bytes: usize,
 ) -> Result<Persisted, String> {
+    let stem = result_file_stem(id);
+    persist_with_stem(config_home, dir, &stem, body, is_json, cap_bytes).await
+}
+
+/// Persist one physical Mod core execution in a namespace disjoint from
+/// ordinary provider IDs. A retry shares the logical tool-use ID but owns
+/// different complete output, so its preview must reference its own file.
+pub(crate) async fn persist_mod_run(
+    config_home: &Path,
+    dir: &Path,
+    run_id: uuid::Uuid,
+    body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    is_json: bool,
+    cap_bytes: usize,
+) -> Result<Persisted, String> {
+    let stem = format!("mod-run-{run_id}");
+    persist_with_stem(config_home, dir, &stem, body, is_json, cap_bytes).await
+}
+
+async fn persist_with_stem(
+    config_home: &Path,
+    dir: &Path,
+    stem: &str,
+    body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    is_json: bool,
+    cap_bytes: usize,
+) -> Result<Persisted, String> {
     // `y = v4(h, a)` — cut the body to the byte cap BEFORE anything is written, so
     // a runaway tool result cannot fill the disk. `originalSize` still reports
     // the FULL length (`p.length`), which is what makes the envelope able to
@@ -441,7 +471,6 @@ pub async fn persist(
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
-    let stem = result_file_stem(id);
     let filepath = dir.join(format!("{stem}.{}", if is_json { "json" } else { "txt" }));
     match tokio::fs::symlink_metadata(&filepath).await {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -726,6 +755,92 @@ mod tests {
         .unwrap();
         assert_eq!(first.filepath, second.filepath);
         assert_eq!(std::fs::read_to_string(first.filepath).unwrap(), "first");
+    }
+
+    #[tokio::test]
+    async fn physical_mod_run_files_are_disjoint_from_exact_provider_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tool-results");
+        let run_id = uuid::Uuid::new_v4();
+        let provider_id = format!("mod-run-{run_id}");
+        let run = persist_mod_run(root.path(), &dir, run_id, &"run".into(), false, 1024)
+            .await
+            .unwrap();
+        assert_eq!(run.filepath, dir.join(format!("{provider_id}.txt")));
+        let provider = persist(
+            root.path(),
+            &dir,
+            &provider_id,
+            &"provider-first".into(),
+            false,
+            1024,
+        )
+        .await
+        .unwrap();
+        let provider_retry = persist(
+            root.path(),
+            &dir,
+            &provider_id,
+            &"provider-second".into(),
+            false,
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_ne!(provider.filepath, run.filepath);
+        assert_eq!(provider.filepath, provider_retry.filepath);
+        assert_eq!(
+            std::fs::read_to_string(provider.filepath).unwrap(),
+            "provider-first"
+        );
+        assert_eq!(std::fs::read_to_string(run.filepath).unwrap(), "run");
+
+        let units = vec![0xd800, b'-' as u16, b'x' as u16];
+        let exact_body = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "\u{fffd}-x".into(),
+            units.clone(),
+        )
+        .unwrap();
+        let exact = persist_mod_run(
+            root.path(),
+            &dir,
+            uuid::Uuid::new_v4(),
+            &exact_body,
+            false,
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.preview_utf16, units);
+        assert_eq!(
+            std::fs::read_to_string(exact.filepath).unwrap(),
+            "\u{fffd}-x"
+        );
+    }
+
+    #[tokio::test]
+    async fn case_distinct_provider_ids_use_disjoint_reserved_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tool-results");
+        let encoded = result_file_stem("toolu_Aa").into_owned();
+        assert!(encoded.starts_with("opaque-"));
+        let ids = ["toolu_Aa", "toolu_aa", encoded.as_str()];
+        let mut names = std::collections::HashSet::new();
+        for (index, id) in ids.into_iter().enumerate() {
+            let body = format!("result-{index}");
+            let first = persist(root.path(), &dir, id, &body.clone().into(), false, 1024)
+                .await
+                .unwrap();
+            let name = first.filepath.file_name().unwrap().to_str().unwrap();
+            assert!(names.insert(name.to_ascii_lowercase()), "alias for {id}");
+            assert_eq!(std::fs::read_to_string(&first.filepath).unwrap(), body);
+
+            let retry = persist(root.path(), &dir, id, &"ignored retry".into(), false, 1024)
+                .await
+                .unwrap();
+            assert_eq!(retry.filepath, first.filepath);
+            assert_eq!(std::fs::read_to_string(&retry.filepath).unwrap(), body);
+        }
     }
 
     #[tokio::test]

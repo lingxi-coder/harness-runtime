@@ -546,7 +546,9 @@ fn join_text_blocks(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -790,6 +792,104 @@ mod tests {
         let session = orch.session.lock().await;
         assert_eq!(session.history.len(), 1);
         drop(session);
+    }
+
+    #[tokio::test]
+    async fn delegate_packet_keeps_source_preserving_question_and_prior_context() {
+        let mut question_units: Vec<u16> = "Read the serial number on the red box"
+            .encode_utf16()
+            .collect();
+        question_units.push(0xd800);
+        let question = String::from_utf16_lossy(&question_units);
+        let mut prior_units: Vec<u16> = "Earlier context".encode_utf16().collect();
+        prior_units.push(0xdfff);
+        let prior = String::from_utf16_lossy(&prior_units);
+        let mut previous = ConversationMessage::user(MessageId::new(), prior.clone());
+        let ConversationMessage::User { content, .. } = &mut previous else {
+            unreachable!()
+        };
+        *content = vec![ContentBlock::TextJsUtf16 {
+            text: prior.clone(),
+            utf16_code_units: prior_units,
+            citations: None,
+        }];
+        let mut current = ConversationMessage::user_with_images(
+            MessageId::new(),
+            question.clone(),
+            vec![lingxi_core::types::ImageSource::Url {
+                url: "https://example.com/serial.png".into(),
+            }],
+        );
+        let ConversationMessage::User { content, .. } = &mut current else {
+            unreachable!()
+        };
+        content[0] = ContentBlock::TextJsUtf16 {
+            text: question.clone(),
+            utf16_code_units: question_units.clone(),
+            citations: None,
+        };
+        let fingerprint = sidequery::collect_media_fingerprints(&[current.clone()])
+            .unwrap()
+            .remove(0);
+        let api = Arc::new(VisionAwareMockApiClient::new(
+            vec![],
+            media_route(),
+            VisionDelegationResult {
+                analysis: MediaAnalysis {
+                    question_key: current.id().to_string(),
+                    media_fingerprints: vec![fingerprint],
+                    model: "vision".into(),
+                    prompt_version: PROMPT_VERSION,
+                    created_at: std::time::SystemTime::UNIX_EPOCH,
+                    task_findings: vec!["serial number".into()],
+                    media: vec![],
+                    cross_media_findings: vec![],
+                    truncated: false,
+                },
+                usage: cost::Usage::default(),
+                elapsed: std::time::Duration::ZERO,
+                retry_count: 0,
+                api_calls: 0,
+            },
+        ));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let history = vec![previous, current];
+        orch.session.lock().await.history = history.clone();
+        let prepared = VisionModelCallPreparer::new()
+            .prepare(
+                &orch,
+                ModelCallPath::Batched,
+                None,
+                None,
+                PreparedModelCall {
+                    history_snapshot: history,
+                    model: "text-only".into(),
+                    model_profile: Some("test".into()),
+                    outgoing_history_rewriter: None,
+                },
+            )
+            .await
+            .unwrap();
+        let packets = api.captured_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].current_user_text, question);
+        assert_eq!(
+            packets[0].prior_text_context,
+            vec![(MessageRole::User, prior)]
+        );
+        assert!(prepared.history_snapshot.iter().any(|message| matches!(
+            message, ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::TextJsUtf16 { utf16_code_units, .. } if *utf16_code_units == question_units))
+        )));
     }
 
     #[tokio::test]
