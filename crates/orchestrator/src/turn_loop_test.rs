@@ -4368,6 +4368,152 @@ mod read_file_state_tests {
         assert!(!deferral.wants_defer("Read", false));
     }
 
+    #[tokio::test]
+    async fn native_322_loaded_mcp_descriptions_reenter_mod_with_larger_source() {
+        use tool_api::tool_search_view::ToolRegistryView;
+
+        const NAME: &str = "mcp__audit__echo";
+        fn expected(limit: usize, call: usize) -> String {
+            let source = format!("{}\u{2026} [truncated]", "x".repeat(limit));
+            format!(
+                "{source}|mod:{call}|source:{}",
+                source.encode_utf16().count()
+            )
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("mcp-describe.js");
+        std::fs::write(
+            &module,
+            r#"let calls = 0;
+            export function register(on) {
+              on('tool.describe', { tool: 'mcp__audit__echo' }, ($, e, next) => ({
+                description: `${e.description}|mod:${++calls}|source:${e.description.length}`,
+                isDeferred: true,
+              }));
+              on('prompt.submit', ($, e, next) => {
+                $.ui.invalidate('tool.describe');
+                return next(e);
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("mcp-describe", dir.path(), &module, source_fixture!({}))
+            .await
+            .unwrap();
+        let mut hooks = hooks::HookRegistry::new();
+        hooks.set_mod_host(host.clone());
+        let deferral = Arc::new(tool_api::DeferralState::new(
+            tool_api::ToolSearchMode::Enabled,
+            false,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.set_deferral(deferral.clone());
+        registry.register_builtin(Arc::new(StubFileTool {
+            name: "ToolSearch",
+            cwd: dir.path().to_path_buf(),
+        }));
+        let context = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::disabled()),
+            vec![dir.path().to_path_buf()],
+        );
+        registry.register_mcp_tools(
+            lingxi_core::types::McpConnectionId::new(),
+            vec![Arc::new(tool_mcp::MCPTool::new_for_tool(
+                context,
+                NAME.into(),
+                "x".repeat(20_000).into(),
+                source_fixture!({"type":"object"}),
+                None,
+                None,
+                None,
+                false,
+                false,
+            ))],
+        );
+        let registry = Arc::new(registry);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            registry.clone(),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks)));
+
+        let initial = orch.build_wire_tools().await.unwrap().0;
+        assert!(initial.iter().all(|tool| tool.name != NAME));
+        let search = registry.tool_search_view().entries();
+        assert_eq!(
+            search
+                .iter()
+                .find(|tool| tool.name == NAME)
+                .unwrap()
+                .description
+                .string_at(""),
+            Some(expected(4096, 1).as_str()),
+            "keyword search sees the ordinary source budget before the Mod"
+        );
+
+        deferral.mark_loaded([NAME.to_owned()]);
+        for _ in 0..2 {
+            let wire = orch.build_wire_tools().await.unwrap().0;
+            let tool = wire.iter().find(|tool| tool.name == NAME).unwrap();
+            assert!(tool.defer_loading);
+            assert_eq!(
+                tool.description.string_at(""),
+                Some(expected(16_384, 2).as_str())
+            );
+            let search = registry.tool_search_view().entries();
+            assert_eq!(
+                search
+                    .iter()
+                    .find(|tool| tool.name == NAME)
+                    .unwrap()
+                    .description
+                    .string_at(""),
+                Some(expected(4096, 1).as_str()),
+                "loaded mode has its own Mod answer without replacing the keyword view"
+            );
+        }
+
+        host.dispatch_with_log_at_session(
+            "prompt.submit",
+            source_fixture!({"text":"invalidate both description modes"}),
+            &orch,
+            |event| async move { Ok(event) },
+            |_, _| async {},
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            let wire = orch.build_wire_tools().await.unwrap().0;
+            let tool = wire.iter().find(|tool| tool.name == NAME).unwrap();
+            assert!(tool.defer_loading);
+            assert_eq!(
+                tool.description.string_at(""),
+                Some(expected(16_384, 4).as_str())
+            );
+            let search = registry.tool_search_view().entries();
+            assert_eq!(
+                search
+                    .iter()
+                    .find(|tool| tool.name == NAME)
+                    .unwrap()
+                    .description
+                    .string_at(""),
+                Some(expected(4096, 3).as_str()),
+                "invalidation refreshes and then caches both source budgets"
+            );
+        }
+        host.unload("mcp-describe").await.unwrap();
+    }
+
     struct StubCoordinatorMode {
         enabled: bool,
     }

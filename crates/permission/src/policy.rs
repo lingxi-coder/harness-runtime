@@ -632,6 +632,9 @@ pub struct PermissionPolicy {
     /// remain in the UTF-16 projection so alias source enumeration never
     /// narrows JavaScript strings through Rust `String`.
     pub tool_aliases: Option<Utf16JsonProjection>,
+    /// Catalog-owned connector names for deny/ask only, independent of
+    /// initialize.toolAliases and of any rule source's proxy expansion.
+    pub mcp_deny_aliases: std::collections::BTreeMap<String, Vec<String>>,
     /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
     /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
     /// isAutoAllowBashIfSandboxedEnabled() && shouldUseSandbox(input)` branch).
@@ -872,6 +875,7 @@ impl PermissionPolicy {
             additional_working_dirs: AdditionalWorkingDirs::new(),
             block_reads_outside_working_directories: false,
             tool_aliases: None,
+            mcp_deny_aliases: Default::default(),
             sandbox_runtime: None,
             pwsh_parser: None,
             plan_files: None,
@@ -910,6 +914,16 @@ impl PermissionPolicy {
         }
         self.tool_aliases = aliases;
         Ok(self)
+    }
+
+    /// Attach one current catalog snapshot of restrictive connector names.
+    #[must_use]
+    pub fn with_mcp_deny_aliases(
+        mut self,
+        aliases: std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        self.mcp_deny_aliases = aliases;
+        self
     }
 
     /// Publish the session's plan-file identity holder — see
@@ -2274,6 +2288,7 @@ impl PermissionPolicy {
             additional_working_dirs,
             block_reads_outside_working_directories: self.block_reads_outside_working_directories,
             tool_aliases: self.tool_aliases.clone(),
+            mcp_deny_aliases: self.mcp_deny_aliases.clone(),
             sandbox_runtime: self.sandbox_runtime.clone(),
             pwsh_parser: self.pwsh_parser.clone(),
             plan_files: self.plan_files.clone(),
@@ -3167,6 +3182,25 @@ impl PermissionPolicy {
     }
 
     fn rule_match_kind_with_shell_ast(
+        &self,
+        rule: &PermissionRule,
+        tool_name: &str,
+        input: &Utf16JsonProjection,
+        shell_ast_candidates: &[String],
+    ) -> RulePatternMatch {
+        if rule.behavior != PermissionBehavior::Allow {
+            for alias in self.mcp_deny_aliases.get(tool_name).into_iter().flatten() {
+                let matched =
+                    self.rule_match_kind_for_candidate(rule, alias, input, shell_ast_candidates);
+                if matched != RulePatternMatch::NoMatch {
+                    return matched;
+                }
+            }
+        }
+        self.rule_match_kind_for_candidate(rule, tool_name, input, shell_ast_candidates)
+    }
+
+    fn rule_match_kind_for_candidate(
         &self,
         rule: &PermissionRule,
         tool_name: &str,

@@ -1,0 +1,44 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "cases": [
+    {
+      "name": "invalid-json",
+      "kind": "syntax",
+      "diagnostic": "invalid JSON",
+      "expected": "The connection to MCP server \"gap\" was closed because a message from the server was too large or could not be parsed, so the result of tool \"echo\" was not read. The tool may have run: check whether it did before running it again.",
+      "server": "gap",
+      "tool": "echo",
+      "source": "/Users/luolingfeng/lingxi/artifacts/mcp-gap-closure-322-20261109/work/remote/native-r3/invalid-json/report.json",
+      "source_sha256": "e69623b24df25c788703aea646715e0f511a72ab5d28af3fced4313a16bdcbca"
+    },
+    {
+      "name": "invalid-schema",
+      "kind": "schema",
+      "diagnostic": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "expected": "MCP server \"gap\" returned a malformed result that failed schema validation: [\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "server": "gap",
+      "tool": "echo",
+      "source": "/Users/luolingfeng/lingxi/artifacts/mcp-gap-closure-322-20261109/work/remote/native-r3/invalid-schema/report.json",
+      "source_sha256": "ce1d1f0b98bf197fe702c6551a552b5b29955197d1b2016ab851f0b5fd553da1"
+    },
+    {
+      "name": "http-error-text",
+      "kind": "transport",
+      "server": "wire audit",
+      "tool": "echo",
+      "diagnostic": "Error POSTing to endpoint: REMOTE_ERROR_\u03a9",
+      "expected": "Error POSTing to endpoint: REMOTE_ERROR_\u03a9",
+      "reportSha256": "5f22de171ceb94403a5d8e30f784937f2be98243909f649d46f81d25801dbb46"
+    },
+    {
+      "name": "json-body-overflow",
+      "kind": "body-overflow",
+      "server": "gap",
+      "tool": "echo",
+      "diagnostic": "body limit exceeded",
+      "expected": "The response from MCP server \"gap\" for tool \"echo\" was larger than 16MB, so it was not read. The tool may have run: check whether it did before running it again, and when you run it again, ask for less data.",
+      "reportSha256": "7dc3b384572403b1a9ffe504cafd683300a0248917dfdba9f38aacd3906c0489"
+    }
+  ]
+}

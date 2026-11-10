@@ -754,6 +754,15 @@ impl HookExecutorImpl {
         self.registry.read().await.has_hooks_for(event_type)
     }
 
+    /// Synchronous capability gate for hosts whose trait cannot await. A busy
+    /// registry is conservatively treated as potentially configured; execution
+    /// performs the authoritative subscription check under the async lock.
+    pub fn may_have_hooks_for(&self, event_type: &crate::events::HookEventType) -> bool {
+        self.registry
+            .try_read()
+            .map_or(true, |registry| registry.has_hooks_for(event_type))
+    }
+
     /// Register an agent's frontmatter hooks scoped to `agent_id` (G4 — claude
     /// `registerFrontmatterHooks(setAppState, agentId, hooks, …, isAgent)`,
     /// runAgent.ts:557-575). Writes through the shared registry so the hooks fire
@@ -771,6 +780,19 @@ impl HookExecutorImpl {
             .write()
             .await
             .register_agent_hooks(agent_id, hooks, is_agent);
+    }
+
+    /// Attach host loader provenance before frontmatter registration. Response
+    /// JSON never gains a way to assert that its own output is nonpersonal.
+    pub async fn set_personal_hook_origins(
+        &self,
+        hooks: &[HookDefinition],
+        personal: Option<bool>,
+    ) {
+        self.registry
+            .write()
+            .await
+            .set_personal_hook_origins(hooks, personal);
     }
 
     /// Remove every frontmatter hook scoped to `agent_id` (G4 — claude
@@ -1349,7 +1371,7 @@ impl HookExecutorImpl {
             return skipped;
         }
         let reg = self.registry.read().await;
-        let matched: Vec<HookDefinition> = reg
+        let mut matched: Vec<HookDefinition> = reg
             .match_event_partition(&event, &ctx, partition)
             .into_iter()
             .filter(|hook| Some(hook.id) != excluded)
@@ -1360,6 +1382,16 @@ impl HookExecutorImpl {
             .cloned()
             .collect();
         drop(reg);
+        // WorktreeCreate owns the folder before any platform creation, and
+        // WorktreeRemove owns cleanup. Neither lifecycle can run detached.
+        if matches!(
+            &event,
+            HookEvent::WorktreeCreate { .. } | HookEvent::WorktreeRemove { .. }
+        ) {
+            for hook in &mut matched {
+                hook.blocking = true;
+            }
+        }
         // Native's UserPromptExpansion runner starts its matched hook work as a
         // batch and consumes each result as it settles. Keep the ordinary
         // priority-ordered path for every other event; non-blocking UPE hooks
@@ -2476,6 +2508,32 @@ impl Dispatcher {
         ctx: &HookContext,
         progress_id: Option<&str>,
     ) -> HookResult {
+        if matches!(
+            event,
+            HookEvent::WorktreeCreate { .. } | HookEvent::WorktreeRemove { .. }
+        ) {
+            let unsupported = match hook.executor {
+                HookExecutor::Prompt { .. } => {
+                    Some("Prompt stop hooks are not yet supported outside REPL")
+                }
+                HookExecutor::Agent { .. } => {
+                    Some("Agent stop hooks are not yet supported outside REPL")
+                }
+                HookExecutor::Function { .. } => {
+                    Some("Internal error: function hook executed outside REPL context")
+                }
+                _ => None,
+            };
+            if let Some(message) = unsupported {
+                return HookResult {
+                    outcome: HookOutcome::Error,
+                    stdout: ExactHookText::default(),
+                    stderr: message.into(),
+                    exit_code: None,
+                    response: None,
+                };
+            }
+        }
         match &hook.executor {
             HookExecutor::Function { source, budget_ms } => {
                 let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
@@ -3105,11 +3163,26 @@ impl Dispatcher {
                     Some(timeout) if !timeout.is_zero() => timeout,
                     _ => Duration::from_millis(HOOK_COMMAND_TIMEOUT_MS),
                 };
+                let input = match expand_mcp_hook_input(input, &body_projection) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        return HookResult {
+                            outcome: HookOutcome::Error,
+                            stdout: ExactHookText::default(),
+                            stderr: ExactHookText::from_text(format!(
+                                "Hook {} failed: MCP hook input interpolation: {error}",
+                                hook.id
+                            )),
+                            exit_code: None,
+                            response: None,
+                        }
+                    }
+                };
                 match invoker
                     .invoke(HookMcpInvocation {
                         server: server.clone(),
                         tool: tool.clone(),
-                        input: expand_mcp_hook_input(input, &body_projection),
+                        input,
                         timeout: effective_timeout,
                     })
                     .await
@@ -3421,6 +3494,9 @@ impl HookExecutorImpl {
             if let Some(er) = &resp.elicitation_response {
                 agg.elicitation_response = Some(er.clone());
             }
+            // Native yields at most one replacement per completed hook,
+            // choosing direct over legacy within that result only.
+            agg.record_output_rewrite(resp);
             // PostToolUse `updatedMCPToolOutput`: keep the latest replacement
             // any folded hook returned, mirroring TS's per-hook assignment
             // (`result.updatedMCPToolOutput = …`, `utils/hooks.ts:647`). The
@@ -3463,6 +3539,8 @@ impl HookExecutorImpl {
                     crate::response::PairedRewrite::Direct
                 } else if resp.updated_mcp_tool_output.is_some() {
                     crate::response::PairedRewrite::LegacyMcp
+                } else if resp.legacy_mcp_rewrite_suppressed {
+                    crate::response::PairedRewrite::Suppressed
                 } else {
                     crate::response::PairedRewrite::None
                 });
@@ -3524,6 +3602,17 @@ impl HookExecutorImpl {
                 agg.reload_skills = true;
             }
             agg.attachments.extend(resp.attachments.clone());
+        }
+        if matches!(hook_event, "WorktreeCreate" | "WorktreeRemove") {
+            let worktree_result =
+                crate::worktree_manager::WorktreeHookResult::from_result(hook, &r);
+            if hook_event == "WorktreeCreate"
+                && agg.worktree_path.is_none()
+                && worktree_result.succeeded
+            {
+                agg.worktree_path = worktree_result.selected_path();
+            }
+            agg.worktree_results.push(worktree_result);
         }
         agg.all_results.push((hook.id, r));
     }
@@ -3841,13 +3930,14 @@ fn is_existing_dir(path: &Path) -> bool {
 /// missing fields are filled by later B-cluster batches that thread richer
 /// context through `HookEvent` / `HookContext`.
 fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static str, String)> {
-    match event {
+    let (name, body) = match event {
         HookEvent::PreToolUse {
             tool_name,
             tool_input,
             tool_use_id,
         } => {
             let payload = PreToolUsePayload {
+                mcp_server: ctx.mcp_server.clone(),
                 hook_event_name: HookEventNamePre,
                 session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
@@ -3871,6 +3961,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
             duration_ms,
         } => {
             let payload = PostToolUsePayload {
+                mcp_server: ctx.mcp_server.clone(),
                 hook_event_name: HookEventNamePost,
                 session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
@@ -3891,7 +3982,32 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
         // Lifecycle events (B1) share the `createBaseHookInput` base shape; they
         // are split into a helper to keep this dispatch readable.
         _ => build_lifecycle_envelope_body(event, ctx),
+    }?;
+    let Some(directory) = &ctx.scratchpad_dir else {
+        return Some((name, body));
+    };
+    // Native Ip inserts this feature-gated base field directly after cwd.
+    // Rebuild through the exact carrier so tool/hook source strings retain
+    // arbitrary UTF-16 and the optional field is shared by every event arm.
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&body).ok()?;
+    let mut fields = Vec::new();
+    for entry in source.object_entries()? {
+        if entry.display_key == "scratchpad_dir" {
+            continue;
+        }
+        fields.push((entry.code_units.to_vec(), entry.value.to_projection().ok()?));
+        if entry.display_key == "cwd" {
+            fields.push((
+                "scratchpad_dir".encode_utf16().collect(),
+                directory.to_string_lossy().into_owned().into(),
+            ));
+        }
     }
+    let body = lingxi_core::types::utf16_json::Utf16JsonProjection::object_units(fields)
+        .ok()?
+        .to_json_string()
+        .ok()?;
+    Some((name, body))
 }
 
 /// The `createBaseHookInput` base shape (`utils/hooks.ts:301-328`) extracted
@@ -4147,6 +4263,7 @@ fn build_lifecycle_envelope_body(
             duration_ms,
         } => {
             let payload = PostToolUseFailurePayload {
+                mcp_server: ctx.mcp_server.clone(),
                 hook_event_name: HookEventNamePostToolUseFailure,
                 session_id: b.session_id,
                 transcript_path: b.transcript_path,
@@ -4160,7 +4277,7 @@ fn build_lifecycle_envelope_body(
                 tool_input: tool_input.clone(),
                 tool_use_id: tool_use_id.to_string(),
                 error: error.clone(),
-                is_interrupt: None,
+                is_interrupt: ctx.tool_was_interrupted,
                 duration_ms: *duration_ms,
             };
             Some(("PostToolUseFailure", serde_json::to_string(&payload).ok()?))
@@ -4245,6 +4362,7 @@ fn build_lifecycle_envelope_body(
             ..
         } => {
             let payload = PermissionRequestPayload {
+                mcp_server: ctx.mcp_server.clone(),
                 hook_event_name: HookEventNamePermissionRequest,
                 session_id: b.session_id,
                 transcript_path: b.transcript_path,
@@ -4267,6 +4385,7 @@ fn build_lifecycle_envelope_body(
             reason,
         } => {
             let payload = PermissionDeniedPayload {
+                mcp_server: ctx.mcp_server.clone(),
                 hook_event_name: HookEventNamePermissionDenied,
                 session_id: b.session_id,
                 transcript_path: b.transcript_path,
@@ -4888,9 +5007,81 @@ fn parse_exact_hook_response(
 fn expand_mcp_hook_input(
     input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     payload: &lingxi_core::types::utf16_json::Utf16JsonProjection,
-) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-    expand_mcp_hook_value(input, payload)
-        .expect("validated MCP hook input template expands as flat JSON")
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+    // Ordinary JSON-property paths stay in the iterative Rust mapper. Native
+    // JS also observes inherited properties and the `__proto__` assignment
+    // setter; use our existing capability-free sandbox only for those cases.
+    let mut javascript_properties = template_assigns_proto(input);
+    let expanded = expand_mcp_hook_value(input, payload, &mut javascript_properties)
+        .map_err(|error| error.to_string())?;
+    if !javascript_properties {
+        return Ok(expanded);
+    }
+    let envelope = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&format!(
+        "{{\"template\":{},\"payload\":{}}}",
+        input.to_json_string().map_err(|error| error.to_string())?,
+        payload
+            .to_json_string()
+            .map_err(|error| error.to_string())?,
+    ))
+    .map_err(|error| error.to_string())?;
+    crate::function_hook::Sandbox::default()
+        .eval(MCP_TEMPLATE_JAVASCRIPT_PROPERTIES, &envelope)
+        .map_err(|error| error.to_string())
+}
+
+/// Fixed program only: authored strings are JSON data, never executable source.
+/// The inherited values that can stringify as functions are standard builtins;
+/// normalize QuickJS's multiline builtin representation to Bun's wire text.
+const MCP_TEMPLATE_JAVASCRIPT_PROPERTIES: &str = r#"
+function replace(text) {
+  return text.replace(/\$\{([a-zA-Z_][a-zA-Z0-9_.]*)\}/g, (_, path) => {
+    let value = input.payload;
+    for (const key of path.split('.')) {
+      if (value === null || typeof value !== 'object') return '';
+      value = value[key];
+    }
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'object') return JSON.stringify(value);
+    if (typeof value === 'function') return String(value).replace(/\s+/g, ' ');
+    return String(value);
+  });
+}
+const root = Array.isArray(input.template) ? [] : {};
+const pending = [[input.template, root]];
+while (pending.length) {
+  const [source, target] = pending.pop();
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== null && typeof value === 'object') {
+      const child = Array.isArray(value) ? [] : {};
+      target[key] = child;
+      pending.push([value, child]);
+    } else {
+      target[key] = typeof value === 'string' ? replace(value) : value;
+    }
+  }
+}
+return root;
+"#;
+
+fn template_assigns_proto(input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
+    let Some(root) = input.at_pointer("") else {
+        return false;
+    };
+    let mut pending = vec![root];
+    while let Some(value) = pending.pop() {
+        if let Some(entries) = value.object_entries() {
+            for entry in entries {
+                if entry.display_key == "__proto__" {
+                    return true;
+                }
+                pending.push(entry.value);
+            }
+        } else if let Some((_, entries)) = value.array_entries() {
+            pending.extend(entries.into_iter().map(|(_, value)| value));
+        }
+    }
+    false
 }
 
 /// Expand `${path}` template strings without converting either the configured
@@ -4899,6 +5090,7 @@ fn expand_mcp_hook_input(
 fn expand_mcp_hook_value(
     value: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     payload: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    javascript_properties: &mut bool,
 ) -> Result<
     lingxi_core::types::utf16_json::Utf16JsonProjection,
     lingxi_core::types::utf16_json::Utf16JsonProjectionError,
@@ -4908,7 +5100,7 @@ fn expand_mcp_hook_value(
         if expansion_error.is_some() {
             return None;
         }
-        match expand_mcp_hook_string(units, payload) {
+        match expand_mcp_hook_string(units, payload, javascript_properties) {
             Ok(value) => Some(value),
             Err(error) => {
                 expansion_error = Some(error);
@@ -4948,6 +5140,7 @@ fn find_utf16_subslice(haystack: &[u16], needle: &[u16], from: usize) -> Option<
 fn expand_mcp_hook_string(
     text: &[u16],
     payload: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    javascript_properties: &mut bool,
 ) -> Result<
     lingxi_core::types::utf16_json::Utf16JsonProjection,
     lingxi_core::types::utf16_json::Utf16JsonProjectionError,
@@ -4956,23 +5149,6 @@ fn expand_mcp_hook_string(
 
     const OPEN: [u16; 2] = [36, 123];
     const CLOSE: u16 = 125;
-    let opens = text
-        .windows(OPEN.len())
-        .filter(|window| *window == OPEN)
-        .count();
-    if text.starts_with(&OPEN) && text.last() == Some(&CLOSE) && opens == 1 {
-        if let Some(value) = lookup_mcp_hook_path(payload, &text[OPEN.len()..text.len() - 1]) {
-            if value.string_units("").is_some() {
-                return Ok(value);
-            }
-            // Template values are JavaScript-coerced into the containing
-            // string even when the placeholder occupies the whole string.
-            // Keep object/array JSON text as a source-created root string;
-            // returning the referenced subtree here changes the output shape.
-            let rendered = value.to_json_string().unwrap_or_default();
-            return Json::root_string(rendered.clone(), rendered.encode_utf16().collect());
-        }
-    }
 
     let mut output = Vec::with_capacity(text.len());
     let mut cursor = 0;
@@ -4984,7 +5160,32 @@ fn expand_mcp_hook_string(
             return Json::root_string(String::from_utf16_lossy(&output), output);
         };
         let path_end = path_start + close_relative;
-        if let Some(value) = lookup_mcp_hook_path(payload, &text[path_start..path_end]) {
+        // Native only interpolates the ASCII identifier/path grammar. An
+        // unrecognized placeholder remains literal instead of being erased.
+        let path = &text[path_start..path_end];
+        let identifier_start = |unit: u16| {
+            unit == u16::from(b'_')
+                || (u16::from(b'a')..=u16::from(b'z')).contains(&unit)
+                || (u16::from(b'A')..=u16::from(b'Z')).contains(&unit)
+        };
+        let valid = path.first().is_some_and(|unit| identifier_start(*unit))
+            && path.iter().skip(1).all(|unit| {
+                identifier_start(*unit)
+                    || (u16::from(b'0')..=u16::from(b'9')).contains(unit)
+                    || *unit == u16::from(b'.')
+            });
+        if !valid {
+            // Advance only past `${`: a nested valid placeholder can still
+            // match the native global regexp within this invalid one.
+            output.extend_from_slice(&text[start..path_start]);
+            cursor = path_start;
+            continue;
+        }
+        if let Some(value) = lookup_mcp_hook_path(payload, path) {
+            if value.at_pointer("").is_some_and(|value| value.is_null()) {
+                cursor = path_end + 1;
+                continue;
+            }
             if let Some(string_units) = value.string_units("") {
                 output.extend_from_slice(&string_units);
             } else if let Some(number) = value.number_at("") {
@@ -5001,6 +5202,9 @@ fn expand_mcp_hook_string(
             } else if let Ok(serialized) = value.to_json_string() {
                 output.extend(serialized.encode_utf16());
             }
+        } else {
+            // A missing own property may exist on Object/Array.prototype.
+            *javascript_properties = true;
         }
         cursor = path_end + 1;
     }
@@ -5014,23 +5218,42 @@ fn lookup_mcp_hook_path(
 ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
     let mut pointer = Vec::new();
     let mut value = payload.at_pointer("")?;
-    for segment in path.split(|unit| *unit == u16::from(b'.')) {
-        if segment.is_empty() {
-            return None;
-        }
+    let mut segments = path.split(|unit| *unit == u16::from(b'.')).peekable();
+    while let Some(segment) = segments.next() {
         if value.object_entries().is_some() {
             value = value.get_property_units(segment)?;
             pointer = append_json_pointer_token(&pointer, segment);
         } else if let Some(length) = value.array_len() {
-            let index = std::str::from_utf8(
-                &segment
-                    .iter()
-                    .map(|unit| u8::try_from(*unit).ok())
-                    .collect::<Option<Vec<_>>>()?,
-            )
-            .ok()?
-            .parse::<usize>()
-            .ok()?;
+            if segment
+                == [
+                    u16::from(b'l'),
+                    u16::from(b'e'),
+                    u16::from(b'n'),
+                    u16::from(b'g'),
+                    u16::from(b't'),
+                    u16::from(b'h'),
+                ]
+            {
+                // Array length is an own JS property; subsequent property
+                // traversal stops because the value is a primitive number.
+                if segments.peek().is_some() {
+                    return None;
+                }
+                return lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    &length.to_string(),
+                )
+                .ok();
+            }
+            let index_text = segment
+                .iter()
+                .map(|unit| u8::try_from(*unit).ok())
+                .collect::<Option<Vec<_>>>()?;
+            let index_text = std::str::from_utf8(&index_text).ok()?;
+            let index = index_text.parse::<usize>().ok()?;
+            // JS array property names must use canonical decimal spelling.
+            if index.to_string() != index_text {
+                return None;
+            }
             if index >= length {
                 return None;
             }
@@ -5057,14 +5280,130 @@ mod mcp_hook_source_tests {
     }
 
     #[test]
-    fn exact_mcp_placeholder_preserves_source_keys_and_string_units() {
-        let template = json(r#"{"exact":"${event.\ud800}","nested":{"copy":"${event.value}"}}"#);
-        let payload = json(r#"{"event":{"\ud800":"\udc00","value":"ready"}}"#);
+    fn native_322_scratchpad_base_field_is_conditional_ordered_and_source_preserving() {
+        let event = crate::HookEvent::PreToolUse {
+            tool_name: "mcp__fixture__echo".into(),
+            tool_input: json(r#"{"exact":"\ud800Ω"}"#),
+            tool_use_id: lingxi_core::types::ToolUseId::new(),
+        };
+        let mut context = crate::HookContext {
+            cwd: "/workspace".into(),
+            prompt_id: Some("prompt".into()),
+            ..Default::default()
+        };
+        let (_, disabled) = super::build_envelope_body(&event, &context).unwrap();
+        assert!(!disabled.contains("scratchpad_dir"));
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("scratchpad");
+        context.scratchpad_dir = Some(directory.clone());
+        let (_, enabled) = super::build_envelope_body(&event, &context).unwrap();
+        let path_json = serde_json::to_string(&directory.to_string_lossy()).unwrap();
+        assert!(enabled.contains(&format!(
+            r#""cwd":"/workspace","scratchpad_dir":{path_json},"prompt_id":"prompt""#
+        )));
+        assert!(enabled.contains(r#""exact":"\ud800Ω""#));
+        assert_eq!(
+            json(&enabled).string_at("/scratchpad_dir"),
+            directory.to_str()
+        );
+        assert!(!directory.exists());
+    }
 
-        let expanded = expand_mcp_hook_input(&template, &payload);
+    #[test]
+    fn native_322_scratchpad_base_fields_match_shipped_helper_fixtures() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/mcp_hook_features_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let context = crate::HookContext {
+                cwd: "/workspace".into(),
+                prompt_id: Some("prompt".into()),
+                scratchpad_dir: (case["enabled"] == true)
+                    .then(|| case["directory"].as_str().map(Into::into))
+                    .flatten(),
+                ..Default::default()
+            };
+            let event = crate::HookEvent::PreToolUse {
+                tool_name: "echo".into(),
+                tool_input: json("{}"),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
+            };
+            let (_, body) = super::build_envelope_body(&event, &context).unwrap();
+            let source = json(&body);
+            let expected = json(case["expected_json"].as_str().unwrap());
+            let selected = Utf16JsonProjection::object_units(
+                source
+                    .object_entries()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|entry| expected.get_property(entry.display_key).is_some())
+                    .map(|entry| {
+                        (
+                            entry.code_units.to_vec(),
+                            entry.value.to_projection().unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            assert_eq!(
+                selected.to_json_string().unwrap(),
+                case["expected_json"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn native_322_failure_hook_keeps_known_false_interrupt_flag() {
+        let event = crate::HookEvent::PostToolUseFailure {
+            tool_name: "mcp__wire_audit__echo".into(),
+            tool_input: json("{}"),
+            error: "failed".into(),
+            tool_use_id: lingxi_core::types::ToolUseId::new(),
+            duration_ms: Some(1),
+        };
+        for interrupted in [false, true] {
+            let context = crate::HookContext {
+                tool_was_interrupted: Some(interrupted),
+                mcp_server: Some(crate::HookMcpServerProvenance {
+                    name: "wire audit".into(),
+                    source: "dynamic".into(),
+                }),
+                ..Default::default()
+            };
+            let (_, body) = super::build_lifecycle_envelope_body(&event, &context).unwrap();
+            let source = json(&body);
+            assert_eq!(
+                source
+                    .at_pointer("/is_interrupt")
+                    .and_then(|value| value.as_bool()),
+                Some(interrupted)
+            );
+            assert!(body.ends_with(r#""mcp_server":{"name":"wire audit","source":"dynamic"}}"#));
+        }
+    }
+
+    #[test]
+    fn exact_mcp_placeholder_preserves_source_keys_and_string_units() {
+        let template = json(
+            r#"{"exact":"${event.value}","nested":{"\ud800":"${event.value}"},"invalid":"${event.\ud800}"}"#,
+        );
+        let payload = json(r#"{"event":{"\ud800":"unused","value":"\udc00"}}"#);
+
+        let expanded = expand_mcp_hook_input(&template, &payload).unwrap();
 
         assert_eq!(expanded.string_units("/exact"), Some(vec![0xDC00]));
-        assert_eq!(expanded.string_at("/nested/copy"), Some("ready"));
+        assert!(expanded
+            .to_json_string()
+            .unwrap()
+            .contains(r#""\ud800":"\udc00""#));
+        assert_eq!(
+            expanded.string_units("/invalid"),
+            Some("${event.".encode_utf16().chain([0xD800, 125]).collect())
+        );
         assert!(expanded
             .to_json_string()
             .expect("flat projection serializes")
@@ -5078,11 +5417,27 @@ mod mcp_hook_source_tests {
         );
         let payload = json(r#"{"event":{"value":"X","record":{"n":1}}}"#);
 
-        let expanded = expand_mcp_hook_input(&template, &payload);
+        let expanded = expand_mcp_hook_input(&template, &payload).unwrap();
 
         assert_eq!(expanded.string_at("/mixed"), Some("before:X:after"));
         assert_eq!(expanded.string_at("/missing"), Some(""));
         assert_eq!(expanded.string_at("/object"), Some(r#"{"n":1}"#));
+    }
+
+    #[test]
+    fn native_322_mcp_templates_match_shipped_helper_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hooks_2_1_322.json")).unwrap();
+        for case in fixture["templateCases"].as_array().unwrap() {
+            let input = json(case["input_json"].as_str().unwrap());
+            let payload = json(case["payload_json"].as_str().unwrap());
+            let expected = case["expanded_json"].as_str().unwrap();
+            let actual = expand_mcp_hook_input(&input, &payload)
+                .unwrap()
+                .to_json_string()
+                .unwrap();
+            assert_eq!(actual, expected, "{}", case["name"]);
+        }
     }
 
     #[test]

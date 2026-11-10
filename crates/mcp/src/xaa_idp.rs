@@ -35,12 +35,14 @@
 use crate::oauth::{self, OnAuthorizationUrl};
 use crate::registry::{XaaConfigProvider, XaaInputs};
 use lingxi_core::host::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
+use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection};
 use lingxi_core::types::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// IdP request deadline (xaaIdpLogin.ts `IDP_REQUEST_TIMEOUT_MS = 30000`).
 const IDP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const IDP_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Expiry buffer applied to a cached id_token: a token within this window of
 /// expiring is treated as a miss so the next attempt re-acquires
@@ -130,14 +132,26 @@ impl XaaIdpSettings {
 // Issuer normalization (xaaIdpLogin.ts:84-93).
 // ---------------------------------------------------------------------------
 
-/// Normalize an IdP issuer for use as a cache key: strip trailing slashes and
-/// lowercase the host. Issuers from config vs OIDC discovery can differ
-/// cosmetically but should hit the same cache slot (`issuerKey`).
-///
-/// We avoid a `url` dep (not in mcp's tree) and apply the same pragmatic subset
-/// `xaa::normalize_url` uses: lowercase scheme + host, strip a trailing slash.
+/// Native issuerKey: URL canonicalization, trailing pathname-slash removal,
+/// lowercased host and retained query/fragment. URL serialization keeps the
+/// root slash, unlike the XAA issuer-equality helper.
 #[must_use]
 pub fn issuer_key(issuer: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(issuer) {
+        let path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&path);
+        if let Some(host) = url.host_str() {
+            let host = host.to_lowercase();
+            let _ = url.set_host(Some(&host));
+        }
+        return url.to_string();
+    }
+    issuer.trim_end_matches('/').to_owned()
+}
+
+// Read older LingXi cache keys during migration; writes use native URL
+// canonicalization without touching other MCP/account credential services.
+fn legacy_issuer_key(issuer: &str) -> String {
     let trimmed = issuer.trim_end_matches('/');
     let Some((scheme, rest)) = trimmed.split_once("://") else {
         return trimmed.to_string();
@@ -185,51 +199,100 @@ pub async fn discover_oidc(
     http: &Arc<dyn HttpTransport>,
     issuer: &str,
 ) -> Result<OidcMetadata, McpError> {
+    Ok(discover_oidc_document(http, issuer).await?.metadata)
+}
+
+#[derive(Debug)]
+struct OidcMetadataDocument {
+    metadata: OidcMetadata,
+    issuer_units: Vec<u16>,
+    authorization_response_iss_parameter_supported: bool,
+    token_endpoint_auth_methods_supported: Option<Vec<String>>,
+}
+
+async fn discover_oidc_document(
+    http: &Arc<dyn HttpTransport>,
+    issuer: &str,
+) -> Result<OidcMetadataDocument, McpError> {
     let base = if issuer.ends_with('/') {
-        issuer.to_string()
+        issuer.to_owned()
     } else {
         format!("{issuer}/")
     };
-    let url = format!("{base}.well-known/openid-configuration");
-    let req = HttpRequest {
-        method: HttpMethod::Get,
-        url: url.clone(),
-        headers: vec![("accept".into(), "application/json".into())],
-        body: None,
-        body_bytes: None,
-        timeout: Some(IDP_REQUEST_TIMEOUT),
-    };
-    let resp = http
-        .request(req)
+    let url = url::Url::parse(&base)
+        .and_then(|base| base.join(".well-known/openid-configuration"))
+        .map_err(|_| {
+            McpError::OAuth(
+                format!("XAA IdP: OIDC discovery failed: issuer is not a valid URL: {issuer}")
+                    .into(),
+            )
+        })?;
+    let response = http
+        .request(HttpRequest {
+            method: HttpMethod::Get,
+            url: url.to_string(),
+            headers: vec![("Accept".into(), "application/json".into())],
+            body: None,
+            body_bytes: None,
+            timeout: Some(IDP_REQUEST_TIMEOUT),
+        })
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: OIDC discovery transport: {e}").into()))?;
-    if !(200..300).contains(&resp.status) {
+        .map_err(|error| {
+            McpError::OAuth(format!("XAA IdP: OIDC discovery transport: {error}").into())
+        })?;
+    if !(200..300).contains(&response.status) {
         return Err(McpError::OAuth(
             format!(
                 "XAA IdP: OIDC discovery failed: HTTP {} at {url}",
-                resp.status
+                response.status
             )
             .into(),
         ));
     }
-    let meta: OidcMetadata = serde_json::from_str(&resp.body).map_err(|_| {
-        McpError::OAuth(
-            format!("XAA IdP: OIDC discovery returned invalid/non-JSON metadata at {url}").into(),
-        )
-    })?;
-    if url::Url::parse(&meta.token_endpoint)
+    let validated =
+        crate::oauth::schemas::validate_authorization(&response.body, true).map_err(|error| {
+            McpError::OAuth(format!("XAA IdP: invalid OIDC metadata: {error}").into())
+        })?;
+    let value = validated.projection();
+    let document = OidcMetadataDocument {
+        metadata: OidcMetadata {
+            authorization_endpoint: value
+                .string_at("/authorization_endpoint")
+                .expect("validated endpoint")
+                .to_owned(),
+            token_endpoint: value
+                .string_at("/token_endpoint")
+                .expect("validated endpoint")
+                .to_owned(),
+        },
+        issuer_units: value.string_units("/issuer").expect("validated issuer"),
+        authorization_response_iss_parameter_supported: value
+            .get_property("authorization_response_iss_parameter_supported")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        token_endpoint_auth_methods_supported: value
+            .get_property("token_endpoint_auth_methods_supported")
+            .and_then(|value| value.array_entries())
+            .map(|(_, entries)| {
+                entries
+                    .into_iter()
+                    .map(|(_, value)| value.as_str().expect("validated string").to_owned())
+                    .collect()
+            }),
+    };
+    if url::Url::parse(&document.metadata.token_endpoint)
         .ok()
         .is_none_or(|endpoint| endpoint.scheme() != "https")
     {
         return Err(McpError::OAuth(
             format!(
                 "XAA IdP: refusing non-HTTPS token endpoint: {}",
-                meta.token_endpoint
+                document.metadata.token_endpoint
             )
             .into(),
         ));
     }
-    Ok(meta)
+    Ok(document)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,36 +301,75 @@ pub async fn discover_oidc(
 
 /// Decode the `exp` claim (seconds since epoch) from a JWT without verifying
 /// its signature. Returns `None` if parsing fails or `exp` is absent. Used only
-/// to derive a cache TTL — see xaaIdpLogin.ts:239-251 for why no signature /
+/// to expose the legacy integer view; cache calculation uses exact JS numeric
+/// claims, including fractional/negative values. See xaaIdpLogin.ts:239-251 for why no signature /
 /// iss / aud validation is needed (the IdP validates its own token at the
 /// RFC 8693 exchange).
 #[must_use]
 pub fn jwt_exp(jwt: &str) -> Option<u64> {
+    jwt_exp_number(jwt)
+        .filter(|value| {
+            value.is_finite() && *value >= 0.0 && value.fract() == 0.0 && *value < u64::MAX as f64
+        })
+        .map(|value| value as u64)
+}
+
+fn jwt_exp_number(jwt: &str) -> Option<f64> {
     use base64::Engine;
-    let mut parts = jwt.split('.');
-    let (_h, payload, _s) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() {
-        return None; // more than 3 segments — not a compact JWS.
+    let parts = jwt.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
     }
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    claims.get("exp").and_then(serde_json::Value::as_u64)
+    // Buffer.from(payload,'base64url') accepts URL/base64 alphabets, optional
+    // padding and ignored non-alphabet bytes. A trailing incomplete sextet is
+    // ignored, matching Node/Bun Buffer decoding.
+    let mut payload = parts[1]
+        .bytes()
+        .take_while(|byte| *byte != b'=')
+        .filter(|byte| byte.is_ascii_alphanumeric() || b"+/-_".contains(byte))
+        .map(|byte| match byte {
+            b'-' => b'+',
+            b'_' => b'/',
+            _ => byte,
+        })
+        .collect::<Vec<_>>();
+    if payload.len() % 4 == 1 {
+        payload.pop();
+    }
+    while payload.len() % 4 != 0 {
+        payload.push(b'=');
+    }
+    let decoder = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+    );
+    let bytes = decoder.decode(payload).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&text)
+        .ok()?
+        .get_property("exp")?
+        .as_number()
+}
+
+fn epoch_millis(time: SystemTime) -> f64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(value) => value.as_millis() as f64,
+        Err(value) => -(value.duration().as_millis() as f64),
+    }
+}
+
+fn time_from_millis(milliseconds: f64) -> Option<SystemTime> {
+    let duration = Duration::try_from_secs_f64(milliseconds.abs() / 1000.0).ok()?;
+    if milliseconds.is_sign_negative() {
+        UNIX_EPOCH.checked_sub(duration)
+    } else {
+        UNIX_EPOCH.checked_add(duration)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // id_token cache (xaaIdpLogin.ts:99-150).
 // ---------------------------------------------------------------------------
-
-/// On-disk shape for a cached id_token: the token plus its absolute expiry
-/// (Unix seconds). Mirrors the TS `{ idToken, expiresAt }` slot.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct CachedIdToken {
-    id_token: String,
-    /// Absolute expiry, seconds since the Unix epoch.
-    expires_at_unix: u64,
-}
 
 /// Read a cached id_token for `issuer`, or `None` if missing or within the 60s
 /// expiry buffer (`getCachedIdpIdToken`, xaaIdpLogin.ts:99-107).
@@ -279,27 +381,68 @@ pub async fn get_cached_id_token(
     clock: &Arc<dyn Clock>,
     issuer: &str,
 ) -> Result<Option<String>, McpError> {
+    Ok(get_cached_id_token_source(storage, clock, issuer)
+        .await?
+        .and_then(|value| value.string_at("").map(str::to_owned)))
+}
+
+/// Exact cached IdP token text. The String API exposes its USV wire view;
+/// this source API keeps unpaired UTF16 units without touching provider auth.
+pub async fn get_cached_id_token_source(
+    storage: &Arc<dyn SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    issuer: &str,
+) -> Result<Option<Utf16JsonProjection>, McpError> {
     let key = issuer_key(issuer);
-    let data = storage
+    let mut data = storage
         .retrieve(XAA_IDP_SERVICE, &key)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache retrieve: {e}").into()))?;
+        .map_err(|error| {
+            McpError::OAuth(format!("XAA IdP: id_token cache retrieve: {error}").into())
+        })?;
+    let legacy_key = legacy_issuer_key(issuer);
+    if data.is_none() && legacy_key != key {
+        data = storage
+            .retrieve(XAA_IDP_SERVICE, &legacy_key)
+            .await
+            .map_err(|error| {
+                McpError::OAuth(format!("XAA IdP: id_token cache retrieve: {error}").into())
+            })?;
+    }
     let Some(data) = data else { return Ok(None) };
-    let cached: CachedIdToken = match serde_json::from_slice(data.expose_secret_bytes()) {
-        Ok(c) => c,
-        // A corrupt cache entry is a miss, not a hard error.
-        Err(_) => return Ok(None),
+    let cached =
+        match Utf16JsonProjection::parse(&String::from_utf8_lossy(data.expose_secret_bytes())) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+    let numeric = |value: lingxi_core::types::utf16_json::JsonValueView<'_>| {
+        value
+            .as_number()
+            .unwrap_or_else(|| crate::oauth::schemas::finite_js_number(value).unwrap_or(f64::NAN))
     };
-    let expires_at = UNIX_EPOCH + Duration::from_secs(cached.expires_at_unix);
-    // Within the buffer of expiring (or already past) → treat as a miss.
-    if expires_at <= clock.now() + ID_TOKEN_EXPIRY_BUFFER {
+    // Presence wins even for null/zero; only missing milliseconds use the
+    // legacy second-based entry. Native subtraction preserves NaN behavior.
+    let expires_at_millis = match cached.get_property("expires_at_millis") {
+        Some(value) => numeric(value),
+        None => {
+            cached
+                .get_property("expires_at_unix")
+                .map_or(f64::NAN, numeric)
+                * 1000.0
+        }
+    };
+    if expires_at_millis - epoch_millis(clock.now()) <= ID_TOKEN_EXPIRY_BUFFER.as_millis() as f64 {
         return Ok(None);
     }
-    Ok(Some(cached.id_token))
+    if cached.string_at("/id_token").is_none() {
+        return Ok(None);
+    }
+    Ok(cached.subprojection("/id_token").ok())
 }
 
 /// Persist an id_token for `issuer` with an absolute expiry (`saveIdpIdToken`,
 /// xaaIdpLogin.ts:109-123).
+#[cfg(test)]
 async fn set_cached_id_token(
     storage: &Arc<dyn SecureStorage>,
     clock: &Arc<dyn Clock>,
@@ -307,15 +450,41 @@ async fn set_cached_id_token(
     id_token: &str,
     expires_at: SystemTime,
 ) -> Result<(), McpError> {
-    let cached = CachedIdToken {
-        id_token: id_token.to_string(),
-        expires_at_unix: expires_at
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    };
-    let bytes = serde_json::to_vec(&cached)
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode id_token: {e}").into()))?;
+    set_cached_id_token_source(
+        storage,
+        clock,
+        issuer,
+        &id_token.into(),
+        epoch_millis(expires_at),
+    )
+    .await
+}
+
+async fn set_cached_id_token_source(
+    storage: &Arc<dyn SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    issuer: &str,
+    id_token: &Utf16JsonProjection,
+    expires_at_millis: f64,
+) -> Result<(), McpError> {
+    let mut builder = Utf16JsonBuilder::new();
+    let token = builder
+        .import_projection(id_token)
+        .map_err(|error| McpError::OAuth(error.to_string().into()))?;
+    let expiry = builder.push_number(expires_at_millis);
+    let legacy_seconds = builder.push_number(expires_at_millis / 1000.0);
+    let root = builder
+        .push_object(vec![
+            ("id_token".to_owned(), token),
+            ("expires_at_unix".to_owned(), legacy_seconds),
+            ("expires_at_millis".to_owned(), expiry),
+        ])
+        .map_err(|error| McpError::OAuth(error.to_string().into()))?;
+    let bytes = builder
+        .finish(root)
+        .and_then(|value| value.to_json_string())
+        .map_err(|error| McpError::OAuth(error.to_string().into()))?
+        .into_bytes();
     let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
@@ -347,12 +516,28 @@ pub async fn save_id_token_from_jwt(
     issuer: &str,
     jwt: &str,
 ) -> Result<SystemTime, McpError> {
-    let expires_at = match jwt_exp(jwt) {
-        Some(exp) => UNIX_EPOCH + Duration::from_secs(exp),
-        None => clock.now() + ID_TOKEN_NO_EXP_FALLBACK,
+    let expiry = save_id_token_from_jwt_expiry(storage, clock, issuer, jwt).await?;
+    let oauth::OAuthExpiry::Number(milliseconds) = expiry else {
+        unreachable!("JWT save always computes expiry")
     };
-    set_cached_id_token(storage, clock, issuer, jwt, expires_at).await?;
-    Ok(expires_at)
+    time_from_millis(milliseconds)
+        .ok_or_else(|| McpError::OAuth("XAA IdP: token expiry is outside SystemTime range".into()))
+}
+
+/// Native numeric millisecond expiry for callers that preserve JS Number
+/// values, including infinities (serialized to null by the storage writer).
+pub async fn save_id_token_from_jwt_expiry(
+    storage: &Arc<dyn SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    issuer: &str,
+    jwt: &str,
+) -> Result<oauth::OAuthExpiry, McpError> {
+    let expires_at_millis = jwt_exp_number(jwt)
+        .filter(|value| *value != 0.0 && !value.is_nan())
+        .map(|value| value * 1000.0)
+        .unwrap_or_else(|| epoch_millis(clock.now()) + ID_TOKEN_NO_EXP_FALLBACK.as_millis() as f64);
+    set_cached_id_token_source(storage, clock, issuer, &jwt.into(), expires_at_millis).await?;
+    Ok(oauth::OAuthExpiry::Number(expires_at_millis))
 }
 
 /// Remove a cached id_token for `issuer` (`clearIdpIdToken`,
@@ -364,22 +549,18 @@ pub async fn clear_cached_id_token(
     storage: &Arc<dyn SecureStorage>,
     issuer: &str,
 ) -> Result<(), McpError> {
-    storage
-        .delete(XAA_IDP_SERVICE, &issuer_key(issuer))
-        .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache delete: {e}").into()))
+    let key = issuer_key(issuer);
+    let _ = storage.delete(XAA_IDP_SERVICE, &key).await;
+    let legacy = legacy_issuer_key(issuer);
+    if legacy != key {
+        let _ = storage.delete(XAA_IDP_SERVICE, &legacy).await;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // IdP client secret (xaaIdpLogin.ts:177-181, `getIdpClientSecret`).
 // ---------------------------------------------------------------------------
-
-/// On-disk shape for the IdP client secret slot (`{ clientSecret }`).
-#[derive(Debug, serde::Deserialize)]
-struct StoredClientSecret {
-    #[serde(rename = "clientSecret")]
-    client_secret: String,
-}
 
 /// Read the IdP client secret for `issuer`, if any (`getIdpClientSecret`).
 /// `None` → public IdP client (PKCE only). Read from the `xaa-idp-config`
@@ -391,7 +572,12 @@ pub async fn get_idp_client_secret(
     storage: &Arc<dyn SecureStorage>,
     issuer: &str,
 ) -> Result<Option<String>, McpError> {
-    read_client_secret(storage, XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer)).await
+    let key = issuer_key(issuer);
+    let value = read_client_secret(storage, XAA_IDP_CONFIG_SERVICE, &key).await?;
+    if value.is_some() || key == legacy_issuer_key(issuer) {
+        return Ok(value);
+    }
+    read_client_secret(storage, XAA_IDP_CONFIG_SERVICE, &legacy_issuer_key(issuer)).await
 }
 
 /// Persist the IdP client secret for `issuer` (`saveIdpClientSecret`,
@@ -432,10 +618,13 @@ pub async fn clear_idp_client_secret(
     storage: &Arc<dyn SecureStorage>,
     issuer: &str,
 ) -> Result<(), McpError> {
-    storage
-        .delete(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer))
-        .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret delete: {e}").into()))
+    let key = issuer_key(issuer);
+    let _ = storage.delete(XAA_IDP_CONFIG_SERVICE, &key).await;
+    let legacy = legacy_issuer_key(issuer);
+    if legacy != key {
+        let _ = storage.delete(XAA_IDP_CONFIG_SERVICE, &legacy).await;
+    }
+    Ok(())
 }
 
 /// Read the AS confidential-client secret for a server
@@ -446,7 +635,11 @@ async fn get_as_client_secret(
     storage: &Arc<dyn SecureStorage>,
     server_key: &str,
 ) -> Result<Option<String>, McpError> {
-    read_client_secret(storage, MCP_OAUTH_CLIENT_CONFIG_SERVICE, server_key).await
+    Ok(
+        read_client_secret(storage, MCP_OAUTH_CLIENT_CONFIG_SERVICE, server_key)
+            .await?
+            .filter(|secret| !secret.is_empty()),
+    )
 }
 
 /// Shared `{ clientSecret }` reader for the two confidential-secret slots.
@@ -459,25 +652,16 @@ async fn read_client_secret(
         McpError::OAuth(format!("XAA IdP: secret retrieve ({service}): {e}").into())
     })?;
     let Some(data) = data else { return Ok(None) };
-    let parsed: StoredClientSecret = serde_json::from_slice(data.expose_secret_bytes())
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode secret ({service}): {e}").into()))?;
-    Ok(Some(parsed.client_secret))
+    let parsed = Utf16JsonProjection::parse(&String::from_utf8_lossy(data.expose_secret_bytes()))
+        .map_err(|error| {
+        McpError::OAuth(format!("XAA IdP: decode secret ({service}): {error}").into())
+    })?;
+    Ok(parsed.string_at("/clientSecret").map(str::to_owned))
 }
 
 // ---------------------------------------------------------------------------
 // acquire_idp_id_token (xaaIdpLogin.ts:401-487).
 // ---------------------------------------------------------------------------
-
-/// `authorization_code`-grant token response, extracting the OIDC `id_token`.
-/// The oauth.rs `Tokens` deliberately drops `id_token` (OAuth, not OIDC); we
-/// parse our own minimal shape so the openid-scope response surfaces it.
-#[derive(Debug, serde::Deserialize)]
-struct OidcTokenResponse {
-    #[serde(default)]
-    id_token: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-}
 
 /// Acquire an id_token from the IdP: return the cached token if still valid,
 /// otherwise run the OIDC authorization_code + PKCE browser flow once and cache
@@ -502,12 +686,16 @@ pub async fn acquire_idp_id_token(
     idp_client_secret: Option<&str>,
 ) -> Result<String, McpError> {
     // Cache hit → done (no browser pop).
-    if let Some(cached) = get_cached_id_token(storage, clock, &settings.issuer).await? {
+    if let Some(cached) = get_cached_id_token(storage, clock, &settings.issuer)
+        .await?
+        .filter(|token| !token.is_empty())
+    {
         return Ok(cached);
     }
 
     // 1. OIDC discovery → authorization + token endpoints.
-    let oidc = discover_oidc(http, &settings.issuer).await?;
+    let oidc_document = discover_oidc_document(http, &settings.issuer).await?;
+    let oidc = &oidc_document.metadata;
     // Adapt to the oauth.rs metadata shape (authorize-URL build + exchange).
     let meta = oauth::AuthServerMetadata {
         authorization_endpoint: oidc.authorization_endpoint.clone(),
@@ -518,7 +706,9 @@ pub async fn acquire_idp_id_token(
         default_scope: None,
         revocation_endpoint: None,
         revocation_endpoint_auth_methods_supported: None,
-        token_endpoint_auth_methods_supported: None,
+        token_endpoint_auth_methods_supported: oidc_document
+            .token_endpoint_auth_methods_supported
+            .clone(),
     };
 
     // 2. Bind the loopback listener FIRST so the redirect_uri is known before
@@ -536,20 +726,29 @@ pub async fn acquire_idp_id_token(
     on_authorization_url(&auth_url);
 
     // 4. Wait for the redirect, validate state, capture the code.
-    let params = listener
-        .accept(&state, &redirect_uri)
-        .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: callback: {e}").into()))?;
+    let params = tokio::time::timeout(
+        IDP_LOGIN_TIMEOUT,
+        listener.accept_xaa_with_issuer_units(
+            &state,
+            &redirect_uri,
+            Some(oidc_document.issuer_units.as_slice()),
+            oidc_document.authorization_response_iss_parameter_supported,
+        ),
+    )
+    .await
+    .map_err(|_| McpError::OAuth("XAA IdP: login timed out".into()))?
+    .map_err(|error| McpError::OAuth(error.to_string().into()))?;
 
     // 5. Exchange the code for tokens, extracting the id_token. We POST the same
     //    authorization_code grant oauth::exchange_code does, but parse our own
     //    OIDC shape (oauth::Tokens drops id_token). `client_secret` is sent via
     //    client_secret_post when the IdP client is confidential.
-    let (id_token, expires_in) = exchange_code_for_id_token(
+    let (id_token, expires_in, id_token_source) = exchange_code_for_id_token(
         http,
-        &oidc.token_endpoint,
+        clock,
+        &meta,
         &settings.client_id,
-        idp_client_secret,
+        idp_client_secret.filter(|secret| !secret.is_empty()),
         &params.code,
         &verifier,
         &redirect_uri,
@@ -559,11 +758,19 @@ pub async fn acquire_idp_id_token(
     // 6. Cache it — prefer the id_token's own `exp` claim, else the AS-provided
     //    `expires_in`, else +1h (xaaIdpLogin.ts:475-478:
     //    `expFromJwt ? expFromJwt : now + (expires_in ?? 3600)`).
-    let expires_at = match jwt_exp(&id_token) {
-        Some(exp) => UNIX_EPOCH + Duration::from_secs(exp),
-        None => clock.now() + Duration::from_secs(expires_in.unwrap_or(3600)),
-    };
-    set_cached_id_token(storage, clock, &settings.issuer, &id_token, expires_at).await?;
+    let expires_at_millis = jwt_exp_number(&id_token)
+        .filter(|value| *value != 0.0 && !value.is_nan())
+        .map(|value| value * 1000.0)
+        .unwrap_or_else(|| epoch_millis(clock.now()) + expires_in.unwrap_or(3600.0) * 1000.0);
+    // Native returns the acquired token when a cache write fails.
+    let _ = set_cached_id_token_source(
+        storage,
+        clock,
+        &settings.issuer,
+        &id_token_source,
+        expires_at_millis,
+    )
+    .await;
 
     Ok(id_token)
 }
@@ -573,59 +780,45 @@ pub async fn acquire_idp_id_token(
 /// `client_secret_post` when present (xaaIdpLogin.ts:418-432).
 async fn exchange_code_for_id_token(
     http: &Arc<dyn HttpTransport>,
-    token_endpoint: &str,
+    clock: &Arc<dyn Clock>,
+    metadata: &oauth::AuthServerMetadata,
     client_id: &str,
     client_secret: Option<&str>,
     code: &str,
     verifier: &str,
     redirect_uri: &str,
-) -> Result<(String, Option<u64>), McpError> {
-    let mut form: Vec<(&str, &str)> = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", verifier),
-    ];
-    if let Some(secret) = client_secret {
-        form.push(("client_secret", secret));
-    }
-    let body = form
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-    let req = HttpRequest {
-        method: HttpMethod::Post,
-        url: token_endpoint.to_string(),
-        headers: vec![
-            (
-                "content-type".into(),
-                "application/x-www-form-urlencoded".into(),
-            ),
-            ("accept".into(), "application/json".into()),
-        ],
-        body: Some(body),
-        body_bytes: None,
-        timeout: Some(IDP_REQUEST_TIMEOUT),
-    };
-    let resp = http
-        .request(req)
-        .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: token exchange transport: {e}").into()))?;
-    if !(200..300).contains(&resp.status) {
-        return Err(McpError::OAuth(
-            format!("XAA IdP: token exchange failed: HTTP {}", resp.status).into(),
-        ));
-    }
-    let parsed: OidcTokenResponse = serde_json::from_str(&resp.body)
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode token response: {e}").into()))?;
-    let id_token = parsed.id_token.ok_or_else(|| {
-        McpError::OAuth("XAA IdP: token response missing id_token (check scope=openid)".into())
-    })?;
-    // Return `expires_in` so the caller can use it as the cache-TTL fallback when
-    // the id_token carries no `exp` claim (xaaIdpLogin.ts:475-478).
-    Ok((id_token, parsed.expires_in))
+) -> Result<(String, Option<f64>, Utf16JsonProjection), McpError> {
+    let (_, body) = oauth::exchange_code_with_client_raw(
+        http,
+        clock,
+        metadata,
+        client_id,
+        client_secret.filter(|secret| !secret.is_empty()),
+        None,
+        code,
+        verifier,
+        redirect_uri,
+        None,
+    )
+    .await
+    .map_err(|error| McpError::OAuth(error.to_string().into()))?;
+    let parsed = crate::oauth::schemas::validate_tokens(&body)
+        .map_err(|error| McpError::OAuth(error.into()))?;
+    let projection = parsed.projection();
+    let id_token = projection
+        .string_at("/id_token")
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            McpError::OAuth("XAA IdP: token response missing id_token (check scope=openid)".into())
+        })?
+        .to_owned();
+    Ok((
+        id_token,
+        projection.number_at("/expires_in"),
+        projection
+            .subprojection("/id_token")
+            .map_err(|error| McpError::OAuth(error.to_string().into()))?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +835,7 @@ async fn exchange_code_for_id_token(
 /// provider can't see the per-server OAuth config — the provider needs the
 /// AS `client_id` from the server's `oauth.clientId`. The registry supplies
 /// that via [`Self::with_server_client_id`] resolution; see [`xaa_inputs`].
+#[derive(Clone)]
 pub struct XaaIdpConfigProvider {
     http: Arc<dyn HttpTransport>,
     clock: Arc<dyn Clock>,
@@ -653,6 +847,15 @@ pub struct XaaIdpConfigProvider {
     /// engine wires this from its known MCP configs. When a server isn't in the
     /// map, `xaa_inputs` returns `Ok(None)` (not XAA-provisioned).
     server_lookup: Arc<dyn ServerOAuthLookup>,
+    server_credentials: Option<XaaServerCredentials>,
+}
+
+#[derive(Clone)]
+struct XaaServerCredentials {
+    name: String,
+    key: String,
+    client_id: Option<String>,
+    storage: Arc<dyn SecureStorage>,
 }
 
 /// Seam the host implements so the provider can map a `server_name` to its
@@ -686,12 +889,49 @@ impl XaaIdpConfigProvider {
             on_authorization_url,
             settings,
             server_lookup,
+            server_credentials: None,
         }
+    }
+
+    async fn lookup_server_credentials(
+        &self,
+        server_name: &str,
+    ) -> Option<(String, String, Arc<dyn SecureStorage>)> {
+        if let Some(bound) = self
+            .server_credentials
+            .as_ref()
+            .filter(|bound| bound.name == server_name)
+        {
+            return Some((
+                bound.client_id.clone()?,
+                bound.key.clone(),
+                bound.storage.clone(),
+            ));
+        }
+        let (client_id, key) = self.server_lookup.lookup(server_name).await?;
+        Some((client_id, key, self.storage.clone()))
     }
 }
 
 #[async_trait::async_trait]
 impl XaaConfigProvider for XaaIdpConfigProvider {
+    fn for_server_credentials(
+        &self,
+        server_name: &str,
+        server_key: &str,
+        client_id: Option<&str>,
+        storage: Arc<dyn SecureStorage>,
+    ) -> Option<Arc<dyn XaaConfigProvider>> {
+        let mut provider = self.clone();
+        provider.server_credentials = Some(XaaServerCredentials {
+            name: server_name.to_owned(),
+            key: server_key.to_owned(),
+            client_id: client_id.map(str::to_owned),
+            storage,
+        });
+        Some(Arc::new(provider))
+    }
+
     async fn xaa_inputs(
         &self,
         server_name: &str,
@@ -700,14 +940,16 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         // Resolve the AS client_id + server_key for this server. Unknown server
         // (or no AS client_id) → not XAA-provisioned (auth.ts:683-688 raises;
         // our seam returns Ok(None) so the registry emits its hard-fail copy).
-        let Some((as_client_id, server_key)) = self.server_lookup.lookup(server_name).await else {
+        let Some((as_client_id, server_key, as_storage)) =
+            self.lookup_server_credentials(server_name).await
+        else {
             return Ok(None);
         };
 
         // AS confidential client_secret (mcpOAuthClientConfig[serverKey]). Absent
         // → can't run the confidential jwt-bearer leg; treat as not provisioned
         // (auth.ts:691-711 raises; we surface the actionable error to the user).
-        let Some(as_client_secret) = get_as_client_secret(&self.storage, &server_key).await? else {
+        let Some(as_client_secret) = get_as_client_secret(&as_storage, &server_key).await? else {
             return Err(McpError::OAuth(
                 format!(
                     "XAA: AS client secret not found for '{server_name}'. \
@@ -745,6 +987,34 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         }))
     }
 
+    async fn as_client_secret_source(
+        &self,
+        server_name: &str,
+        _server_url: &str,
+    ) -> Result<Option<Utf16JsonProjection>, McpError> {
+        let Some((_, key, as_storage)) = self.lookup_server_credentials(server_name).await else {
+            return Ok(None);
+        };
+        let Some(data) = as_storage
+            .retrieve(MCP_OAUTH_CLIENT_CONFIG_SERVICE, &key)
+            .await
+            .map_err(|error| {
+                McpError::OAuth(format!("XAA IdP: secret retrieve: {error}").into())
+            })?
+        else {
+            return Ok(None);
+        };
+        let source =
+            Utf16JsonProjection::parse(&String::from_utf8_lossy(data.expose_secret_bytes()))
+                .map_err(|error| {
+                    McpError::OAuth(format!("XAA IdP: decode secret: {error}").into())
+                })?;
+        if source.string_at("/clientSecret").is_none() {
+            return Ok(None);
+        }
+        Ok(source.subprojection("/clientSecret").ok())
+    }
+
     async fn peek_id_token_cache_hit(
         &self,
         server_name: &str,
@@ -755,7 +1025,9 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         // failure-telemetry try/catch begins. Repeating these read-only checks
         // in `xaa_inputs` keeps the trait seam stateless while preserving that
         // observable ordering.
-        let Some((_as_client_id, server_key)) = self.server_lookup.lookup(server_name).await else {
+        let Some((_as_client_id, server_key, as_storage)) =
+            self.lookup_server_credentials(server_name).await
+        else {
             return Err(McpError::OAuth(
                 format!(
                     "XAA: server '{server_name}' is not XAA-provisioned (no AS client config)."
@@ -763,7 +1035,7 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
                 .into(),
             ));
         };
-        if get_as_client_secret(&self.storage, &server_key)
+        if get_as_client_secret(&as_storage, &server_key)
             .await?
             .is_none()
         {
@@ -775,7 +1047,7 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         Ok(
             get_cached_id_token(&self.storage, &self.clock, &self.settings.issuer)
                 .await?
-                .is_some(),
+                .is_some_and(|token| !token.is_empty()),
         )
     }
 
@@ -1176,8 +1448,7 @@ mod tests {
                 HttpMethod::Get,
                 "/tenant/.well-known/openid-configuration".into(),
                 200,
-                r#"{"authorization_endpoint":"https://idp.example.com/authorize",
-                    "token_endpoint":"https://idp.example.com/token"}"#
+                r#"{"authorization_endpoint":"https://idp.example.com/authorize","token_endpoint":"https://idp.example.com/token","issuer":"https://idp.example.com","jwks_uri":"https://idp.example.com/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#
                     .into(),
             )],
         });
@@ -1199,8 +1470,7 @@ mod tests {
                 HttpMethod::Get,
                 "openid-configuration".into(),
                 200,
-                r#"{"authorization_endpoint":"https://idp/authorize",
-                    "token_endpoint":"http://idp/token"}"#
+                r#"{"authorization_endpoint":"https://idp/authorize","token_endpoint":"http://idp/token","issuer":"https://idp","jwks_uri":"https://idp/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#
                     .into(),
             )],
         });
@@ -1279,8 +1549,9 @@ mod tests {
     async fn acquire_idp_id_token_runs_pkce_flow_and_caches() {
         let exp = 2_000_000_000;
         let id_token = jwt_with_exp(exp);
-        let token_body =
-            format!(r#"{{"access_token":"at","id_token":"{id_token}","expires_in":3600}}"#);
+        let token_body = format!(
+            r#"{{"access_token":"at","token_type":"Bearer","id_token":"{id_token}","expires_in":3600}}"#
+        );
         let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
             routes: vec![
                 (
@@ -1289,8 +1560,7 @@ mod tests {
                     200,
                     // authorize endpoint is unused (we drive the callback directly),
                     // but token endpoint must be HTTPS.
-                    r#"{"authorization_endpoint":"https://idp/authorize",
-                        "token_endpoint":"https://idp/token"}"#
+                    r#"{"authorization_endpoint":"https://idp/authorize","token_endpoint":"https://idp/token","issuer":"https://idp","jwks_uri":"https://idp/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#
                         .into(),
                 ),
                 (
@@ -1371,15 +1641,15 @@ mod tests {
     #[tokio::test]
     async fn provider_assembles_full_inputs() {
         let id_token = jwt_with_exp(2_000_000_000);
-        let token_body = format!(r#"{{"access_token":"at","id_token":"{id_token}"}}"#);
+        let token_body =
+            format!(r#"{{"access_token":"at","token_type":"Bearer","id_token":"{id_token}"}}"#);
         let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
             routes: vec![
                 (
                     HttpMethod::Get,
                     "openid-configuration".into(),
                     200,
-                    r#"{"authorization_endpoint":"https://idp/authorize",
-                        "token_endpoint":"https://idp/token"}"#
+                    r#"{"authorization_endpoint":"https://idp/authorize","token_endpoint":"https://idp/token","issuer":"https://idp","jwks_uri":"https://idp/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#
                         .into(),
                 ),
                 (
@@ -1633,5 +1903,485 @@ mod tests {
         assert_eq!(merged.issuer, "https://b");
         assert_eq!(merged.client_id, "c2");
         assert_eq!(merged.callback_port, Some(7777));
+    }
+
+    #[test]
+    fn native_322_idp_jwt_parser_matches_buffer_and_numeric_claims() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_xaa_2_1_322.json")).unwrap();
+        for case in fixture["jwtCases"].as_array().unwrap() {
+            assert_eq!(
+                jwt_exp_number(case["token"].as_str().unwrap()),
+                case["expected"].as_f64(),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_numeric_cache_expiry_preserves_fraction_negative_zero_and_infinity() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_xaa_2_1_322.json")).unwrap();
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1000)));
+        for case in fixture["cacheExpiryCases"].as_array().unwrap() {
+            let token = case["token"].as_str().unwrap();
+            let expiry =
+                save_id_token_from_jwt_expiry(&storage, &clock, "https://idp.example", token)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_string(&expiry).unwrap(),
+                case["expected_json"].as_str().unwrap()
+            );
+            if case.get("nonfinite").is_some() {
+                assert!(matches!(expiry,oauth::OAuthExpiry::Number(value) if value.is_infinite()));
+                assert!(get_cached_id_token(&storage, &clock, "https://idp.example")
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert!(
+                    save_id_token_from_jwt(&storage, &clock, "https://idp.example", token)
+                        .await
+                        .is_err(),
+                    "SystemTime compatibility API must not silently replace Infinity with1970"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_issuer_migration_reads_and_clears_legacy_cache_slots() {
+        let memory = Arc::new(MemStorage::default());
+        let storage: Arc<dyn SecureStorage> = memory.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1000)));
+        let issuer = "https://IDP.EXAMPLE:443/";
+        assert_eq!(issuer_key(issuer), "https://idp.example/");
+        let legacy = legacy_issuer_key(issuer);
+        memory
+            .put_json(
+                XAA_IDP_SERVICE,
+                &legacy,
+                r#"{"id_token":"fake-legacy-token","expires_at_unix":2000000000}"#,
+            )
+            .await;
+        memory
+            .put_json(
+                XAA_IDP_CONFIG_SERVICE,
+                &legacy,
+                r#"{"clientSecret":"fake-legacy-secret"}"#,
+            )
+            .await;
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, issuer)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("fake-legacy-token")
+        );
+        assert_eq!(
+            get_idp_client_secret(&storage, issuer)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("fake-legacy-secret")
+        );
+        clear_cached_id_token(&storage, issuer).await.unwrap();
+        clear_idp_client_secret(&storage, issuer).await.unwrap();
+        assert!(get_cached_id_token(&storage, &clock, issuer)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(get_idp_client_secret(&storage, issuer)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_cached_token_preserves_unpaired_source_units() {
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH));
+        let token = Utf16JsonProjection::parse(r#""fake\ud800token""#).unwrap();
+        set_cached_id_token_source(
+            &storage,
+            &clock,
+            "https://idp.example",
+            &token,
+            2000000000.125 * 1000.0,
+        )
+        .await
+        .unwrap();
+        let restored = get_cached_id_token_source(&storage, &clock, "https://idp.example")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.string_units(""), token.string_units(""));
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, "https://idp.example")
+                .await
+                .unwrap()
+                .unwrap(),
+            "fake\u{FFFD}token"
+        );
+        let data = storage
+            .retrieve(XAA_IDP_SERVICE, &issuer_key("https://idp.example"))
+            .await
+            .unwrap()
+            .unwrap();
+        let stored =
+            Utf16JsonProjection::parse(&String::from_utf8_lossy(data.expose_secret_bytes()))
+                .unwrap();
+        assert_eq!(stored.string_units("/id_token"), token.string_units(""));
+        assert_eq!(stored.number_at("/expires_at_unix"), Some(2000000000.125));
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_exact_milliseconds_win_over_legacy_seconds_including_null() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_xaa_2_1_322.json")).unwrap();
+        let memory = Arc::new(MemStorage::default());
+        let storage: Arc<dyn SecureStorage> = memory.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1000)));
+        let key = issuer_key("https://idp.example");
+        for case in fixture["cacheMillisecondsCases"].as_array().unwrap() {
+            let fields = case["raw_expiry_json"]
+                .as_str()
+                .map(|raw| format!(",\"expires_at_millis\":{raw},\"expires_at_unix\":2000000000"))
+                .unwrap_or_default();
+            memory
+                .put_json(
+                    XAA_IDP_SERVICE,
+                    &key,
+                    &format!("{{\"id_token\":\"fake-token\"{fields}}}"),
+                )
+                .await;
+            assert_eq!(
+                get_cached_id_token_source(&storage, &clock, "https://idp.example")
+                    .await
+                    .unwrap()
+                    .is_some(),
+                case["cached"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+        let exact_millis = 545531393461.19696;
+        assert_ne!(
+            exact_millis / 1000.0 * 1000.0,
+            exact_millis,
+            "fixture exposes old millisecond rounding"
+        );
+        set_cached_id_token_source(
+            &storage,
+            &clock,
+            "https://idp.example",
+            &"fake-token".into(),
+            exact_millis,
+        )
+        .await
+        .unwrap();
+        let stored = storage
+            .retrieve(XAA_IDP_SERVICE, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        let source =
+            Utf16JsonProjection::parse(&String::from_utf8_lossy(stored.expose_secret_bytes()))
+                .unwrap();
+        assert_eq!(source.number_at("/expires_at_millis"), Some(exact_millis));
+        assert_eq!(
+            source.number_at("/expires_at_unix"),
+            Some(exact_millis / 1000.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_binds_server_as_storage_without_rebinding_the_global_idp_cache() {
+        let memory = Arc::new(MemStorage::default());
+        let selected_memory = Arc::new(MemStorage::default());
+        memory
+            .put_json(
+                MCP_OAUTH_CLIENT_CONFIG_SERVICE,
+                "same-server-key",
+                r#"{"clientSecret":"scalar-secret"}"#,
+            )
+            .await;
+        selected_memory
+            .put_json(
+                MCP_OAUTH_CLIENT_CONFIG_SERVICE,
+                "same-server-key",
+                r#"{"clientSecret":"raw\ud800secret"}"#,
+            )
+            .await;
+        memory
+            .put_json(
+                XAA_IDP_CONFIG_SERVICE,
+                &issuer_key("https://idp.example"),
+                r#"{"clientSecret":"global-idp-secret"}"#,
+            )
+            .await;
+        let storage: Arc<dyn SecureStorage> = memory;
+        let selected_storage: Arc<dyn SecureStorage> = selected_memory;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(now));
+        set_cached_id_token(
+            &storage,
+            &clock,
+            "https://idp.example",
+            "global-idp-token",
+            now + Duration::from_secs(3_600),
+        )
+        .await
+        .unwrap();
+        let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
+            routes: vec![(
+                HttpMethod::Get,
+                "openid-configuration".into(),
+                200,
+                r#"{"authorization_endpoint":"https://idp.example/authorize","token_endpoint":"https://idp.example/token","issuer":"https://idp.example","jwks_uri":"https://idp.example/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#.into(),
+            )],
+        });
+        let provider = XaaIdpConfigProvider::new(
+            http,
+            clock.clone(),
+            storage.clone(),
+            Arc::new(|_| panic!("the global MCP IdP cache must be reused")),
+            XaaIdpSettings {
+                issuer: "https://idp.example".into(),
+                client_id: "idp-client".into(),
+                callback_port: None,
+            },
+            Arc::new(StaticLookup(Some((
+                "lookup-client".into(),
+                "same-server-key".into(),
+            )))),
+        );
+        let bound = provider
+            .for_server_credentials(
+                "utf16-d800",
+                "same-server-key",
+                Some("raw-bound-client"),
+                selected_storage.clone(),
+            )
+            .expect("concrete provider binds host-proven credentials");
+        assert!(bound
+            .peek_id_token_cache_hit("utf16-d800", "https://mcp.example")
+            .await
+            .unwrap());
+        let inputs = bound
+            .xaa_inputs("utf16-d800", "https://mcp.example")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inputs.client_id, "raw-bound-client");
+        assert_eq!(inputs.client_secret, "raw\u{fffd}secret");
+        assert_eq!(
+            inputs.idp_client_secret.as_deref(),
+            Some("global-idp-secret")
+        );
+        assert_eq!(inputs.idp_id_token, "global-idp-token");
+        assert_eq!(
+            bound
+                .as_client_secret_source("utf16-d800", "https://mcp.example")
+                .await
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#""raw\ud800secret""#
+        );
+        assert_eq!(
+            provider
+                .as_client_secret_source("utf16-d800", "https://mcp.example")
+                .await
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#""scalar-secret""#
+        );
+        bound.clear_id_token().await.unwrap();
+        assert!(get_cached_id_token(&storage, &clock, "https://idp.example")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(selected_storage
+            .contains(MCP_OAUTH_CLIENT_CONFIG_SERVICE, "same-server-key")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_322_xaa_provider_exposes_exact_as_secret_separately_from_wire_view() {
+        let memory = Arc::new(MemStorage::default());
+        memory
+            .put_json(
+                MCP_OAUTH_CLIENT_CONFIG_SERVICE,
+                "fake-server-key",
+                r#"{"clientSecret":"fake\ud800secret"}"#,
+            )
+            .await;
+        let storage: Arc<dyn SecureStorage> = memory;
+        let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp { routes: Vec::new() });
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH));
+        let provider = XaaIdpConfigProvider::new(
+            http,
+            clock,
+            storage.clone(),
+            Arc::new(|_| {}),
+            XaaIdpSettings {
+                issuer: "https://idp.example".into(),
+                client_id: "fake-idp-client".into(),
+                callback_port: None,
+            },
+            Arc::new(StaticLookup(Some((
+                "fake-client".into(),
+                "fake-server-key".into(),
+            )))),
+        );
+        let source = provider
+            .as_client_secret_source("fake-server", "https://mcp.example")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.to_json_string().unwrap(), r#""fake\ud800secret""#);
+        assert_eq!(
+            get_as_client_secret(&storage, "fake-server-key")
+                .await
+                .unwrap()
+                .unwrap(),
+            "fake\u{FFFD}secret"
+        );
+    }
+
+    struct NativeWireCapture {
+        seen: Mutex<Vec<HttpRequest>>,
+        body: String,
+    }
+    #[async_trait::async_trait]
+    impl HttpTransport for NativeWireCapture {
+        async fn request(
+            &self,
+            request: HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            self.seen.lock().await.push(request);
+            Ok(lingxi_core::types::HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: self.body.clone(),
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _: HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::Connection("unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_discovery_url_and_authored_headers() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_xaa_2_1_322.json")).unwrap();
+        let body = r#"{"issuer":"https://idp.example","authorization_endpoint":"https://idp.example/authorize","token_endpoint":"https://idp.example/token","jwks_uri":"https://idp.example/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#;
+        for case in fixture["oidcCases"].as_array().unwrap() {
+            let capture = Arc::new(NativeWireCapture {
+                seen: Mutex::new(Vec::new()),
+                body: body.into(),
+            });
+            let http: Arc<dyn HttpTransport> = capture.clone();
+            let result = discover_oidc(&http, case["input"].as_str().unwrap()).await;
+            assert_eq!(result.is_err(), case.get("error").is_some());
+            let seen = capture.seen.lock().await;
+            if case.get("request").is_some() {
+                assert_eq!(seen[0].url, case["request"]["url"].as_str().unwrap());
+                assert_eq!(
+                    seen[0].headers,
+                    vec![("Accept".into(), "application/json".into())]
+                );
+            } else {
+                assert!(seen.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_metadata_keeps_issuer_units_without_rejecting_valid_source_strings() {
+        let capture = Arc::new(NativeWireCapture { seen:Mutex::new(Vec::new()),body:r#"{"issuer":"https://idp.example/\ud800","authorization_endpoint":"https://idp.example/\ud800","token_endpoint":"https://idp.example/\udfff","jwks_uri":"https://idp.example/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}"#.into() });
+        let http: Arc<dyn HttpTransport> = capture;
+        let document = discover_oidc_document(&http, "https://idp.example")
+            .await
+            .unwrap();
+        assert_eq!(
+            document.metadata.authorization_endpoint,
+            "https://idp.example/\u{FFFD}"
+        );
+        assert_eq!(
+            document.metadata.token_endpoint,
+            "https://idp.example/\u{FFFD}"
+        );
+        assert_eq!(document.issuer_units.last(), Some(&0xD800));
+        assert_ne!(
+            document.issuer_units,
+            "https://idp.example/\u{FFFD}"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_322_idp_code_exchange_uses_metadata_auth_selector_and_form_order() {
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH));
+        for (supported, secret, basic, expected_tail) in [
+            (
+                vec!["client_secret_basic"],
+                Some("fake-secret"),
+                true,
+                "redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback",
+            ),
+            (
+                vec!["client_secret_post"],
+                Some("fake-secret"),
+                false,
+                "client_id=fake-client&client_secret=fake-secret",
+            ),
+            (
+                vec!["none"],
+                Some("fake-secret"),
+                false,
+                "client_id=fake-client",
+            ),
+            (Vec::new(), Some(""), false, "client_id=fake-client"),
+        ] {
+            let capture = Arc::new(NativeWireCapture { seen:Mutex::new(Vec::new()),body:r#"{"access_token":"fake","token_type":"Bearer","id_token":"fake-id-token","expires_in":"1.25"}"#.into() });
+            let http: Arc<dyn HttpTransport> = capture.clone();
+            let metadata:oauth::AuthServerMetadata = serde_json::from_value(serde_json::json!({"authorization_endpoint":"https://idp.example/authorize","token_endpoint":"https://idp.example/token","token_endpoint_auth_methods_supported":supported})).unwrap();
+            let (token, expiry, _) = exchange_code_for_id_token(
+                &http,
+                &clock,
+                &metadata,
+                "fake-client",
+                secret,
+                "fake +~!*code",
+                "fake-verifier",
+                "http://localhost:31337/callback",
+            )
+            .await
+            .unwrap();
+            assert_eq!(token, "fake-id-token");
+            assert_eq!(expiry, Some(1.25));
+            let seen = capture.seen.lock().await;
+            let body = seen[0].body.as_ref().unwrap();
+            assert!(body.starts_with("grant_type=authorization_code&code=fake+%2B%7E%21*code&code_verifier=fake-verifier&redirect_uri="));
+            assert!(body.ends_with(expected_tail));
+            assert_eq!(
+                seen[0]
+                    .headers
+                    .iter()
+                    .any(|(key, _)| key.eq_ignore_ascii_case("authorization")),
+                basic
+            );
+        }
     }
 }

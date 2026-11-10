@@ -1,0 +1,1797 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "name": "sdk-settings",
+      "start": 261122786,
+      "end": 261124947,
+      "sha256": "9c80d6acb6a90dfa40e2b19b7083caf3e74eee91b45db104c5204d24ac0fa7e7"
+    },
+    {
+      "name": "mcp-normalizer",
+      "start": 260530248,
+      "end": 260530385,
+      "sha256": "2a939978d12b8f9007235f0b22462fde69be38a1ec2b1016ef30aeb03ece18c4"
+    },
+    {
+      "name": "sdk-trusted-admission",
+      "start": 267957847,
+      "end": 267958047,
+      "sha256": "e18ac958c9e6f7b7271e42bf593b79efc1cf5d4b1ebaae3a5324f0879fe8d816"
+    },
+    {
+      "name": "sdk-connector-deny-key",
+      "start": 267962360,
+      "end": 267962841,
+      "sha256": "5df02846f639ace1963e6173bd40424196dfcf04961c50af42ecfae3015bc0c3"
+    },
+    {
+      "name": "sdk-auto-mode-verdict",
+      "start": 279489874,
+      "end": 279491271,
+      "sha256": "e6671edde38e773c24c674d74ab4f1832143473f8c4e9776563ea79537594ad6"
+    },
+    {
+      "name": "wire-input-text-marker",
+      "start": 271232958,
+      "end": 271233075,
+      "sha256": "9a304676b658bd85bc0284d174af15f73195804894839025d33d4ea4f5ca985f"
+    }
+  ],
+  "settingsCases": [
+    {
+      "inputSource": "{}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "null",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "[]",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"\"}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"  \"}",
+      "expectedSource": "{\"connectorId\":\"  \"}"
+    },
+    {
+      "inputSource": "{\"connectorId\":5}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"crm.proxy\",\"autoModeVerdictTools\":[\"ping\",\"\",\"ping\"],\"disableAutoBackground\":true}",
+      "expectedSource": "{\"disableAutoBackground\":true,\"connectorId\":\"crm.proxy\",\"autoModeVerdictTools\":[\"ping\",\"\",\"ping\"]}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"autoModeVerdictTools\":[]}",
+      "expectedSource": "{\"connectorId\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"autoModeVerdictTools\":[]}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"bad__key\",\"disableAutoBackground\":false}",
+      "expectedSource": "{\"connectorId\":\"bad__key\"}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"one😀two\",\"autoModeVerdictTools\":[\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"]}",
+      "expectedSource": "{\"connectorId\":\"one😀two\",\"autoModeVerdictTools\":[\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"]}"
+    },
+    {
+      "inputSource": "{\"connectorId\":\"one\\ud800two\",\"autoModeVerdictTools\":[\"\\ud800\"]}",
+      "expectedSource": "{\"connectorId\":\"one\\ud800two\",\"autoModeVerdictTools\":[\"\\ud800\"]}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}",
+      "expectedSource": "{\"autoModeVerdictTools\":[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":[\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\"]}",
+      "expectedSource": "{\"autoModeVerdictTools\":[\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\"]}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":[\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\",\"ping\"]}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":[\"ping\",null]}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"autoModeVerdictTools\":\"ping\"}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"disableAutoBackground\":\"true\"}",
+      "expectedSource": "{}"
+    },
+    {
+      "inputSource": "{\"disableAutoBackground\":null}",
+      "expectedSource": "{}"
+    }
+  ],
+  "trustCases": [
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": "crm_proxy"
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "dynamic",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "project",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "project",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": "crm_proxy"
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "user",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": "crm_proxy"
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "agent",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "dynamic",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "dynamic",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "dynamic",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "project",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "project",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "project",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "user",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "user",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "user",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": false,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "agent",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": false,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": true,
+        "connectorId": "crm.proxy"
+      },
+      "trusted": false,
+      "source": "agent",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "http",
+        "name": "host-key",
+        "scope": "agent",
+        "relayed": true,
+        "connectorId": "crm.proxy",
+        "pluginSource": {}
+      },
+      "trusted": false,
+      "source": "plugin",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "connectorId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "connectorId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "connectorId": "bad__id"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "connectorId": "one😀two"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": null
+    },
+    {
+      "config": {
+        "type": "sdk",
+        "name": "host-key",
+        "scope": "dynamic",
+        "connectorId": "claude.ai CRM Proxy"
+      },
+      "trusted": true,
+      "source": "sdk",
+      "denyKey": "claude_ai_CRM_Proxy"
+    }
+  ],
+  "verdictCases": [
+    {
+      "name": "verdict-0",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep",
+        "claudecode/autoModeVerdict": "allowed_by_server"
+      }
+    },
+    {
+      "name": "verdict-1",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": false,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-2",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": false,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-3",
+      "input": {
+        "config": {
+          "type": "http",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-4",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": []
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-5",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": []
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-6",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          },
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "plugin"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-7",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": null,
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-8",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "forged",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "forged",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-9",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": true,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-10",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": "model-call",
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-11",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": true,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-12",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-13",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "other",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-14",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "different-tool"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-15",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": false,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-16",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": false,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-17",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": false,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-18",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": false,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-19",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": null,
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-20",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{ \"q\": 1 }",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-21",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 2
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-22",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "a": 1,
+          "b": 2
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"b\":2,\"a\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-23",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "project",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "project"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-24",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": null,
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "other",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep"
+      }
+    },
+    {
+      "name": "verdict-25",
+      "input": {
+        "config": {
+          "type": "sdk",
+          "name": "host-key",
+          "scope": "dynamic",
+          "autoModeVerdictTools": [
+            "ping"
+          ]
+        },
+        "rawTool": "ping",
+        "args": {
+          "q": 1
+        },
+        "toolUseId": "model-call",
+        "metaToolUseId": "model-call",
+        "enabled": true,
+        "autoModeClassified": true,
+        "hookCaller": false,
+        "clientRequestedToolUseId": "another-call",
+        "parentIsVirtual": false,
+        "parentToolUses": [
+          [
+            "model-call",
+            "mcp__host-key__ping"
+          ]
+        ],
+        "mainConversation": true,
+        "pipelineAllows": true,
+        "pipelineClassifier": true,
+        "serverCleared": true,
+        "wireInputText": "{\"q\":1}",
+        "queryTools": [
+          {
+            "modelName": "mcp__host-key__ping",
+            "serverName": "host-key",
+            "rawTool": "ping",
+            "source": "sdk"
+          }
+        ]
+      },
+      "expectedMeta": {
+        "claudecode/toolUseId": "model-call",
+        "other": "keep",
+        "claudecode/autoModeVerdict": "allowed_by_server"
+      }
+    }
+  ],
+  "scope": "Unchanged shipped function replay in Node VM. External environment feature toggles/owner registry and context construction are explicit boundary fixtures; positive server verdict uses host-supplied facts and a hidden marker, never a local classifier or real account."
+}

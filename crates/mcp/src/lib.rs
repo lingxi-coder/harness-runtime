@@ -92,8 +92,10 @@ pub mod normalization;
 pub mod oauth;
 pub mod projects_session;
 pub mod protocol_negotiation;
+pub mod provenance;
 pub mod raw_conn;
 pub mod registry;
+pub mod sdk_verdict;
 pub mod server_gate;
 pub mod tool_identity;
 pub mod tool_policy;
@@ -104,7 +106,8 @@ pub mod xaa;
 pub mod xaa_idp;
 
 pub use client::{
-    truncate_description, McpClient, McpClientError, McpDirectoryEntry, MAX_MCP_DESCRIPTION_LENGTH,
+    truncate_description, truncate_description_source, McpClient, McpClientError,
+    McpDirectoryEntry, MAX_DEFERRED_MCP_DESCRIPTION_LENGTH, MAX_MCP_DESCRIPTION_LENGTH,
     MAX_MCP_DIRECTORY_PAGES,
 };
 pub use connection::{
@@ -129,10 +132,11 @@ pub use identity::{
 pub use inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 pub use initialize_params::{ClientCapabilities, InitializeParams};
 pub use json_config::{
-    build_server_from_json_entry, discovery_cache_flag, discovery_cache_is_schema_key_for,
-    load_mcp_json_with_precedence, load_mcp_servers, parse_global_config_mcp_servers,
-    parse_local_config_mcp_servers, parse_mcp_json_string, parse_plugin_mcp_json_string, role_flag,
-    role_is_schema_key_for, server_entry_shape_is_valid, McpJsonError,
+    apply_sdk_mcp_settings, build_server_from_json_entry, build_server_from_json_entry_utf16,
+    discovery_cache_flag, discovery_cache_is_schema_key_for, load_mcp_json_with_precedence,
+    load_mcp_servers, parse_global_config_mcp_servers, parse_local_config_mcp_servers,
+    parse_mcp_json_string, parse_plugin_mcp_json_string, role_flag, role_is_schema_key_for,
+    server_entry_shape_is_valid, McpJsonError,
 };
 pub use lingxi_core::host::{
     McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpNotificationDto,
@@ -144,6 +148,8 @@ pub use mcp_output_storage::{
     RawResourceContent as RawResourceContentRich,
 };
 pub use native_message_schema::decode_native_mcp_frame;
+pub use provenance::McpServerProvenance;
+mod server_name;
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
     McpCatalogChanged, McpCatalogKind, McpRegistry, McpToolOutputSchemaParserHandle,
@@ -152,5 +158,8 @@ pub use registry::{
 pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,
     McpServerBlockReason, McpServerDecision, BUILTIN_COMPUTER_USE_SERVER,
+};
+pub use server_name::{
+    finalize_mcp_server_names, finalize_mcp_server_names_against, McpServerName,
 };
 pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

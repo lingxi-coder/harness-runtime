@@ -941,6 +941,7 @@ pub struct McpInputRequiredOptions {
     pub reset_timeout_on_progress: bool,
     pub cancellation: CancellationToken,
     pub on_progress: Option<McpResultProgressCallback>,
+    pub cancellation_reason: Option<Arc<std::sync::Mutex<Utf16JsonProjection>>>,
 }
 
 impl Default for McpInputRequiredOptions {
@@ -953,6 +954,7 @@ impl Default for McpInputRequiredOptions {
             reset_timeout_on_progress: false,
             cancellation: CancellationToken::new(),
             on_progress: None,
+            cancellation_reason: None,
         }
     }
 }
@@ -1138,20 +1140,69 @@ pub struct JsonrpcMcpResultIo {
     pub client_capabilities: Utf16JsonProjection,
 }
 
-struct CancelRequest {
+/// SDK call cancellation is separate from transport stream cancellation.
+/// An HTTP request abort still sends the peer's JSON-RPC cancellation notice.
+pub struct RpcCallCancellationGuard {
     connection: Arc<jsonrpc::Connection>,
     id: jsonrpc::Id,
     armed: bool,
-    reason: String,
+    reason: Utf16JsonProjection,
     meta: Option<Utf16JsonProjection>,
+    shared_reason: Option<Arc<std::sync::Mutex<Utf16JsonProjection>>>,
 }
 
-impl Drop for CancelRequest {
+impl RpcCallCancellationGuard {
+    /// Attach one SDK request's cancellation notice. `reason` is a source
+    /// string projection; the default is the host interrupt's native reason.
+    pub fn new(
+        connection: Arc<jsonrpc::Connection>,
+        id: jsonrpc::Id,
+        reason: Option<Utf16JsonProjection>,
+    ) -> Self {
+        Self {
+            connection,
+            id,
+            armed: true,
+            reason: reason.unwrap_or_else(|| string_value("AbortError: remote-cancel")),
+            meta: None,
+            shared_reason: None,
+        }
+    }
+
+    /// A received response, including a remote error, completes the request.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Retain an exact source cancellation reason, including lone UTF-16 units.
+    pub fn set_reason(&mut self, reason: Utf16JsonProjection) {
+        self.shared_reason = None;
+        self.reason = reason;
+    }
+
+    /// A direct host call may set a staged timeout reason immediately before
+    /// dropping its still-owned future. Ordinary requests leave this absent.
+    pub fn with_shared_reason(
+        mut self,
+        reason: Option<Arc<std::sync::Mutex<Utf16JsonProjection>>>,
+    ) -> Self {
+        self.shared_reason = reason;
+        self
+    }
+}
+
+impl Drop for RpcCallCancellationGuard {
     fn drop(&mut self) {
-        if self.armed && !self.connection.has_per_request_cancellation() {
+        if self.armed {
+            if let Some(reason) = &self.shared_reason {
+                self.reason = reason
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+            }
             let mut params = Utf16JsonProjection::object(vec![
                 ("requestId".to_owned(), id_projection(&self.id)),
-                ("reason".to_owned(), string_value(&self.reason)),
+                ("reason".to_owned(), self.reason.clone()),
             ])
             .expect("fixed cancellation fields are unique");
             if let Some(meta) = &self.meta {
@@ -2066,13 +2117,10 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                 params.to_json_string().expect("MCP params are valid JSON")
             })?;
         let id = call.id().clone();
-        let mut cancellation = CancelRequest {
-            connection: self.connection.clone(),
-            id: id.clone(),
-            armed: true,
-            reason: "Request cancelled".into(),
-            meta: cancellation_meta,
-        };
+        let mut cancellation =
+            RpcCallCancellationGuard::new(self.connection.clone(), id.clone(), None)
+                .with_shared_reason(options.cancellation_reason.clone());
+        cancellation.meta = cancellation_meta;
         let wait = call.wait_raw_json();
         tokio::pin!(wait);
         let start = Instant::now();
@@ -2082,14 +2130,14 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                 biased;
                 _ = options.cancellation.cancelled() => return Err(cancelled()),
                 raw = &mut wait => {
-                    cancellation.armed = false;
+                    cancellation.disarm();
                     let raw = raw.map_err(|error| McpResultError::Connection(error.into()))?;
                     return Utf16JsonProjection::parse(&raw).map_err(|error| {
                         McpSdkError::new("INVALID_RESULT", error.to_string(), None).into()
                     });
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    cancellation.reason = "SdkError: Request timed out".into();
+                    cancellation.set_reason(string_value("SdkError: Request timed out"));
                     let data = source_object(vec![("timeout".into(), number_value(options.per_request_timeout.as_millis() as f64))]);
                     return Err(McpSdkError::new("REQUEST_TIMEOUT", "Request timed out", Some(data)).into());
                 }
@@ -2107,7 +2155,7 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                     if options.reset_timeout_on_progress {
                         if let Some(max) = options.max_total_timeout {
                             if start.elapsed() >= max {
-                                cancellation.reason = "SdkError: Maximum total timeout exceeded".into();
+                                cancellation.set_reason(string_value("SdkError: Maximum total timeout exceeded"));
                                 return Err(total_timeout(max, start.elapsed()));
                             }
                         }

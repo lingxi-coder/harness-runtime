@@ -99,8 +99,9 @@ impl McpRegistry {
         let Some(deps) = &self.oauth else {
             return Ok(None);
         };
-        let key = oauth::server_key(&config.name, &config.spec);
-        let grant_token = oauth::discovery_cache_grant_token(&deps.storage, &key)
+        let key = oauth::server_key(config.storage_name(), &config.spec);
+        let storage = self.oauth_storage_for_config(config, &deps.storage);
+        let grant_token = oauth::discovery_cache_grant_token(&storage, &key)
             .await
             .map_err(|_| crate::discovery_cache::MissReason::NoFingerprint)?;
         let Some(grant_token) = grant_token else {
@@ -118,8 +119,9 @@ impl McpRegistry {
                 config.spec,
                 McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
             ) {
-                let server_key = oauth::server_key(&config.name, &config.spec);
-                let stored = oauth::load_tokens(&deps.storage, &server_key)
+                let server_key = oauth::server_key(config.storage_name(), &config.spec);
+                let storage = self.oauth_storage_for_config(config, &deps.storage);
+                let stored = oauth::load_tokens(&storage, &server_key)
                     .await
                     .map_err(|_| ())?;
                 if let Some(stored) = stored {
@@ -324,7 +326,7 @@ impl McpRegistry {
         ) {
             Some(reason) => {
                 if reason.purges_existing_entry() {
-                    let _ = store.purge_server_family(&config.name);
+                    let _ = store.purge_server_family(config.storage_name());
                 }
                 DiscoveryCacheConsult {
                     decision: crate::discovery_cache::Decision::Miss {
@@ -591,7 +593,7 @@ impl McpRegistry {
                 }
             }
             Some(reason) if reason.purges_existing_entry() => {
-                if let Err(error) = store.purge_server_family(&config.name) {
+                if let Err(error) = store.purge_server_family(config.storage_name()) {
                     tracing::warn!(
                         server = %config.name,
                         %error,

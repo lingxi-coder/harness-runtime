@@ -622,7 +622,11 @@ pub(super) struct RegisteredSkillReadRoots(pub Arc<RwLock<CommandRegistry>>);
 #[async_trait::async_trait]
 impl tool_api::builtin_context::SkillReadRoots for RegisteredSkillReadRoots {
     async fn roots(&self) -> Vec<std::path::PathBuf> {
-        self.0.read().await.list_all().into_iter()
+        self.0
+            .read()
+            .await
+            .list_all()
+            .into_iter()
             .filter_map(|command| command.skill_root.clone())
             .collect()
     }

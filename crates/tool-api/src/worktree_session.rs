@@ -54,6 +54,9 @@ pub struct WorktreeSession {
     /// `remove` on an entered (not owned) worktree (`t.enteredExisting`,
     /// errorCode 4) — this session is not its owner.
     pub entered_existing: bool,
+    /// The create hook owns this folder. Restored sessions must retain that
+    /// ownership so ExitWorktree never passes it to ordinary git removal.
+    pub hook_based: bool,
     /// Name of a tmux session attached to this worktree, if any. Populated by
     /// the boot-time `--worktree --tmux` launch path (`engine-desktop`'s
     /// `apply_worktree_launch`), which creates a detached `tmux new-session`
@@ -71,19 +74,23 @@ impl WorktreeSession {
     /// fields LingXi tracks (`originalCwd`, `worktreePath`, `worktreeBranch`,
     /// `originalHeadCommit`, `enteredExisting`, `tmuxSessionName`). LingXi's
     /// simpler `WorktreeSession` has no `worktreeName`/`preEnterOriginalCwd`/
-    /// `originalBranch`/`hookBased`, so those keys are omitted rather than
+    /// `originalBranch`, so those keys are omitted rather than
     /// fabricated; the round-trip through [`Self::from_persisted_json`] restores
     /// exactly what is written here.
     #[must_use]
     pub fn to_persisted_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "originalCwd": self.original_cwd.to_string_lossy(),
             "worktreePath": self.worktree_path.to_string_lossy(),
             "worktreeBranch": self.branch_name,
             "originalHeadCommit": self.base_commit,
             "enteredExisting": self.entered_existing,
             "tmuxSessionName": self.tmux_session_name,
-        })
+        });
+        if self.hook_based {
+            value["hookBased"] = serde_json::Value::Bool(true);
+        }
+        value
     }
 
     /// Reconstruct a [`WorktreeSession`] from a persisted `worktreeSession`
@@ -113,6 +120,10 @@ impl WorktreeSession {
                 .map(str::to_string),
             entered_existing: obj
                 .get("enteredExisting")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            hook_based: obj
+                .get("hookBased")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             tmux_session_name: obj
@@ -176,6 +187,7 @@ mod tests {
             branch_name: "worktree-feat".to_string(),
             base_commit: Some("deadbeef".to_string()),
             entered_existing: false,
+            hook_based: false,
             tmux_session_name: None,
         });
         assert!(cell.lock().unwrap().is_some());
@@ -197,6 +209,7 @@ mod tests {
             branch_name: "worktree-feat".to_string(),
             base_commit: None,
             entered_existing: false,
+            hook_based: false,
             tmux_session_name: None,
         });
 
@@ -215,6 +228,7 @@ mod tests {
             branch_name: "worktree-feat".to_string(),
             base_commit: Some("deadbeef".to_string()),
             entered_existing: true,
+            hook_based: false,
             tmux_session_name: Some("lingxi_feat".to_string()),
         };
         let json = orig.to_persisted_json();
@@ -245,5 +259,18 @@ mod tests {
         .expect("minimal");
         assert_eq!(m.branch_name, "HEAD");
         assert!(!m.entered_existing);
+    }
+    #[test]
+    fn hook_ownership_round_trips_and_legacy_records_default_to_git() {
+        let value = serde_json::json!({ "worktreePath": "/owned", "originalCwd": "/repo", "hookBased": true });
+        let restored = WorktreeSession::from_persisted_json(&value).unwrap();
+        assert!(restored.hook_based);
+        assert_eq!(restored.to_persisted_json()["hookBased"], true);
+        let legacy = WorktreeSession::from_persisted_json(
+            &serde_json::json!({ "worktreePath": "/tree", "originalCwd": "/repo" }),
+        )
+        .unwrap();
+        assert!(!legacy.hook_based);
+        assert!(legacy.to_persisted_json().get("hookBased").is_none());
     }
 }

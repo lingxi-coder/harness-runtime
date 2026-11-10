@@ -534,6 +534,7 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
         mcp::decode_native_mcp_frame,
         jsonrpc::codec::DecodeErrorHandling::Skip,
     ))
+    .initial_request_id(0)
     .unknown_method_message("Method not found")
     .build_async_io(stdout, stdin);
 

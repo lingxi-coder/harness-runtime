@@ -1,0 +1,68 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "scope": "Raw nested SDK control message JSON, malformed outer-envelope ACKs and unsupported host requests from the complete native CLI with a loopback mock provider. Client identity remains native in this reference fixture.",
+  "nativeMessages": [
+    "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claude-code\",\"title\":\"Claude Code\",\"description\":\"Anthropic's agentic coding tool\",\"websiteUrl\":\"https://claude.com/claude-code\",\"version\":\"2.1.322\"}},\"jsonrpc\":\"2.0\",\"id\":0}",
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+    "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}",
+    "{\"jsonrpc\":\"2.0\",\"id\":\"peer-roots/list\\ud800\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":\"peer-elicitation/create\\ud800\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":\"peer-fixture/unknown\\ud800\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}",
+    "{\"method\":\"tools/call\",\"params\":{\"name\":\"hold\",\"arguments\":{},\"_meta\":{\"claudecode/toolUseId\":\"toolu_sdk_probe\",\"progressToken\":2}},\"jsonrpc\":\"2.0\",\"id\":2}",
+    "{\"result\":{},\"jsonrpc\":\"2.0\",\"id\":\"peer\\ud800\"}"
+  ],
+  "ingressCases": [
+    {
+      "name": "missing-server",
+      "request": {
+        "subtype": "mcp_message",
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "method": "ping"
+        }
+      },
+      "responseSubtype": "success"
+    },
+    {
+      "name": "null-server",
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": null,
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "method": "ping"
+        }
+      },
+      "responseSubtype": "success"
+    },
+    {
+      "name": "number-server",
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": 7,
+        "message": {}
+      },
+      "responseSubtype": "success"
+    },
+    {
+      "name": "missing-message",
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture"
+      },
+      "responseSubtype": "success"
+    },
+    {
+      "name": "null-message",
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": null
+      },
+      "responseSubtype": "success"
+    }
+  ]
+}

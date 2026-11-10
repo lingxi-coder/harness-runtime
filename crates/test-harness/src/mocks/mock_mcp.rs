@@ -143,6 +143,7 @@ impl MockMcpTransport {
         self.tools.lock().unwrap().push(McpToolDto {
             server_name: "mock".into(),
             tool_name: name.into(),
+            wire_tool_name: None,
             description: format!("{name} test tool").into(),
             input_schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
             output_schema: None,

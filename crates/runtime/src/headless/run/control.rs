@@ -59,6 +59,20 @@ fn resolve_set_proactivity_offer_bypass(
     }
 }
 
+fn sdk_message_server_is_connected(status: &Utf16JsonProjection, server: &str) -> bool {
+    sdk_message_server_units_are_connected(status, &server.encode_utf16().collect::<Vec<_>>())
+}
+
+fn sdk_message_server_units_are_connected(status: &Utf16JsonProjection, server: &[u16]) -> bool {
+    (0..status.array_len("/mcpServers").unwrap_or(0)).any(|index| {
+        status
+            .string_units(&format!("/mcpServers/{index}/name"))
+            .as_deref()
+            == Some(server)
+            && status.string_at(&format!("/mcpServers/{index}/status")) == Some("connected")
+    })
+}
+
 pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetModelTarget {
     // CC: `fr != null` — in JS `!= null` covers both `null` and `undefined`, so
     // an explicit JSON `null` is treated as absent (→ default), not a type
@@ -140,6 +154,12 @@ pub(super) async fn dispatch_control_request(
     match subtype {
         "initialize" => {
             if let Err(error) =
+                super::super::sdk_mcp_server_controls::validate_initialize(&request_projection)
+            {
+                writer.reply_error(request_id, &error);
+                return writer.finish();
+            }
+            if let Err(error) =
                 apply_initialize_tool_aliases(orchestrator, &request_projection).await
             {
                 writer.reply_error(request_id, &error);
@@ -163,7 +183,23 @@ pub(super) async fn dispatch_control_request(
                 init_fast_mode_state,
                 init_fast_mode_disabled_reason,
             );
-            let configs = sdk_configs.unwrap_or_default();
+            payload["capabilities"] =
+                if host.is_remote_control_transport() || host.redacts_persisted_content() {
+                    json!(["ui_surface_v1"])
+                } else {
+                    json!([
+                        "ui_surface_v1",
+                        "mcp_call_result_not_for_model_v1",
+                        "mcp_call_check_permissions_v1"
+                    ])
+                };
+            let mut configs = sdk_configs.unwrap_or_default();
+            for config in &mut configs {
+                config.metadata.relayed = host.is_remote_control_transport();
+            }
+            orchestrator
+                .finalize_sdk_mcp_initialize_names(&mut configs)
+                .await;
             orchestrator
                 .apply_sdk_mcp_initialize_policies(&configs)
                 .await;
@@ -171,7 +207,10 @@ pub(super) async fn dispatch_control_request(
                 .iter()
                 .map(|config| config.name.clone())
                 .collect::<Vec<_>>();
+            let mut manifest_parked = false;
+            let mut manifest_status = None;
             if let Some(transport) = control_plane.sdk_mcp_transport() {
+                transport.configure_server_names(&configs);
                 if let Some(statuses) = transport.park_manifests(
                     &names,
                     request_projection
@@ -179,10 +218,20 @@ pub(super) async fn dispatch_control_request(
                         .ok()
                         .as_ref(),
                 ) {
-                    payload["sdk_mcp_manifests_parked"] = statuses;
+                    manifest_parked = statuses.object_entries().is_some_and(|statuses| {
+                        statuses
+                            .into_iter()
+                            .any(|status| status.value.as_str() == Some("parked"))
+                    });
+                    manifest_status = Some(statuses);
                 }
             }
             let mut payload = projection_from_value(&payload);
+            if let Some(status) = manifest_status {
+                payload
+                    .set_field("sdk_mcp_manifests_parked", status)
+                    .expect("manifest status projection");
+            }
             payload
                 .set_field("commands", projected_array(init_commands.to_vec()))
                 .expect("valid initialize command projections");
@@ -210,15 +259,30 @@ pub(super) async fn dispatch_control_request(
                     )
                     .expect("valid output style names");
             }
+            let mut connect_after_reply = Some(configs);
+            if !manifest_parked && !names.is_empty() {
+                let configs = connect_after_reply.take().unwrap_or_default();
+                let completed = tokio_util::sync::CancellationToken::new();
+                let done = completed.clone();
+                let owner = orchestrator.clone();
+                auxiliary_tasks.push(tokio::spawn(async move {
+                    owner.connect_sdk_mcp_servers(configs).await;
+                    done.cancel();
+                }));
+                if let Some(transport) = control_plane.sdk_mcp_transport() {
+                    tokio::select! {
+                        _ = transport.wait_for_handshake_admission(&names) => {},
+                        _ = completed.cancelled() => {},
+                    }
+                }
+            }
             writer.reply_initialize(
                 payload,
                 control_plane.pending_permission_requests().await,
                 control_plane.pending_user_dialog_requests().await,
             );
-            // The host must see this reply before receiving MCP handshake
-            // requests; all later catalog changes use the session registry.
             writer.finish()?;
-            if !configs.is_empty() {
+            if let Some(configs) = connect_after_reply.filter(|configs| !configs.is_empty()) {
                 let orchestrator = orchestrator.clone();
                 auxiliary_tasks.push(tokio::spawn(async move {
                     orchestrator.connect_sdk_mcp_servers(configs).await;
@@ -413,19 +477,148 @@ pub(super) async fn dispatch_control_request(
             Ok(status) => writer.reply_projected_payload(status),
             Err(error) => writer.reply_error(request_id, &error),
         },
+        "mcp_set_servers" => {
+            let parsed = match super::super::sdk_mcp_server_controls::parse_set_servers(
+                &request_projection,
+                host.is_remote_control_transport(),
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    writer.reply_error(request_id, &error);
+                    return writer.finish();
+                }
+            };
+            if let Some(tools) = parsed.denied_tools {
+                orchestrator.replace_control_mcp_denied_tools(tools);
+            }
+            let transport = control_plane.sdk_mcp_transport();
+            let retire = |names: &[String]| {
+                if let Some(transport) = &transport {
+                    transport.retire_server_keys(names);
+                }
+            };
+            match orchestrator
+                .set_mcp_servers_from_control(
+                    parsed.configs,
+                    parsed.errors,
+                    host.is_remote_control_transport(),
+                    &host.mcp_operator_owned_server_names(),
+                    &retire,
+                )
+                .await
+            {
+                Ok((response, connect_sdk)) => {
+                    if let Some(transport) = &transport {
+                        transport.configure_server_names(&connect_sdk);
+                    }
+                    writer.reply_projected_payload(response);
+                    writer.finish()?;
+                    if !connect_sdk.is_empty() {
+                        let owner = orchestrator.clone();
+                        auxiliary_tasks.push(tokio::spawn(async move {
+                            owner.connect_control_mcp_servers(connect_sdk).await;
+                        }));
+                    }
+                }
+                Err(error) => writer.reply_error(request_id, &error),
+            }
+        }
+        "mcp_call" => {
+            // Replacement cancels the previous owner even if this new
+            // request is rejected by the synchronous validation below.
+            let owner = control_plane.begin_inbound_ui_request(&writer.request_id)?;
+            let Some(tool_units) = field("tool").and_then(JsonValueView::code_units) else {
+                writer.reply_error(request_id, "mcp_call: tool must be a string");
+                return writer.finish();
+            };
+            // Only a display fallback travels beside the request. Execution
+            // and diagnostics consume its exact `/tool` source projection.
+            let tool = String::from_utf16_lossy(tool_units);
+            let local = !host.is_remote_control_transport() && !host.redacts_persisted_content();
+            let checked = match field("check_permissions") {
+                None => false,
+                Some(value) => match value.as_bool() {
+                    Some(false) => false,
+                    Some(true) if local => true,
+                    Some(true) => {
+                        writer.reply_error(
+                            request_id,
+                            "The tool did not run: check_permissions is not available here.",
+                        );
+                        return writer.finish();
+                    }
+                    None => {
+                        writer.reply_error(
+                            request_id,
+                            "mcp_call: check_permissions must be a boolean",
+                        );
+                        return writer.finish();
+                    }
+                },
+            };
+            let program_result = local
+                && field("result_not_for_model").and_then(JsonValueView::as_bool) == Some(true);
+            let environment = super::super::sdk_mcp_call::CallEnvironment {
+                essential_traffic_only: host
+                    .environment_variable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                    .is_some_and(|value| {
+                        matches!(
+                            value.to_ascii_lowercase().as_str(),
+                            "1" | "true" | "yes" | "on"
+                        )
+                    }),
+                program_result,
+                checked,
+                file_store: super::super::host::mcp_staged_store_for_session(
+                    host,
+                    &session_cwd.cwd(),
+                ),
+            };
+            let call = request_projection.clone();
+            let request_id = writer.request_id.clone();
+            let reply = control_plane.outbound_writer();
+            let orchestrator = orchestrator.clone();
+            let cancel = owner.cancellation_token();
+            let errors = execution_errors.clone();
+            let stopped = end_notify.clone();
+            auxiliary_tasks.push(tokio::spawn(async move {
+                let result = super::super::sdk_mcp_call::execute(
+                    &orchestrator,
+                    &tool,
+                    &call,
+                    environment,
+                    cancel,
+                )
+                .await;
+                let delivered = owner.reply_if_current(|| match result {
+                    Ok(payload) => reply.reply_success_projected(request_id, Some(payload)),
+                    Err(error) => reply.reply_error_projected(request_id, error.into()),
+                });
+                if let Err(error) = delivered {
+                    errors
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(error.to_string());
+                    stopped.notify_one();
+                }
+            }));
+        }
         "mcp_message" => {
-            let result = match (
-                field("server_name").and_then(JsonValueView::as_str),
+            if let (Some(server), Ok(message), Some(transport)) = (
+                field("server_name").and_then(JsonValueView::code_units),
                 request_projection.subprojection("/message"),
                 control_plane.sdk_mcp_transport(),
             ) {
-                (Some(server), Ok(message), Some(transport)) => transport.deliver(server, &message),
-                _ => Err("Invalid MCP message".to_owned()),
-            };
-            match result {
-                Ok(()) => writer.reply_success(request_id, None),
-                Err(error) => writer.reply_error(request_id, &error),
+                let connected = orchestrator.sdk_mcp_message_is_connected(server).await;
+                if connected {
+                    if let Err(error) = transport.deliver_units(server, &message) {
+                        tracing::debug!(server = %String::from_utf16_lossy(server), %error, "Ignoring late SDK MCP message");
+                    }
+                }
             }
+            // Native acknowledges this control subtype even for unknown
+            // servers, missing wrapper fields, or invalid JSON-RPC payloads.
+            writer.reply_success(request_id, None);
         }
         "mcp_read_resource" => {
             let result = match (
@@ -993,42 +1186,119 @@ pub(super) async fn dispatch_control_request(
             }
             writer.reply_success(request_id, None);
         }
-        "mcp_authenticate" | "mcp_reconnect" => {
-            // ORACLE (2.1.201 `-p` handler): both branches first resolve the
-            // MCP server config by `serverName`; when no server matches, they
-            // reply `error: "Server not found: {serverName}"` (verified live —
-            // `mcp_authenticate`/`mcp_reconnect` for an unknown server both
-            // return that exact string). A fresh `-p` session has no MCP
-            // servers, so this is the dominant observable path.
-            //
-            // DEFERRED (found-server path): the live handler then starts an
-            // OAuth flow (mcp_authenticate → `{authUrl, requiresUserAction,…}`)
-            // or tears down + reconnects the transport (mcp_reconnect → bare
-            // success ack). The port's stream-json server has no live OAuth /
-            // reconnect seam wired here, so a matched server is acked
-            // best-effort: `mcp_reconnect` → bare success (mirrors the binary's
-            // `Ur(_t)`), `mcp_authenticate` → success `{}`. Full flows tracked
-            // as a follow-up.
-            let server_name = field("serverName")
+        "mcp_authenticate" => {
+            let server = request_projection
+                .subprojection("/serverName")
+                .unwrap_or_else(|_| "".into());
+            let redirect_uri = field("redirectUri")
                 .and_then(JsonValueView::as_str)
-                .unwrap_or("")
-                .to_string();
-            let known: Vec<String> = orchestrator
-                .list_mcp_servers()
+                .map(str::to_owned);
+            let redirect_only =
+                field("redirectUriOnly").and_then(JsonValueView::as_bool) == Some(true);
+            match orchestrator
+                .authenticate_sdk_mcp(&server, redirect_uri, redirect_only)
                 .await
-                .into_iter()
-                .map(|s| s.name)
-                .collect();
-            if !known.iter().any(|n| n == &server_name) {
-                writer.reply_error(request_id, &format!("Server not found: {server_name}"));
-            } else if subtype == "mcp_reconnect" {
-                writer.reply_success(request_id, None);
-            } else {
-                writer.reply_success(request_id, Some(json!({})));
+            {
+                Ok(response) => writer.reply_success(request_id, Some(response)),
+                Err(error) => writer.reply_sdk_auth_error(&error),
             }
         }
-        // The orchestrator-free arms (get_binary_version, message_rated,
-        // mcp_oauth_callback_url), the CLI-originated guard subtypes (no-reply),
+        "mcp_oauth_callback_url" => {
+            let server = request_projection
+                .subprojection("/serverName")
+                .unwrap_or_else(|_| "".into());
+            let callback = field("callbackUrl")
+                .and_then(JsonValueView::as_str)
+                .unwrap_or("");
+            match orchestrator
+                .submit_sdk_mcp_oauth_callback(&server, callback)
+                .await
+            {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(error) => writer.reply_sdk_auth_error(&error),
+            }
+        }
+        "mcp_toggle" => {
+            let server = request_projection
+                .subprojection("/serverName")
+                .unwrap_or_else(|_| projection_from_value(&Value::Null));
+            let enabled = request_projection
+                .subprojection("/enabled")
+                .unwrap_or_else(|_| projection_from_value(&Value::Null));
+            let sdk_enable = enabled.at_pointer("").and_then(|value| value.as_bool()) == Some(true)
+                && orchestrator
+                    .sdk_mcp_status()
+                    .await
+                    .ok()
+                    .is_some_and(|status| {
+                        (0..status.array_len("/mcpServers").unwrap_or(0)).any(|index| {
+                            status.string_units(&format!("/mcpServers/{index}/name"))
+                                == server.string_units("")
+                                && status.string_at(&format!("/mcpServers/{index}/transport"))
+                                    == Some("sdk")
+                        })
+                    });
+            if sdk_enable {
+                // Native admits SDK enable independently of the control input
+                // loop so status and other server messages can progress while
+                // its caller is still answering the new initialize request.
+                let owner = orchestrator.clone();
+                let transport = control_plane.sdk_mcp_transport();
+                if let (Some(transport), Some(units)) = (&transport, server.string_units("")) {
+                    transport.admit_server_name_units(&units);
+                }
+                let reply = control_plane.outbound_writer();
+                let request_id = writer.request_id.clone();
+                let errors = execution_errors.clone();
+                let stopped = end_notify.clone();
+                auxiliary_tasks.push(tokio::spawn(async move {
+                    let retire = |names: &[String]| {
+                        if let Some(transport) = &transport {
+                            transport.retire_server_keys(names);
+                        }
+                    };
+                    let delivered = match owner
+                        .toggle_mcp_from_control(&server, &enabled, &retire)
+                        .await
+                    {
+                        Ok(()) => reply.reply_success_projected(request_id, None),
+                        Err(error) => reply.reply_error_projected(request_id, error),
+                    };
+                    if let Err(error) = delivered {
+                        errors
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(error.to_string());
+                        stopped.notify_one();
+                    }
+                }));
+                return writer.finish();
+            }
+            let transport = control_plane.sdk_mcp_transport();
+            let retire = |names: &[String]| {
+                if let Some(transport) = &transport {
+                    transport.retire_server_keys(names);
+                }
+            };
+            match orchestrator
+                .toggle_mcp_from_control(&server, &enabled, &retire)
+                .await
+            {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(error) => writer.reply_error_projection(error),
+            }
+        }
+        "mcp_reconnect" => {
+            let server = request_projection
+                .subprojection("/serverName")
+                .unwrap_or_else(|_| projection_from_value(&Value::Null));
+            match orchestrator.reconnect_mcp_from_control(&server).await {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(error) => writer.reply_error_projection(error),
+            }
+        }
+        // The orchestrator-free arms (get_binary_version, message_rated),
+        // the CLI-originated guard subtypes (no-reply),
         // and the byte-exact `Unsupported control request subtype` fallthrough
         // are pure — classified by `pure_control_response` so the wire shapes
         // are unit-testable without a live orchestrator.
@@ -1074,11 +1344,8 @@ pub(super) fn pure_control_response(
         }))),
         // §2.2 #45: telemetry-only; ack with `{}`.
         "message_rated" => PureControlReply::Success(Some(json!({}))),
-        // ORACLE (2.1.201 `-p` handler): `mcp_oauth_callback_url` looks up the
-        // in-flight OAuth flow for `serverName`; with no active flow it replies
-        // `error: "No active OAuth flow for server: {serverName}"` (verified
-        // live). The port keeps no active-flow registry in the stream-json
-        // server, so this is always the faithful reply.
+        // Pure no-active-flow projection; the runtime's owning async arm above
+        // submits callbacks to the session's SDK OAuth continuation.
         "mcp_oauth_callback_url" => {
             let server_name = field("serverName")
                 .and_then(JsonValueView::as_str)
@@ -1612,12 +1879,73 @@ impl RequestReplyWriter<'_> {
     fn reply_error(&self, _request_id: &str, message: &str) {
         self.reply_error_projection(Utf16JsonProjection::from(message));
     }
+
+    fn reply_sdk_auth_error(&self, error: &mcp::registry::SdkMcpAuthenticationError) {
+        let mut response = projection_from_value(&json!({"subtype":"error","error":error.message}));
+        response
+            .set_field("request_id", self.request_id.clone())
+            .expect("source request identity");
+        if let Some(code) = error.error_code.as_ref() {
+            response
+                .set_field("error_code", code.as_str().into())
+                .expect("SDK error code");
+        }
+        let mut frame = projection_from_value(&json!({"type":"control_response"}));
+        frame
+            .set_field("response", response)
+            .expect("SDK authentication error response");
+        self.record(self.writer.send_projected(&frame));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::headless::run::PrintAuxTaskGroup;
+
+    #[test]
+    fn native_322_sdk_auth_error_preserves_source_id_and_error_code() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let output = ControlPlaneWriter::new(Arc::new(tx));
+        let identity = Utf16JsonProjection::parse(r#""auth\ud800""#).unwrap();
+        let writer = RequestReplyWriter {
+            writer: &output,
+            delivery_error: std::sync::Mutex::new(None),
+            request_id: identity.clone(),
+        };
+        writer.reply_sdk_auth_error(&mcp::registry::SdkMcpAuthenticationError {
+            message: "SDK auth failed: LOCAL_REDIRECT_REJECTED".into(),
+            error_code: Some("mcp_redirect_uri_unusable".into()),
+        });
+        writer.finish().unwrap();
+        let crate::headless::stream_json::OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+            panic!("expected a control response");
+        };
+        let frame = Utf16JsonProjection::parse(&line).unwrap();
+        assert_eq!(
+            frame.string_units("/response/request_id"),
+            identity.string_units("")
+        );
+        assert_eq!(frame.string_at("/response/subtype"), Some("error"));
+        assert_eq!(
+            frame.string_at("/response/error_code"),
+            Some("mcp_redirect_uri_unusable")
+        );
+        assert_eq!(
+            frame.string_at("/response/error"),
+            Some("SDK auth failed: LOCAL_REDIRECT_REJECTED")
+        );
+        assert!(frame.at_pointer("/response/response").is_none());
+    }
+
+    #[test]
+    fn sdk_message_delivery_requires_connected_server_and_unknown_names_are_ignored() {
+        let status = Utf16JsonProjection::parse(r#"{"mcpServers":[{"name":"ready","status":"connected"},{"name":"starting","status":"pending"},{"name":"failed","status":"failed"}]}"#).unwrap();
+        assert!(sdk_message_server_is_connected(&status, "ready"));
+        for name in ["starting", "failed", "unknown"] {
+            assert!(!sdk_message_server_is_connected(&status, name));
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_initialize_alias_request(
@@ -1639,8 +1967,9 @@ mod tests {
             r#"{{"type":"control_request","request_id":"{id}","request":{request}}}"#
         ))
         .unwrap();
+        let subtype = frame.string_at("/request/subtype").unwrap_or("initialize");
         dispatch_control_request(
-            "initialize",
+            subtype,
             id,
             &frame,
             writer,
@@ -1671,6 +2000,53 @@ mod tests {
             panic!("initialize must return one control response")
         };
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_322_malformed_sdk_envelopes_are_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let stream = Arc::new(
+            crate::headless::stream_json::StreamJsonStream::new_placeholder(
+                crate::headless::io::Output::new(tokio::io::sink()),
+            ),
+        );
+        let runtime = super::super::tests::fixture_runtime(stream, root.path()).await;
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let outbound = Arc::new(tx);
+        let writer = ControlPlaneWriter::new(outbound.clone());
+        let cancel = tokio::sync::watch::channel(false).0;
+        let lifecycle = crate::headless::queued_commands::QueueLifecycle::new(
+            outbound.clone(),
+            "sdk-outer-envelope".to_owned(),
+        );
+        let plane = crate::headless::control_plane::StdioControlPlane::new(outbound.clone());
+        let end = Arc::new(tokio::sync::Notify::new());
+        let tasks = Arc::new(PrintAuxTaskGroup::default());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp_sdk_control_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["ingressCases"].as_array().unwrap() {
+            let reply = dispatch_initialize_alias_request(
+                &runtime,
+                &writer,
+                &outbound,
+                &mut receiver,
+                case["name"].as_str().unwrap(),
+                &case["request"].to_string(),
+                &cancel,
+                &lifecycle,
+                &plane,
+                &end,
+                &tasks,
+            )
+            .await;
+            assert_eq!(
+                reply["response"]["subtype"], case["responseSubtype"],
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[tokio::test]

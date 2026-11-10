@@ -48,6 +48,35 @@ pub fn normalize_name_for_mcp(name: &str) -> String {
     lingxi_core::types::normalize_name_for_mcp(name)
 }
 
+/// Native 2.1.322 `ln`: bounded control diagnostic text. Isolated UTF-16
+/// units, invisible characters and non-space separators are deleted.
+#[must_use]
+pub fn sanitize_control_name_units(units: &[u16]) -> String {
+    static INVISIBLE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\x{2800}]")
+            .expect("native identifier character classes")
+    });
+    let scalar = char::decode_utf16(units.iter().copied().take(4096))
+        .filter_map(Result::ok)
+        .collect::<String>();
+    let stripped = INVISIBLE.replace_all(&scalar, "");
+    let mut used = 0;
+    stripped
+        .chars()
+        .filter(|character| {
+            !matches!(
+                *character,
+                '\u{00a0}' | '\u{1680}' | '\u{2000}'
+                    ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+            )
+        })
+        .take_while(|character| {
+            used += character.len_utf16();
+            used <= 1024
+        })
+        .collect()
+}
+
 /// Whether `name` is a reserved MCP server name — claude-code 2.1.206's `TEt`
 /// predicate, `lDe(e) || zbt(e) || i6n(e) || e === GCn`:
 /// - `Bc(e) === "claude-in-chrome"` (`gE`)
@@ -70,6 +99,41 @@ pub fn is_reserved_mcp_server_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_322_control_diagnostics_match_shipped_utf16_sanitizer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/mcp_sdk_control_names_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let units = case["inputUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sanitize_control_name_units(&units),
+                case["sanitized"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn normalization_322_matches_native_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_2_1_322.json"))
+                .expect("native MCP fixture");
+        for case in fixture["normalizationCases"].as_array().expect("cases") {
+            assert_eq!(
+                normalize_name_for_mcp(case["input"].as_str().unwrap()),
+                case["expected"].as_str().unwrap(),
+            );
+        }
+    }
 
     #[test]
     fn reserved_names_match_normalizer_and_raw() {

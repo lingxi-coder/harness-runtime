@@ -4401,8 +4401,39 @@ pub async fn build_with_credential_stack(
     // worktree + judges it on the SYNC path) and the LocalAgent handler (which
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
-    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> =
-        Arc::new(DesktopWorktreeManager::new(cwd.clone()));
+    let worktree_hook_context = {
+        let cwd_cell = teammate_session_cwd_cell.clone();
+        let original_cwd = cwd.clone();
+        let transcript_path = main_transcript_path.clone();
+        let permission_mode = cfg.permission_mode.wire_str().to_owned();
+        Arc::new(move || hooks::HookContext {
+            session_id: main_session_id,
+            cwd: cwd_cell
+                .get()
+                .map_or_else(|| original_cwd.clone(), |cell| cell.cwd()),
+            project_dir: Some(original_cwd.clone()),
+            transcript_path: transcript_path.clone(),
+            permission_mode: Some(permission_mode.clone()),
+            ..hooks::HookContext::default()
+        })
+    };
+    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> = Arc::new(
+        hooks::HookedWorktreeManager::new(
+            Arc::new(DesktopWorktreeManager::new(cwd.clone())),
+            hooks.clone(),
+            cwd.clone(),
+            worktree_hook_context,
+        )
+        .with_personal_hook_registry(hook_registry.clone())
+        .with_workspace_trust_provider(proxy_auth_workspace_trust_provider.clone())
+        .with_restrict_personal_config(lingxi_core::host::env::is_env_truthy(
+            lingxi_core::host::env::var_with_legacy(
+                "LINGXI_RESTRICT_PERSONAL_CONFIG",
+                "CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG",
+            )
+            .as_deref(),
+        )),
+    );
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
     // status sink solves); until then it reports "not fork-capable", which
@@ -6045,13 +6076,28 @@ pub async fn build_with_credential_stack(
         let live_tools = tools.clone();
         let live_mcp_tool_ctx = mcp_tool_ctx.clone();
         let live_commands = shared_command_registry.clone();
+        let mut model_tool_changes = mcp_registry.subscribe_model_tool_changes();
         tokio::spawn(async move {
             let mut recovery = std::collections::VecDeque::new();
             loop {
+                let from_recovery = !recovery.is_empty();
                 let change = if let Some(change) = recovery.pop_front() {
                     change
                 } else {
-                    match mcp_catalog_changes.recv().await {
+                    let received = tokio::select! {
+                        received = mcp_catalog_changes.recv() => received,
+                        received = model_tool_changes.recv() => {
+                            if matches!(received, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
+                            let Some(registry) = mcp_registry_weak.upgrade() else { break; };
+                            let mut refreshed = tool_mcp::build_registered_mcp_tools(registry.as_ref(), live_mcp_tool_ctx.clone()).await;
+                            if is_app_chat {
+                                for (_, tools) in &mut refreshed { tools.retain(|tool| tool.supports_persistent_chat()); }
+                            }
+                            live_tools.replace_mcp_tools(refreshed);
+                            continue;
+                        }
+                    };
+                    match received {
                         Ok(change) => change,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             let Some(registry) = mcp_registry_weak.upgrade() else {
@@ -6095,7 +6141,8 @@ pub async fn build_with_credential_stack(
                     break;
                 };
 
-                if change.retired_connection_id.is_some() {
+                let cached_publication = !from_recovery && change.telemetry_cause.is_none();
+                if change.retired_connection_id.is_some() || cached_publication {
                     let refreshed = tool_mcp::build_registered_mcp_tools(
                         registry.as_ref(),
                         live_mcp_tool_ctx.clone(),
@@ -6118,6 +6165,10 @@ pub async fn build_with_credential_stack(
                         refreshed
                     };
                     live_tools.replace_mcp_tools(refreshed);
+                    if cached_publication {
+                        reconcile_mcp_prompt_catalog(registry.as_ref(), &live_commands).await;
+                        continue;
+                    }
                 }
 
                 tracing::debug!(
@@ -7834,6 +7885,13 @@ pub async fn build_with_credential_stack(
                 && (!strict_plugin_only_hooks || agent_source_is_trusted(source))
             {
                 if agent::hooks_trust::agent_hooks_origin_trusted(&resolved_definition, &cfg.cwd) {
+                    plugin_hook_registry
+                        .write()
+                        .await
+                        .set_personal_hook_origins(
+                            &frontmatter_hooks,
+                            agent::hooks_trust::personal_config_origin(&resolved_definition),
+                        );
                     orch.replace_main_thread_agent_hooks(&frontmatter_hooks)
                         .await;
                 } else {

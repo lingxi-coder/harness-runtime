@@ -4,11 +4,36 @@
 //! used by every host (desktop, windows, mobile). Replaces the formerly
 //! duplicated `platforms/{common,windows,posix}` copies.
 
+mod mcp_system_roots;
 pub mod reqwest_http;
 mod tls_config;
 
 pub use reqwest_http::ReqwestHttp;
 pub use tls_config::prewarm_native_roots;
+
+/// Apply the shared process TLS trust and client identity configuration.
+///
+/// General HTTP/provider clients retain their environment-based CA roots and
+/// mTLS settings, including branded environment aliases.
+#[must_use]
+pub fn configure_client_tls(
+    builder: lingxi_llm_client::transport::http_backend::ClientBuilder,
+) -> lingxi_llm_client::transport::http_backend::ClientBuilder {
+    tls_config::TlsSettings::from_env().apply_to_builder(builder)
+}
+
+/// Apply MCP's explicit OS-store trust policy and shared client identity.
+///
+/// Native MCP uses the runtime's system store and `NODE_EXTRA_CA_CERTS`.
+/// Direct MCP trust ignores OpenSSL path overrides; the agent-proxy fallback
+/// independently applies its explicit `SSL_CERT_FILE` bundle.
+/// This per-client policy leaves ordinary HTTP/provider TLS behavior intact.
+#[must_use]
+pub fn configure_mcp_client_tls(
+    builder: lingxi_llm_client::transport::http_backend::ClientBuilder,
+) -> lingxi_llm_client::transport::http_backend::ClientBuilder {
+    tls_config::TlsSettings::from_env().apply_to_mcp_builder(builder)
+}
 
 mod monitor_websocket;
 mod native_proxy;

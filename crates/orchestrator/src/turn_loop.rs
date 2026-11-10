@@ -140,18 +140,11 @@ use tool_results::tool_result_size;
 #[cfg(test)]
 use tool_results::tool_result_to_model_text;
 
-/// Registry name of the worktree-creation tool (`tool_worktree::ENTER_TOOL_NAME`).
-/// A successful invocation of this tool is the port's sole worktree-creation
-/// path, so it is where the turn loop fires the `WorktreeCreate` hook. Held as a
-/// literal (not imported) so `orchestrator` keeps no dependency on `tool-worktree`.
-const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
-
 /// Registry name of the subagent-spawning tool (`tools/agent` `AGENT_TOOL_NAME`).
 /// A completed dispatch of this
 /// tool means the spawned subagent's loop has stopped, so it is where the turn
 /// loop fires the `SubagentStop` hook. Held as literals (not imported) so
-/// `orchestrator` keeps no dependency on `tools/agent` — same precedent as
-/// `ENTER_WORKTREE_TOOL_NAME`.
+/// `orchestrator` keeps no dependency on `tools/agent`.
 const AGENT_TOOL_NAME: &str = "Agent";
 
 /// #40: apply a hook's folded `terminalSequence` (claude-code `szn`, BIN off

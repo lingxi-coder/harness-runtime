@@ -274,7 +274,8 @@ mod tests {
         };
         std::fs::create_dir_all(&chat.session_directory).unwrap();
         let cwd = branding::workspace_home(root.path())
-            .join("app-agents/test-app/chats").join(&chat_id);
+            .join("app-agents/test-app/chats")
+            .join(&chat_id);
         std::fs::create_dir_all(&cwd).unwrap();
         let mut profile = AppInvocationProfile::new(identity, Default::default());
         profile.app_chat = Some(chat);

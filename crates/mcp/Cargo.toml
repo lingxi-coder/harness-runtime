@@ -19,6 +19,7 @@ indexmap.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "io-util", "process"] }
+tokio-util.workspace = true
 tracing.workspace = true
 futures-util = { workspace = true }
 base64 = "0.22"

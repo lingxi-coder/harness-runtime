@@ -3,8 +3,7 @@ use super::tool_results::{
     apply_tool_result_persistence_with_process_output, process_output_file_from_source,
 };
 use super::{
-    apply_terminal_sequence, AGENT_TOOL_NAME, CANCEL_MESSAGE, ENTER_WORKTREE_TOOL_NAME,
-    PERMISSION_DENIED_RETRY_MESSAGE,
+    apply_terminal_sequence, AGENT_TOOL_NAME, CANCEL_MESSAGE, PERMISSION_DENIED_RETRY_MESSAGE,
 };
 use crate::autonomous_tool_scheduler::ToolDispatchPublicationFence;
 use crate::conversation::{
@@ -978,6 +977,19 @@ fn tool_check_result_rule_source(
     }
 }
 
+fn mcp_restrictive_aliases(
+    tool: &dyn tool_api::Tool,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    if tool.mcp_deny_aliases().is_empty() {
+        Default::default()
+    } else {
+        std::collections::BTreeMap::from([(
+            tool.name().to_owned(),
+            tool.mcp_deny_aliases().to_vec(),
+        )])
+    }
+}
+
 fn raw_permission_resolution_from_tool_check(
     name: &str,
     evaluation: &lingxi_core::host::permission_gate::PermissionToolCheckEvaluation,
@@ -1149,10 +1161,15 @@ async fn evaluate_normal_tool_check_core(
     // calls the tool's `checkPermissions`. Keep that early rejection inside
     // the lazy core callback so a direct Mod answer still skips it altogether.
     let policy_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+        mcp_deny_aliases: mcp_restrictive_aliases(tool),
+        request_source: (tool)
+            .suppresses_all_permission_updates()
+            .then_some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp),
         tool_use_id: Some(tool_use_id.to_string()),
         tool_check_ceiling,
         requires_user_interaction,
-        suppress_always_allow_rule: requires_user_interaction
+        suppress_always_allow_rule: (tool).suppresses_always_allow_rule()
+            || requires_user_interaction
             || restricted_protected_mutation
             || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
         hook_ask_floor: hook_ask,
@@ -1234,13 +1251,18 @@ async fn finish_normal_tool_check_core(
     mut core: NormalToolCheckCore,
 ) -> Result<NormalToolCheckCore, OrchestratorError> {
     let resolution_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+        mcp_deny_aliases: mcp_restrictive_aliases(tool),
+        request_source: (tool)
+            .suppresses_all_permission_updates()
+            .then_some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp),
         tool_use_id: Some(tool_use_id.to_string()),
         tool_check_ceiling: core
             .evaluation
             .as_ref()
             .and_then(|evaluation| evaluation.ceiling),
         requires_user_interaction,
-        suppress_always_allow_rule: requires_user_interaction
+        suppress_always_allow_rule: (tool).suppresses_always_allow_rule()
+            || requires_user_interaction
             || restricted_protected_mutation
             || core
                 .evaluation
@@ -2359,9 +2381,14 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         let plan_mode = self.session.lock().await.plan_mode;
         let tool_check_ceiling = tool.tool_check_permission_ceiling(&input).await;
         let policy_ctx = PermissionCheckContext {
+            mcp_deny_aliases: mcp_restrictive_aliases(tool.as_ref()),
+            request_source: (tool.as_ref())
+                .suppresses_all_permission_updates()
+                .then_some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp),
             tool_check_ceiling,
             requires_user_interaction: tool.requires_user_interaction(),
-            suppress_always_allow_rule: tool.requires_user_interaction(),
+            suppress_always_allow_rule: (tool.as_ref()).suppresses_always_allow_rule()
+                || tool.requires_user_interaction(),
             mode_override: plan_mode.then(|| "plan".to_string()),
             ..Default::default()
         };
@@ -2424,6 +2451,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             },
             trusted_effective_permission_mode: None,
             classifier_only_review: None,
+            mcp_auto_mode_verdict: None,
             instruction_context: Some(self.instruction_context_snapshot().await),
             content_replacement_state: None,
             session: Some(self.session.clone()),
@@ -4075,6 +4103,7 @@ pub(crate) async fn streaming_tool_context_base(
         },
         trusted_effective_permission_mode: None,
         classifier_only_review: None,
+        mcp_auto_mode_verdict: None,
         content_replacement_state: None,
         session: Some(orch.session.clone()),
         observer_pairings: orch.model_runtime.observer_pairings.clone(),
@@ -5582,7 +5611,31 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // attribute, so a PreToolUse/PostToolUse hook's output joins to OTel
         // events at prompt grain.
         let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
+        let effort = (|| {
+            let snapshot = orch
+                .api
+                .effort_command_snapshot(
+                    &ctx.options.main_loop_model,
+                    ctx.options.model_profile.as_deref(),
+                )
+                .ok()??;
+            snapshot.capabilities.supported.then(|| {
+                hooks::hook_payload::EffortLevel::new(
+                    snapshot.displayed(std::env::var(branding::EFFORT_LEVEL_ENV).ok().as_deref()),
+                )
+            })
+        })();
         let hook_ctx = HookContext {
+            effort,
+            mcp_deny_aliases: tool_handle.mcp_deny_aliases().to_vec(),
+            mcp_server: tool_handle.mcp_server_provenance().map(|server| {
+                hooks::HookMcpServerProvenance {
+                    name: hooks::response::ExactHookText::from_utf16(
+                        server.name.utf16_units().to_vec(),
+                    ),
+                    source: server.source.clone().into(),
+                }
+            }),
             prompt_transcript: Some(orch.prompt_hook_transcript().await),
             model_selection: Some(hooks::HookModelSelection {
                 model: ctx.options.main_loop_model.clone(),
@@ -6047,10 +6100,17 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             .await;
         let hook_preflight = if hook_allowed && !plan_mode {
             let policy_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
+                request_source: (tool_handle.as_ref())
+                    .suppresses_all_permission_updates()
+                    .then_some(
+                        lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp,
+                    ),
                 tool_use_id: Some(tool_use_id.to_string()),
                 tool_check_ceiling,
                 requires_user_interaction,
-                suppress_always_allow_rule: requires_user_interaction
+                suppress_always_allow_rule: (tool_handle.as_ref()).suppresses_always_allow_rule()
+                    || requires_user_interaction
                     || restricted_protected_mutation
                     || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 ..Default::default()
@@ -6176,9 +6236,16 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
             let permission_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
+                request_source: (tool_handle.as_ref())
+                    .suppresses_all_permission_updates()
+                    .then_some(
+                        lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp,
+                    ),
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
-                suppress_always_allow_rule: requires_user_interaction
+                suppress_always_allow_rule: (tool_handle.as_ref()).suppresses_always_allow_rule()
+                    || requires_user_interaction
                     || restricted_protected_mutation
                     || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 ..Default::default()
@@ -6280,6 +6347,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     decision_reason,
                 }) => {
                     let ask_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                        mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
                         decision_reason_type,
                         decision_reason,
                         ..permission_ctx.clone()
@@ -6424,7 +6492,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // escalate an otherwise-permitted call to Ask. Merely being an
             // interactive tool must not create a generic permission prompt
             // (AskUserQuestion owns its business UI).
-            let suppress_always_allow_rule = (requires_user_interaction
+            let suppress_always_allow_rule = (tool_handle.suppresses_always_allow_rule()
+                || requires_user_interaction
                 || restricted_protected_mutation
                 || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask))
                 && matches!(
@@ -6523,6 +6592,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     // never reached here — emit through the outer gate, which
                     // forwards to the stdio transport. No-op on non-stdio transports.
                     let sysmsg_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                        mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
                         tool_use_id: Some(tool_use_id.to_string()),
                         ..Default::default()
                     };
@@ -6560,7 +6630,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             // `updatedPermissions` entries. Apply and persist
                             // them before resolving the rescued call so the
                             // same live gate observes the host's updates.
-                            if !req_agg.permission_updates.is_empty() {
+                            if !tool_handle.suppresses_all_permission_updates()
+                                && !req_agg.permission_updates.is_empty()
+                            {
                                 orch.perms
                                     .apply_permission_updates(&req_agg.permission_updates);
                                 orch.perms
@@ -6646,6 +6718,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                 // rewrite to the input the tool actually runs with.
                                 let permission_ctx =
                                     lingxi_core::host::permission_gate::PermissionCheckContext {
+                                        mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
+                                        request_source: (tool_handle.as_ref()).suppresses_all_permission_updates().then_some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp),
                                         tool_use_id: Some(tool_use_id.to_string()),
                                         requires_user_interaction,
                                         suppress_always_allow_rule,
@@ -6821,9 +6895,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         let (decision_reason_type, decision_reason) =
                             tool_ask_reason_context(reason);
                         let ask_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                            mcp_deny_aliases: mcp_restrictive_aliases(tool_handle.as_ref()),
+                            request_source: (tool_handle.as_ref()).suppresses_all_permission_updates().then_some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp),
                             tool_use_id: Some(tool_use_id.to_string()),
                             requires_user_interaction,
-                            suppress_always_allow_rule: requires_user_interaction
+                            suppress_always_allow_rule: (tool_handle.as_ref()).suppresses_always_allow_rule() || requires_user_interaction
                                 || restricted_protected_mutation
                                 || tool_check_ceiling
                                     == Some(lingxi_core::host::McpPermissionCeiling::Ask),
@@ -7615,8 +7691,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             tool_name = %name,
         );
         telemetry::otel::emit_hook_lifecycle("post", "started", name, None);
-        let post_agg =
-            super::boxed_turn_future(|| orch.hooks.execute(post_event, hook_ctx.clone())).await;
+        let post_ctx = HookContext {
+            tool_was_interrupted: Some(is_abort),
+            ..hook_ctx.clone()
+        };
+        let post_agg = super::boxed_turn_future(|| orch.hooks.execute(post_event, post_ctx)).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
@@ -7819,64 +7898,55 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             injected_messages.push((message, tool_use_id.clone()));
         }
 
-        // PostToolUse `updatedToolOutput` (#38, all-tools) + `updatedMCPToolOutput`
-        // (legacy, MCP-only) may REPLACE a SUCCESSFUL tool's output. claude yields
-        // all-tools first, MCP second so MCP overrides (BIN off 202157140); applies
-        // only if `outputSchema` is absent or validates (BIN off 202169384), else
-        // keeps original + emits `hook_error_during_execution` (BIN off 202465455).
-        // The substituted JSON passes through the tool's own result mapper.
-        // No-op when unset. Outer `Some` = key set even to `null` (`!== void 0`).
-        let replacement: Option<Utf16JsonProjection> = if is_error {
-            None
-        } else {
-            let mut repl = post_agg.updated_tool_output.clone();
-            if tool_handle.is_mcp() {
-                if let Some(mcp) = post_agg.updated_mcp_tool_output.clone() {
-                    repl = Some(mcp);
+        // Native 2.1.322 yields one rewrite per completed hook: the direct
+        // field wins within a hook, while later hooks can replace earlier
+        // values. Invalid later output keeps the last accepted replacement.
+        let mut content = content;
+        let mut mcp_output_mutated = false;
+        if !is_error {
+            for rewrite in &post_agg.output_rewrites {
+                if rewrite.legacy_mcp_only && !tool_handle.is_mcp() {
+                    continue;
                 }
-            }
-            repl
-        };
-        let (content, mcp_output_mutated) = match replacement {
-            Some(new_output) => {
+                let new_output = &rewrite.value;
                 // Validate against the tool's output schema when one exists
                 // (`e.outputSchema?.safeParse(...)?.success!==!1`): substitute
                 // unless validation EXPLICITLY fails. No schema → substitute.
                 let schema_ok = match tool_handle.output_schema() {
                     None => Ok(()),
-                    Some(schema) => match Utf16JsonConsumer::new_for_json_decoded_sources(&[
-                        schema,
-                        &new_output,
-                    ]) {
-                        Ok(consumer) => tool_api::output_schema::validate(
-                            &consumer.values()[0],
-                            &consumer.values()[1],
-                        )
-                        .map_err(|detail| {
-                            consumer
-                                .restore(&serde_json::Value::String(detail))
-                                .unwrap_or_else(|_| {
-                                    source_text_from_units(
-                                        "could not restore output schema diagnostic"
-                                            .encode_utf16()
-                                            .collect(),
-                                    )
-                                })
-                        }),
-                        Err(error) => Err(source_text_from_units(
-                            format!("could not inspect output schema: {error}")
-                                .encode_utf16()
-                                .collect(),
-                        )),
-                    },
+                    Some(schema) => {
+                        match Utf16JsonConsumer::new_for_json_decoded_sources(&[schema, new_output])
+                        {
+                            Ok(consumer) => tool_api::output_schema::validate(
+                                &consumer.values()[0],
+                                &consumer.values()[1],
+                            )
+                            .map_err(|detail| {
+                                consumer
+                                    .restore(&serde_json::Value::String(detail))
+                                    .unwrap_or_else(|_| {
+                                        source_text_from_units(
+                                            "could not restore output schema diagnostic"
+                                                .encode_utf16()
+                                                .collect(),
+                                        )
+                                    })
+                            }),
+                            Err(error) => Err(source_text_from_units(
+                                format!("could not inspect output schema: {error}")
+                                    .encode_utf16()
+                                    .collect(),
+                            )),
+                        }
+                    }
                 };
                 match schema_ok {
-                    Ok(()) => (
-                        tool_handle
-                            .map_result_text(&new_output)
-                            .unwrap_or_else(|| source_tool_result_text(&new_output)),
-                        true,
-                    ),
+                    Ok(()) => {
+                        content = tool_handle
+                            .map_result_text(new_output)
+                            .unwrap_or_else(|| source_tool_result_text(new_output));
+                        mcp_output_mutated = true;
+                    }
                     Err(detail) => {
                         // Schema MISMATCH: keep the ORIGINAL output and surface
                         // the `hook_error_during_execution` meta message
@@ -7912,12 +7982,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             publication_fence.clone(),
                         )
                         .await;
-                        (content, false)
                     }
                 }
             }
-            None => (content, false),
-        };
+        }
 
         // HOOK.1: BOTH the PreToolUse and the PostToolUse `additionalContext`
         // ride the `injected` channel as their OWN messages — neither is folded
@@ -7950,53 +8018,6 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             mutated_response = mutated,
         );
         telemetry::otel::emit_hook_lifecycle("post", "completed", name, Some(post_dur_ms));
-
-        // Worktree-creation hook (parity with claude-code `executeWorktreeCreateHook`,
-        // `utils/hooks.ts:4928`). claude-code fires `WorktreeCreate` from the
-        // worktree-creation logic (`createWorktreeForSession` /
-        // `createAgentWorktree`); the LingXi port creates worktrees only through
-        // the registered, turn_loop-dispatched `EnterWorktree` tool, so we fire it
-        // here — same TIMING (immediately after the worktree exists), the fire just
-        // lives in the dispatch chokepoint alongside `PostToolUse`. Only a
-        // SUCCESSFUL `EnterWorktree` result counts (an errored create never made a
-        // worktree). The wire payload carries only `name` — the requested slug, the
-        // single field claude-code passes to `executeWorktreeCreateHook(slug)`. We
-        // thread the resolved `path`/`branch` as engine-side context too (not on the
-        // wire). Best-effort: a failing/absent hook never breaks the worktree op
-        // (`orch.hooks.execute` is a strict no-op when no `WorktreeCreate` hook is
-        // registered, mirroring the `PostToolUse` arm above).
-        if !is_error && name == ENTER_WORKTREE_TOOL_NAME {
-            // `name` (slug) is the requested input; `path`/`branch_name` come from
-            // the tool's result data (`{"path":…,"branch_name":…}`).
-            let slug = effective_input
-                .string_at("/slug")
-                .unwrap_or_default()
-                .to_string();
-            let wt_path = emit_payload.string_at("/path").unwrap_or_default();
-            let wt_branch = emit_payload
-                .string_at("/branch_name")
-                .unwrap_or_default()
-                .to_string();
-            let wt_event = HookEvent::WorktreeCreate {
-                name: slug,
-                path: std::path::PathBuf::from(wt_path),
-                branch: wt_branch,
-            };
-            let wt_started = std::time::Instant::now();
-            // Reuse the same hook context (session_id / cwd) the pre/post hooks used.
-            let _wt_agg =
-                super::boxed_turn_future(|| orch.hooks.execute(wt_event, hook_ctx.clone())).await;
-            // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            let wt_dur_ms = wt_started.elapsed().as_millis() as u64;
-            // No `tengu_*` analytic here: claude-code's worktree-create path emits
-            // no orchestrator-lifecycle event, so we keep parity by logging only.
-            tracing::debug!(
-                tool_name = %name,
-                duration_ms = wt_dur_ms,
-                "fired WorktreeCreate hook after successful EnterWorktree",
-            );
-        }
 
         // SubagentStart + SubagentStop hooks (claude `executeSubagentStartHooks`
         // runAgent.ts:532; `executeStopHooks`→`SubagentStop` utils/hooks.ts:3653-3678).

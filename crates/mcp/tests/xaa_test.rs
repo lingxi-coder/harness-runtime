@@ -47,7 +47,7 @@ impl MockXaa {
         if url.contains("oauth-authorization-server") {
             return (
                 200,
-                r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"],"token_endpoint_auth_methods_supported":["client_secret_basic"]}"#
+                r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"],"token_endpoint_auth_methods_supported":["client_secret_basic"],"authorization_endpoint":"https://as.example.com/authorize","response_types_supported":["code"]}"#
                     .to_string(),
             );
         }
@@ -163,7 +163,7 @@ async fn xaa_token_exchange_4xx_clears_id_token() {
             } else if req.url.contains("oauth-authorization-server") {
                 (
                     200,
-                    r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"],"authorization_endpoint":"https://as.example.com/authorize","response_types_supported":["code"]}"#.to_string(),
                 )
             } else if req.url.contains("idp.example.com/token") {
                 (400, r#"{"error":"invalid_grant"}"#.to_string())
@@ -219,7 +219,7 @@ async fn authorization_server_issuer_mismatch_remains_metadata_discovery_failure
             } else if req.url.contains("oauth-authorization-server") {
                 (
                     200,
-                    r#"{"issuer":"https://other.example.com/root","token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    r#"{"issuer":"https://other.example.com/root","token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"],"authorization_endpoint":"https://other.example.com/root/authorize","response_types_supported":["code"]}"#.to_string(),
                 )
             } else {
                 (404, String::new())

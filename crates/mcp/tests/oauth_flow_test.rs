@@ -12,6 +12,9 @@
 //! - 401-on-connect: the transport 401s once, the registry refreshes and
 //!   retries, and the retried spec carries the new Bearer.
 
+#[path = "support/sdk_authentication_322.rs"]
+mod sdk_authentication_322;
+
 use async_trait::async_trait;
 use lingxi_core::host::http::SseStream;
 use lingxi_core::host::{
@@ -155,7 +158,7 @@ impl HttpTransport for RetryableStandardOAuthAs {
         } else if req.url == "https://as.example.com/.well-known/oauth-authorization-server" {
             (
                 200,
-                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
             )
         } else {
             (404, "")
@@ -197,7 +200,7 @@ impl HttpTransport for StandardOAuthAs {
         } else if req.url == "https://as.example.com/.well-known/oauth-authorization-server" {
             (
                 200,
-                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.to_string(),
+                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.to_string(),
             )
         } else if req.url == "https://as.example.com/token"
             && request_body.contains("grant_type=refresh_token")
@@ -250,6 +253,8 @@ impl MockAs {
             return Canned {
                 status: 200,
                 body: r#"{
+                    "issuer": "https://as.example.com",
+                    "response_types_supported": ["code"],
                     "authorization_endpoint": "https://as.example.com/authorize",
                     "token_endpoint": "https://as.example.com/token",
                     "registration_endpoint": "https://as.example.com/register",
@@ -268,7 +273,12 @@ impl MockAs {
         if url.contains("/register") {
             return Canned {
                 status: 201,
-                body: r#"{"client_id": "dyn-client-9"}"#.into(),
+                body: {
+                    let mut registration: serde_json::Value = serde_json::from_str(body)
+                        .expect("DCR request carries native client metadata");
+                    registration["client_id"] = serde_json::json!("dyn-client-9");
+                    registration.to_string()
+                },
             };
         }
         if url.contains("/token") {
@@ -1080,7 +1090,14 @@ async fn terminal_refresh_rejections_clear_the_source_scope_and_are_not_replayed
             .expect("invalidated credential record remains scoped");
         assert_eq!(stored.access_token, "");
         assert_eq!(stored.refresh_token, None);
-        assert_eq!(stored.expires_at_millis, oauth::OAuthExpiry::Number(0.0));
+        // Native tokens invalidation writes expiresAt=0; all invalidation
+        // rebuilds the entry and omits expiry with the registration fields.
+        let expected_expiry = if error == "invalid_grant" {
+            oauth::OAuthExpiry::Number(0.0)
+        } else {
+            oauth::OAuthExpiry::Undefined
+        };
+        assert_eq!(stored.expires_at_millis, expected_expiry);
         assert_eq!(stored.client_id.as_deref(), expected_client_id);
 
         let second_transport = RecordingTransport::new(0);
@@ -1325,6 +1342,182 @@ async fn static_token_server_spec_is_unchanged() {
 }
 
 #[tokio::test]
+async fn oauth_uses_authored_scalar_credential_name_with_a_private_catalog_handle() {
+    let entry = serde_json::json!({
+        "type": "http",
+        "url": "https://mcp.example.com/v1",
+        "oauth": {"clientId": "configured-client"}
+    });
+    let scope = ConfigScope::Settings(lingxi_core::types::SettingsScope::Project);
+    let existing = mcp::build_server_from_json_entry_utf16(&[0xd800], &entry, scope)
+        .expect("exact non-scalar server name");
+    let authored_name = existing.name.clone();
+    let authored_units = authored_name.encode_utf16().collect::<Vec<_>>();
+    let mut config = mcp::build_server_from_json_entry_utf16(&authored_units, &entry, scope)
+        .expect("scalar server name matching an existing private handle");
+    mcp::finalize_mcp_server_names_against(std::slice::from_mut(&mut config), &[existing]);
+    assert_ne!(config.name, authored_name);
+    assert_eq!(config.authored_name_units(), authored_units);
+    assert_eq!(config.storage_name(), authored_name);
+
+    let authored_key = oauth::server_key(&authored_name, &config.spec);
+    let private_key = oauth::server_key(&config.name, &config.spec);
+    assert_ne!(authored_key, private_key);
+    let storage = MemStorage::new();
+    for (key, access_token) in [
+        (&authored_key, "authored-scalar-access"),
+        (&private_key, "private-handle-decoy"),
+    ] {
+        store_oauth_test_tokens(
+            &storage,
+            key,
+            &oauth::StoredTokens {
+                access_token: access_token.into(),
+                refresh_token: None,
+                expires_at_millis: oauth::OAuthExpiry::Number(4_600_000.0),
+                client_id: Some("configured-client".into()),
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await;
+    }
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let (on_url, _url_rx) = url_capture();
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: TestClock::new(1_000) as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config.clone()).await.expect("connect ok");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer authored-scalar-access")
+    );
+    assert!(mock_as.requests().is_empty(), "the cached grant is reused");
+    assert_eq!(
+        registry
+            .get_config_by_key(&config.name)
+            .await
+            .expect("private catalog slot")
+            .name,
+        config.name
+    );
+    assert!(registry.get_config_by_key(&authored_name).await.is_none());
+    assert_eq!(
+        registry
+            .get_config(&authored_name)
+            .await
+            .expect("public authored-name lookup")
+            .name,
+        config.name
+    );
+}
+
+#[tokio::test]
+async fn oauth_keeps_simultaneous_raw_and_encoded_scalar_credentials_in_distinct_services() {
+    let entry = serde_json::json!({
+        "type": "http",
+        "url": "https://mcp.example.com/v1",
+        "oauth": {"clientId": "configured-client"}
+    });
+    let scope = ConfigScope::Settings(lingxi_core::types::SettingsScope::Project);
+    let raw = mcp::build_server_from_json_entry_utf16(&[0xd800], &entry, scope)
+        .expect("exact non-scalar server name");
+    let scalar = mcp::build_server_from_json_entry_utf16(
+        &"utf16-d800".encode_utf16().collect::<Vec<_>>(),
+        &entry,
+        scope,
+    )
+    .expect("scalar server name matching the deterministic raw storage identity");
+    assert_eq!(raw.storage_name(), "utf16-d800");
+    assert_eq!(scalar.storage_name(), "utf16-d800");
+    assert_ne!(raw.name, scalar.name);
+    let key = oauth::server_key("utf16-d800", &raw.spec);
+    assert_eq!(key, oauth::server_key("utf16-d800", &scalar.spec));
+
+    let storage = MemStorage::new();
+    for (service, access_token) in [
+        (oauth::MCP_OAUTH_SERVICE, "scalar-access"),
+        ("mcp-utf16-mcp-oauth", "raw-access"),
+    ] {
+        let stored = oauth::StoredTokens {
+            access_token: access_token.into(),
+            refresh_token: None,
+            expires_at_millis: oauth::OAuthExpiry::Number(4_600_000.0),
+            client_id: Some("configured-client".into()),
+            client_secret: None,
+            step_up_scope: None,
+        };
+        storage
+            .store(
+                service,
+                &key,
+                SecureStorageData::new(
+                    serde_json::to_vec(&stored).unwrap(),
+                    SecureStorageMetadata {
+                        created_at: SystemTime::UNIX_EPOCH,
+                        last_accessed: None,
+                        kind: SecretKindDto("mcp_oauth_tokens".into()),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let (on_url, _url_rx) = url_capture();
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: TestClock::new(1_000) as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(raw.clone()).await.expect("raw connect");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer raw-access")
+    );
+    registry
+        .connect(scalar.clone())
+        .await
+        .expect("simultaneous scalar connect");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer scalar-access")
+    );
+    assert!(
+        mock_as.requests().is_empty(),
+        "both cached grants are reused"
+    );
+    assert_eq!(
+        registry
+            .get_config_by_key(&raw.name)
+            .await
+            .expect("raw catalog slot")
+            .authored_name_units(),
+        vec![0xd800]
+    );
+    assert_eq!(
+        registry
+            .get_config_by_key(&scalar.name)
+            .await
+            .expect("scalar catalog slot")
+            .authored_name_units(),
+        "utf16-d800".encode_utf16().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
     let refresh = r#"{"access_token":"access-2","refresh_token":"refresh-2","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = MockAs::new("{}", refresh);
@@ -1518,7 +1711,7 @@ impl HttpTransport for ChallengeAwareAs {
         {
             (
                 200,
-                r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#.to_string(),
+                r#"{"issuer":"https://as-from-challenge.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#.to_string(),
             )
         } else if req.url == "https://as-from-challenge.example.com/token" {
             (200, self.refresh_body.clone())
@@ -2080,7 +2273,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
             } else if url.contains("oauth-authorization-server") {
                 (
                     200,
-                    r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#
+                    r#"{"issuer":"https://as.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#
                         .to_string(),
                 )
             } else {
@@ -2407,7 +2600,7 @@ impl HttpTransport for XaaHttp {
         let (status, body) = if url.contains("oauth-protected-resource") {
             (200, r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.to_string())
         } else if url.contains("oauth-authorization-server") {
-            (200, r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string())
+            (200, r#"{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/authorize","response_types_supported":["code"],"token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string())
         } else if url.contains("idp.example.com/token") {
             (200, r#"{"access_token":"id-jag","issued_token_type":"urn:ietf:params:oauth:token-type:id-jag"}"#.to_string())
         } else if url.contains("as.example.com/token") {
@@ -2716,7 +2909,7 @@ impl HttpTransport for XaaRefreshOnlyAs {
             return Ok(HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: r#"{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.into(),
+                body: r#"{"issuer":"https://as.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.into(),
                 body_bytes: Vec::new(),
             });
         }

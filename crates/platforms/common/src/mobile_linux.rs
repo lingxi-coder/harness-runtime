@@ -1770,7 +1770,7 @@ mod tests {
             .expect("plan type");
         assert_eq!(
             plan.request.cwd.as_deref(),
-            Some("/home/atlas_guest/.atlas/.apps/calorie-a1b2c3d4/source")
+            Some("/home/atlas_guest/.atlas-workspaces/apps/calorie-a1b2c3d4/source")
         );
 
         let foreign_account_command = ProcessCommand {

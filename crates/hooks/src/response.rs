@@ -51,7 +51,7 @@ mod raw_hook_json_array {
     }
 }
 
-mod raw_exact_hook_text {
+pub(crate) mod raw_exact_hook_text {
     use super::{ExactHookText, HookJson};
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -554,9 +554,7 @@ pub enum PairedRewrite {
     Direct,
     /// The same hook set the legacy `updatedMCPToolOutput`.
     LegacyMcp,
-    /// The legacy MCP rewrite was suppressed. The port has no
-    /// `legacyMcpRewriteSuppressed` signal, so this variant is never produced
-    /// today — it exists so the wire vocabulary is complete.
+    /// The same hook set a falsy legacy MCP rewrite, which native suppresses.
     Suppressed,
     /// The hook rewrote nothing.
     None,
@@ -614,6 +612,15 @@ pub struct HookResponse {
     /// the executor fills in, so it is `#[serde(skip)]`.
     #[serde(skip)]
     pub block_command: Option<ExactHookText>,
+    /// Folder supplied by a WorktreeCreate HTTP or callback hook. Command
+    /// hooks use their last nonempty stdout line instead, as the native runner does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "raw_exact_hook_text::serialize_option",
+        deserialize_with = "raw_exact_hook_text::deserialize_option"
+    )]
+    pub worktree_path: Option<ExactHookText>,
     /// Replacement input for the in-flight action (e.g. mutated tool input).
     #[serde(
         default,
@@ -756,6 +763,10 @@ pub struct HookResponse {
         deserialize_with = "raw_exact_hook_text::deserialize_option"
     )]
     pub classifier_context: Option<ExactHookText>,
+    /// A present but falsy legacy MCP rewrite was ignored by native parsing.
+    /// It still pairs classifier assertions as `suppressed` for this result.
+    #[serde(default)]
+    pub legacy_mcp_rewrite_suppressed: bool,
     /// Elicitation answer a hook provided via
     /// `hookSpecificOutput.{action,content}` (claude-code
     /// `parseElicitationHookOutput`, `utils/hooks.ts:4434-4446` /
@@ -1163,11 +1174,27 @@ pub enum ModelSwitchProjectionError {
     Projection(#[from] lingxi_core::types::utf16_json::Utf16JsonProjectionError),
 }
 
+/// One output replacement yielded by a completed hook. Keep the sequence so
+/// direct and legacy MCP-only rewrites compete in completion order; eligibility
+/// and output-schema validation belong to the actual tool's caller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookOutputRewrite {
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub value: HookJson,
+    pub legacy_mcp_only: bool,
+}
+
 /// Merged result of all hooks fired for one event. The executor folds each
 /// individual [`HookResult`] into this aggregate in priority order; the first
 /// `Block` decision wins and stops further folding.
 #[derive(Debug, Clone, Default)]
 pub struct AggregateHookResult {
+    /// Ordered lifecycle results, including successful hooks without a path.
+    /// The worktree adapter uses these to preserve native failure diagnostics
+    /// and the first-successful, nonheld folder selection.
+    pub worktree_results: Vec<crate::worktree_manager::WorktreeHookResult>,
+    /// First successful WorktreeCreate folder before host personal-source policy.
+    pub worktree_path: Option<ExactHookText>,
     /// Host-only identities of the named runtime session hooks actually folded
     /// into this result. Captured dispatch roles survive later replacement or
     /// removal of their registry entries.
@@ -1270,6 +1297,11 @@ pub struct AggregateHookResult {
     /// result (BIN off 202169384). Additive default `None` → byte-identical when
     /// no hook mutates the output.
     pub updated_tool_output: Option<HookJson>,
+    /// Every output rewrite in hook-completion order. A result containing both
+    /// fields contributes only its direct rewrite. Falsy legacy values have
+    /// already been suppressed by response parsing and contribute no entry.
+    pub output_rewrites: Vec<HookOutputRewrite>,
+
     /// SH-01 — every `classifierContext` a folded `PostToolUse` hook supplied,
     /// in execution order, already capped to
     /// [`CLASSIFIER_CONTEXT_CAP_UTF16`] (oracle 2.1.238 @ 296974134 yields one
@@ -1364,6 +1396,26 @@ pub struct AggregateHookResult {
 }
 
 impl AggregateHookResult {
+    /// Record the single replacement the native per-hook fold yields.
+    pub(crate) fn record_output_rewrite(&mut self, response: &HookResponse) {
+        let replacement = response
+            .updated_tool_output
+            .as_ref()
+            .map(|value| (value, false))
+            .or_else(|| {
+                response
+                    .updated_mcp_tool_output
+                    .as_ref()
+                    .map(|value| (value, true))
+            });
+        if let Some((value, legacy_mcp_only)) = replacement {
+            self.output_rewrites.push(HookOutputRewrite {
+                value: value.clone(),
+                legacy_mcp_only,
+            });
+        }
+    }
+
     /// Build the narrow Native classic result object used between managed,
     /// Mod, and core model-switch middleware. Exact hook strings are projected
     /// directly from retained UTF-16 stdout; no serde `Value` conversion is
@@ -1742,6 +1794,7 @@ impl AggregateHookResult {
         if later.updated_tool_output.is_some() {
             self.updated_tool_output = later.updated_tool_output.take();
         }
+        self.output_rewrites.append(&mut later.output_rewrites);
         self.classifier_contexts
             .append(&mut later.classifier_contexts);
         self.classifier_context_chars = self

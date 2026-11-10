@@ -4591,6 +4591,13 @@ mod once_and_status_message_tests {
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(
+            agg.output_rewrites,
+            vec![crate::HookOutputRewrite {
+                value: hook_json(r#"{"content":"rewritten"}"#),
+                legacy_mcp_only: true,
+            }]
+        );
+        assert_eq!(
             agg.updated_mcp_tool_output,
             Some(hook_json(r#"{"content":"rewritten"}"#)),
             "the hook's updatedMCPToolOutput must reach the aggregate",

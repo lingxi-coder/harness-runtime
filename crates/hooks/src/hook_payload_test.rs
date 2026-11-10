@@ -25,8 +25,202 @@ mod tests {
     }
 
     #[test]
+    fn mcp_provenance_is_appended_and_does_not_infer_sdk_from_name() {
+        let payload = PreToolUsePayload {
+            hook_event_name: HookEventNamePre,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            tool_name: "mcp__sdk__read".into(),
+            tool_input: HookJson::parse("{}").unwrap(),
+            tool_use_id: "tool-1".into(),
+            mcp_server: Some(HookMcpServerProvenance {
+                name: "sdk".into(),
+                source: "user".into(),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"session_id":"s","transcript_path":"/t","cwd":"/w","hook_event_name":"PreToolUse","tool_name":"mcp__sdk__read","tool_input":{},"tool_use_id":"tool-1","mcp_server":{"name":"sdk","source":"user"}}"#
+        );
+        let unknown = HookMcpServerProvenance {
+            name: "configured".into(),
+            source: "future-source".into(),
+        };
+        let decoded: HookMcpServerProvenance =
+            serde_json::from_str(&serde_json::to_string(&unknown).unwrap()).unwrap();
+        assert_eq!(decoded, unknown);
+    }
+
+    #[test]
+    fn native_322_mcp_provenance_strings_preserve_utf16_code_units() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hooks_2_1_322.json")).unwrap();
+        for case in fixture["provenanceCases"].as_array().unwrap() {
+            let raw = case["expected_json"].as_str().unwrap();
+            let provenance: HookMcpServerProvenance = serde_json::from_str(raw).unwrap();
+            assert_eq!(serde_json::to_string(&provenance).unwrap(), raw);
+        }
+        let value: HookMcpServerProvenance =
+            serde_json::from_str(r#"{"name":"name\ud800","source":"user\udfff"}"#).unwrap();
+        assert_eq!(value.name.utf16_code_units.last(), Some(&0xD800));
+        assert_eq!(value.source.utf16_code_units.last(), Some(&0xDFFF));
+    }
+
+    #[test]
+    fn native_322_hook_response_fixture_matches_result_channels() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hooks_2_1_322.json")).unwrap();
+        for case in fixture["responseCases"].as_array().unwrap() {
+            let event = match case["event"].as_str().unwrap() {
+                "PostToolUse" => "PostToolUse",
+                "SessionStart" => "SessionStart",
+                "UserPromptExpansion" => "UserPromptExpansion",
+                "PreToolUse" => "PreToolUse",
+                "ElicitationResult" => "ElicitationResult",
+                "Elicitation" => "Elicitation",
+                "CwdChanged" => "CwdChanged",
+                other => panic!("unexpected fixture event {other}"),
+            };
+            let response = parse_response(case["input_json"].as_str().unwrap(), event).unwrap();
+            let expected = HookJson::parse(case["expected_json"].as_str().unwrap()).unwrap();
+            let mut channels: Vec<(&str, HookJson)> = Vec::new();
+            if let Some(decision) = response.decision {
+                let behavior = match decision {
+                    HookDecision::Allow | HookDecision::Approve => "allow",
+                    HookDecision::Block => "deny",
+                    HookDecision::Ask => "ask",
+                    HookDecision::Defer => "defer",
+                    HookDecision::Continue => "continue",
+                };
+                channels.push(("permissionBehavior", source_text(behavior)));
+            }
+            for (key, value) in [
+                ("updatedInput", response.updated_input),
+                ("updatedToolOutput", response.updated_tool_output),
+                ("updatedMCPToolOutput", response.updated_mcp_tool_output),
+            ] {
+                if let Some(value) = value {
+                    channels.push((key, value));
+                }
+            }
+            for (key, value) in [
+                ("additionalContext", response.additional_context),
+                ("classifierContext", response.classifier_context),
+                ("sessionTitle", response.session_title),
+                ("initialUserMessage", response.initial_user_message),
+            ] {
+                if let Some(value) = value {
+                    channels.push((key, value.into_projection()));
+                }
+            }
+            if response.legacy_mcp_rewrite_suppressed {
+                channels.push((
+                    "legacyMcpRewriteSuppressed",
+                    HookJson::parse("true").unwrap(),
+                ));
+            }
+            if response.suppress_original_prompt {
+                channels.push(("suppressOriginalPrompt", HookJson::parse("true").unwrap()));
+            }
+            for (key, value) in [
+                ("retry", response.retry),
+                ("reloadSkills", response.reload_skills),
+            ] {
+                if let Some(value) = value {
+                    channels.push((
+                        key,
+                        HookJson::parse(if value { "true" } else { "false" }).unwrap(),
+                    ));
+                }
+            }
+            if let Some(paths) = response.watch_paths {
+                channels.push((
+                    "watchPaths",
+                    HookJson::array(
+                        paths
+                            .into_iter()
+                            .map(ExactHookText::into_projection)
+                            .collect(),
+                    )
+                    .unwrap(),
+                ));
+            }
+            if let Some(answer) = response.elicitation_response {
+                let key = if event == "ElicitationResult" {
+                    "elicitationResultResponse"
+                } else {
+                    "elicitationResponse"
+                };
+                let mut raw = format!(
+                    "{{\"action\":{}",
+                    serde_json::to_string(&answer.action).unwrap()
+                );
+                if let Some(content) = answer.content {
+                    raw.push_str(",\"content\":");
+                    raw.push_str(&content.to_json_string().unwrap());
+                }
+                raw.push('}');
+                channels.push((key, HookJson::parse(&raw).unwrap()));
+            }
+            for (key, value) in &channels {
+                let expected_value = expected
+                    .subprojection(&format!("/{key}"))
+                    .unwrap_or_else(|_| panic!("unexpected {key} for {}", case["name"]));
+                assert_eq!(
+                    value.to_json_string().unwrap(),
+                    expected_value.to_json_string().unwrap(),
+                    "{} {key}",
+                    case["name"]
+                );
+            }
+            assert_eq!(
+                channels.len(),
+                expected.object_entries().unwrap().len(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn native_322_output_rewrites_preserve_cross_hook_completion_order() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hooks_2_1_322.json")).unwrap();
+        for case in fixture["rewriteSequences"].as_array().unwrap() {
+            let mut aggregate = crate::AggregateHookResult::default();
+            for output in case["outputs_json"].as_array().unwrap() {
+                let response = parse_response(output.as_str().unwrap(), "PostToolUse").unwrap();
+                aggregate.record_output_rewrite(&response);
+            }
+            assert_eq!(
+                serde_json::to_string(&aggregate.output_rewrites).unwrap(),
+                case["expected_rewrites_json"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn output_union_ignores_fields_owned_by_other_events() {
+        let response=parse_response(r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedInput":false,"action":123,"watchPaths":false,"permissionDecisionReason":0,"sessionTitle":false}}"#,"PostToolUse").unwrap();
+        assert!(response.updated_input.is_none());
+        assert!(response.elicitation_response.is_none());
+        assert!(response.watch_paths.is_none());
+        assert!(response.reason.is_none());
+        assert!(response.session_title.is_none());
+    }
+
+    #[test]
     fn pre_payload_serializes_byte_lock() {
         let p = PreToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePre,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -41,7 +235,7 @@ mod tests {
             tool_use_id: "tu-1".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
-        assert!(s.starts_with(r#"{"hook_event_name":"PreToolUse","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tu-1"}"#));
+        assert!(s.starts_with(r#"{"session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tu-1"}"#));
     }
 
     /// `prompt_id` sits on the SHARED hook-input base, between `cwd` and
@@ -54,6 +248,7 @@ mod tests {
     #[test]
     fn prompt_id_rides_the_shared_base_between_cwd_and_permission_mode() {
         let p = PreToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePre,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -108,6 +303,7 @@ mod tests {
     #[test]
     fn post_payload_includes_tool_response() {
         let p = PostToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePost,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -131,6 +327,7 @@ mod tests {
     #[test]
     fn round_trip_pre_payload() {
         let p = PreToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePre,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -153,6 +350,7 @@ mod tests {
     #[test]
     fn arbitrary_tool_input_stays_a_raw_member_through_envelope_serde() {
         let payload = PreToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePre,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -225,6 +423,7 @@ mod tests {
         // PRESENT: `effort: { level: "high" }`, placed after the base
         // `agent_type` field and before the event-specific fields.
         let with_effort = PreToolUsePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePre,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -247,7 +446,7 @@ mod tests {
         // Wire position: base block, after `cwd` (the last always-present base
         // field here) and immediately before `tool_name`.
         assert!(
-            s.contains(r#""cwd":"/w","effort":{"level":"high"},"tool_name":"Bash""#),
+            s.contains(r#""cwd":"/w","effort":{"level":"high"},"hook_event_name":"PreToolUse","tool_name":"Bash""#),
             "effort sits in the base block before event fields: {s}"
         );
         let back: PreToolUsePayload = serde_json::from_str(&s).unwrap();
@@ -938,9 +1137,10 @@ mod tests {
             err.to_string(),
             "Unknown hook decision type: maybe. Valid types are: approve, block"
         );
-        // An empty `decision` is falsy in the binary's `if(e.decision)` — skipped, not thrown.
-        let r = parse_response(r#"{"decision":""}"#, "PreToolUse").unwrap();
-        assert_eq!(r.decision, None);
+        // The native enum schema rejects an empty spelling before the
+        // result processor reaches its truthiness guard.
+        assert!(matches!(parse_response(r#"{"decision":""}"#, "PreToolUse"),
+            Err(HookResponseParseError::UnknownDecision { value }) if value.is_empty()));
     }
 
     #[test]
@@ -961,14 +1161,9 @@ mod tests {
             err.to_string(),
             "Unknown hook permissionDecision type: perhaps. Valid types are: allow, deny, ask, defer"
         );
-        // An empty hsOut `permissionDecision` is falsy in the binary's
-        // `&& e.hookSpecificOutput.permissionDecision` guard — skipped, not thrown.
-        let r = parse_response(
+        assert!(matches!(parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":""}}"#,
-            "PreToolUse",
-        )
-        .unwrap();
-        assert_eq!(r.decision, None);
+            "PreToolUse"), Err(HookResponseParseError::UnknownPermissionDecision { value }) if value.is_empty()));
     }
 
     #[test]
@@ -1042,6 +1237,7 @@ mod tests {
     #[test]
     fn permission_denied_payload_serializes_byte_lock() {
         let p = PermissionDeniedPayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePermissionDenied,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -1067,6 +1263,7 @@ mod tests {
     #[test]
     fn permission_denied_reason_preserves_lone_surrogate_units() {
         let p = PermissionDeniedPayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePermissionDenied,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -1582,21 +1779,36 @@ mod tests {
     // ---- B1: parse_response validates the new hookEventNames ------------
 
     #[test]
-    fn parse_response_validates_new_event_names() {
-        for name in [
-            "Stop",
-            "SubagentStop",
+    fn only_declared_events_accept_hook_specific_output() {
+        for event in [
+            "TaskCreated",
             "TaskCompleted",
-            "UserPromptSubmit",
-            "SessionStart",
             "StopFailure",
+            "PreCompact",
+            "PostCompact",
+            "TeammateIdle",
+            "ConfigChange",
+            "InstructionsLoaded",
+            "DirectoryAdded",
+            "WorktreeRemove",
+            "SessionEnd",
+            "AgentSpawn",
         ] {
+            let raw = format!(
+                r#"{{"hookSpecificOutput":{{"hookEventName":"{event}","additionalContext":"x"}}}}"#
+            );
+            assert!(parse_response(&raw, event).is_err(), "{event}");
+        }
+    }
+
+    #[test]
+    fn parse_response_validates_new_event_names() {
+        for name in ["Stop", "SubagentStop", "UserPromptSubmit", "SessionStart"] {
             // Matching event name parses fine.
             let raw = format!(
                 r#"{{"hookSpecificOutput":{{"hookEventName":"{name}","additionalContext":"x"}}}}"#
             );
-            let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-            let r = parse_response(&raw, leaked).unwrap();
+            let r = parse_response(&raw, name).unwrap();
             // `additionalContext` now lands on its own field (NOT system_message).
             assert_eq!(
                 r.additional_context
@@ -1608,7 +1820,7 @@ mod tests {
             // A mismatched name is rejected.
             let err = parse_response(
                 r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse"}}"#,
-                leaked,
+                name,
             )
             .unwrap_err();
             assert!(matches!(
@@ -1623,6 +1835,7 @@ mod tests {
     #[test]
     fn post_tool_use_failure_payload_serializes_byte_lock() {
         let p = PostToolUseFailurePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePostToolUseFailure,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -1642,13 +1855,14 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
             s,
-            r#"{"hook_event_name":"PostToolUseFailure","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","tool_name":"Bash","tool_input":null,"tool_use_id":"tu-1","error":"boom"}"#
+            r#"{"session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":null,"tool_use_id":"tu-1","error":"boom"}"#
         );
     }
 
     #[test]
     fn post_tool_use_failure_payload_serializes_with_interrupt() {
         let p = PostToolUseFailurePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePostToolUseFailure,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -1674,6 +1888,7 @@ mod tests {
     fn post_tool_use_failure_error_keeps_lone_surrogate_units() {
         let error = Utf16JsonProjection::parse(r#""x\ud800y""#).unwrap();
         let payload = PostToolUseFailurePayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePostToolUseFailure,
             session_id: "s".into(),
             transcript_path: "/t".into(),
@@ -1940,6 +2155,7 @@ mod tests {
     #[test]
     fn permission_request_payload_serializes_byte_lock() {
         let p = PermissionRequestPayload {
+            mcp_server: None,
             hook_event_name: HookEventNamePermissionRequest,
             session_id: "sess-1".into(),
             transcript_path: "/tmp/t.jsonl".into(),
@@ -1956,7 +2172,7 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
             s,
-            r#"{"hook_event_name":"PermissionRequest","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#
+            r#"{"session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#
         );
     }
 

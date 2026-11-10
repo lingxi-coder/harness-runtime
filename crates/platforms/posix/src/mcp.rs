@@ -621,7 +621,8 @@ struct ToolsListResult {
 
 #[derive(Deserialize)]
 struct RawTool {
-    name: String,
+    #[serde(deserialize_with = "deserialize_tool_name_source")]
+    name: Utf16JsonProjection,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -662,6 +663,12 @@ impl RawTool {
     /// token; `McpRegistry::connect` rewrites both once it knows the registry
     /// key.
     fn into_dto(self) -> McpToolDto {
+        let units = self
+            .name
+            .string_units("")
+            .expect("decoded tool name is a string");
+        let name = String::from_utf16_lossy(&units);
+        let wire_tool_name = String::from_utf16(&units).is_err().then_some(self.name);
         let search_hint = self.meta.as_ref().and_then(|meta| {
             let value = meta.get_property("anthropic/searchHint")?;
             value.as_str()?;
@@ -679,9 +686,10 @@ impl RawTool {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         McpToolDto {
-            full_name: format!("mcp____{}", self.name),
+            full_name: format!("mcp____{name}"),
             server_name: String::new(),
-            tool_name: self.name,
+            tool_name: name,
+            wire_tool_name,
             description: self.description.unwrap_or_else(|| source_string("")),
             input_schema: self.input_schema,
             output_schema: self.output_schema,
@@ -693,6 +701,16 @@ impl RawTool {
             requires_user_interaction,
         }
     }
+}
+
+fn deserialize_tool_name_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Utf16JsonProjection, D::Error> {
+    let name = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if name.string_units("").is_none() {
+        return Err(serde::de::Error::custom("MCP tool name must be a string"));
+    }
+    Ok(name)
 }
 
 #[derive(Deserialize)]
@@ -1765,6 +1783,7 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
         mcp::decode_native_mcp_frame,
         jsonrpc::codec::DecodeErrorHandling::Skip,
     ))
+    .initial_request_id(0)
     .unknown_method_message("Method not found")
     .build_async_io(stdout, stdin);
 

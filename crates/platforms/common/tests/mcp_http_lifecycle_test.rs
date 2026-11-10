@@ -7,6 +7,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use futures::StreamExt;
 use lingxi_core::host::McpTransportSpec;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, McpServerMetadata};
 use serde_json::{json, Value};
@@ -69,7 +70,17 @@ async fn get_events(State(state): State<Arc<StateData>>, headers: HeaderMap) -> 
             Ok(_) => Some((Ok::<_, Infallible>(Event::default().event("message").id("catalog-change").data(json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}).to_string())), receiver)),
         }
     });
-    Sse::new(stream).into_response()
+    // The owning Local Apps server emits an authoritative catalog notification
+    // after each GET attachment, covering changes while its stream was offline.
+    let attached = futures::stream::once(async {
+        Ok::<_, Infallible>(
+            Event::default()
+                .event("message")
+                .id("catalog-attach")
+                .data("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"),
+        )
+    });
+    Sse::new(attached.chain(stream)).into_response()
 }
 async fn delete_session(State(state): State<Arc<StateData>>, headers: HeaderMap) -> StatusCode {
     assert_eq!(headers["mcp-session-id"], "app-session");
@@ -171,7 +182,7 @@ async fn an_existing_rust_registry_observes_app_start_stop_and_get_only_reconnec
         state.headers.lock().await["last-event-id"],
         "catalog-change"
     );
-    // No notification is emitted while GET is offline: reattachment must invalidate tools.
+    // A real server notification on reattachment invalidates an offline catalog change.
     let change = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let change = changes.recv().await.unwrap();
@@ -187,8 +198,8 @@ async fn an_existing_rust_registry_observes_app_start_stop_and_get_only_reconnec
     registry.disconnect("apps").await.unwrap();
     assert_eq!(
         state.deletes.load(Ordering::SeqCst),
-        1,
-        "async disconnect drains DELETE before returning"
+        0,
+        "ordinary disconnect closes streams without terminating the server session"
     );
     let gets = state.gets.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -201,27 +212,26 @@ async fn an_existing_rust_registry_observes_app_start_stop_and_get_only_reconnec
 }
 
 #[tokio::test]
-async fn optional_get_405_keeps_post_calls_and_terminates_the_session_once() {
+async fn optional_get_405_keeps_post_calls_and_close_does_not_delete_the_session() {
     let (state, registry, server) = fixture(false).await;
     wait_for(async || state.gets.load(Ordering::SeqCst) == 1).await;
     assert!(registry.tool_identity_catalog().await.is_empty());
     registry.disconnect("apps").await.unwrap();
-    assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.deletes.load(Ordering::SeqCst), 0);
     assert_eq!(state.gets.load(Ordering::SeqCst), 1);
     server.abort();
 }
 
 #[tokio::test]
-async fn cancelled_disconnect_retains_the_http_cleanup_receipt_for_retry() {
+async fn normal_disconnect_does_not_wait_for_an_explicit_delete_handler() {
     let (state, registry, server) = fixture(true).await;
     state.delay_delete.store(true, Ordering::SeqCst);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), registry.disconnect("apps"))
-            .await
-            .is_err()
-    );
+    tokio::time::timeout(Duration::from_millis(100), registry.disconnect("apps"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(state.deletes.load(Ordering::SeqCst), 0);
     registry.disconnect("apps").await.unwrap();
-    assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.deletes.load(Ordering::SeqCst), 0);
     server.abort();
 }

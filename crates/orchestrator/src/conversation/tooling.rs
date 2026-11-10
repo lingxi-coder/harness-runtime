@@ -873,7 +873,8 @@ impl ConversationOrchestrator {
                 }
             }
         }
-        self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire)
+        let base_wire = wire.clone();
+        self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire, false, true)
             .await;
         let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
         let has_deferred_candidates = tools.iter().any(|tool| {
@@ -997,6 +998,49 @@ impl ConversationOrchestrator {
             context_window,
             exact_deferred_tokens,
         );
+        // Loaded MCP descriptions enter tool.describe with the larger source
+        // budget. Keep keyword search and auto-threshold counting on the
+        // ordinary description above; a Mod can transform either form.
+        let mut loaded_tools = Vec::new();
+        let mut loaded_wire = Vec::new();
+        for tool in &tools {
+            if !wire
+                .iter()
+                .any(|entry| entry.name == tool.name() && entry.defer_loading)
+            {
+                continue;
+            }
+            let Some(description) = tool.prompt_for_loading_mode(true) else {
+                continue;
+            };
+            let Some(mut entry) = base_wire
+                .iter()
+                .find(|entry| entry.name == tool.name())
+                .cloned()
+            else {
+                continue;
+            };
+            entry.description =
+                tool_api::apply_prompt_tool_override(tool.name(), &prompt_options, description);
+            entry.defer_loading = true;
+            loaded_tools.push(tool.clone());
+            loaded_wire.push(entry);
+        }
+        if !loaded_wire.is_empty() {
+            self.apply_mod_tool_descriptions(
+                mod_host.as_ref(),
+                &loaded_tools,
+                &mut loaded_wire,
+                true,
+                false,
+            )
+            .await;
+            for loaded in loaded_wire {
+                if let Some(entry) = wire.iter_mut().find(|entry| entry.name == loaded.name) {
+                    entry.description = loaded.description;
+                }
+            }
+        }
         // Auto mode learns whether it is active only after the schemas are
         // serialized and measured. Publish the complete deferred candidate
         // view (including descriptions), then hide ToolSearch itself whenever
@@ -1073,11 +1117,15 @@ impl ConversationOrchestrator {
         host: Option<&std::sync::Arc<hooks::mods::ModHost>>,
         tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
         wire: &mut [lingxi_core::host::SourceToolWireDefinition],
+        loaded_through_tool_search: bool,
+        publish_defer_overrides: bool,
     ) {
         let Some(host) = host.filter(|host| host.has_event("tool.describe")) else {
-            self.tools
-                .deferral()
-                .set_mod_overrides(std::collections::HashMap::new());
+            if publish_defer_overrides {
+                self.tools
+                    .deferral()
+                    .set_mod_overrides(std::collections::HashMap::new());
+            }
             return;
         };
         let identity = host.registration_identity();
@@ -1090,6 +1138,7 @@ impl ConversationOrchestrator {
         let mut overrides = std::collections::HashMap::new();
         for (tool, entry) in tools.iter().zip(wire.iter_mut()) {
             let name = tool.name();
+            let cache_key = (name.to_owned(), loaded_through_tool_search);
             if entry.description.string_units("").is_none() {
                 continue;
             }
@@ -1120,7 +1169,7 @@ impl ConversationOrchestrator {
                 let cache = self.prompt_runtime.mod_tool_descriptions.lock().await;
                 cache
                     .answers
-                    .get(name)
+                    .get(&cache_key)
                     .and_then(|(source, catalog, answer)| {
                         (source == &input && catalog == &identity).then_some(answer.clone())
                     })
@@ -1217,7 +1266,7 @@ impl ConversationOrchestrator {
                 if cache.generation == generation {
                     cache
                         .answers
-                        .insert(name.to_owned(), (input, identity, result.clone()));
+                        .insert(cache_key, (input, identity, result.clone()));
                 }
                 result
             };
@@ -1234,7 +1283,9 @@ impl ConversationOrchestrator {
                 .unwrap_or(raw_deferred);
             overrides.insert(name.to_owned(), deferred);
         }
-        self.tools.deferral().set_mod_overrides(overrides);
+        if publish_defer_overrides {
+            self.tools.deferral().set_mod_overrides(overrides);
+        }
     }
 
     async fn apply_prompt_snapshot_tool_descriptions(
@@ -1356,7 +1407,14 @@ impl ConversationOrchestrator {
                         .iter()
                         .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
                         .collect();
-                    tools.retain(|t| !def_denied.contains(t.name()));
+                    tools.retain(|t| {
+                        !def_denied.contains(t.name())
+                            && !t.mcp_deny_aliases().iter().any(|alias| {
+                                def_denied
+                                    .iter()
+                                    .any(|denied| permission::tool_wide_name_matches(denied, alias))
+                            })
+                    });
                 }
                 match &agent.tool_policy {
                     agent::AgentToolPolicy::All { .. } => {}
@@ -1368,7 +1426,14 @@ impl ConversationOrchestrator {
                     agent::AgentToolPolicy::Except(names) => {
                         let blocked: std::collections::HashSet<&str> =
                             names.iter().map(String::as_str).collect();
-                        tools.retain(|t| !blocked.contains(t.name()));
+                        tools.retain(|t| {
+                            !blocked.contains(t.name())
+                                && !t.mcp_deny_aliases().iter().any(|alias| {
+                                    blocked.iter().any(|denied| {
+                                        permission::tool_wide_name_matches(denied, alias)
+                                    })
+                                })
+                        });
                     }
                 }
                 *self

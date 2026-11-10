@@ -231,7 +231,7 @@ impl McpRegistry {
         if !supports_kind {
             return Ok(Some(current_id));
         }
-        let Some(client) = self.get_client(&change.server_name).await else {
+        let Some(client) = self.get_client_by_key(&change.server_name).await else {
             return Err(McpError::Internal(
                 format!(
                     "MCP server \"{}\" has no live client for catalog refresh",
@@ -271,6 +271,7 @@ impl McpRegistry {
 
         let mut conns = self.connections.write().await;
         let Some(McpConnectionState::Connected {
+            config,
             connection_id,
             tools,
             prompts,
@@ -287,6 +288,7 @@ impl McpRegistry {
             Refreshed::Tools(next, dropped_tools) => {
                 let new_count = next.len();
                 *tools = next;
+                self.record_control_catalog_publication(&change.server_name, config);
                 self.dropped_tool_snapshots
                     .write()
                     .await

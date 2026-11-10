@@ -52,6 +52,7 @@ pub mod teammate_idle_firer;
 pub mod terminal_seq;
 pub mod user_config;
 pub mod watcher_rebinder;
+pub mod worktree_manager;
 
 pub use async_registry::AsyncHookRegistry;
 pub use attachment::{
@@ -76,8 +77,8 @@ pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChan
 pub use hook_payload::{
     parse_response, parse_response_projection, validation_hint, HookBackgroundTask,
     HookEventEnvelope, HookEventNamePost, HookEventNamePostModelSwitch, HookEventNamePre,
-    HookEventNamePreModelSwitch, HookResponseParseError, HookSessionCron, PostModelSwitchPayload,
-    PostToolUsePayload, PreModelSwitchPayload, PreToolUsePayload,
+    HookEventNamePreModelSwitch, HookMcpServerProvenance, HookResponseParseError, HookSessionCron,
+    PostModelSwitchPayload, PostToolUsePayload, PreModelSwitchPayload, PreToolUsePayload,
 };
 pub use loader::{
     parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated,
@@ -94,8 +95,8 @@ pub use prompt_executor::{
 pub use registry::{HookContext, HookModelSelection, HookRegistry, HookSourceReplaceResult};
 pub use response::{
     truncate_utf16, AggregateHookResult, ClassifierHostContext, ElicitationHookResponse,
-    ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite,
-    PermissionRequestResult, CLASSIFIER_CONTEXT_CAP_UTF16,
+    ExactHookText, HookDecision, HookOutcome, HookOutputRewrite, HookResponse, HookResult,
+    PairedRewrite, PermissionRequestResult, CLASSIFIER_CONTEXT_CAP_UTF16,
 };
 pub use settings_layer::{
     event_name_for_hook, file_changed_matchers_from_hooks, parse_hook_layer_strict,
@@ -108,3 +109,5 @@ pub use teammate_idle_firer::{
     OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer, TeammateIdleOutcome,
 };
 pub use watcher_rebinder::{OptionalWatcherRebinder, WatcherRebinder};
+
+pub use worktree_manager::{HookedWorktreeManager, WorktreeHookResult};

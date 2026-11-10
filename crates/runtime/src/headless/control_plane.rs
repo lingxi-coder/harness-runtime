@@ -168,6 +168,30 @@ pub(crate) struct InboundUiRequestGuard {
 }
 
 impl InboundUiRequestGuard {
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.entry.cancelled.clone()
+    }
+
+    /// Direct MCP calls answer an explicit cancel, but a superseding request
+    /// owns the ID and suppresses the previous generation's eventual answer.
+    pub(crate) fn reply_if_current(
+        &self,
+        reply: impl FnOnce() -> Result<(), crate::headless::stream_json_input::InputError>,
+    ) -> Result<(), crate::headless::stream_json_input::InputError> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .get(&self.key)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
+        {
+            reply()
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn reply_if_live(
         &self,
         reply: impl FnOnce() -> Result<(), crate::headless::stream_json_input::InputError>,
@@ -462,11 +486,7 @@ impl StdioControlPlane {
     /// drop its prompt, remove the pending entry locally (tracking its tool_use_id
     /// so a late response is deduped), and let the awaiting future fall through.
     pub async fn cancel_request(&self, request_id: &Utf16JsonProjection) {
-        let identity = request_id.string_at("").unwrap_or_default();
-        let entry = self.broker.remove(identity).await;
-        if let Some(tuid) = entry.and_then(|e| e.tool_use_id) {
-            self.track_resolved(tuid).await;
-        }
+        self.retire_request(request_id).await;
         let frame = Utf16JsonProjection::object(vec![
             ("type".into(), "control_cancel_request".into()),
             ("request_id".into(), request_id.clone()),
@@ -475,6 +495,16 @@ impl StdioControlPlane {
         let line = crate::headless::stream_json::serialize_projected_ndjson_line(&frame)
             .expect("valid cancellation projection");
         let _ = self.outbound_tx.send(OutboundMsg::Line(line));
+    }
+
+    /// Transport cleanup retires local bookkeeping without asking the host to
+    /// cancel its server. Native SDK close has no outer cancellation frame.
+    pub(crate) async fn retire_request(&self, request_id: &Utf16JsonProjection) {
+        let identity = request_id.string_at("").unwrap_or_default();
+        let entry = self.broker.remove(identity).await;
+        if let Some(tuid) = entry.and_then(|e| e.tool_use_id) {
+            self.track_resolved(tuid).await;
+        }
     }
 
     /// Emit a CLI-originated `control_request` and return a receiver resolved
@@ -1522,6 +1552,28 @@ mod tests {
         drop(old);
         assert_eq!(plane.inbound_ui_requests.lock().unwrap().len(), 1);
         current.reply_if_live(|| Ok(())).unwrap();
+        drop(current);
+        assert!(plane.inbound_ui_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_mcp_cancel_answers_current_owner_but_supersession_does_not() {
+        let (plane, _) = plane_with_channel();
+        let id = source(json!("mcp-call"));
+        let old = plane.begin_inbound_ui_request(&id).unwrap();
+        old.cancellation_token().cancel();
+        let mut answered = false;
+        old.reply_if_current(|| {
+            answered = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(answered);
+        let current = plane.begin_inbound_ui_request(&id).unwrap();
+        old.reply_if_current(|| panic!("superseded control call must not reply"))
+            .unwrap();
+        drop(old);
+        current.reply_if_current(|| Ok(())).unwrap();
         drop(current);
         assert!(plane.inbound_ui_requests.lock().unwrap().is_empty());
     }

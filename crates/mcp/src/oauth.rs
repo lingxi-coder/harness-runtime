@@ -63,6 +63,14 @@ use telemetry::pii::Verified;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub mod callback;
+pub(crate) mod schemas;
+pub(crate) mod sdk_flow;
+pub(crate) mod session;
+pub use session::{configure_client_secret, configure_client_secret_source, McpOAuthIdentity};
+
+#[cfg(test)]
+#[path = "oauth/native_322_tests.rs"]
+mod native_322_tests;
 
 pub use callback::{CallbackError, CallbackListener, CallbackParams};
 
@@ -390,7 +398,14 @@ impl Serialize for OAuthExpiry {
     {
         match self {
             Self::Undefined | Self::Null => serializer.serialize_none(),
-            Self::Number(value) => serializer.serialize_f64(*value),
+            Self::Number(value) => {
+                let projection =
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!(value),
+                    )
+                    .map_err(serde::ser::Error::custom)?;
+                lingxi_core::types::utf16_json::raw_json_serde::serialize(&projection, serializer)
+            }
         }
     }
 }
@@ -527,9 +542,19 @@ impl From<CallbackError> for OAuthError {
 #[must_use]
 pub fn generate_pkce() -> (String, String) {
     let mut rng = rand::rng();
-    let bytes: [u8; 32] = std::array::from_fn(|_| rng.random::<u8>());
-    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let bytes: [u8; 43] = std::array::from_fn(|_| rng.random::<u8>());
+    pkce_from_random_bytes(&bytes)
+}
 
+fn pkce_from_random_bytes(bytes: &[u8; 43]) -> (String, String) {
+    // Native's shipped generator draws 43 bytes and indexes the RFC7636
+    // alphabet with byte %66, rather than base64-encoding 32 random bytes.
+    const ALPHABET: &[u8; 66] =
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+    let verifier: String = bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(*byte) % 66]))
+        .collect();
     let mut h = Sha256::new();
     h.update(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(h.finalize());
@@ -537,12 +562,12 @@ pub fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Generate a 16-byte CSRF state token, base64url-encoded (no padding). Sent
+/// Generate a 32-byte CSRF state token, base64url-encoded (no padding). Sent
 /// in the authorize URL and validated against the redirect callback's `state`.
 #[must_use]
 pub fn generate_state_token() -> String {
     let mut rng = rand::rng();
-    let bytes: [u8; 16] = std::array::from_fn(|_| rng.random::<u8>());
+    let bytes: [u8; 32] = std::array::from_fn(|_| rng.random::<u8>());
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -559,6 +584,8 @@ pub fn generate_state_token() -> String {
 struct ProtectedResourceMetadata {
     #[serde(default)]
     authorization_servers: Vec<String>,
+    #[serde(default)]
+    scopes_supported: Option<Vec<String>>,
     /// RFC 9728 `resource` — REQUIRED, matching the oracle's PRM schema
     /// `Wot=Ia({resource:pe().url(), authorization_servers:...optional(), …})`
     /// (@181753670): `resource` alone carries no `.optional()`, so
@@ -621,8 +648,9 @@ pub(crate) fn parse_www_authenticate_challenge(header: &str) -> WwwAuthChallenge
     if !gate_ok {
         return WwwAuthChallenge::default();
     }
-    let resource_metadata_url =
-        challenge_param(header, "resource_metadata").filter(|url| url::Url::parse(url).is_ok());
+    let resource_metadata_url = challenge_param(header, "resource_metadata")
+        .and_then(|value| url::Url::parse(&value).ok())
+        .map(|url| url.to_string());
     WwwAuthChallenge {
         resource_metadata_url,
         scope: challenge_param(header, "scope"),
@@ -744,56 +772,208 @@ pub struct AuthServerMetadata {
 /// Private projection of RFC 8414 fields used by the standard MCP SDK's
 /// authorization-response issuer check. Keep these fields out of the public
 /// metadata DTO to avoid changing its struct-literal API.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct AuthServerMetadataDocument {
-    #[serde(flatten)]
     metadata: AuthServerMetadata,
-    #[serde(default)]
     issuer: Option<String>,
-    #[serde(default)]
+    issuer_units: Vec<u16>,
+    raw: String,
+    client_id_metadata_document_supported: bool,
     authorization_response_iss_parameter_supported: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DiscoveredAuthServer {
     metadata: AuthServerMetadata,
     /// Canonical `new URL(PRM.resource).href`, after the existing origin/path
     /// guard. The standard SDK carries this exact value through authorize and
     /// authorization-code requests.
     resource: Option<String>,
+    resource_scopes_supported: Option<Vec<String>>,
     /// RFC 8414's issuer field, not `authorization_servers[0]` from PRM.
     issuer: Option<String>,
     issuer_parameter_supported: bool,
+    issuer_units: Vec<u16>,
+    authorization_server_url: String,
+    authorization_metadata: Option<String>,
+    cimd_supported: bool,
+}
+
+fn validate_issuer_echo(
+    expected: &str,
+    received: Option<&str>,
+    enforce: bool,
+) -> Result<(), OAuthError> {
+    if !enforce
+        || received.is_some_and(|received| {
+            received == expected || expected.strip_suffix('/') == Some(received)
+        })
+    {
+        return Ok(());
+    }
+    let same_origin = received
+        .and_then(|received| {
+            url::Url::parse(expected)
+                .ok()
+                .zip(url::Url::parse(received).ok())
+        })
+        .is_some_and(|(expected, received)| {
+            matches!(expected.scheme(), "http" | "https")
+                && matches!(received.scheme(), "http" | "https")
+                && expected.username().is_empty()
+                && expected.password().is_none()
+                && received.username().is_empty()
+                && received.password().is_none()
+                && received.query().is_none()
+                && received.fragment().is_none()
+                && expected.origin() == received.origin()
+        });
+    if same_origin {
+        Ok(())
+    } else {
+        Err(OAuthError::Discovery(
+            "Issuer echo cross-origin mismatch (RFC 8414 §3.3)".into(),
+        ))
+    }
+}
+
+fn projection_strings(
+    value: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pointer: &str,
+) -> Option<Vec<String>> {
+    Some(
+        (0..value.array_len(pointer)?)
+            .map(|index| {
+                value
+                    .string_at(&format!("{pointer}/{index}"))
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect(),
+    )
+}
+fn parse_authorization_document(
+    raw: &str,
+    oidc: bool,
+) -> Result<AuthServerMetadataDocument, OAuthError> {
+    let validated = schemas::validate_authorization(raw, oidc).map_err(OAuthError::Discovery)?;
+    let value = validated.projection();
+    let string = |key: &str| value.string_at(key).map(str::to_owned);
+    Ok(AuthServerMetadataDocument {
+        metadata: AuthServerMetadata {
+            authorization_endpoint: string("/authorization_endpoint").unwrap(),
+            token_endpoint: string("/token_endpoint").unwrap(),
+            registration_endpoint: string("/registration_endpoint"),
+            scopes_supported: projection_strings(value, "/scopes_supported"),
+            scope: string("/scope"),
+            default_scope: string("/default_scope"),
+            revocation_endpoint: string("/revocation_endpoint"),
+            revocation_endpoint_auth_methods_supported: projection_strings(
+                value,
+                "/revocation_endpoint_auth_methods_supported",
+            ),
+            token_endpoint_auth_methods_supported: projection_strings(
+                value,
+                "/token_endpoint_auth_methods_supported",
+            ),
+        },
+        issuer: string("/issuer"),
+        issuer_units: value.string_units("/issuer").unwrap(),
+        raw: validated.source().to_owned(),
+        client_id_metadata_document_supported: value
+            .at_pointer("/client_id_metadata_document_supported")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        authorization_response_iss_parameter_supported: value
+            .at_pointer("/authorization_response_iss_parameter_supported")
+            .and_then(|value| value.as_bool()),
+    })
 }
 
 /// Build a `.well-known` URL by inserting the well-known path between the
 /// origin and any path component (RFC 8414 §3: the well-known segment is
 /// inserted after the host, before the issuer path).
 fn well_known_url(base: &str, suffix: &str) -> String {
-    // Split scheme://host[:port] from the path. We avoid a `url` dep (not in
-    // mcp's tree); the inputs are validated server URLs from config.
-    let without_scheme = base.split_once("://");
-    match without_scheme {
-        Some((scheme, rest)) => {
-            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-            let path = path.trim_end_matches('/');
-            if path.is_empty() {
-                format!("{scheme}://{host}/.well-known/{suffix}")
-            } else {
-                // RFC 8414 path-aware form: /.well-known/{suffix}/{path}
-                format!("{scheme}://{host}/.well-known/{suffix}/{path}")
-            }
-        }
-        // No scheme — treat the whole thing as host.
-        None => format!("{base}/.well-known/{suffix}"),
+    let Ok(mut url) = url::Url::parse(base) else {
+        return format!("{base}/.well-known/{suffix}");
+    };
+    let path = url
+        .path()
+        .strip_suffix('/')
+        .unwrap_or(url.path())
+        .to_owned();
+    url.set_path(&format!("/.well-known/{suffix}{path}"));
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn authorization_metadata_urls(base: &str) -> Result<Vec<String>, OAuthError> {
+    let url = url::Url::parse(base).map_err(|error| {
+        OAuthError::Discovery(format!("invalid authorization server URL: {error}"))
+    })?;
+    let origin = url.origin().ascii_serialization();
+    let path = url.path().strip_suffix('/').unwrap_or(url.path());
+    let mut urls = vec![
+        format!("{origin}/.well-known/oauth-authorization-server{path}"),
+        format!("{origin}/.well-known/openid-configuration{path}"),
+    ];
+    if !path.is_empty() {
+        urls.push(format!("{origin}{path}/.well-known/openid-configuration"));
     }
+    Ok(urls)
+}
+
+const MCP_OAUTH_PROTOCOL_VERSION: &str = "2025-11-25";
+
+async fn fetch_discovery_response(
+    http: &Arc<dyn HttpTransport>,
+    url: &str,
+    accept: bool,
+) -> Result<lingxi_core::types::HttpResponse, OAuthError> {
+    let mut headers = vec![(
+        "MCP-Protocol-Version".into(),
+        MCP_OAUTH_PROTOCOL_VERSION.into(),
+    )];
+    if accept {
+        headers.push(("Accept".into(), "application/json".into()));
+    }
+    http.request(HttpRequest {
+        method: HttpMethod::Get,
+        url: url.to_owned(),
+        headers,
+        body: None,
+        body_bytes: None,
+        timeout: Some(OAUTH_HTTP_TIMEOUT),
+    })
+    .await
+    .map_err(|error| OAuthError::Discovery(format!("transport: {error}")))
+}
+
+async fn discover_authorization_metadata(
+    http: &Arc<dyn HttpTransport>,
+    base: &str,
+) -> Result<Option<AuthServerMetadataDocument>, OAuthError> {
+    for (index, candidate) in authorization_metadata_urls(base)?.into_iter().enumerate() {
+        let response = fetch_discovery_response(http, &candidate, true).await?;
+        if !(200..300).contains(&response.status) {
+            if (400..500).contains(&response.status) || response.status == 502 {
+                continue;
+            }
+            return Err(OAuthError::Discovery(format!(
+                "HTTP {} fetching {candidate}",
+                response.status
+            )));
+        }
+        return parse_authorization_document(&response.body, index > 0).map(Some);
+    }
+    Ok(None)
 }
 
 /// One discovery `GET` returning a parsed JSON body, or `Err` on non-200.
-async fn get_json<T: serde::de::DeserializeOwned>(
+async fn get_authorization_document(
     http: &Arc<dyn HttpTransport>,
     url: &str,
-) -> Result<T, OAuthError> {
+) -> Result<AuthServerMetadataDocument, OAuthError> {
     let req = HttpRequest {
         method: HttpMethod::Get,
         url: url.to_string(),
@@ -806,14 +986,13 @@ async fn get_json<T: serde::de::DeserializeOwned>(
         .request(req)
         .await
         .map_err(|e| OAuthError::Discovery(format!("transport: {e}")))?;
-    if resp.status != 200 {
+    if !(200..300).contains(&resp.status) {
         return Err(OAuthError::Discovery(format!(
             "HTTP {} fetching {url}",
             resp.status
         )));
     }
-    serde_json::from_str(&resp.body)
-        .map_err(|e| OAuthError::Discovery(format!("decode {url}: {e}")))
+    parse_authorization_document(&resp.body, false)
 }
 
 /// Discover the authorization-server metadata for an MCP `server_url`.
@@ -856,6 +1035,25 @@ async fn discover_auth_server(
     configured_url: Option<&str>,
     resource_metadata_url: Option<&str>,
 ) -> Result<DiscoveredAuthServer, OAuthError> {
+    discover_auth_server_for_flow(
+        http,
+        server_url,
+        configured_url,
+        resource_metadata_url,
+        false,
+    )
+    .await
+}
+
+/// Interactive SDK auth supports the default endpoints when discovery finds
+/// no metadata. The public discovery-only helper retains its error contract.
+async fn discover_auth_server_for_flow(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    configured_url: Option<&str>,
+    resource_metadata_url: Option<&str>,
+    allow_default_endpoints: bool,
+) -> Result<DiscoveredAuthServer, OAuthError> {
     if let Some(cfg) = configured_url {
         if !cfg.starts_with("https://") {
             return Err(OAuthError::Discovery(format!(
@@ -867,38 +1065,104 @@ async fn discover_auth_server(
         // sequential because it reads `authorization_servers`.
         let protected_http = Arc::clone(http);
         let (metadata, protected_resource) = tokio::try_join!(
-            get_json::<AuthServerMetadataDocument>(http, cfg),
+            get_authorization_document(http, cfg),
             discover_protected_resource(&protected_http, server_url, resource_metadata_url),
         )?;
-        return Ok(discovered_metadata(
+        let resource_scopes = protected_resource
+            .as_ref()
+            .and_then(|(metadata, _)| metadata.scopes_supported.clone());
+        let issuer = metadata.issuer.clone().unwrap_or_default();
+        return discovered_metadata(
             metadata,
             protected_resource.map(|(_, resource)| resource),
-        ));
+            resource_scopes,
+            &issuer,
+        );
     }
 
-    // RFC 9728: protected-resource probe → issuer → RFC 8414. A challenge-named
-    // URL (§24c) is fetched AT THAT EXACT ADDRESS; otherwise fall back to the
-    // well-known guess on the server itself.
     let protected_resource =
         discover_protected_resource(http, server_url, resource_metadata_url).await?;
     let resource = protected_resource
         .as_ref()
         .map(|(_, resource)| resource.clone());
-    if let Some((pr, resource)) = protected_resource {
-        if let Some(issuer) = pr.authorization_servers.first() {
-            let as_url = well_known_url(issuer, "oauth-authorization-server");
-            if let Ok(meta) = get_json::<AuthServerMetadataDocument>(http, &as_url).await {
-                return Ok(discovered_metadata(meta, Some(resource)));
+    let resource_scopes = protected_resource
+        .as_ref()
+        .and_then(|(metadata, _)| metadata.scopes_supported.clone());
+    let server = url::Url::parse(server_url)
+        .map_err(|error| OAuthError::Discovery(format!("invalid MCP server URL: {error}")))?;
+    let issuer = protected_resource
+        .as_ref()
+        .and_then(|(metadata, _)| metadata.authorization_servers.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            server
+                .join("/")
+                .expect("hierarchical MCP endpoint")
+                .to_string()
+        });
+    match discover_authorization_metadata(http, &issuer).await {
+        Ok(Some(metadata)) => {
+            return discovered_metadata(metadata, resource, resource_scopes, &issuer)
+        }
+        // SDK v9t propagates genuine HTTP/JSON failures. A missing document
+        // (4xx/502 at every candidate) is the distinct default-endpoint case.
+        Err(error) if allow_default_endpoints => return Err(error),
+        Ok(None) | Err(_) => {}
+    }
+    // The application preflight retains its path-aware legacy discovery
+    // after the standard origin/PRM chain has no usable metadata.
+    if server.path() != "/" {
+        match discover_authorization_metadata(http, server_url).await {
+            Ok(Some(metadata)) => {
+                return discovered_metadata(metadata, resource, resource_scopes, server_url)
             }
+            Err(error) if allow_default_endpoints => return Err(error),
+            Ok(None) | Err(_) => {}
         }
     }
+    if allow_default_endpoints {
+        return default_discovered(&issuer, resource, resource_scopes);
+    }
+    Err(OAuthError::Discovery(format!(
+        "no usable metadata at {}",
+        authorization_metadata_urls(&issuer)?[0]
+    )))
+}
 
-    // Fallback: RFC 8414 directly against the server URL (path-aware).
-    let as_url = well_known_url(server_url, "oauth-authorization-server");
-    Ok(discovered_metadata(
-        get_json::<AuthServerMetadataDocument>(http, &as_url).await?,
+fn default_discovered(
+    issuer: &str,
+    resource: Option<String>,
+    resource_scopes: Option<Vec<String>>,
+) -> Result<DiscoveredAuthServer, OAuthError> {
+    let issuer =
+        url::Url::parse(issuer).map_err(|error| OAuthError::Discovery(error.to_string()))?;
+    let endpoint = |path| {
+        issuer
+            .join(path)
+            .map(String::from)
+            .map_err(|error| OAuthError::Discovery(error.to_string()))
+    };
+    Ok(DiscoveredAuthServer {
+        metadata: AuthServerMetadata {
+            authorization_endpoint: endpoint("/authorize")?,
+            token_endpoint: endpoint("/token")?,
+            registration_endpoint: Some(endpoint("/register")?),
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: None,
+        },
         resource,
-    ))
+        resource_scopes_supported: resource_scopes,
+        issuer: None,
+        issuer_parameter_supported: false,
+        issuer_units: issuer.as_str().encode_utf16().collect(),
+        authorization_server_url: issuer.to_string(),
+        authorization_metadata: None,
+        cimd_supported: false,
+    })
 }
 
 async fn discover_protected_resource(
@@ -906,34 +1170,70 @@ async fn discover_protected_resource(
     server_url: &str,
     resource_metadata_url: Option<&str>,
 ) -> Result<Option<(ProtectedResourceMetadata, String)>, OAuthError> {
-    let pr_url = match resource_metadata_url {
-        Some(named) => named.to_string(),
+    let mut pr_url = match resource_metadata_url {
+        Some(named) => url::Url::parse(named)
+            .map_err(|error| {
+                OAuthError::Discovery(format!("invalid resource metadata URL: {error}"))
+            })?
+            .to_string(),
         None => well_known_url(server_url, "oauth-protected-resource"),
     };
-    match get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
-        Ok(pr) => {
-            let resource = validated_resource_url(server_url, &pr.resource)?;
-            Ok(Some((pr, resource)))
-        }
-        // A missing or undecodable PRM is an optional discovery probe. The
-        // configured RFC 8414 URL still determines AS metadata, while a valid
-        // PRM contributes its RFC 8707 resource indicator to the OAuth wire.
-        Err(_) => Ok(None),
+    let mut response = fetch_discovery_response(http, &pr_url, false).await?;
+    let server = url::Url::parse(server_url)
+        .map_err(|error| OAuthError::Discovery(format!("invalid MCP server URL: {error}")))?;
+    if resource_metadata_url.is_none()
+        && server.path() != "/"
+        && ((400..500).contains(&response.status) || response.status == 502)
+    {
+        pr_url = server
+            .join("/.well-known/oauth-protected-resource")
+            .map_err(|error| OAuthError::Discovery(error.to_string()))?
+            .to_string();
+        response = fetch_discovery_response(http, &pr_url, false).await?;
     }
+    if !(200..300).contains(&response.status) {
+        return Ok(None);
+    }
+    let Ok(validated) = schemas::validate_prm(&response.body) else {
+        return Ok(None);
+    };
+    let value = validated.projection();
+    let metadata = ProtectedResourceMetadata {
+        authorization_servers: projection_strings(value, "/authorization_servers")
+            .unwrap_or_default(),
+        scopes_supported: projection_strings(value, "/scopes_supported"),
+        resource: value.string_at("/resource").unwrap().to_owned(),
+    };
+    let resource = validated_resource_url(server_url, &metadata.resource)?;
+    Ok(Some((metadata, resource)))
 }
 
 fn discovered_metadata(
     document: AuthServerMetadataDocument,
     resource: Option<String>,
-) -> DiscoveredAuthServer {
-    DiscoveredAuthServer {
+    resource_scopes_supported: Option<Vec<String>>,
+    authorization_server_url: &str,
+) -> Result<DiscoveredAuthServer, OAuthError> {
+    for endpoint in [
+        &document.metadata.authorization_endpoint,
+        &document.metadata.token_endpoint,
+    ] {
+        url::Url::parse(endpoint)
+            .map_err(|error| OAuthError::Discovery(format!("invalid OAuth endpoint: {error}")))?;
+    }
+    Ok(DiscoveredAuthServer {
         metadata: document.metadata,
         resource,
+        resource_scopes_supported,
         issuer: document.issuer,
+        issuer_units: document.issuer_units,
+        authorization_server_url: authorization_server_url.into(),
+        authorization_metadata: Some(document.raw),
+        cimd_supported: document.client_id_metadata_document_supported,
         issuer_parameter_supported: document
             .authorization_response_iss_parameter_supported
             .unwrap_or(false),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -944,18 +1244,114 @@ fn discovered_metadata(
 /// `ClaudeAuthProvider.clientMetadata` (auth.ts:1417-1437):
 /// `grant_types:[authorization_code, refresh_token]`, `response_types:[code]`,
 /// `token_endpoint_auth_method:none`.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct RegistrationRequest<'a> {
+    client_name: String,
     redirect_uris: Vec<&'a str>,
     grant_types: Vec<&'a str>,
     response_types: Vec<&'a str>,
     token_endpoint_auth_method: &'a str,
-    client_name: String,
-    /// Advertised scope, mirrored into the client metadata when the auth server
-    /// publishes one (auth.ts:1426-1434, `getScopeFromMetadata`). Omitted (per
-    /// RFC 7591) when no scope is available.
-    #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'a str>,
+    application_type: &'static str,
+    scope_precedes_application_type: bool,
+}
+
+impl Serialize for RegistrationRequest<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(6 + usize::from(self.scope.is_some())))?;
+        map.serialize_entry("client_name", &self.client_name)?;
+        map.serialize_entry("redirect_uris", &self.redirect_uris)?;
+        map.serialize_entry("grant_types", &self.grant_types)?;
+        map.serialize_entry("response_types", &self.response_types)?;
+        map.serialize_entry(
+            "token_endpoint_auth_method",
+            self.token_endpoint_auth_method,
+        )?;
+        // Jd appends application_type after provider client metadata; th's
+        // scope spread retains an existing key's position or appends it.
+        if self.scope_precedes_application_type {
+            if let Some(scope) = self.scope {
+                map.serialize_entry("scope", scope)?;
+            }
+        }
+        map.serialize_entry("application_type", self.application_type)?;
+        if !self.scope_precedes_application_type {
+            if let Some(scope) = self.scope {
+                map.serialize_entry("scope", scope)?;
+            }
+        }
+        map.end()
+    }
+}
+
+fn client_application_type(redirect_uri: &str) -> &'static str {
+    let Ok(url) = url::Url::parse(redirect_uri) else {
+        return "web";
+    };
+    if !matches!(url.scheme(), "http" | "https") || is_oauth_loopback(&url) {
+        "native"
+    } else {
+        "web"
+    }
+}
+
+fn is_oauth_loopback(url: &url::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    )
+}
+
+fn token_endpoint_url(endpoint: &str) -> Result<url::Url, OAuthError> {
+    let url = url::Url::parse(endpoint)
+        .map_err(|error| OAuthError::Token(format!("invalid token endpoint: {error}")))?;
+    if url.scheme() != "https" && !is_oauth_loopback(&url) {
+        return Err(OAuthError::Token(format!(
+            "OAuth token endpoint must use HTTPS or a loopback host: {url}"
+        )));
+    }
+    Ok(url)
+}
+
+fn form_body<'a>(form: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish()
+}
+
+/// JavaScript encodeURIComponent, used only by revocation Basic auth. Token
+/// grants use raw Latin-1 btoa bytes and URLSearchParams uses form encoding.
+fn encode_uri_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn token_basic_authorization(client_id: &str, client_secret: &str) -> Result<String, OAuthError> {
+    if client_secret.is_empty() {
+        return Err(OAuthError::Token(
+            "client_secret_basic authentication requires a client_secret".into(),
+        ));
+    }
+    let bytes = format!("{client_id}:{client_secret}")
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).ok())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            OAuthError::Token("Invalid character in client_secret_basic credentials".into())
+        })?;
+    Ok(format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// DCR response — we only need the issued `client_id`.
@@ -976,6 +1372,47 @@ pub async fn register_client(
     server_name: &str,
     scope: Option<&str>,
 ) -> Result<String, OAuthError> {
+    register_client_with_scope_order(
+        http,
+        registration_endpoint,
+        redirect_uri,
+        server_name,
+        scope,
+        false,
+    )
+    .await
+}
+
+async fn register_client_with_scope_order(
+    http: &Arc<dyn HttpTransport>,
+    registration_endpoint: &str,
+    redirect_uri: &str,
+    server_name: &str,
+    scope: Option<&str>,
+    scope_precedes_application_type: bool,
+) -> Result<String, OAuthError> {
+    register_client_information(
+        http,
+        registration_endpoint,
+        redirect_uri,
+        server_name,
+        scope,
+        scope_precedes_application_type,
+        &McpOAuthIdentity::default(),
+    )
+    .await
+    .map(|client| client.client_id)
+}
+
+async fn register_client_information(
+    http: &Arc<dyn HttpTransport>,
+    registration_endpoint: &str,
+    redirect_uri: &str,
+    server_name: &str,
+    scope: Option<&str>,
+    scope_precedes_application_type: bool,
+    identity: &McpOAuthIdentity,
+) -> Result<session::ClientInformation, OAuthError> {
     let body = RegistrationRequest {
         redirect_uris: vec![redirect_uri],
         grant_types: vec!["authorization_code", "refresh_token"],
@@ -983,18 +1420,17 @@ pub async fn register_client(
         token_endpoint_auth_method: "none",
         // claude-code uses `Claude Code (${serverName})` (auth.ts:1419); keep
         // the LingXi rebrand but mirror the per-server suffix.
-        client_name: format!("LingXi ({server_name})"),
+        client_name: format!("{} ({server_name})", identity.client_name),
         scope,
+        application_type: client_application_type(redirect_uri),
+        scope_precedes_application_type,
     };
     let body = serde_json::to_string(&body)
         .map_err(|e| OAuthError::Registration(format!("encode: {e}")))?;
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: registration_endpoint.to_string(),
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            ("accept".into(), "application/json".into()),
-        ],
+        headers: vec![("Content-Type".into(), "application/json".into())],
         body: Some(body),
         body_bytes: None,
         timeout: Some(OAUTH_HTTP_TIMEOUT),
@@ -1010,9 +1446,16 @@ pub async fn register_client(
             resp.status, resp.body
         )));
     }
-    let parsed: RegistrationResponse = serde_json::from_str(&resp.body)
-        .map_err(|e| OAuthError::Registration(format!("decode: {e}")))?;
-    Ok(parsed.client_id)
+    let validated = schemas::validate_registration(&resp.body).map_err(OAuthError::Registration)?;
+    let value = validated.projection();
+    Ok(session::ClientInformation {
+        client_id: value.string_at("/client_id").unwrap().into(),
+        client_secret: value.string_at("/client_secret").map(str::to_owned),
+        token_endpoint_auth_method: value
+            .string_at("/token_endpoint_auth_method")
+            .map(str::to_owned),
+        raw: validated.source().to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,7 +1505,9 @@ where
     }
 }
 
-fn deserialize_coerced_optional_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+pub(crate) fn deserialize_coerced_optional_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -1181,24 +1626,148 @@ fn build_authorize_url_with_resource(
 ) -> (String, String, String) {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state_token();
-    let mut url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
-        meta.authorization_endpoint,
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(&state),
-        urlencoding::encode(&challenge),
+    let url = authorize_url_from_material(
+        &meta.authorization_endpoint,
+        client_id,
+        redirect_uri,
+        scope,
+        resource,
+        &state,
+        &challenge,
     );
+    (url, verifier, state)
+}
+
+fn set_query_pair(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some(index) = pairs.iter().position(|(name, _)| name == key) {
+        pairs[index].1 = value.to_owned();
+        let mut current = 0;
+        pairs.retain(|(name, _)| {
+            let retain = name != key || current == index;
+            current += 1;
+            retain
+        });
+    } else {
+        pairs.push((key.to_owned(), value.to_owned()));
+    }
+}
+
+fn authorize_url_from_material(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+    state: &str,
+    challenge: &str,
+) -> String {
+    authorize_url_from_material_with_scope(
+        endpoint,
+        client_id,
+        redirect_uri,
+        scope,
+        resource,
+        state,
+        challenge,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_url_from_material_with_scope(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+    state: &str,
+    challenge: &str,
+    provider_scope: Option<(&AuthServerMetadata, Option<&str>)>,
+) -> String {
+    // Actual flow discovery validates endpoint URLs. Keep the public helper's
+    // existing infallible signature for callers with already-validated DTOs.
+    let Ok(mut url) = url::Url::parse(endpoint) else {
+        return endpoint.to_owned();
+    };
+    let mut pairs = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    for (key, value) in [
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+        ("redirect_uri", redirect_uri),
+        ("state", state),
+    ] {
+        if !value.is_empty() || key != "state" {
+            set_query_pair(&mut pairs, key, value);
+        }
+    }
     if !scope.is_empty() {
-        url.push_str(&format!("&scope={}", urlencoding::encode(scope)));
+        set_query_pair(&mut pairs, "scope", scope);
+    }
+    if scope.split(' ').any(|value| value == "offline_access") {
+        pairs.push(("prompt".into(), "consent".into()));
     }
     if let Some(resource) = resource {
-        let separator = if url.contains('?') { '&' } else { '?' };
-        url.push(separator);
-        url.push_str("resource=");
-        url.push_str(&urlencoding::encode(resource));
+        set_query_pair(&mut pairs, "resource", resource);
     }
-    (url, verifier, state)
+    if let Some((metadata, configured_scope)) = provider_scope {
+        let current_scope = pairs
+            .iter()
+            .find(|(key, _)| key == "scope")
+            .map(|(_, value)| value.as_str());
+        if let Some(resolved_scope) = configured_scope.or(current_scope) {
+            if let Some(final_scope) = with_offline_access(Some(resolved_scope), metadata) {
+                if Some(final_scope.as_str()) != current_scope {
+                    set_query_pair(&mut pairs, "scope", &final_scope);
+                }
+            }
+        }
+    }
+    normalize_authorization_prompt(&url, &mut pairs);
+    let query = form_body(
+        pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    url.set_query(Some(&query));
+    url.to_string()
+}
+
+fn normalize_authorization_prompt(url: &url::Url, pairs: &mut Vec<(String, String)>) {
+    let host = url.host_str().unwrap_or_default();
+    let microsoft = [
+        "login.microsoftonline.com",
+        "login.microsoftonline.us",
+        "login.partner.microsoftonline.cn",
+        "login.chinacloudapi.cn",
+    ]
+    .contains(&host)
+        || host.ends_with(".b2clogin.com")
+        || host.ends_with(".ciamlogin.com");
+    let prompts = pairs
+        .iter()
+        .filter(|(name, _)| name == "prompt")
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let retained = prompts
+        .iter()
+        .filter(|value| !microsoft || value.as_str() != "consent")
+        .cloned()
+        .collect::<Vec<_>>();
+    if retained.len() != prompts.len() || retained.len() > 1 {
+        pairs.retain(|(name, _)| name != "prompt");
+        if let Some(value) = retained
+            .iter()
+            .find(|value| value.as_str() == "consent")
+            .or_else(|| retained.last())
+        {
+            pairs.push(("prompt".into(), value.clone()));
+        }
+    }
 }
 
 /// POST a form-encoded grant to the token endpoint and parse the response,
@@ -1222,24 +1791,21 @@ async fn post_token_grant_with_headers(
     form: &[(&str, &str)],
     extra_headers: &[(&str, String)],
 ) -> Result<(Tokens, u16, String), OAuthError> {
-    let body = form
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
+    let token_endpoint = token_endpoint_url(token_endpoint)?.to_string();
+    let body = form_body(form.iter().copied());
     let mut headers = vec![
         (
-            "content-type".into(),
+            "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ),
-        ("accept".into(), "application/json".into()),
+        ("Accept".into(), "application/json".into()),
     ];
     for (k, v) in extra_headers {
         headers.push(((*k).to_string(), v.clone()));
     }
     let req = HttpRequest {
         method: HttpMethod::Post,
-        url: token_endpoint.to_string(),
+        url: token_endpoint,
         headers,
         body: Some(body),
         body_bytes: None,
@@ -1253,33 +1819,44 @@ async fn post_token_grant_with_headers(
             }
             error => OAuthError::Token(format!("transport: {error}")),
         })?;
-    if resp.status != 200 {
+    if !(200..300).contains(&resp.status) {
         // Caller maps the (status, body) to a specific error.
         return Err(OAuthError::Token(format!(
             "status {}: {}",
             resp.status, resp.body
         )));
     }
-    let response_json = serde_json::from_str::<serde_json::Value>(&resp.body)
-        .map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
-    if response_json.get("error").is_some() {
-        // The SDK converts OAuth error objects to its OAuth error type even
-        // when the endpoint incorrectly returns HTTP 200; refresh policy then
-        // classifies the code the same way as a non-200 OAuth response.
-        return Err(OAuthError::Token(format!(
-            "status {}: {}",
-            resp.status, resp.body
-        )));
-    }
-    let parsed: TokenResponse = serde_json::from_value(response_json)
-        .map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
-    let expires_at = parsed
-        .expires_in
+    let validated = match schemas::validate_tokens(&resp.body) {
+        Ok(validated) => validated,
+        Err(schema_error) => {
+            if let Ok(error) = schemas::validate_oauth_error(&resp.body) {
+                let code = error.projection().string_at("/error").unwrap_or_default();
+                let normalized = if [
+                    "invalid_refresh_token",
+                    "expired_refresh_token",
+                    "token_expired",
+                ]
+                .contains(&code)
+                {
+                    serde_json::json!({"error":"invalid_grant","error_description":error.projection().string_at("/error_description").map(str::to_owned).unwrap_or_else(||format!("Server returned non-standard error code: {code}"))}).to_string()
+                } else {
+                    error.json().map_err(OAuthError::Token)?
+                };
+                return Err(OAuthError::Token(format!("status 400: {normalized}")));
+            }
+            return Err(OAuthError::Token(format!("decode: {schema_error}")));
+        }
+    };
+    let value = validated.projection();
+    let expires_at = value
+        .number_at("/expires_in")
         .map(|seconds| OAuthExpiry::from_expires_in(clock.now(), seconds))
         .unwrap_or_default();
     let tokens = Tokens {
-        access_token: Secret::new(parsed.access_token),
-        refresh_token: parsed.refresh_token.map(Secret::new),
+        access_token: Secret::new(value.string_at("/access_token").unwrap().to_owned()),
+        refresh_token: value
+            .string_at("/refresh_token")
+            .map(|value| Secret::new(value.to_owned())),
         expires_at,
         // Filled in by the caller, which knows the `client_id` used for the grant.
         client_id: None,
@@ -1377,20 +1954,97 @@ async fn exchange_code_with_resource(
     redirect_uri: &str,
     resource: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
+    exchange_code_with_client_raw(
+        http,
+        clock,
+        meta,
+        client_id,
+        None,
+        None,
+        code,
+        verifier,
+        redirect_uri,
+        resource,
+    )
+    .await
+    .map(|(tokens, _)| tokens)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn exchange_code_with_client_raw(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    client_secret: Option<&str>,
+    registered_auth_method: Option<&str>,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+    resource: Option<&str>,
+) -> Result<(Tokens, String), OAuthError> {
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
         ("code_verifier", verifier),
+        ("redirect_uri", redirect_uri),
     ];
     if let Some(resource) = resource {
         form.push(("resource", resource));
     }
-    let (mut tokens, _status, _body) =
-        post_token_grant(http, clock, &meta.token_endpoint, &form).await?;
+    let extra_headers = apply_token_client_auth(
+        meta,
+        client_id,
+        client_secret,
+        registered_auth_method,
+        &mut form,
+    )?;
+    let (mut tokens, _status, body) =
+        post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
+            .await?;
     tokens.client_id = Some(client_id.to_string());
-    Ok(tokens)
+    Ok((tokens, body))
+}
+
+fn apply_token_client_auth<'a>(
+    metadata: &AuthServerMetadata,
+    client_id: &'a str,
+    secret: Option<&'a str>,
+    registered_auth_method: Option<&str>,
+    form: &mut Vec<(&'a str, &'a str)>,
+) -> Result<Vec<(&'static str, String)>, OAuthError> {
+    let supported = metadata
+        .token_endpoint_auth_methods_supported
+        .as_deref()
+        .unwrap_or(&[]);
+    let registered = registered_auth_method
+        .filter(|method| ["client_secret_basic", "client_secret_post", "none"].contains(method))
+        .filter(|method| {
+            supported.is_empty() || supported.iter().any(|supported| supported == *method)
+        });
+    let method = match registered {
+        Some("client_secret_basic") => TokenAuthMethod::SecretBasic,
+        Some("client_secret_post") => TokenAuthMethod::SecretPost,
+        Some("none") => TokenAuthMethod::None,
+        _ => select_token_auth_method(secret.is_some(), supported),
+    };
+    match method {
+        TokenAuthMethod::SecretBasic => Ok(vec![(
+            "authorization",
+            token_basic_authorization(client_id, secret.unwrap_or_default())?,
+        )]),
+        TokenAuthMethod::SecretPost => {
+            form.push(("client_id", client_id));
+            if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+                form.push(("client_secret", secret));
+            }
+            Ok(Vec::new())
+        }
+        TokenAuthMethod::None => {
+            form.push(("client_id", client_id));
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// Client-authentication method for a token-endpoint grant — oracle `Pc`'s
@@ -1529,6 +2183,146 @@ pub(crate) async fn refresh_standard_tokens(
     unreachable!("the three-attempt refresh loop always returns")
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn refresh_stored_standard_tokens(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
+    server_url: &str,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
+    key: &str,
+    identity: &McpOAuthIdentity,
+    refresh_token: &str,
+    resource_metadata_url: Option<&str>,
+) -> Result<Tokens, OAuthError> {
+    let mut state = session::load(storage, key).await?;
+    // Native clientInformation serves an existing registration before a
+    // configured client ID. Migrate pre-session LingXi credentials without
+    // inventing a redirect URI or replacing an existing issuer binding.
+    let mut migrated_registration = false;
+    if state.client_registration.is_none() {
+        if let Some(stored) = load_tokens(storage, key).await? {
+            if let Some(client_id) = stored.client_id.filter(|id| !id.is_empty()) {
+                let mut registration = serde_json::Map::new();
+                registration.insert("client_id".into(), serde_json::Value::String(client_id));
+                if let Some(secret) = stored.client_secret {
+                    registration.insert("client_secret".into(), serde_json::Value::String(secret));
+                }
+                state.client_registration =
+                    Some(serde_json::Value::Object(registration).to_string());
+                migrated_registration = true;
+            }
+        }
+    }
+    let legacy_registration = migrated_registration
+        .then(|| state.client_registration.clone())
+        .flatten();
+    let discovered = discover_with_session(
+        http,
+        server_url,
+        oauth,
+        resource_metadata_url,
+        &state,
+        Some((storage, key, clock.now(), identity.strict_issuer_echo)),
+    )
+    .await?;
+    // Discovery may have refreshed/persisted its cache. Keep that state (or
+    // a concurrent registration winner) when adding the legacy client stamp.
+    state = session::load(storage, key).await?;
+    if state.client_registration.is_none() && migrated_registration {
+        state.client_registration = legacy_registration;
+    }
+    validate_issuer_echo(
+        &discovered.authorization_server_url,
+        discovered.issuer.as_deref(),
+        identity.strict_issuer_echo,
+    )?;
+    if discovered.authorization_metadata.is_none() {
+        return Err(OAuthError::Discovery(
+            "Failed to discover OAuth metadata".into(),
+        ));
+    }
+    let client = state.resolve_client(
+        oauth.client_id.as_deref(),
+        &discovered.issuer_units,
+        None,
+        identity,
+    );
+    let client = match client {
+        Some(client) => client,
+        None => {
+            let stored = load_tokens(storage, key)
+                .await?
+                .ok_or_else(|| OAuthError::Token("No client information available".into()))?;
+            if state
+                .client_issuer
+                .as_ref()
+                .is_some_and(|issuer| !session::issuer_equal(issuer, &discovered.issuer_units))
+            {
+                return Err(OAuthError::Token(
+                    "OAuth authorization server does not match registered client issuer".into(),
+                ));
+            }
+            let id = stored
+                .client_id
+                .or_else(|| oauth.client_id.clone())
+                .unwrap_or_default();
+            session::ClientInformation {
+                client_id: id.clone(),
+                client_secret: stored
+                    .client_secret
+                    .or(state.configured_client_secret.clone()),
+                token_endpoint_auth_method: None,
+                raw: serde_json::json!({"client_id":id}).to_string(),
+            }
+        }
+    };
+    if migrated_registration {
+        if state.client_issuer.is_none() {
+            state.client_issuer = Some(discovered.issuer_units.clone());
+        }
+        session::save(storage, clock, key, &state).await?;
+    }
+    let resource = url::Url::parse(server_url)
+        .map_err(|error| OAuthError::Token(error.to_string()))?
+        .to_string();
+    for attempt in 0_u32..3 {
+        match refresh_tokens_once_raw(
+            http,
+            clock,
+            &discovered.metadata,
+            &client.client_id,
+            client.client_secret.as_deref(),
+            client.token_endpoint_auth_method.as_deref(),
+            refresh_token,
+            Some(&resource),
+            true,
+        )
+        .await
+        {
+            Ok((tokens, raw)) => {
+                state.token_response = Some(raw);
+                state.save_client(
+                    &client,
+                    discovered.issuer_units.clone(),
+                    state
+                        .redirect_uri
+                        .clone()
+                        .as_deref()
+                        .unwrap_or("http://localhost/callback"),
+                );
+                session::save(storage, clock, key, &state).await?;
+                return Ok(tokens);
+            }
+            Err(error) if attempt < 2 && retryable_standard_refresh(&error) => {
+                tokio::time::sleep(Duration::from_millis(1000_u64 << attempt)).await
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
 async fn refresh_tokens_once(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
@@ -1539,48 +2333,51 @@ async fn refresh_tokens_once(
     resource: Option<&str>,
     standard_error_mapping: bool,
 ) -> Result<Tokens, OAuthError> {
+    refresh_tokens_once_raw(
+        http,
+        clock,
+        meta,
+        client_id,
+        client_secret,
+        None,
+        refresh_token,
+        resource,
+        standard_error_mapping,
+    )
+    .await
+    .map(|(tokens, _)| tokens)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn refresh_tokens_once_raw(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    client_secret: Option<&str>,
+    registered_auth_method: Option<&str>,
+    refresh_token: &str,
+    resource: Option<&str>,
+    standard_error_mapping: bool,
+) -> Result<(Tokens, String), OAuthError> {
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
-    let mut extra_headers: Vec<(&str, String)> = Vec::new();
-    let supported = meta
-        .token_endpoint_auth_methods_supported
-        .as_deref()
-        .unwrap_or(&[]);
-    match select_token_auth_method(client_secret.is_some(), supported) {
-        // `zc(e,t,r)`: throws without a secret, so this arm is only ever
-        // selected when one is present.
-        TokenAuthMethod::SecretBasic if client_secret.is_some() => {
-            let secret = client_secret.unwrap_or_default();
-            extra_headers.push((
-                "authorization",
-                format!(
-                    "Basic {}",
-                    base64::engine::general_purpose::STANDARD
-                        .encode(format!("{client_id}:{secret}"))
-                ),
-            ));
-        }
-        // `Cc(e,t,r)`: `client_id` always, `client_secret` when present.
-        TokenAuthMethod::SecretPost => {
-            form.push(("client_id", client_id));
-            if let Some(secret) = client_secret {
-                form.push(("client_secret", secret));
-            }
-        }
-        // `kc(e,t)`: `client_id` only.
-        TokenAuthMethod::SecretBasic | TokenAuthMethod::None => {
-            form.push(("client_id", client_id));
-        }
-    }
     if let Some(resource) = resource {
         form.push(("resource", resource));
     }
+    let extra_headers = apply_token_client_auth(
+        meta,
+        client_id,
+        client_secret,
+        registered_auth_method,
+        &mut form,
+    )?;
     match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
         .await
     {
-        Ok((mut tokens, _status, _body)) => {
+        Ok((mut tokens, _status, body)) => {
             // RFC 6749 §6: a refresh response MAY omit a new refresh token, in
             // which case the existing one stays valid — carry it forward.
             if tokens.refresh_token.is_none() {
@@ -1588,7 +2385,7 @@ async fn refresh_tokens_once(
             }
             // Persist the client_id used so the NEXT refresh re-sends it.
             tokens.client_id = Some(client_id.to_string());
-            Ok(tokens)
+            Ok((tokens, body))
         }
         Err(OAuthError::Token(msg)) if standard_error_mapping => {
             if oauth_error_code(&msg).as_deref() == Some("invalid_grant") {
@@ -1688,6 +2485,33 @@ fn curated_metadata_scope(meta: &AuthServerMetadata, has_explicit_metadata_url: 
     String::new()
 }
 
+/// Native SDK Gd: explicit step-up scope, PRM advertised scopes, then the
+/// public client's metadata scope. Public clients advertise refresh_token.
+fn sdk_requested_scope(
+    requested: Option<&str>,
+    resource_scopes: Option<&[String]>,
+    client_scope: Option<&str>,
+    metadata: &AuthServerMetadata,
+) -> Option<String> {
+    let prm_scope = resource_scopes.map(|scopes| scopes.join(" "));
+    let mut scope = requested
+        .filter(|scope| !scope.is_empty())
+        .or_else(|| prm_scope.as_deref().filter(|scope| !scope.is_empty()))
+        .or(client_scope)
+        .map(str::to_owned);
+    if let Some(value) = scope.as_mut().filter(|scope| !scope.is_empty()) {
+        if metadata
+            .scopes_supported
+            .as_ref()
+            .is_some_and(|scopes| scopes.iter().any(|scope| scope == "offline_access"))
+            && !value.split(' ').any(|scope| scope == "offline_access")
+        {
+            value.push_str(" offline_access");
+        }
+    }
+    scope
+}
+
 /// Append `offline_access` to the authorize-URL scope when the server
 /// advertises it — 1:1 with the binary's `D$p(e,t)`. `scope` mirrors JS `e`:
 /// `None` is JS `null` (no scope resolved at all), `Some(s)` a resolved scope
@@ -1743,6 +2567,7 @@ fn with_offline_access(scope: Option<&str>, meta: &AuthServerMetadata) -> Option
 /// The `r === null` guard is why a genuine no-scope request (no explicit
 /// metadata URL, no curated scope) stays scope-less even when the server
 /// advertises `offline_access` — the cc 2.1.196 "don't over-ask" fix.
+#[cfg(test)]
 fn authorize_url_scope(
     scope: &str,
     has_explicit_metadata_url: bool,
@@ -1799,6 +2624,8 @@ pub async fn perform_oauth_flow(
         scope_override,
         None,
         None,
+        None,
+        None,
     )
     .await
 }
@@ -1830,6 +2657,8 @@ pub async fn perform_oauth_flow_with_manual_input(
         scope_override,
         None,
         Some(manual_input),
+        None,
+        None,
     )
     .await
 }
@@ -1862,6 +2691,193 @@ pub(crate) async fn perform_oauth_flow_for_reauth(
         scope_override,
         resource_metadata_url,
         None,
+        None,
+        None,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct OAuthFlowPersistence<'a> {
+    storage: &'a Arc<dyn lingxi_core::host::SecureStorage>,
+    key: &'a str,
+    identity: &'a McpOAuthIdentity,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn perform_oauth_flow_stored(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
+    server_name: &str,
+    server_url: &str,
+    on_auth_url: &OnAuthorizationUrl,
+    telemetry: Option<&McpOAuthTelemetryContext>,
+    scope_override: Option<&str>,
+    resource_metadata_url: Option<&str>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
+    key: &str,
+    identity: &McpOAuthIdentity,
+) -> Result<Tokens, OAuthError> {
+    perform_oauth_flow_inner(
+        http,
+        clock,
+        oauth,
+        server_name,
+        server_url,
+        on_auth_url,
+        telemetry,
+        scope_override,
+        resource_metadata_url,
+        None,
+        Some(OAuthFlowPersistence {
+            storage,
+            key,
+            identity,
+        }),
+        None,
+    )
+    .await
+}
+
+struct FlowDiscoveryCacheEntry {
+    owner: std::sync::Weak<dyn lingxi_core::host::SecureStorage>,
+    server_url: String,
+    at_millis: f64,
+    strict_issuer_echo: bool,
+    discovered: DiscoveredAuthServer,
+}
+fn flow_discovery_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<FlowDiscoveryCacheEntry>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<FlowDiscoveryCacheEntry>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+pub(crate) fn invalidate_flow_discovery(
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
+    key: &str,
+) {
+    if let Some(entries) = flow_discovery_cache().lock().unwrap().get_mut(key) {
+        entries.retain(|entry| {
+            entry
+                .owner
+                .upgrade()
+                .is_some_and(|owner| !Arc::ptr_eq(&owner, storage))
+        });
+    }
+}
+
+async fn discover_with_session(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
+    resource_hint: Option<&str>,
+    state: &session::OAuthSessionState,
+    cache: Option<(
+        &Arc<dyn lingxi_core::host::SecureStorage>,
+        &str,
+        SystemTime,
+        bool,
+    )>,
+) -> Result<DiscoveredAuthServer, OAuthError> {
+    if oauth.auth_server_metadata_url.is_none() && resource_hint.is_none() {
+        if let Some((storage, key, now, strict)) = cache {
+            let now = date_now_millis(now);
+            if let Some(cached) = flow_discovery_cache()
+                .lock()
+                .unwrap()
+                .get(key)
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry
+                            .owner
+                            .upgrade()
+                            .is_some_and(|owner| Arc::ptr_eq(&owner, storage))
+                            && entry.server_url == server_url
+                            && entry.strict_issuer_echo == strict
+                            && now - entry.at_millis < 600_000.0
+                    })
+                })
+                .map(|entry| entry.discovered.clone())
+            {
+                return Ok(cached);
+            }
+        }
+    }
+    let discovered =
+        discover_with_session_uncached(http, server_url, oauth, resource_hint, state).await?;
+    if oauth.auth_server_metadata_url.is_none() {
+        if let Some((storage, key, now, strict)) = cache {
+            let now = date_now_millis(now);
+            let mut cache = flow_discovery_cache().lock().unwrap();
+            let entries = cache.entry(key.to_owned()).or_default();
+            entries.retain(|entry| {
+                entry
+                    .owner
+                    .upgrade()
+                    .is_some_and(|owner| !Arc::ptr_eq(&owner, storage))
+                    && now - entry.at_millis < 600_000.0
+            });
+            entries.push(FlowDiscoveryCacheEntry {
+                owner: Arc::downgrade(storage),
+                server_url: server_url.into(),
+                at_millis: now,
+                strict_issuer_echo: strict,
+                discovered: discovered.clone(),
+            });
+        }
+    }
+    Ok(discovered)
+}
+
+async fn discover_with_session_uncached(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
+    resource_hint: Option<&str>,
+    state: &session::OAuthSessionState,
+) -> Result<DiscoveredAuthServer, OAuthError> {
+    if oauth.auth_server_metadata_url.is_none() {
+        if let Some(cached) = state.discovery.as_ref() {
+            let metadata = match cached.authorization_metadata.as_deref() {
+                Some(raw) => Some(parse_authorization_document(raw, false)?),
+                None => {
+                    discover_authorization_metadata(http, &cached.authorization_server_url).await?
+                }
+            };
+            {
+                let resource = discover_protected_resource(
+                    http,
+                    server_url,
+                    resource_hint.or(cached.resource_metadata_url.as_deref()),
+                )
+                .await?;
+                let scopes = resource
+                    .as_ref()
+                    .and_then(|(metadata, _)| metadata.scopes_supported.clone());
+                return match metadata {
+                    Some(metadata) => discovered_metadata(
+                        metadata,
+                        resource.map(|(_, resource)| resource),
+                        scopes,
+                        &cached.authorization_server_url,
+                    ),
+                    None => default_discovered(
+                        &cached.authorization_server_url,
+                        resource.map(|(_, resource)| resource),
+                        scopes,
+                    ),
+                };
+            }
+        }
+    }
+    discover_auth_server_for_flow(
+        http,
+        server_url,
+        oauth.auth_server_metadata_url.as_deref(),
+        resource_hint,
+        true,
     )
     .await
 }
@@ -1878,107 +2894,120 @@ async fn perform_oauth_flow_inner(
     scope_override: Option<&str>,
     resource_metadata_url: Option<&str>,
     manual_input: Option<&mut (dyn AsyncBufRead + Unpin + Send)>,
+    persistence: Option<OAuthFlowPersistence<'_>>,
+    sdk: Option<sdk_flow::Attempt<'_>>,
 ) -> Result<Tokens, OAuthError> {
     let flow_attempt_id = new_flow_attempt_id();
     emit_oauth_flow_start(telemetry, &flow_attempt_id);
 
     let result: Result<Tokens, OAuthError> = async {
-    // 1. Discovery.
-    let discovered = discover_auth_server(
-        http,
-        server_url,
-        oauth.auth_server_metadata_url.as_deref(),
-        resource_metadata_url,
-    )
-    .await?;
+    let default_identity=McpOAuthIdentity::default();
+    let identity=persistence.map(|context|context.identity).unwrap_or(&default_identity);
+    let mut session_state=match persistence {Some(context)=>session::load(context.storage,context.key).await?,None=>session::OAuthSessionState::default()};
+    // Preserve legacy public-client entries while adding the native issuer stamp.
+    if session_state.client_registration.is_none() {
+        if let Some(context)=persistence {
+            if let Some(stored)=load_tokens(context.storage,context.key).await? {
+                if let Some(client_id)=stored.client_id {
+                    session_state.client_registration=Some(serde_json::json!({"client_id":client_id,"client_secret":stored.client_secret}).to_string());
+                }
+            }
+        }
+    }
+    let discovered=discover_with_session(http,server_url,oauth,resource_metadata_url,&session_state,persistence.map(|context|(context.storage,context.key,clock.now(),identity.strict_issuer_echo))).await?;
+    if discovered.authorization_metadata.is_some() {validate_issuer_echo(&discovered.authorization_server_url,discovered.issuer.as_deref(),identity.strict_issuer_echo)?;}
     let meta = &discovered.metadata;
 
     // 2. Bind the loopback listener FIRST so the redirect_uri is known before
     //    the authorize URL is built (claude-code's listen(0) pattern). A
     //    configured `callback_port` pins the port; otherwise the OS assigns one.
-    let listener = CallbackListener::bind(oauth.callback_port.unwrap_or(0)).await?;
+    let callback_port=oauth.callback_port.or_else(||session::saved_callback_port(&session_state)).unwrap_or(0);
+    let listener = CallbackListener::bind(callback_port).await?;
     let port = listener.port();
-    let redirect_uri = format!("http://localhost:{port}/callback");
+    let redirect_uri = sdk.as_ref().and_then(|attempt|attempt.redirect_uri).map(str::to_owned).unwrap_or_else(||format!("http://localhost:{port}/callback"));
 
-    // 3. Advertised scope (used both for DCR client metadata and the authorize
-    //    URL). A `scope_override` (a cached step-up scope from a prior 403
-    //    `insufficient_scope`) takes precedence so the authorize URL requests
-    //    the elevated scope (auth.ts:909-935 / 1625-1637). Otherwise the scope
-    //    is the CURATED metadata scope — cc 2.1.196 fix, binary
-    //    `getCuratedMetadataScope`: the non-standard `scope` / `default_scope`
-    //    metadata strings when published, and the full `scopes_supported`
-    //    catalog ONLY when the user explicitly configured
-    //    `authServerMetadataUrl` (`if(this.serverConfig.oauth?.
-    //    authServerMetadataUrl && Array.isArray(this._metadata?.
-    //    scopes_supported)) return this._metadata.scopes_supported.join(" ")`).
-    //    With no scope specified anywhere the request carries NO scope — it
-    //    must NOT ask for the whole advertised catalog.
-    let scope = match scope_override {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => curated_metadata_scope(&meta, oauth.auth_server_metadata_url.is_some()),
-    };
-
-    // 4. Client id — configured, else dynamic client registration.
-    let client_id = if let Some(id) = &oauth.client_id {
-        id.clone()
-    } else {
-        let reg = meta.registration_endpoint.as_deref().ok_or_else(|| {
-            OAuthError::Registration(
-                "no client_id configured and server advertises no registration_endpoint".into(),
-            )
-        })?;
-        let dcr_scope = (!scope.is_empty()).then_some(scope.as_str());
-        register_client(http, reg, &redirect_uri, server_name, dcr_scope).await?
-    };
-
-    // 5. Authorize URL (PKCE inside) + surface it to the host. The authorize
-    //    scope (unlike the DCR scope) gains `offline_access` when the server
-    //    advertises it (binary `redirectToAuthorization` → `D$p`), so refresh
-    //    tokens keep being issued now that the catalog is no longer requested.
-    //    Mirror the binary's scope resolution 1:1 (`redirectToAuthorization`):
-    //      t = authServerMetadataUrl ? getCuratedMetadataScope() : undefined
-    //      n = the scope actually placed in the URL (absent when empty)
-    //      r = t ?? n            (JS nullish: t="" is kept; undefined → n)
-    //      o = r === null ? null : D$p(r, metadata)
-    //    Only when `o` is non-null does the URL carry a scope, so a genuine
-    //    no-scope request (no explicit metadata URL + no curated scope) stays
-    //    scope-less even when the server advertises `offline_access`.
-    let authorize_scope =
-        authorize_url_scope(&scope, oauth.auth_server_metadata_url.is_some(), &meta);
-    let (auth_url, verifier, state) = build_authorize_url_with_resource(
+    // The SDK resolves requested scope, PRM scopes, then client metadata.
+    // Its offline_access addition also belongs in DCR, before the provider's
+    // later configured-scope override in redirectToAuthorization.
+    let curated_scope = curated_metadata_scope(meta, oauth.auth_server_metadata_url.is_some());
+    let scope = sdk_requested_scope(
+        scope_override,
+        discovered.resource_scopes_supported.as_deref(),
+        Some(&curated_scope),
         meta,
+    );
+
+    let mut client=session_state.resolve_client(oauth.client_id.as_deref(),&discovered.issuer_units,Some(&redirect_uri),identity);
+    if client.is_none() {
+        let metadata_url=identity.metadata_url()?;
+        client=if discovered.cimd_supported && metadata_url.is_some() && session::loopback_callback(&redirect_uri) {
+            let client_id=metadata_url.unwrap().to_owned();
+            Some(session::ClientInformation {raw:serde_json::json!({"client_id":client_id}).to_string(),client_id,client_secret:None,token_endpoint_auth_method:None})
+        } else {
+            let reg=meta.registration_endpoint.as_deref().ok_or_else(||OAuthError::Registration("Incompatible auth server: does not support dynamic client registration".into()))?;
+            Some(register_client_information(http,reg,&redirect_uri,server_name,scope.as_deref().filter(|scope|!scope.is_empty()),!curated_scope.is_empty(),identity).await?)
+        };
+    }
+    let client=client.expect("configured, CIMD, or registered client");
+    let client_id=&client.client_id;
+    session_state.save_client(&client,discovered.issuer_units.clone(),&redirect_uri);
+    let binding=oauth.auth_server_metadata_url.as_ref().map(|url|session::MetadataBinding::Configured(url.clone())).unwrap_or(session::MetadataBinding::Default);
+    let previous=session_state.discovery.take();
+    session_state.discovery=Some(match previous {
+        Some(previous) if previous.metadata_binding!=session::MetadataBinding::Unstamped=>previous,
+        _=>session::StoredDiscovery {authorization_server_url:discovered.authorization_server_url.clone(),oauth_metadata_found:discovered.authorization_metadata.is_some(),metadata_binding:if discovered.authorization_metadata.is_some(){binding}else{session::MetadataBinding::Unstamped},resource_metadata_url:resource_metadata_url.map(str::to_owned),authorization_metadata:None,xaa_pinned:false},
+    });
+    if let Some(context)=persistence {session::save(context.storage,clock,context.key,&session_state).await?;}
+    if let Some(raw)=discovered.authorization_metadata.as_deref() {
+        let document=schemas::validate_authorization(raw,false).map_err(OAuthError::Discovery)?;
+        if !projection_strings(document.projection(),"/response_types_supported").unwrap_or_default().iter().any(|value|value=="code") {return Err(OAuthError::Discovery("Incompatible auth server: does not support response type code".into()));}
+        if projection_strings(document.projection(),"/code_challenge_methods_supported").is_some_and(|values|!values.iter().any(|value|value=="S256")) {return Err(OAuthError::Discovery("Incompatible auth server: does not support code challenge method S256".into()));}
+    }
+
+    // The application overrides SDK scope with explicit server configuration
+    // except during step-up. Preserve an explicitly empty curated scope.
+    let configured_scope = if scope_override.is_some_and(|scope| !scope.is_empty()) {
+        None
+    } else {
+        oauth.scopes.as_deref().filter(|scope| !scope.is_empty()).or_else(||
+            oauth.auth_server_metadata_url.as_ref().map(|_| curated_scope.as_str()))
+    };
+    let (verifier, challenge) = generate_pkce();
+    let state = generate_state_token();
+    let auth_url = authorize_url_from_material_with_scope(
+        &meta.authorization_endpoint,
         &client_id,
         &redirect_uri,
-        &authorize_scope,
+        scope.as_deref().unwrap_or_default(),
         discovered.resource.as_deref(),
+        &state,
+        &challenge,
+        Some((meta, configured_scope)),
     );
     on_auth_url(&auth_url);
+    if let Some(attempt)=sdk.as_ref() {attempt.control.publish(&auth_url,port,&state,attempt.redirect_uri.is_some());}
 
     // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
     //    is echoed into the listener's 404 page ("registered redirect_uri must
     //    be {T}").
-    let code = if let Some(input) = manual_input {
-        let mut line = String::new();
-        tokio::select! {
-            params = listener.accept_with_issuer(
-                &state,
-                &redirect_uri,
-                discovered.issuer.as_deref(),
-                discovered.issuer_parameter_supported,
-            ) => params?.code,
-            read = input.read_line(&mut line) => {
-                let bytes = read.map_err(|e| OAuthError::Callback(format!("read manual callback: {e}")))?;
-                if bytes == 0 {
-                    return Err(OAuthError::Callback(
-                        "stdin closed before an authorization callback or code was provided".into(),
-                    ));
+    let code = if let Some(attempt)=sdk.as_ref() {
+        attempt.control.wait_for_callback(listener,&state,&redirect_uri,discovered.issuer.as_ref().map(|_|discovered.issuer_units.as_slice()),discovered.issuer_parameter_supported).await?
+    } else if let Some(input) = manual_input {
+        let callback=listener.accept_with_issuer_units(&state,&redirect_uri,discovered.issuer.as_ref().map(|_|discovered.issuer_units.as_slice()),discovered.issuer_parameter_supported);
+        tokio::pin!(callback);
+        let deadline=tokio::time::sleep(OAUTH_CALLBACK_TIMEOUT);
+        tokio::pin!(deadline);
+        let mut line=String::new();
+        loop {
+            line.clear();
+            tokio::select! {
+                params=&mut callback=>break params?.code,
+                _=&mut deadline=>return Err(OAuthError::Callback("Authentication timeout".into())),
+                read=input.read_line(&mut line)=>{
+                    let bytes=read.map_err(|error|OAuthError::Callback(format!("read manual callback: {error}")))?;
+                    if bytes==0 {return Err(OAuthError::Callback("stdin closed before an authorization callback or code was provided".into()));}
+                    if let Some(result)=try_manual_callback_url(&line,&state,discovered.issuer.as_deref(),discovered.issuer_parameter_supported) {break result?;}
                 }
-                parse_manual_callback_input_with_issuer(
-                    &line,
-                    &state,
-                    discovered.issuer.as_deref(),
-                    discovered.issuer_parameter_supported,
-                )?
             }
         }
     } else {
@@ -1988,10 +3017,10 @@ async fn perform_oauth_flow_inner(
         // oracle's browser-authorization deadline.
         match tokio::time::timeout(
             OAUTH_CALLBACK_TIMEOUT,
-            listener.accept_with_issuer(
+            listener.accept_with_issuer_units(
                 &state,
                 &redirect_uri,
-                discovered.issuer.as_deref(),
+                discovered.issuer.as_ref().map(|_|discovered.issuer_units.as_slice()),
                 discovered.issuer_parameter_supported,
             ),
         )
@@ -2000,24 +3029,35 @@ async fn perform_oauth_flow_inner(
             Ok(result) => result?.code,
             Err(_elapsed) => {
                 return Err(OAuthError::Callback(
-                    "The browser authorization timed out after 5 minutes.".into(),
+                    "Authentication timeout".into(),
                 ))
             }
         }
     };
 
-    // 7. Exchange the code for tokens.
-    exchange_code_with_resource(
-        http,
-        clock,
-        meta,
-        &client_id,
-        &code,
-        &verifier,
-        &redirect_uri,
-        discovered.resource.as_deref(),
-    )
-    .await
+    // Use the same in-memory discovery snapshot on the callback leg, while
+    // rereading client information to exclude concurrent foreign registration.
+    let callback_client=if let Some(context)=persistence {
+        session::load(context.storage,context.key).await?.resolve_client(oauth.client_id.as_deref(),&discovered.issuer_units,Some(&redirect_uri),identity).ok_or_else(||OAuthError::Token("Existing OAuth client information is required when exchanging an authorization code".into()))?
+    } else {client.clone()};
+    let result=exchange_code_with_client_raw(http,clock,meta,&callback_client.client_id,callback_client.client_secret.as_deref(),callback_client.token_endpoint_auth_method.as_deref(),&code,&verifier,&redirect_uri,discovered.resource.as_deref()).await;
+    match result {
+        Ok((tokens,raw))=>{
+            session_state.token_response=Some(raw);
+            if let Some(context)=persistence {session::save(context.storage,clock,context.key,&session_state).await?;}
+            Ok(tokens)
+        }
+        Err(error)=>{
+            if let Some(context)=persistence {
+                if let Some(code)=oauth_error_code(&error.to_string()) {
+                    if ["invalid_client","unauthorized_client"].contains(&code.as_str()) {session_state.invalidate("client");session_state.invalidate("tokens");}
+                    else if code=="invalid_grant" {session_state.invalidate("tokens");}
+                    session::save(context.storage,clock,context.key,&session_state).await?;
+                }
+            }
+            Err(error)
+        }
+    }
     }
     .await;
 
@@ -2031,6 +3071,41 @@ async fn perform_oauth_flow_inner(
             Err(err)
         }
     }
+}
+
+fn try_manual_callback_url(
+    input: &str,
+    state: &str,
+    issuer: Option<&str>,
+    issuer_required: bool,
+) -> Option<Result<String, OAuthError>> {
+    let url = url::Url::parse(input.trim()).ok()?;
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    let first = |key: &str| {
+        pairs
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_ref())
+    };
+    let code = first("code").filter(|value| !value.is_empty());
+    let error = first("error").filter(|value| !value.is_empty());
+    if code.is_none() && error.is_none() || first("state") != Some(state) {
+        return None;
+    }
+    if let Some(error) = error {
+        return Some(Err(OAuthError::Callback(format!(
+            "OAuth error: {error} - {}",
+            first("error_description").unwrap_or_default()
+        ))));
+    }
+    if let Err(error) = validate_manual_callback_issuer(
+        first("iss").filter(|value| !value.is_empty()),
+        issuer,
+        issuer_required,
+    ) {
+        return Some(Err(error));
+    }
+    Some(Ok(code?.to_owned()))
 }
 
 /// Parse a headless OAuth response pasted by the user. A bare value is treated
@@ -2070,9 +3145,9 @@ fn parse_manual_callback_input_with_issuer(
     let mut issuer_seen = false;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "state" => state = Some(value.into_owned()),
-            "error" => provider_error = Some(value.into_owned()),
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            "error" if provider_error.is_none() => provider_error = Some(value.into_owned()),
             "iss" if !issuer_seen => {
                 let value = value.into_owned();
                 issuer = (!value.is_empty()).then_some(value);
@@ -2275,12 +3350,23 @@ pub(crate) async fn invalidate_standard_credentials(
     }
     current.access_token.clear();
     current.refresh_token = None;
-    current.expires_at_millis = OAuthExpiry::Number(0.0);
+    current.expires_at_millis = if scope == CredentialInvalidation::All {
+        OAuthExpiry::Undefined
+    } else {
+        OAuthExpiry::Number(0.0)
+    };
     if scope == CredentialInvalidation::All {
         current.client_id = None;
         current.client_secret = None;
     }
-    store_tokens(storage, clock, key, &current).await
+    store_tokens(storage, clock, key, &current).await?;
+    let mut state = session::load(storage, key).await?;
+    state.invalidate(if scope == CredentialInvalidation::All {
+        "all"
+    } else {
+        "tokens"
+    });
+    session::save(storage, clock, key, &state).await
 }
 
 #[must_use]
@@ -2366,7 +3452,23 @@ pub async fn save_tokens_with_telemetry(
     tokens: &Tokens,
     telemetry: Option<&McpOAuthTelemetryContext>,
 ) -> Result<(), OAuthError> {
-    let stored = StoredTokens::from_tokens(tokens);
+    let mut stored = StoredTokens::from_tokens(tokens);
+    if let Some(previous) = load_tokens(storage, key).await? {
+        if previous.client_id == stored.client_id {
+            stored.client_secret = previous.client_secret;
+        }
+    }
+    let session = session::load(storage, key).await?;
+    if let Some(raw) = session.client_registration {
+        if let Ok(client) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&raw) {
+            if client.string_at("/client_id") == stored.client_id.as_deref() {
+                stored.client_secret = client
+                    .string_at("/client_secret")
+                    .map(str::to_owned)
+                    .or(session.configured_client_secret);
+            }
+        }
+    }
     store_tokens_with_telemetry(storage, clock, key, &stored, telemetry).await
 }
 
@@ -2428,7 +3530,10 @@ pub async fn revoke_token(
     )];
 
     // auth.ts:411-428 client-auth precedence.
-    match (client_id, client_secret) {
+    match (
+        client_id.filter(|value| !value.is_empty()),
+        client_secret.filter(|value| !value.is_empty()),
+    ) {
         (Some(id), Some(secret)) => {
             if auth_method == "client_secret_post" {
                 form.push(("client_id".into(), id.into()));
@@ -2437,8 +3542,8 @@ pub async fn revoke_token(
                 // client_secret_basic: base64(urlencode(id):urlencode(secret)).
                 let basic = format!(
                     "{}:{}",
-                    urlencoding::encode(id),
-                    urlencoding::encode(secret)
+                    encode_uri_component(id),
+                    encode_uri_component(secret)
                 );
                 headers.push((
                     "authorization".into(),
@@ -2455,10 +3560,10 @@ pub async fn revoke_token(
     }
 
     let encode_body = |form: &[(String, String)]| {
-        form.iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&")
+        form_body(
+            form.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
     };
 
     let req = HttpRequest {
@@ -2479,7 +3584,7 @@ pub async fn revoke_token(
 
     // auth.ts:434-457: 401 fallback → retry with Bearer, clearing client creds.
     if resp.status == 401 {
-        if let Some(at) = access_token {
+        if let Some(at) = access_token.filter(|value| !value.is_empty()) {
             form.retain(|(k, _)| k != "client_id" && k != "client_secret");
             let mut retry_headers: Vec<(String, String)> = headers
                 .into_iter()
@@ -2549,7 +3654,9 @@ pub async fn revoke_server_tokens(
             .is_some_and(|s| !s.is_empty());
         if has_access || has_refresh {
             // Best-effort server-side revocation; never propagate failures.
-            if let Err(e) = revoke_at_endpoint(http, server_url, oauth_cfg, stored).await {
+            let session = session::load(storage, key).await.unwrap_or_default();
+            if let Err(e) = revoke_at_endpoint(http, server_url, oauth_cfg, stored, &session).await
+            {
                 tracing::debug!(error = %e, "mcp oauth: token revocation failed (best-effort)");
             }
         } else {
@@ -2557,6 +3664,9 @@ pub async fn revoke_server_tokens(
         }
     }
 
+    if let Err(error) = session::clear_auth(storage, key).await {
+        tracing::debug!(%error,"mcp oauth: failed to clear session auth state");
+    }
     // Always clear local tokens, regardless of server-side result (auth.ts:575).
     if let Err(e) = storage.delete(MCP_OAUTH_SERVICE, key).await {
         tracing::debug!(error = %e, "mcp oauth: failed to clear local tokens after revocation");
@@ -2604,15 +3714,24 @@ async fn revoke_at_endpoint(
     server_url: &str,
     oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
     stored: &StoredTokens,
+    session: &session::OAuthSessionState,
 ) -> Result<(), OAuthError> {
-    let meta = discover_auth_server_metadata(
-        http,
-        server_url,
-        oauth_cfg.auth_server_metadata_url.as_deref(),
-        // Logout/disconnect has no live challenge to consult.
-        None,
-    )
-    .await?;
+    let discovery_base = session
+        .discovery
+        .as_ref()
+        .map(|discovery| discovery.authorization_server_url.as_str())
+        .unwrap_or(server_url);
+    let configured_metadata = if session
+        .discovery
+        .as_ref()
+        .is_some_and(|state| state.xaa_pinned)
+    {
+        None
+    } else {
+        oauth_cfg.auth_server_metadata_url.as_deref()
+    };
+    let meta =
+        discover_auth_server_metadata(http, discovery_base, configured_metadata, None).await?;
 
     let Some(endpoint) = meta.revocation_endpoint.as_deref() else {
         tracing::debug!("mcp oauth: server does not support token revocation");
@@ -2634,11 +3753,40 @@ async fn revoke_at_endpoint(
         _ => "client_secret_basic",
     };
 
-    let client_id = stored
-        .client_id
+    let registration = session
+        .client_registration
         .as_deref()
+        .and_then(|raw| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).ok());
+    let client_id = registration
+        .as_ref()
+        .and_then(|value| value.string_at("/client_id"))
+        .or(stored.client_id.as_deref())
         .or(oauth_cfg.client_id.as_deref());
-    let client_secret = stored.client_secret.as_deref();
+    let client_secret = registration
+        .as_ref()
+        .and_then(|value| value.string_at("/client_secret"))
+        .or(stored.client_secret.as_deref())
+        .or_else(|| {
+            (client_id == oauth_cfg.client_id.as_deref())
+                .then_some(session.configured_client_secret.as_deref())
+                .flatten()
+        });
+    if auth_method == "client_secret_basic"
+        && client_id.is_some_and(|value| !value.is_empty())
+        && client_secret.is_some_and(|value| !value.is_empty())
+    {
+        if registration.as_ref().is_some_and(|value| {
+            ["/client_id", "/client_secret"].iter().any(|path| {
+                value
+                    .string_units(path)
+                    .is_some_and(|units| char::decode_utf16(units).any(|unit| unit.is_err()))
+            })
+        }) {
+            return Err(OAuthError::Token(
+                "String contained an illegal UTF-16 sequence.".into(),
+            ));
+        }
+    }
     let access_token = (!stored.access_token.is_empty()).then_some(stored.access_token.as_str());
 
     // Refresh token first (auth.ts:523-543), best-effort.
@@ -3773,7 +4921,7 @@ mod tests {
             (
                 "https://as-from-challenge.example.com/.well-known/oauth-authorization-server",
                 200,
-                r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#,
+                r#"{"issuer":"https://as-from-challenge.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#,
             ),
         ]);
         let http_dyn: Arc<dyn HttpTransport> = http.clone();
@@ -3813,7 +4961,7 @@ mod tests {
             (
                 "https://as-default.example.com/.well-known/oauth-authorization-server",
                 200,
-                r#"{"authorization_endpoint":"https://as-default.example.com/authorize","token_endpoint":"https://as-default.example.com/token"}"#,
+                r#"{"issuer":"https://as-default.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as-default.example.com/authorize","token_endpoint":"https://as-default.example.com/token"}"#,
             ),
         ]);
         let http_dyn: Arc<dyn HttpTransport> = http.clone();
@@ -3844,7 +4992,7 @@ mod tests {
             (
                 "https://as.attacker.example/.well-known/oauth-authorization-server",
                 200,
-                r#"{"authorization_endpoint":"https://as.attacker.example/authorize","token_endpoint":"https://as.attacker.example/token"}"#,
+                r#"{"issuer":"https://as.attacker.example","response_types_supported":["code"],"authorization_endpoint":"https://as.attacker.example/authorize","token_endpoint":"https://as.attacker.example/token"}"#,
             ),
         ]);
         let http_dyn: Arc<dyn HttpTransport> = http.clone();
@@ -4145,7 +5293,7 @@ mod tests {
             (
                 "https://as.example.com/.well-known/oauth-authorization-server",
                 200,
-                r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+                r#"{"issuer":"https://as.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
             ),
         ]);
         let http_dyn: Arc<dyn HttpTransport> = http.clone();
@@ -4172,7 +5320,7 @@ mod tests {
             (
                 "https://mcp.example.com/.well-known/oauth-authorization-server/v1",
                 200,
-                r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+                r#"{"issuer":"https://as.example.com","response_types_supported":["code"],"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
             ),
         ]);
         let http_dyn: Arc<dyn HttpTransport> = http;

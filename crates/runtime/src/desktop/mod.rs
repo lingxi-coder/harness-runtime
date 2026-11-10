@@ -4685,7 +4685,8 @@ async fn build_agent_mcp_tool_set(
                 dto.search_hint.clone(),
                 dto.always_load.unwrap_or(false),
                 dto.requires_user_interaction,
-            );
+            )
+            .with_server_provenance(&entry_config);
             let tool = if let Some(ceiling) =
                 tool_mcp::configured_permission_ceiling(&entry_config, &dto.tool_name)
             {
@@ -6664,6 +6665,7 @@ async fn apply_worktree_launch(
         .await
         .map_err(|e| BuildError::WorktreeLaunch(e.to_string()))?;
     let worktree_path = handle.path.clone();
+    let hook_based = ctx.worktree.is_hook_based(&handle);
     ctx.session_cwd
         .swap(handle.path.clone(), vec![handle.path.clone()]);
     *ctx.worktree_session
@@ -6677,6 +6679,7 @@ async fn apply_worktree_launch(
         // one), so `ExitWorktree` may remove it — same as
         // `EnterWorktreeTool::call_create`'s `entered_existing: false`.
         entered_existing: false,
+        hook_based,
         // Populated below (Task 4) when `tmux_launch.is_some()` AND the tmux
         // session actually gets created; `None` otherwise.
         tmux_session_name: None,

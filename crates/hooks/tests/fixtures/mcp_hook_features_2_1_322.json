@@ -1,0 +1,29 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "range": {
+    "start": 274587817,
+    "end": 274588396,
+    "sha256": "d0f4a96b6a8f9a7967e01b12d339b530dbf5dda3fc1117d8f5ed1932984d9655"
+  },
+  "cases": [
+    {
+      "name": "disabled",
+      "enabled": false,
+      "directory": "/session/scratchpad",
+      "expected_json": "{\"cwd\":\"/workspace\",\"prompt_id\":\"prompt\"}"
+    },
+    {
+      "name": "enabled-with-path",
+      "enabled": true,
+      "directory": "/session/scratchpad",
+      "expected_json": "{\"cwd\":\"/workspace\",\"scratchpad_dir\":\"/session/scratchpad\",\"prompt_id\":\"prompt\"}"
+    },
+    {
+      "name": "enabled-without-path",
+      "enabled": true,
+      "directory": null,
+      "expected_json": "{\"cwd\":\"/workspace\",\"prompt_id\":\"prompt\"}"
+    }
+  ]
+}

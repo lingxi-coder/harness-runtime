@@ -73,6 +73,13 @@ impl<C> ConnectionBuilder<C> {
         self
     }
 
+    /// Opt into a protocol-owned request sequence. Generic JSON-RPC remains
+    /// one-based; native MCP transports explicitly select zero.
+    pub fn initial_request_id(mut self, id: i64) -> Self {
+        self.initial_request_id = id;
+        self
+    }
+
     /// Use a fixed error message for inbound requests with no registered
     /// handler. The generic default includes the exact method string.
     pub fn unknown_method_message(mut self, message: impl Into<JsonRpcString>) -> Self {
@@ -215,8 +222,30 @@ impl Connection {
         S: futures::Stream<Item = Message> + Send + Unpin + 'static,
         K: futures::Sink<Message, Error = ConnectionError> + Send + Unpin + 'static,
     {
+        Self::from_message_streams_with_initial_request_id(
+            inbound,
+            outbound,
+            unknown_method_message,
+            DEFAULT_STARTING_REQUEST_ID,
+        )
+    }
+
+    /// Build a typed-message connection with an explicit first request id.
+    /// SDK compatibility transports can select zero without changing the
+    /// generic connection's default or another protocol's request identities.
+    #[must_use]
+    pub fn from_message_streams_with_initial_request_id<S, K>(
+        inbound: S,
+        outbound: K,
+        unknown_method_message: Option<JsonRpcString>,
+        initial_request_id: i64,
+    ) -> Connection
+    where
+        S: futures::Stream<Item = Message> + Send + Unpin + 'static,
+        K: futures::Sink<Message, Error = ConnectionError> + Send + Unpin + 'static,
+    {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let router = Router::new(outbound_tx);
+        let router = Router::new(outbound_tx).with_initial_request_id(initial_request_id);
         let dispatcher = unknown_method_message.map_or_else(Dispatcher::new, |message| {
             Dispatcher::with_method_not_found_message(message)
         });
@@ -591,6 +620,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builder_request_sequence_override_does_not_change_generic_default() {
+        struct EchoId;
+        #[async_trait::async_trait]
+        impl InboundHandler for EchoId {
+            async fn handle(&self, request: Request) -> Response {
+                Response::success(
+                    request.id.clone(),
+                    serde_json::to_value(request.id).unwrap(),
+                )
+            }
+        }
+        for initial in [None, Some(0)] {
+            let (a_in, a_out, b_in, b_out) = duplex_pipe();
+            let builder = Connection::builder(LineCodec::default());
+            let client = match initial {
+                Some(id) => builder.initial_request_id(id),
+                None => builder,
+            }
+            .build(a_in, a_out);
+            let server = Connection::builder(LineCodec::default()).build(b_in, b_out);
+            server.register_handler("echo-id", Arc::new(EchoId)).await;
+            for expected in initial.unwrap_or(1)..initial.unwrap_or(1) + 3 {
+                let id: i64 = client.call("echo-id", json!({})).await.unwrap();
+                assert_eq!(id, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn connection_notify_arrives_at_peer_broadcast() {
         let (a_in, a_out, b_in, b_out) = duplex_pipe();
 
@@ -644,6 +702,45 @@ mod tests {
         let conn_b = Connection::from_stream_sink(b_in, b_out);
         conn_b.register_handler("ping", Arc::new(Echo)).await;
         let _: serde_json::Value = conn_a.call("ping", json!({})).await.expect("roundtrip");
+    }
+
+    #[tokio::test]
+    async fn typed_stream_initial_id_is_opt_in_and_generic_default_is_unchanged() {
+        for initial in [None, Some(0)] {
+            let (incoming, receiver) = mpsc::unbounded_channel::<Message>();
+            let (sender, mut outgoing) = mpsc::unbounded_channel::<Message>();
+            let inbound = futures::stream::unfold(receiver, |mut receiver| async move {
+                receiver.recv().await.map(|message| (message, receiver))
+            });
+            let outbound = futures::sink::unfold(sender, |sender, message| async move {
+                sender.send(message).map_err(|_| {
+                    ConnectionError::Broker(BrokerError::Join("sink closed".into()))
+                })?;
+                Ok::<_, ConnectionError>(sender)
+            });
+            let connection = match initial {
+                Some(id) => Connection::from_message_streams_with_initial_request_id(
+                    Box::pin(inbound),
+                    Box::pin(outbound),
+                    None,
+                    id,
+                ),
+                None => {
+                    Connection::from_message_streams(Box::pin(inbound), Box::pin(outbound), None)
+                }
+            };
+            let call = connection
+                .start_call_raw_json_unbounded("ping", "{}".into())
+                .unwrap();
+            let Message::Request(request) = outgoing.recv().await.unwrap() else {
+                panic!("request")
+            };
+            assert_eq!(request.id, Id::Number(initial.unwrap_or(1)));
+            incoming
+                .send(Message::Response(Response::success(request.id, json!({}))))
+                .unwrap();
+            assert_eq!(call.wait_raw_json().await.unwrap(), "{}");
+        }
     }
 
     #[tokio::test]

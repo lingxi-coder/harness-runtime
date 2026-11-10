@@ -1,0 +1,350 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "label": "http-transport",
+      "start": 305090495,
+      "end": 305102189,
+      "sha256": "d31f56800b944e2762172599b91cfd2ec897f125f65fffef7d5c2b2617f3f4bc"
+    },
+    {
+      "label": "content-type-parser",
+      "start": 304884173,
+      "end": 304885620,
+      "sha256": "cb67dfad94eb8b8e431a2754e361d0ca96e1f8a1b50313914fba37b4cea09f73"
+    },
+    {
+      "label": "header-name-value-encoding",
+      "start": 304846855,
+      "end": 304847479,
+      "sha256": "d0ea4858a2de5fdf094d031dae4512f7d44e1fea6a5d88de28475914578a0719"
+    },
+    {
+      "label": "legacy-sse-transport",
+      "start": 305085434,
+      "end": 305089823,
+      "sha256": "480dd9f66e9472dbb1437e89d593dcd319b876903f4aeaef4db6f1e6e9778e08"
+    },
+    {
+      "label": "http-fetch-timeout-wrapper",
+      "start": 305713385,
+      "end": 305713943,
+      "sha256": "34c588af8961739067df9294a5fb37cc5a1171c2d52fd6dd042f783160a1458f"
+    }
+  ],
+  "mimeCases": [
+    {
+      "value": null,
+      "essence": null
+    },
+    {
+      "value": "",
+      "essence": null
+    },
+    {
+      "value": "application/json",
+      "essence": "application/json"
+    },
+    {
+      "value": "Application/JSON; charset=utf-8",
+      "essence": "application/json"
+    },
+    {
+      "value": " text/event-stream ",
+      "essence": "text/event-stream"
+    },
+    {
+      "value": "text/event-stream; charset=\"utf-8\"",
+      "essence": "text/event-stream"
+    },
+    {
+      "value": "application/json; malformed",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; quoted=\",\"",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; malformed,other",
+      "essence": null
+    },
+    {
+      "value": "application/json; quoted=\"unterminated,",
+      "essence": null
+    },
+    {
+      "value": "application/json; quoted=\"中文,\"",
+      "essence": null
+    },
+    {
+      "value": "application/json; quoted=\",\"",
+      "essence": null
+    },
+    {
+      "value": "text/event-stream-extra",
+      "essence": "text/event-stream-extra"
+    },
+    {
+      "value": "application/jsonp",
+      "essence": "application/jsonp"
+    },
+    {
+      "value": "text/plain",
+      "essence": "text/plain"
+    },
+    {
+      "value": "application/json, text/event-stream",
+      "essence": "application/json, text/event-stream"
+    },
+    {
+      "value": "application/json; x=y; next=z",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; \tx=y,other",
+      "essence": null
+    },
+    {
+      "value": "application/json; x=\"a\\\"b,\"",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; x=\"\u000b,\"",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; x=\"\t,\"",
+      "essence": null
+    },
+    {
+      "value": "application/json; x=\"\\\u000b,\"",
+      "essence": "application/json"
+    },
+    {
+      "value": "application/json; x=\"\\\t,\"",
+      "essence": null
+    }
+  ],
+  "headerCases": [
+    {
+      "label": "ordinary",
+      "headers": {},
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "initialize",
+      "expected": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      }
+    },
+    {
+      "label": "ordinary",
+      "headers": {},
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "tools/list",
+      "expected": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "wire-session-322"
+      }
+    },
+    {
+      "label": "configured-mixed-case",
+      "headers": {
+        "Accept": "APPLICATION/custom, Application/JSON",
+        "Content-Type": "text/custom",
+        "Mcp-Session-Id": "configured-session",
+        "Mcp-Protocol-Version": "configured-version"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "initialize",
+      "expected": {
+        "accept": "application/custom, application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25, configured-version"
+      }
+    },
+    {
+      "label": "configured-mixed-case",
+      "headers": {
+        "Accept": "APPLICATION/custom, Application/JSON",
+        "Content-Type": "text/custom",
+        "Mcp-Session-Id": "configured-session",
+        "Mcp-Protocol-Version": "configured-version"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "tools/list",
+      "expected": {
+        "accept": "application/custom, application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25, configured-version",
+        "mcp-session-id": "wire-session-322, configured-session"
+      }
+    },
+    {
+      "label": "configured-lowercase",
+      "headers": {
+        "mcp-session-id": "configured-session",
+        "mcp-protocol-version": "configured-version"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "initialize",
+      "expected": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "configured-version"
+      }
+    },
+    {
+      "label": "configured-lowercase",
+      "headers": {
+        "mcp-session-id": "configured-session",
+        "mcp-protocol-version": "configured-version"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "tools/list",
+      "expected": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "configured-version",
+        "mcp-session-id": "configured-session"
+      }
+    },
+    {
+      "label": "authored-case-duplicates",
+      "headers": {
+        "X-Dupe": "one",
+        "x-dupe": "two",
+        "Accept": "APPLICATION/custom",
+        "accept": "application/other"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "initialize",
+      "expected": {
+        "accept": "application/custom, application/other, application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "x-dupe": "one, two"
+      }
+    },
+    {
+      "label": "authored-case-duplicates",
+      "headers": {
+        "X-Dupe": "one",
+        "x-dupe": "two",
+        "Accept": "APPLICATION/custom",
+        "accept": "application/other"
+      },
+      "sessionId": "wire-session-322",
+      "protocolVersion": "2025-11-25",
+      "method": "tools/list",
+      "expected": {
+        "accept": "application/custom, application/other, application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "wire-session-322",
+        "x-dupe": "one, two"
+      }
+    }
+  ],
+  "jsonCases": [
+    {
+      "label": "single",
+      "contentType": "application/json",
+      "responseRaw": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"\\ud800\",\"number\":1e+21}}",
+      "receivedRaw": "[{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"\\ud800\",\"number\":1e+21}}]",
+      "error": null
+    },
+    {
+      "label": "array",
+      "contentType": "Application/JSON; charset=utf-8",
+      "responseRaw": "[{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"\\ud800\"}}]",
+      "receivedRaw": "[{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"\\ud800\"}}]",
+      "error": null
+    },
+    {
+      "label": "wrong-type",
+      "contentType": "text/plain",
+      "responseRaw": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}",
+      "receivedRaw": "[]",
+      "error": "Unexpected content type: text/plain"
+    },
+    {
+      "label": "missing-type",
+      "contentType": null,
+      "responseRaw": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}",
+      "receivedRaw": "[]",
+      "error": "Unexpected content type: null"
+    }
+  ],
+  "deleteHeaders": {
+    "mcp-protocol-version": "2025-11-25",
+    "mcp-session-id": "wire-session-322"
+  },
+  "bodyHeaderCases": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "echo",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "tools/call",
+        "mcp-name": "echo",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+          "name": "echo",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {}
+    }
+  ],
+  "timeoutCases": [
+    {
+      "label": "response-headers-timeout",
+      "policyMs": 50,
+      "errorName": "TimeoutError",
+      "errorMessage": "The operation timed out.",
+      "sameErrorReportedAndRejected": true,
+      "inboundFramesBeforeRetry": 0,
+      "retryFrameId": 10,
+      "fetchSignalAborted": true,
+      "connectionSignalAborted": false,
+      "timerCleared": true
+    },
+    {
+      "label": "body-after-response-headers",
+      "policyMs": 50,
+      "timerClearedBeforeBody": true,
+      "bodyPendingAfterHeaders": true,
+      "fetchSignalAborted": false,
+      "receivedFrameId": 11
+    }
+  ],
+  "scope": "Unchanged native HTTP class, MIME/header helpers and fetch-timeout wrapper, controlled valid-frame boundary dependencies and timeout policy/timers, no network. Legacy EventSource GET MIME and named-event behavior are proved by the separate native live receipts. Native timeout failures reject the send promise; Rust maps that failure to its existing local JSON-RPC error rather than leaving the call pending."
+}

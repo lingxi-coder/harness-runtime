@@ -1,0 +1,1642 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "name": "sdk_transport",
+      "start": 290049561,
+      "end": 290052709,
+      "sha256": "42a3317abbc27229b3bc3ded844adb6f6f2c3e7d6649c89ab262d82c730e00c7"
+    },
+    {
+      "name": "manifest_parser",
+      "start": 290052976,
+      "end": 290053502,
+      "sha256": "c12bb81a5a4f6c1dc91401b18058423e1d3d162d1a40a748e1083fa209fe21b7"
+    },
+    {
+      "name": "native_send",
+      "start": 301173575,
+      "end": 301173851,
+      "sha256": "421c74c013480240e9ff37d2909838e9965ad84955013ee0515ebdd23a83972a"
+    }
+  ],
+  "scope": "Pure SDK transport manifest replay/parser, control-request deadline classification and concurrency/close. Host object classification and timer facilities are explicit seams; real control loopback receipts are separate.",
+  "initializeCapabilities": {},
+  "replayCases": [
+    {
+      "input": {
+        "name": "ordinary",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "caps-{}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "caps-{\"roots\":{\"listChanged\":true},\"elicitation\":{}}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "roots": {
+                  "listChanged": true
+                },
+                "elicitation": {}
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "client_capabilities_declared"
+    },
+    {
+      "input": {
+        "name": "caps-{\"elicitation\":{}}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "elicitation": {}
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "client_capabilities_declared"
+    },
+    {
+      "input": {
+        "name": "caps-null",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": null
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "client_capabilities_declared"
+    },
+    {
+      "input": {
+        "name": "caps-[]",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": []
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "client_capabilities_declared"
+    },
+    {
+      "input": {
+        "name": "caps-{\"extra\":true}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "extra": true
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "client_capabilities_declared"
+    },
+    {
+      "input": {
+        "name": "meta-null",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": null
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "malformed_result"
+    },
+    {
+      "input": {
+        "name": "meta-false",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": false
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "malformed_result"
+    },
+    {
+      "input": {
+        "name": "meta-{}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {}
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              },
+              "_meta": {}
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "meta-{\"progressToken\":null}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {
+              "progressToken": null
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "malformed_result"
+    },
+    {
+      "input": {
+        "name": "meta-{\"progressToken\":4}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {
+              "progressToken": 4
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              },
+              "_meta": {
+                "progressToken": 4
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "meta-{\"progressToken\":\"x\"}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {
+              "progressToken": "x"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              },
+              "_meta": {
+                "progressToken": "x"
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "meta-{\"io.modelcontextprotocol/related-task\":{\"taskId\":\"x\"}}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {
+              "io.modelcontextprotocol/related-task": {
+                "taskId": "x"
+              }
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              },
+              "_meta": {
+                "io.modelcontextprotocol/related-task": {
+                  "taskId": "x"
+                }
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": []
+            }
+          }
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "meta-{\"io.modelcontextprotocol/related-task\":{\"taskId\":4}}",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            },
+            "_meta": {
+              "io.modelcontextprotocol/related-task": {
+                "taskId": 4
+              }
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "malformed_result"
+    },
+    {
+      "input": {
+        "name": "protocol-mismatch",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "other",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "protocol_version_mismatch"
+    },
+    {
+      "input": {
+        "name": "list-before-initialized",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "cursor-declared-null",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+              "cursor": null
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "reply": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        },
+        {
+          "swallow": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "replayed"
+    },
+    {
+      "input": {
+        "name": "notification-before-initialize",
+        "manifest": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "unexpected_message"
+    },
+    {
+      "input": {
+        "name": "no-manifest",
+        "messages": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+          }
+        ]
+      },
+      "outputs": [
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        },
+        {
+          "forward": true
+        }
+      ],
+      "outcome": "none"
+    }
+  ],
+  "parserCases": [
+    {
+      "manifests": [],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": null,
+      "manifests": [],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": false,
+      "manifests": [],
+      "malformedField": true,
+      "malformedServerNames": []
+    },
+    {
+      "input": [],
+      "manifests": [],
+      "malformedField": true,
+      "malformedServerNames": []
+    },
+    {
+      "input": {},
+      "manifests": [],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": {
+        "fixture": null
+      },
+      "manifests": [],
+      "malformedField": false,
+      "malformedServerNames": [
+        "fixture"
+      ]
+    },
+    {
+      "input": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "manifests": [
+        [
+          "fixture",
+          {
+            "initializeResult": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        ]
+      ],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": null
+        }
+      },
+      "manifests": [
+        [
+          "fixture",
+          {
+            "initializeResult": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            }
+          }
+        ]
+      ],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": []
+        }
+      },
+      "manifests": [],
+      "malformedField": false,
+      "malformedServerNames": [
+        "fixture"
+      ]
+    },
+    {
+      "input": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        },
+        "ignored": {
+          "initializeResult": false
+        }
+      },
+      "manifests": [
+        [
+          "fixture",
+          {
+            "initializeResult": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            },
+            "toolsListResult": {
+              "tools": []
+            }
+          }
+        ]
+      ],
+      "malformedField": false,
+      "malformedServerNames": []
+    },
+    {
+      "input": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {}
+            },
+            "serverInfo": {
+              "name": "fixture",
+              "version": "1"
+            }
+          },
+          "toolsListResult": {
+            "tools": []
+          }
+        }
+      },
+      "manifests": [
+        [
+          "fixture",
+          {
+            "initializeResult": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "fixture",
+                "version": "1"
+              }
+            },
+            "toolsListResult": {
+              "tools": []
+            }
+          }
+        ]
+      ],
+      "malformedField": false,
+      "malformedServerNames": []
+    }
+  ],
+  "deadlineCases": [
+    {
+      "message": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {}
+        }
+      },
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {}
+          }
+        }
+      },
+      "bounded": false,
+      "timers": [],
+      "options": {
+        "peerRefusalGraceMs": 10000
+      }
+    },
+    {
+      "message": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      },
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "notifications/initialized"
+        }
+      },
+      "bounded": true,
+      "timers": [
+        {
+          "timeoutMs": 70000,
+          "refTimer": true
+        }
+      ],
+      "options": {
+        "peerRefusalGraceMs": 10000
+      }
+    },
+    {
+      "message": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+      },
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "tools/list"
+        }
+      },
+      "bounded": false,
+      "timers": [],
+      "options": {
+        "peerRefusalGraceMs": 10000
+      }
+    },
+    {
+      "message": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {}
+      },
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "result": {}
+        }
+      },
+      "bounded": true,
+      "timers": [
+        {
+          "timeoutMs": 70000,
+          "refTimer": true
+        }
+      ],
+      "options": {
+        "peerRefusalGraceMs": 10000
+      }
+    },
+    {
+      "message": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "error": {
+          "code": -32601,
+          "message": "unknown"
+        }
+      },
+      "request": {
+        "subtype": "mcp_message",
+        "server_name": "fixture",
+        "message": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "error": {
+            "code": -32601,
+            "message": "unknown"
+          }
+        }
+      },
+      "bounded": true,
+      "timers": [
+        {
+          "timeoutMs": 70000,
+          "refTimer": true
+        }
+      ],
+      "options": {
+        "peerRefusalGraceMs": 10000
+      }
+    }
+  ],
+  "utf16MetaCases": [
+    {
+      "metaJson": "{\"progressToken\":\"\\ud800\"}",
+      "accepted": true
+    },
+    {
+      "metaJson": "{\"io.modelcontextprotocol/related-task\":{\"taskId\":\"\\udfff\"}}",
+      "accepted": true
+    }
+  ],
+  "concurrency": {
+    "entered": [
+      {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+      },
+      {
+        "jsonrpc": "2.0",
+        "id": "peer",
+        "result": {}
+      }
+    ],
+    "closeCount": 1,
+    "closedMessage": "Transport is closed"
+  }
+}

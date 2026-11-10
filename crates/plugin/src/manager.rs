@@ -1972,7 +1972,7 @@ impl PluginManager {
                     }
                 }
                 let mut scoped = cfg.clone();
-                scoped.name = scoped_name;
+                scoped.prepend_authored_name(&format!("plugin:{plugin_name}:"));
                 stamp_plugin_mcp_metadata(&mut scoped);
                 // Substitute `${user_config.KEY}` references (command / args
                 // / env, and remote url / headers) with the resolved values
@@ -2189,10 +2189,24 @@ impl PluginManager {
             plugin_data_dir.as_deref(),
             &self.project_dir,
         );
-        self.hook_registry
-            .write()
-            .await
-            .register_plugin_hooks(manifest.id, plugin_hooks);
+        let hook_personal_origin = if matches!(manifest.source, PluginSource::BuiltIn)
+            || self
+                .managed_plugin_names
+                .read()
+                .await
+                .contains(&manifest.name)
+        {
+            Some(false)
+        } else {
+            // The current manifest does not carry a trusted installation
+            // settings tier. Preserve that ambiguity instead of treating a
+            // user-installed plugin as organization-owned.
+            None
+        };
+        let mut hook_registry = self.hook_registry.write().await;
+        hook_registry.set_personal_hook_origins(&plugin_hooks, hook_personal_origin);
+        hook_registry.register_plugin_hooks(manifest.id, plugin_hooks);
+        drop(hook_registry);
 
         if let Some(host) = loaded_mod {
             self.hook_registry.write().await.set_mod_host(host);
@@ -3633,6 +3647,13 @@ fn extract_frontmatter(raw: &str) -> Option<&str> {
 
 fn stamp_plugin_mcp_metadata(config: &mut McpServerConfig) {
     config.metadata.agent_source = Some(mcp::McpAgentSource::Plugin);
+    // Hook provenance describes ownership of this MCP config. `agent_source`
+    // also appears on inline servers from plugin-authored agents and cannot
+    // alone establish that the MCP config itself belongs to a plugin.
+    config
+        .metadata
+        .provenance_source
+        .get_or_insert_with(|| "plugin".into());
 }
 
 /// Installed plugin identity used for `pluginConfigs` and plugin-secret
@@ -4568,6 +4589,11 @@ mod unload_tests {
 
         assert_eq!(cfg.metadata.transport.as_deref(), Some("sdk"));
         assert_eq!(cfg.metadata.agent_source, Some(mcp::McpAgentSource::Plugin));
+        assert_eq!(cfg.metadata.provenance_source.as_deref(), Some("plugin"));
+        assert_eq!(mcp::McpServerProvenance::from_config(&cfg).source, "plugin");
+        cfg.metadata.provenance_source = Some("builtin".into());
+        stamp_plugin_mcp_metadata(&mut cfg);
+        assert_eq!(cfg.metadata.provenance_source.as_deref(), Some("builtin"));
     }
 
     struct FailOnceDisconnectTransport {

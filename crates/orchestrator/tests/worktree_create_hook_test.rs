@@ -1,22 +1,6 @@
-//! tool-dispatch chokepoint (`turn_loop.rs`) after a successful `EnterWorktree`.
-//!
-//! Parity with claude-code: `executeWorktreeCreateHook(slug)` (`utils/hooks.ts:4928`)
-//! runs the `WorktreeCreate` hook when a worktree is created. claude-code fires it
-//! from the worktree-creation logic (`createWorktreeForSession`); the port
-//! creates worktrees only through the registered, turn_loop-dispatched
-//! `EnterWorktree` tool, so the fire lives in `dispatch_tool_uses` immediately
-//! after the tool succeeds — same TIMING, the fire just lives in the dispatch loop
-//! (alongside `PostToolUse`). The wire payload carries only `name` — the requested
-//! slug — exactly as claude-code passes the bare slug to the hook.
-//!
-//! Scenarios:
-//! 1. A successful `EnterWorktree` fires `WorktreeCreate`, carrying the requested
-//!    slug as `name` and the resolved `path` / `branch` from the tool result.
-//! 2. A FAILED `EnterWorktree` (errored create — no worktree exists) does NOT fire
-//!    `WorktreeCreate`.
-//! 3. A non-worktree tool never fires `WorktreeCreate`.
-//! 4. A `WorktreeCreate` hook that itself fails does NOT break the turn
-//!    (best-effort, like the `PostToolUse` arm).
+//! WorktreeCreate belongs to the WorktreeManager lifecycle, before creation.
+//! The dispatch layer must never synthesize a second after-the-fact event from
+//! a tool name. Hook manager lifecycle coverage lives in hooks/worktree_manager.
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -309,7 +293,7 @@ impl BuiltinHookHandler for RecordingHandler {
     }
 }
 
-/// A `WorktreeCreate` hook that itself FAILS — proves the fire is best-effort.
+/// A hook must remain unreachable through a tool that only impersonates the name.
 struct FailingWorktreeHook;
 #[async_trait]
 impl BuiltinHookHandler for FailingWorktreeHook {
@@ -407,7 +391,7 @@ fn two_turn_api(
 }
 
 #[tokio::test]
-async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
+async fn successful_enter_worktree_does_not_synthesize_after_creation_hook() {
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(
         tool_use_id,
@@ -427,20 +411,10 @@ async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
     let outcome = orch.run_turn("make a worktree").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
-    let seen = log.lock().unwrap().clone();
-    assert_eq!(
-        seen.len(),
-        1,
-        "exactly one WorktreeCreate event must fire: {seen:?}"
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the manager, not tool dispatch, owns WorktreeCreate"
     );
-    // `name` is the requested slug — the only field on the claude-code wire payload.
-    assert_eq!(seen[0].name, "user/feature");
-    // The resolved path + branch are threaded as engine-side context.
-    assert_eq!(
-        seen[0].path,
-        PathBuf::from("/tmp/repo-A/.lingxi/worktrees/user+feature")
-    );
-    assert_eq!(seen[0].branch, "worktree-user+feature");
 }
 
 #[tokio::test]
@@ -491,10 +465,9 @@ async fn non_worktree_tool_does_not_fire_worktree_create() {
 }
 
 #[tokio::test]
-async fn failing_worktree_create_hook_does_not_break_turn() {
-    // The successful EnterWorktree fires WorktreeCreate; the registered hook
-    // itself returns a non-success outcome. The turn must STILL complete
-    // (best-effort, identical to the PostToolUse arm).
+async fn tool_name_cannot_trigger_an_unrelated_worktree_create_hook() {
+    // This fake tool does not create through WorktreeManager. Its name cannot
+    // trigger a lifecycle hook, including one which would fail real creation.
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(
         tool_use_id,

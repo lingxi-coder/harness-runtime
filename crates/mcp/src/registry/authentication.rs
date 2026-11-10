@@ -226,14 +226,56 @@ impl McpRegistry {
         &self,
         config: &McpServerConfig,
     ) -> Result<(McpTransportSpec, Option<String>, Option<GrantProvenance>), McpError> {
-        let Some(oauth_cfg) = spec_oauth(&config.spec) else {
-            return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound())));
+        // SDK authenticate may have created a grant for an ordinary remote
+        // server that never authored an oauth block. Reuse that exact stored
+        // grant while leaving tokenless/static-header configurations alone.
+        let implicit_oauth;
+        let oauth_cfg = if let Some(oauth_cfg) = spec_oauth(&config.spec) {
+            oauth_cfg
+        } else {
+            let headers = match &config.spec {
+                McpTransportSpec::Http { headers, .. } | McpTransportSpec::Sse { headers, .. } => {
+                    headers
+                }
+                _ => return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound()))),
+            };
+            if headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"))
+            {
+                return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound())));
+            }
+            let Some(deps) = self.oauth.as_ref() else {
+                return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound())));
+            };
+            let storage = self.oauth_storage_for_config(config, &deps.storage);
+            let key = oauth::server_key(config.storage_name(), &config.spec);
+            if oauth::load_tokens(&storage, &key)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound())));
+            }
+            implicit_oauth = lingxi_core::host::McpOAuthConfigDto {
+                client_id: None,
+                callback_port: None,
+                auth_server_metadata_url: None,
+                scopes: None,
+                xaa: None,
+            };
+            &implicit_oauth
         };
         let Some(deps) = &self.oauth else {
             return Ok((config.spec.clone(), None, None));
         };
-        let key = oauth::server_key(&config.name, &config.spec);
-        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        let deps = &oauth_deps;
+        let key = oauth::server_key(config.storage_name(), &config.spec);
+        let telemetry_ctx =
+            oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
 
         // XAA (cross-app-access, SEP-990): when `oauth.xaa` is set, XAA is the
         // ONLY auth path — never fall through to the consent flow (auth.ts:857-
@@ -262,7 +304,19 @@ impl McpRegistry {
                     && !step_up_pending
                     && remaining.is_some_and(|seconds| seconds <= 300.0);
 
-                if !should_refresh {
+                // Native tokens() does not expose an empty access token,
+                // even when an all-scope invalidation omitted expiresAt.
+                if stored.access_token.is_empty() {
+                    self.run_interactive_oauth(
+                        config,
+                        oauth_cfg,
+                        &key,
+                        deps,
+                        stored.step_up_scope.as_deref(),
+                        None,
+                    )
+                    .await?
+                } else if !should_refresh {
                     if !expired || step_up_pending {
                         stored.into_tokens()
                     } else {
@@ -310,6 +364,22 @@ impl McpRegistry {
         telemetry_ctx: &oauth::McpOAuthTelemetryContext,
         original: oauth::StoredTokens,
     ) -> Result<oauth::Tokens, McpError> {
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        oauth_deps.http = oauth::session::configured_http(
+            &self
+                .oauth
+                .as_ref()
+                .map(|deps| deps.http.clone())
+                .unwrap_or_else(|| deps.http.clone()),
+            &config.spec,
+        );
+        let deps = &oauth_deps;
+        let Some(_refresh_lock) =
+            oauth::session::RefreshLock::acquire(&self.oauth_identity, key).await
+        else {
+            return Ok(original.into_tokens());
+        };
         // The per-server lifecycle lock serializes same-process connects.
         // Reload before refreshing so a credential rotation completed by
         // another owner is adopted instead of replaying its old refresh token.
@@ -347,24 +417,17 @@ impl McpRegistry {
             .clone()
             .or_else(|| oauth_cfg.client_id.clone())
             .unwrap_or_default();
-        let refresh_result = async {
-            let meta = oauth::discover_auth_server_metadata(
-                &deps.http,
-                spec_url(&config.spec),
-                oauth_cfg.auth_server_metadata_url.as_deref(),
-                None,
-            )
-            .await?;
-            oauth::refresh_standard_tokens(
-                &deps.http,
-                &deps.clock,
-                &meta,
-                &client_id,
-                refresh,
-                spec_url(&config.spec),
-            )
-            .await
-        }
+        let refresh_result = oauth::refresh_stored_standard_tokens(
+            &deps.http,
+            &deps.clock,
+            oauth_cfg,
+            spec_url(&config.spec),
+            &deps.storage,
+            key,
+            &self.oauth_identity,
+            refresh,
+            None,
+        )
         .await;
 
         match refresh_result {
@@ -414,10 +477,23 @@ impl McpRegistry {
             .oauth
             .as_ref()
             .ok_or_else(|| McpError::OAuth("oauth seam not wired".into()))?;
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        oauth_deps.http = oauth::session::configured_http(
+            &self
+                .oauth
+                .as_ref()
+                .map(|deps| deps.http.clone())
+                .unwrap_or_else(|| deps.http.clone()),
+            &config.spec,
+        );
+        let deps = &oauth_deps;
+
         let oauth_cfg = spec_oauth(&config.spec)
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
-        let key = oauth::server_key(&config.name, &config.spec);
-        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+        let key = oauth::server_key(config.storage_name(), &config.spec);
+        let telemetry_ctx =
+            oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
 
         // §26b delta 3: an XAA-flagged server's 401 must stay on the XAA
         // path — never fall through to the refresh-or-interactive-consent
@@ -440,22 +516,17 @@ impl McpRegistry {
         let stored = oauth::load_tokens(&deps.storage, &key).await?;
         let token = match stored.as_ref().and_then(|t| t.refresh_token.clone()) {
             Some(refresh) => {
-                let meta = match oauth::discover_auth_server_metadata(
-                    &deps.http,
-                    spec_url(&config.spec),
-                    oauth_cfg.auth_server_metadata_url.as_deref(),
-                    resource_metadata_url,
-                )
-                .await
-                {
-                    Ok(meta) => meta,
-                    Err(error) => {
-                        oauth::emit_oauth_refresh_failure(
-                            &telemetry_ctx,
-                            oauth_refresh_failure_reason(&error),
-                        );
-                        return Err(error.into());
-                    }
+                let Some(refresh_lock) =
+                    oauth::session::RefreshLock::acquire(&self.oauth_identity, &key).await
+                else {
+                    let token = stored
+                        .clone()
+                        .ok_or_else(|| McpError::OAuth("OAuth refresh lock is unavailable".into()))?
+                        .into_tokens();
+                    return Ok((
+                        inject_bearer(&config.spec, token.access_token.expose_secret()),
+                        GrantProvenance::from_tokens(&token),
+                    ));
                 };
                 // Prefer the persisted (DCR-issued or configured) client_id so
                 // refresh re-sends it (auth.ts clientInformation(), 1482-1506).
@@ -464,16 +535,20 @@ impl McpRegistry {
                     .and_then(|t| t.client_id.clone())
                     .or_else(|| oauth_cfg.client_id.clone())
                     .unwrap_or_default();
-                match oauth::refresh_standard_tokens(
+                let refresh_result = oauth::refresh_stored_standard_tokens(
                     &deps.http,
                     &deps.clock,
-                    &meta,
-                    &client_id,
-                    &refresh,
+                    oauth_cfg,
                     spec_url(&config.spec),
+                    &deps.storage,
+                    &key,
+                    &self.oauth_identity,
+                    &refresh,
+                    resource_metadata_url,
                 )
-                .await
-                {
+                .await;
+                drop(refresh_lock);
+                match refresh_result {
                     Ok(t) => {
                         oauth::save_tokens_with_telemetry(
                             &deps.storage,
@@ -566,10 +641,14 @@ impl McpRegistry {
             .oauth
             .as_ref()
             .ok_or_else(|| McpError::OAuth("oauth seam not wired".into()))?;
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        let deps = &oauth_deps;
         let oauth_cfg = spec_oauth(&config.spec)
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
-        let key = oauth::server_key(&config.name, &config.spec);
-        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+        let key = oauth::server_key(config.storage_name(), &config.spec);
+        let telemetry_ctx =
+            oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
 
         // §26b delta 3, second arm: an XAA-flagged server's 403 must stay on
         // the XAA path exactly as its 401 does (`reauth_oauth_spec` above).
@@ -677,6 +756,17 @@ impl McpRegistry {
         force_fresh: bool,
         resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        oauth_deps.http = oauth::session::configured_http(
+            &self
+                .oauth
+                .as_ref()
+                .map(|deps| deps.http.clone())
+                .unwrap_or_else(|| deps.http.clone()),
+            &config.spec,
+        );
+        let deps = &oauth_deps;
         // Gate on the enable flag (mirror of CLAUDE_CODE_ENABLE_XAA).
         if !lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_ENABLE_XAA").ok().as_deref(),
@@ -694,6 +784,14 @@ impl McpRegistry {
         // Single-flight: serialize concurrent resolves for this server key.
         let lock = self.xaa_refresh_lock(key);
         let _single_flight = lock.lock().await;
+        let Some(_process_refresh) =
+            oauth::session::RefreshLock::acquire(&self.oauth_identity, key).await
+        else {
+            return oauth::load_tokens(&deps.storage, key)
+                .await?
+                .map(oauth::StoredTokens::into_tokens)
+                .ok_or_else(|| McpError::OAuth("OAuth refresh lock is unavailable".into()));
+        };
 
         let stored = oauth::load_tokens(&deps.storage, key).await?;
 
@@ -791,14 +889,21 @@ impl McpRegistry {
                 .into(),
             )
         })?;
+        let bound_provider = provider.for_server_credentials(
+            config.storage_name(),
+            key,
+            spec_oauth(&config.spec).and_then(|oauth| oauth.client_id.as_deref()),
+            deps.storage.clone(),
+        );
+        let provider = bound_provider.as_ref().unwrap_or(provider);
         let server_url = spec_url(&config.spec);
         // The oracle performs this read before entering the failure-telemetry
         // try/catch. A storage failure therefore aborts the flow rather than
         // being mislabeled as an IdP cache miss.
         let id_token_cache_hit = provider
-            .peek_id_token_cache_hit(&config.name, server_url)
+            .peek_id_token_cache_hit(config.storage_name(), server_url)
             .await?;
-        let inputs = match provider.xaa_inputs(&config.name, server_url).await {
+        let inputs = match provider.xaa_inputs(config.storage_name(), server_url).await {
             Ok(Some(inputs)) => inputs,
             Ok(None) => {
                 emit_oauth_flow_failure(&telemetry::tengu::mcp::OAuthFlowFailurePayload {
@@ -826,7 +931,16 @@ impl McpRegistry {
             }
         };
 
-        let result = match crate::xaa::perform_cross_app_access(
+        let mut session = oauth::session::load(&deps.storage, key).await?;
+        let pinned_issuer = session
+            .discovery
+            .as_ref()
+            .filter(|state| state.xaa_pinned)
+            .map(|state| state.authorization_server_url.as_str());
+        let client_secret_source = provider
+            .as_client_secret_source(config.storage_name(), server_url)
+            .await?;
+        let result = match crate::xaa::perform_cross_app_access_with_source(
             &deps.http,
             spec_url(&config.spec),
             &crate::xaa::XaaConfig {
@@ -837,6 +951,8 @@ impl McpRegistry {
                 idp_id_token: &inputs.idp_id_token,
                 idp_token_endpoint: &inputs.idp_token_endpoint,
             },
+            pinned_issuer,
+            client_secret_source.as_ref(),
         )
         .await
         {
@@ -865,7 +981,7 @@ impl McpRegistry {
         // RFC-7009 revocation can authenticate the confidential client
         // (auth.ts:807-825 token-save). `expires_in` (when present) sets expiry.
         let expires_at_millis = match result.tokens.expires_in {
-            Some(secs) => oauth::OAuthExpiry::from_expires_in(deps.clock.now(), secs as f64),
+            Some(secs) => oauth::OAuthExpiry::from_expires_in(deps.clock.now(), secs),
             // No expiry advertised → treat as already-stale so the next connect
             // re-runs the exchange (XAA tokens are cheap to re-mint, silent).
             None => oauth::OAuthExpiry::from_system_time(deps.clock.now()),
@@ -878,6 +994,35 @@ impl McpRegistry {
             client_secret: Some(inputs.client_secret.clone()),
             step_up_scope: None,
         };
+        let secret_json = match client_secret_source.as_ref() {
+            Some(source) => source
+                .to_json_string()
+                .map_err(|error| McpError::OAuth(error.to_string().into()))?,
+            None => serde_json::to_string(&inputs.client_secret)
+                .map_err(|error| McpError::OAuth(error.to_string().into()))?,
+        };
+        session.client_registration = Some(format!(
+            "{{\"client_id\":{},\"client_secret\":{secret_json}}}",
+            serde_json::to_string(&inputs.client_id)
+                .map_err(|error| McpError::OAuth(error.to_string().into()))?
+        ));
+        session.client_issuer = result.authorization_server_source.string_units("");
+        session.token_response = Some(
+            result
+                .tokens
+                .source
+                .to_json_string()
+                .map_err(|error| McpError::OAuth(error.to_string().into()))?,
+        );
+        session.discovery = Some(oauth::session::StoredDiscovery {
+            authorization_server_url: result.authorization_server_url.clone(),
+            oauth_metadata_found: true,
+            metadata_binding: oauth::session::MetadataBinding::Default,
+            resource_metadata_url: resource_metadata_url.map(str::to_owned),
+            authorization_metadata: None,
+            xaa_pinned: true,
+        });
+        oauth::session::save(&deps.storage, &deps.clock, key, &session).await?;
         oauth::store_tokens(&deps.storage, &deps.clock, key, &stored)
             .await
             .map_err(McpError::from)?;
@@ -907,6 +1052,17 @@ impl McpRegistry {
         scope_override: Option<&str>,
         resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
+        let mut oauth_deps = deps.clone();
+        oauth_deps.storage = self.oauth_storage_for_config(config, &deps.storage);
+        oauth_deps.http = oauth::session::configured_http(
+            &self
+                .oauth
+                .as_ref()
+                .map(|deps| deps.http.clone())
+                .unwrap_or_else(|| deps.http.clone()),
+            &config.spec,
+        );
+        let deps = &oauth_deps;
         // Effective elevated scope: an explicit override (the 403 step-up path)
         // wins; otherwise honor any `step_up_scope` cached on the stored entry
         // from a previous 403 `insufficient_scope` (auth.ts:906-909
@@ -937,17 +1093,21 @@ impl McpRegistry {
                 callback_port,
             },
         );
-        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
-        let tokens = oauth::perform_oauth_flow_for_reauth(
+        let telemetry_ctx =
+            oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
+        let tokens = oauth::perform_oauth_flow_stored(
             &deps.http,
             &deps.clock,
             oauth_cfg,
-            &config.name,
+            config.storage_name(),
             spec_url(&config.spec),
             &deps.on_authorization_url,
             Some(&telemetry_ctx),
             cached_scope.as_deref(),
             resource_metadata_url,
+            &deps.storage,
+            key,
+            &self.oauth_identity,
         )
         .await?;
         // A fresh grant clears any pending step-up scope (auth.ts:1705): the new

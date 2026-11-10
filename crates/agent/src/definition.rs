@@ -375,6 +375,10 @@ pub enum AgentMcpServerSpec {
     /// Record entry: `{ name: config }` with the config body in the same shape
     /// as one `.mcp.json` server entry, held raw until conversion.
     Record(serde_json::Map<String, serde_json::Value>),
+    /// A JSON string whose authored server-name units are not Unicode scalars.
+    BySourceName(mcp::McpServerName),
+    /// A JSON record retaining non-scalar MCP server-name property keys.
+    SourceRecord(lingxi_core::types::utf16_json::Utf16JsonProjection),
 }
 
 /// Whether the agent needs an isolated git worktree.

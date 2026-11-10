@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod watch_helper;
 pub mod worktree_create_guard;
 pub mod worktree_include;
+pub mod worktree_root;
 
 pub use guest_fs::GuestPathFileSystem;
 pub use http::ReqwestHttp;

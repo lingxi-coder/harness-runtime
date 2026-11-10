@@ -1,0 +1,453 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "cases": [
+    {
+      "name": "tool-missing",
+      "request": {
+        "subtype": "mcp_call"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call: tool must be a string"
+      }
+    },
+    {
+      "name": "tool-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": null
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call: tool must be a string"
+      }
+    },
+    {
+      "name": "tool-number",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": 3
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call: tool must be a string"
+      }
+    },
+    {
+      "name": "tool-unqualified",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "echo"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "Not a fully-qualified MCP tool name: echo"
+      }
+    },
+    {
+      "name": "tool-server-only",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "Not a fully-qualified MCP tool name: mcp__ordinary"
+      }
+    },
+    {
+      "name": "tool-empty-tool",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "Not a fully-qualified MCP tool name: mcp__ordinary__"
+      }
+    },
+    {
+      "name": "check-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__fixture__echo",
+        "check_permissions": null
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call: check_permissions must be a boolean"
+      }
+    },
+    {
+      "name": "check-string",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__fixture__echo",
+        "check_permissions": "true"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call: check_permissions must be a boolean"
+      }
+    },
+    {
+      "name": "sdk",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__fixture__echo"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call does not support SDK MCP servers. SDK servers are caller-provided \u2014 invoke fixture directly."
+      }
+    },
+    {
+      "name": "sdk-checked",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__fixture__echo",
+        "check_permissions": true
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_call does not support SDK MCP servers. SDK servers are caller-provided \u2014 invoke fixture directly."
+      }
+    },
+    {
+      "name": "unknown",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__missing__echo"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "MCP server not connected: missing"
+      }
+    },
+    {
+      "name": "echo",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "arguments": {
+          "value": "source"
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "content": "{\"kind\":\"echo\"}",
+          "structuredContent": {
+            "kind": "echo"
+          },
+          "_meta": {
+            "fixture": true
+          }
+        }
+      }
+    },
+    {
+      "name": "echo-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "arguments": null
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "content": "{\"kind\":\"echo\"}",
+          "structuredContent": {
+            "kind": "echo"
+          },
+          "_meta": {
+            "fixture": true
+          }
+        }
+      }
+    },
+    {
+      "name": "echo-checked",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "arguments": {
+          "value": "checked"
+        },
+        "check_permissions": true
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "content": "{\"kind\":\"echo\"}",
+          "structuredContent": {
+            "kind": "echo"
+          },
+          "_meta": {
+            "fixture": true
+          }
+        }
+      }
+    },
+    {
+      "name": "echo-program",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "arguments": {
+          "value": "program"
+        },
+        "result_not_for_model": true
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"value\":\"program\"}"
+            }
+          ],
+          "structuredContent": {
+            "kind": "echo"
+          },
+          "_meta": {
+            "fixture": true
+          }
+        }
+      }
+    },
+    {
+      "name": "logical",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__logical"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "{}"
+      }
+    },
+    {
+      "name": "rpc",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__rpc"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "fixture rpc error"
+      }
+    },
+    {
+      "name": "staged-timeout-only",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "content": "{\"kind\":\"echo\"}",
+          "structuredContent": {
+            "kind": "echo"
+          },
+          "_meta": {
+            "fixture": true
+          },
+          "staging": {
+            "ok": true,
+            "outputs": [],
+            "inputs_used": []
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-bad-expiry",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "expires_at": "not-a-date"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "expired",
+            "detail": "expires_at is not an RFC3339 timestamp with a zone: not-a-date"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-expired",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "expires_at": "2000-01-01T00:00:00Z"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "expired",
+            "detail": "request expired at 2000-01-01T00:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-outputs-without-expiry",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__files",
+        "output_files": []
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: expires_at is required when output_files are declared"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-invalid-input-path",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__files",
+        "input_files": [
+          {
+            "name": "a",
+            "lane_path": "relative"
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid input lane_path \"relative\": path must be absolute"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-input-missing",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__files",
+        "input_files": [
+          {
+            "name": "a",
+            "lane_path": "/working/sdk-probe-missing"
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "input fetch failed for /working/sdk-probe-missing: get gated: essential-traffic-only",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-output-unused",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__files",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "output_files": [
+          {
+            "name": "a",
+            "lane_path": "/working/output.txt"
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: declared output not referenced by any {{out:NAME}} token in arguments: a"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-token-unknown",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__files",
+        "input_files": [],
+        "arguments": {
+          "value": "{{in:missing}}"
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: args token names no declared file: {{in:missing}}"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-logical",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__logical",
+        "timeout_ms": 5000
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "tool call failed: {}"
+          }
+        }
+      }
+    },
+    {
+      "name": "staged-timeout",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__slow",
+        "timeout_ms": 1000
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "timeout",
+            "detail": "tool call exceeded 1000ms"
+          }
+        }
+      }
+    }
+  ],
+  "cancelError": "mcp_call cancelled by client: ordinary",
+  "supersededResponseSuppressed": true
+}

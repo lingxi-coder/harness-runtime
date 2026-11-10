@@ -73,23 +73,43 @@ fn partial_stream_frame(
     fields.insert("session_id".into(), json!(session_id));
     fields.insert("parent_tool_use_id".into(), Value::Null);
     fields.insert("uuid".into(), json!(uuid));
-    if let Some(value) = metadata.ttft_ms { fields.insert("ttft_ms".into(), json!(value)); }
-    if let Some(value) = &metadata.thinking_display { fields.insert("thinking_display".into(), json!(value)); }
-    if metadata.api_message_id.is_some() { fields.insert("api_message_id".into(), Value::Null); }
-    if let Some(value) = &metadata.abandoned_blocks {
-        fields.insert("abandoned_blocks".into(), json!({
-            "api_message_id": null,
-            "from_block_index": value.from_block_index,
-        }));
+    if let Some(value) = metadata.ttft_ms {
+        fields.insert("ttft_ms".into(), json!(value));
     }
-    if metadata.text_runs_joined { fields.insert("text_runs_joined".into(), json!(true)); }
+    if let Some(value) = &metadata.thinking_display {
+        fields.insert("thinking_display".into(), json!(value));
+    }
+    if metadata.api_message_id.is_some() {
+        fields.insert("api_message_id".into(), Value::Null);
+    }
+    if let Some(value) = &metadata.abandoned_blocks {
+        fields.insert(
+            "abandoned_blocks".into(),
+            json!({
+                "api_message_id": null,
+                "from_block_index": value.from_block_index,
+            }),
+        );
+    }
+    if metadata.text_runs_joined {
+        fields.insert("text_runs_joined".into(), json!(true));
+    }
     let mut frame = project_json_value(&Value::Object(fields));
-    frame.replace_pointer_projection("/event", event).expect("partial frame has event slot");
+    frame
+        .replace_pointer_projection("/event", event)
+        .expect("partial frame has event slot");
     if let Some(id) = &metadata.api_message_id {
-        frame.replace_pointer_projection("/api_message_id", id.clone()).expect("partial frame has identity slot");
+        frame
+            .replace_pointer_projection("/api_message_id", id.clone())
+            .expect("partial frame has identity slot");
     }
     if let Some(abandoned) = &metadata.abandoned_blocks {
-        frame.replace_pointer_projection("/abandoned_blocks/api_message_id", abandoned.api_message_id.clone()).expect("partial frame has abandoned identity slot");
+        frame
+            .replace_pointer_projection(
+                "/abandoned_blocks/api_message_id",
+                abandoned.api_message_id.clone(),
+            )
+            .expect("partial frame has abandoned identity slot");
     }
     frame
 }
@@ -3362,20 +3382,35 @@ impl OutputStream for StreamJsonStream {
             metadata.api_error_status = error.api_error_status;
             metadata.stop_reason = Some(error.stop_reason.clone());
         }
-        if self.suppress_frames { return; }
+        if self.suppress_frames {
+            return;
+        }
         let mut fields = serde_json::Map::new();
         fields.insert("type".into(), json!("assistant"));
         fields.insert("message".into(), Value::Null);
         fields.insert("parent_tool_use_id".into(), Value::Null);
-        fields.insert("session_id".into(), json!(self.session_id.lock().await.clone()));
+        fields.insert(
+            "session_id".into(),
+            json!(self.session_id.lock().await.clone()),
+        );
         fields.insert("uuid".into(), json!(error.uuid.as_uuid().to_string()));
         fields.insert("timestamp".into(), json!(error.timestamp));
-        if let Some(category) = &error.error { fields.insert("error".into(), json!(category)); }
-        if let Some(id) = &error.request_id { fields.insert("request_id".into(), json!(id)); }
+        if let Some(category) = &error.error {
+            fields.insert("error".into(), json!(category));
+        }
+        if let Some(id) = &error.request_id {
+            fields.insert("request_id".into(), json!(id));
+        }
         fields.insert("is_api_error_message".into(), json!(true));
-        if let Some(status) = error.api_error_status { fields.insert("api_error_status".into(), json!(status)); }
-        if let Some(kind) = &error.api_error { fields.insert("api_error".into(), json!(kind)); }
-        if let Some(id) = &error.refused_message_id { fields.insert("refused_message_id".into(), json!(id)); }
+        if let Some(status) = error.api_error_status {
+            fields.insert("api_error_status".into(), json!(status));
+        }
+        if let Some(kind) = &error.api_error {
+            fields.insert("api_error".into(), json!(kind));
+        }
+        if let Some(id) = &error.refused_message_id {
+            fields.insert("refused_message_id".into(), json!(id));
+        }
         let mut frame = project_json_value(&Value::Object(fields));
         if let Err(error) = frame.replace_pointer_projection("/message", error.message.clone()) {
             self.abort_delivery(format!("invalid synthetic API-error message: {error}"));
@@ -3584,7 +3619,12 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_stream_event(&self, event_json: &str, is_message_start: bool) {
-        self.emit_stream_event_with_metadata(event_json, is_message_start, &PartialStreamEventMetadata::default()).await;
+        self.emit_stream_event_with_metadata(
+            event_json,
+            is_message_start,
+            &PartialStreamEventMetadata::default(),
+        )
+        .await;
     }
 
     async fn emit_stream_event_with_metadata(
@@ -3600,7 +3640,10 @@ impl OutputStream for StreamJsonStream {
         let uuid = uuid::Uuid::new_v4().to_string();
         let event = match Utf16JsonProjection::parse(event_json) {
             Ok(event) => event,
-            Err(error) => { self.abort_delivery(format!("invalid partial stream event: {error}")); return; }
+            Err(error) => {
+                self.abort_delivery(format!("invalid partial stream event: {error}"));
+                return;
+            }
         };
         let mut metadata = metadata.clone();
         if is_message_start && metadata.ttft_ms.is_none() {
@@ -5702,9 +5745,8 @@ mod tests {
         // Binary SHA256: 1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd
         // Full raw stdout SHA256: d3d9721835953bf4636cd3c73256d1b4bdd16f7f6cd7f13ffab6fb2e507db07f
         // Fixture retains exact LF records 6, 7 and 11 from that capture.
-        const NATIVE: &str = include_str!(
-            "../../tests/fixtures/native_line_terminators_2_1_319.jsonl"
-        );
+        const NATIVE: &str =
+            include_str!("../../tests/fixtures/native_line_terminators_2_1_319.jsonl");
         let text = "LS[\u{2028}]PS[\u{2029}]NEL[\u{85}]END";
         let mut kinds = Vec::new();
         for native in NATIVE.split_terminator('\n') {
@@ -6106,17 +6148,31 @@ mod tests {
     fn partial_stream_envelopes_match_evaluated_native_319_bytes() {
         let oracle = Utf16JsonProjection::parse(include_str!(
             "../../../orchestrator/tests/fixtures/partial_stream_2_1_319.json"
-        )).unwrap();
+        ))
+        .unwrap();
         for index in 0..oracle.array_len("/envelopeCases").unwrap() {
-            let case = oracle.subprojection(&format!("/envelopeCases/{index}")).unwrap();
-            let abandoned = case.string_at("/abandonedBlocksSource").map(Utf16JsonProjection::parse).transpose().unwrap()
+            let case = oracle
+                .subprojection(&format!("/envelopeCases/{index}"))
+                .unwrap();
+            let abandoned = case
+                .string_at("/abandonedBlocksSource")
+                .map(Utf16JsonProjection::parse)
+                .transpose()
+                .unwrap()
                 .or_else(|| case.subprojection("/input/abandonedBlocks").ok());
             let metadata = PartialStreamEventMetadata {
-                api_message_id: case.string_at("/apiMessageIdSource").map(Utf16JsonProjection::parse).transpose().unwrap()
+                api_message_id: case
+                    .string_at("/apiMessageIdSource")
+                    .map(Utf16JsonProjection::parse)
+                    .transpose()
+                    .unwrap()
                     .or_else(|| case.subprojection("/input/apiMessageId").ok()),
                 ttft_ms: case.number_at("/input/ttftMs").map(|value| value as u64),
                 thinking_display: case.string_at("/input/thinkingDisplay").map(str::to_owned),
-                text_runs_joined: case.at_pointer("/input/textRunsJoined").and_then(JsonValueView::as_bool).unwrap_or(false),
+                text_runs_joined: case
+                    .at_pointer("/input/textRunsJoined")
+                    .and_then(JsonValueView::as_bool)
+                    .unwrap_or(false),
                 abandoned_blocks: abandoned.map(|value| {
                     lingxi_core::host::orchestrator::AbandonedStreamBlocks {
                         api_message_id: value.subprojection("/apiMessageId").unwrap(),
@@ -6124,10 +6180,17 @@ mod tests {
                     }
                 }),
             };
-            let event = case.string_at("/eventSource").map(Utf16JsonProjection::parse).transpose().unwrap()
+            let event = case
+                .string_at("/eventSource")
+                .map(Utf16JsonProjection::parse)
+                .transpose()
+                .unwrap()
                 .unwrap_or_else(|| case.subprojection("/input/event").unwrap());
             let frame = partial_stream_frame(event, "session", "frame", &metadata);
-            assert_eq!(frame.to_json_string().unwrap(), case.string_at("/expectedJson").unwrap());
+            assert_eq!(
+                frame.to_json_string().unwrap(),
+                case.string_at("/expectedJson").unwrap()
+            );
         }
     }
 
@@ -6137,32 +6200,71 @@ mod tests {
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
         let oracle = Utf16JsonProjection::parse(include_str!(
             "../../../orchestrator/tests/fixtures/malformed_tool_use_2_1_319.json"
-        )).unwrap();
+        ))
+        .unwrap();
         let native = oracle.subprojection("/cases/2/expected/events/0").unwrap();
-        stream.emit_terminal_api_error_message(&TerminalApiErrorMessage {
-            uuid: lingxi_core::types::MessageId::new(),
-            timestamp: native.string_at("/timestamp").unwrap().to_owned(),
-            message: native.subprojection("/message").unwrap(),
-            api_error: Some("malformed_tool_use_exhausted".into()),
-            error: None, api_error_status: None,
-            request_id: None,
-            refused_message_id: None,
-            notify_terminal_error: true,
-            terminal_reason: "malformed_tool_use_exhausted".into(),
-            stop_reason: "stop_sequence".into(),
-        }).await;
-        let line = match rx.try_recv().unwrap() { OutboundMsg::Line(line) => line, _ => panic!("assistant frame") };
+        stream
+            .emit_terminal_api_error_message(&TerminalApiErrorMessage {
+                uuid: lingxi_core::types::MessageId::new(),
+                timestamp: native.string_at("/timestamp").unwrap().to_owned(),
+                message: native.subprojection("/message").unwrap(),
+                api_error: Some("malformed_tool_use_exhausted".into()),
+                error: None,
+                api_error_status: None,
+                request_id: None,
+                refused_message_id: None,
+                notify_terminal_error: true,
+                terminal_reason: "malformed_tool_use_exhausted".into(),
+                stop_reason: "stop_sequence".into(),
+            })
+            .await;
+        let line = match rx.try_recv().unwrap() {
+            OutboundMsg::Line(line) => line,
+            _ => panic!("assistant frame"),
+        };
         let frame = Utf16JsonProjection::parse(line.trim_end()).unwrap();
-        assert_eq!(frame.string_at("/api_error"), Some("malformed_tool_use_exhausted"));
-        assert_eq!(frame.at_pointer("/is_api_error_message").and_then(JsonValueView::as_bool), Some(true));
+        assert_eq!(
+            frame.string_at("/api_error"),
+            Some("malformed_tool_use_exhausted")
+        );
+        assert_eq!(
+            frame
+                .at_pointer("/is_api_error_message")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
+        );
         assert!(!frame.contains_property("error"));
-        assert_eq!(frame.subprojection("/message").unwrap().to_json_string().unwrap(), native.subprojection("/message").unwrap().to_json_string().unwrap());
-        let result = stream.build_result_success_frame("", "end_turn", &CostSnapshot::default(), "off", None, &[]).await;
+        assert_eq!(
+            frame
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            native
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
+        let result = stream
+            .build_result_success_frame("", "end_turn", &CostSnapshot::default(), "off", None, &[])
+            .await;
         assert_eq!(result["is_error"], true);
         assert_eq!(result["terminal_reason"], "malformed_tool_use_exhausted");
         assert_eq!(result["stop_reason"], "stop_sequence");
-        stream.emit_message_start("recovered", "claude-sonnet-4-6").await;
-        let result = stream.build_result_success_frame("complete", "end_turn", &CostSnapshot::default(), "off", None, &[]).await;
+        stream
+            .emit_message_start("recovered", "claude-sonnet-4-6")
+            .await;
+        let result = stream
+            .build_result_success_frame(
+                "complete",
+                "end_turn",
+                &CostSnapshot::default(),
+                "off",
+                None,
+                &[],
+            )
+            .await;
         assert_eq!(result["is_error"], false);
         assert_eq!(result["terminal_reason"], "completed");
         assert_eq!(result["stop_reason"], "end_turn");
@@ -6181,15 +6283,24 @@ mod tests {
             notify_terminal_error: true,
             terminal_reason: "api_error".into(), stop_reason: "refusal".into(),
         }).await;
-        let line = match rx.try_recv().unwrap() { OutboundMsg::Line(line) => line, _ => panic!("assistant frame") };
+        let line = match rx.try_recv().unwrap() {
+            OutboundMsg::Line(line) => line,
+            _ => panic!("assistant frame"),
+        };
         let frame = Utf16JsonProjection::parse(line.trim_end()).unwrap();
-        assert_eq!(frame.string_at("/uuid"), Some(uuid.as_uuid().to_string().as_str()));
+        assert_eq!(
+            frame.string_at("/uuid"),
+            Some(uuid.as_uuid().to_string().as_str())
+        );
         assert!(!frame.string_at("/uuid").unwrap().starts_with("msg:"));
         let request = line.find("\"request_id\":\"req-1\"").unwrap();
         let marker = line.find("\"is_api_error_message\":true").unwrap();
         let status = line.find("\"api_error_status\":403").unwrap();
         let refused = line.find("\"refused_message_id\":\"msg-1\"").unwrap();
-        assert!(request < marker && marker < status && status < refused, "{line}");
+        assert!(
+            request < marker && marker < status && status < refused,
+            "{line}"
+        );
         assert!(!line.contains("\"api_error\":"));
     }
 

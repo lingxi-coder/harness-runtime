@@ -1260,6 +1260,7 @@ impl McpTransport for RoleMcpTransport {
         Ok(vec![McpToolDto {
             server_name: "echo".into(),
             tool_name: "send".into(),
+            wire_tool_name: None,
             description: "send through the role fixture".into(),
             input_schema: Utf16JsonProjection::from_serde_value(
                 &serde_json::json!({"type": "object"}),

@@ -165,10 +165,8 @@ impl McpRegistry {
             let task = tokio::spawn(async move {
                 loop {
                     let config = {
-                        let mut queued = queue
-                            .configs
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
+                        let mut queued =
+                            queue.configs.lock().unwrap_or_else(PoisonError::into_inner);
                         queued.pop_front()
                     };
                     let Some(config) = config else {

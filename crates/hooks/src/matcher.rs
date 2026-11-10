@@ -62,35 +62,33 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
     )
 }
 
-/// Maps a legacy tool name to its canonical name — `normalizeLegacyToolName`
-/// (`permissionRuleParser.ts:21-33`): `LEGACY_TOOL_NAME_ALIASES[name] ?? name`.
-///
-/// The external (non-ant) alias table mirrors the canonical copy in
-/// `permission::rule::normalize_legacy_tool_name` (kept in sync; both port the
-/// same TS source). The KAIROS-gated `Brief → SendUserMessage` alias is omitted
-/// in external builds, matching `permission`.
+/// Native 2.1.322's public alias table. Keep rule parsing and hook matching
+/// on the same canonical spelling; the reverse list preserves native order.
+const PUBLIC_TOOL_ALIASES: [(&str, &str); 8] = [
+    ("Task", "Agent"),
+    ("KillShell", "TaskStop"),
+    ("KillBash", "TaskStop"),
+    ("ListPeers", "ListAgents"),
+    ("Brief", "SendUserMessage"),
+    ("ListMcpResources", "ListMcpResourcesTool"),
+    ("ReadMcpResource", "ReadMcpResourceTool"),
+    ("ReadMcpResourceDir", "ReadMcpResourceDirTool"),
+];
+
+/// Maps the public legacy spelling to the tool's canonical name.
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
-    match name {
-        "KillShell" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
-        other => other,
-    }
-    .to_string()
+    permission::rule::normalize_legacy_tool_name(name)
 }
 
-/// Returns the legacy aliases that map to `canonical_name` — the reverse of
-/// [`normalize_legacy_tool_name`], mirroring `getLegacyToolNames`
-/// (`permissionRuleParser.ts:35-41`): every legacy key whose canonical value
-/// equals `canonical_name`, in `LEGACY_TOOL_NAME_ALIASES` insertion order. Used
-/// by [`matches_pattern`]'s regex branch for the remaining non-Agent aliases.
+/// Return public legacy aliases in native insertion order.
 #[must_use]
 pub fn get_legacy_tool_names(canonical_name: &str) -> Vec<String> {
-    match canonical_name {
-        "TaskStop" => vec!["KillShell".to_string()],
-        "TaskOutput" => vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()],
-        _ => Vec::new(),
-    }
+    PUBLIC_TOOL_ALIASES
+        .iter()
+        .filter(|(_, canonical)| *canonical == canonical_name)
+        .map(|(legacy, _)| (*legacy).to_string())
+        .collect()
 }
 
 /// Returns `true` if `matcher` matches `match_query` using the classic
@@ -622,35 +620,45 @@ mod tests {
 
     #[test]
     fn legacy_aliases_resolve_to_canonical() {
-        // Forward map (permissionRuleParser.ts LEGACY_TOOL_NAME_ALIASES).
-        assert_eq!(normalize_legacy_tool_name("Task"), "Task");
-        assert_eq!(normalize_legacy_tool_name("KillShell"), "TaskStop");
-        assert_eq!(normalize_legacy_tool_name("AgentOutputTool"), "TaskOutput");
-        assert_eq!(normalize_legacy_tool_name("BashOutputTool"), "TaskOutput");
-        // Non-legacy names pass through unchanged.
-        assert_eq!(normalize_legacy_tool_name("Write"), "Write");
-        assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
-        // Reverse map (insertion order matters for the two-alias TaskOutput).
-        assert!(get_legacy_tool_names("Agent").is_empty());
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hooks_2_1_322.json")).unwrap();
+        for entry in fixture["publicAliases"].as_array().unwrap() {
+            let legacy = entry[0].as_str().unwrap();
+            let canonical = entry[1].as_str().unwrap();
+            assert_eq!(normalize_legacy_tool_name(legacy), canonical);
+        }
+        for group in fixture["legacyAliasGroups"].as_array().unwrap() {
+            let canonical = group["canonical"].as_str().unwrap();
+            let expected = group["legacy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(get_legacy_tool_names(canonical), expected);
+        }
         assert_eq!(
-            get_legacy_tool_names("TaskStop"),
-            vec!["KillShell".to_string()]
+            normalize_legacy_tool_name("AgentOutputTool"),
+            "AgentOutputTool"
         );
         assert_eq!(
-            get_legacy_tool_names("TaskOutput"),
-            vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()]
+            normalize_legacy_tool_name("BashOutputTool"),
+            "BashOutputTool"
         );
-        assert!(get_legacy_tool_names("Write").is_empty());
+        assert!(get_legacy_tool_names("TaskOutput").is_empty());
     }
 
     #[test]
-    fn removed_agent_alias_does_not_match_canonical_tool() {
-        assert!(!matches_pattern("Agent", "Task"));
-        assert!(!matches_pattern("Agent", "^Task$"));
-        assert!(!matches_pattern("Agent", "Read|Task"));
-        assert!(matches_pattern("Task", "Task"));
-        // Unrelated tool aliases retain their existing matching behavior.
-        assert!(matches_pattern("TaskStop", "KillShell|Write"));
+    fn public_agent_alias_matches_canonical_tool() {
+        assert!(matches_pattern("Agent", "Task"));
+        assert!(matches_pattern("Agent", "^Task$"));
+        assert!(matches_pattern("Agent", "Read|Task"));
+        // The low-level matcher receives canonical queries from the host;
+        // native normalizes matcher segments, not the query argument.
+        assert!(!matches_pattern("Task", "Task"));
+        assert!(matches_pattern("TaskStop", "KillBash|Write"));
+        assert!(matches_pattern("ReadMcpResourceTool", "ReadMcpResource"));
+        assert!(!matches_pattern("TaskOutput", "AgentOutputTool"));
     }
 
     // ── `if`-condition matcher (prepareIfConditionMatcher + per-tool) ──────────
@@ -716,14 +724,14 @@ mod tests {
     }
 
     #[test]
-    fn if_permission_rule_alias_matches_the_canonical_agent_event() {
-        // Native 2.1.318 permission-rule parsing maps stored Task rules to
-        // Agent, including a tool-wide (*). Event tool identities remain
-        // canonical; AgentTool does not expose Task as a runtime alias.
+    fn if_public_agent_alias_matches_both_rule_and_event_spelling() {
+        // Native 2.1.322 normalizes the public Task alias on both sides of
+        // the if-condition comparison. This is separate from the low-level
+        // pattern matcher, whose host-supplied query is already canonical.
         let input = json!({ "description": "x" });
         assert!(matches_if_condition("Task", "Agent", &input));
         assert!(matches_if_condition("Task(*)", "Agent", &input));
-        assert!(!matches_if_condition("Agent", "Task", &input));
+        assert!(matches_if_condition("Agent", "Task", &input));
         assert!(matches_if_condition("Agent(*)", "Agent", &input));
     }
 

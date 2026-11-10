@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+tool-mcp = { path = "../tools/mcp" }
 mobile-linux-api.workspace = true
 url = "2"
 base64 = "0.22"
@@ -81,7 +82,6 @@ nix = { version = "0.27", features = ["process", "signal"] }
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 bytes.workspace = true
 jsonrpc = { path = "../jsonrpc" }
-tool-mcp = { path = "../tools/mcp" }
 tool-shell-mobile = { path = "../tools/shell-mobile" }
 # Reuse the existing tool-api test context for actual native Monitor dispatch fixtures.
 tool-api = { path = "../tool-api", features = ["test-support"] }

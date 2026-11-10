@@ -119,6 +119,9 @@ pub struct ToolUseContext {
     /// Invocation-local verdict from the bound classifier-only permission
     /// path. Tool bodies may annotate reports but cannot mint this result.
     pub classifier_only_review: Option<lingxi_core::host::handback::ReportReview>,
+    /// Authority from a real server-classifier pipeline and the hidden raw
+    /// model-input marker. Ordinary/local classifier approvals leave it unset.
+    pub mcp_auto_mode_verdict: Option<mcp::sdk_verdict::SdkAutoModeVerdictAuthority>,
     /// Host snapshot inherited by ordinary and forked children.
     pub instruction_context: Option<lingxi_core::host::instructions::InstructionContext>,
     /// Shared content-replacement state. Populated in Task 3.
@@ -294,6 +297,8 @@ impl ToolUseContext {
             tool_execution_policy: self.tool_execution_policy,
             trusted_effective_permission_mode: self.trusted_effective_permission_mode.clone(),
             classifier_only_review: self.classifier_only_review.clone(),
+            // Native clears classifier and permission-phase facts for nested calls.
+            mcp_auto_mode_verdict: None,
             instruction_context: self.instruction_context.clone(),
             content_replacement_state: self.content_replacement_state.clone(),
             session: self.session.clone(),
@@ -420,6 +425,7 @@ impl ToolUseContext {
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             trusted_effective_permission_mode: None,
             classifier_only_review: None,
+            mcp_auto_mode_verdict: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

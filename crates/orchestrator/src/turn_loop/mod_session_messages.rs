@@ -542,10 +542,7 @@ fn read_transcript_results(
         cache.retain(|(cached_path, _)| cached_path != path);
         cache.push_back((
             path.to_owned(),
-            std::sync::Arc::new(ResultOffsetIndex {
-                stamp,
-                offsets,
-            }),
+            std::sync::Arc::new(ResultOffsetIndex { stamp, offsets }),
         ));
         while cache.len() > 4 {
             cache.pop_front();

@@ -1,0 +1,1757 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "challenge",
+      "start": 305036636,
+      "end": 305037193,
+      "sha256": "1f40b06573b7550b98089aa4b5c48ba83145fbddb4c27158cba32c400a838b47"
+    },
+    {
+      "name": "prm",
+      "start": 305037193,
+      "end": 305037652,
+      "sha256": "de7699c67844872db0f8b4fecf18e140ad8fc989a95cdeb0cf3033a86d69c1a6"
+    },
+    {
+      "name": "discoveryUrls",
+      "start": 305037652,
+      "end": 305039042,
+      "sha256": "8aa0d44155368b8de4a19dd12e16bd2694c0193765182ef5923c7954e0676e41"
+    },
+    {
+      "name": "asMetadata",
+      "start": 305039042,
+      "end": 305039688,
+      "sha256": "42141f0a1b57e460f6bb1bc32184c7fce7a458f2b25f01a2504ac7a20dbe6319"
+    },
+    {
+      "name": "discovery",
+      "start": 305039688,
+      "end": 305040134,
+      "sha256": "b02c670e795598a7a4fa13c78cf9d6de2e4d8bfa0b9ae4e0206ba92ef108cf53"
+    },
+    {
+      "name": "authorize",
+      "start": 305040134,
+      "end": 305041115,
+      "sha256": "2f1acd91d04e2947762cadcc6a8be50b1eed18ec42ff336248e3b1b30868e2f8"
+    },
+    {
+      "name": "tokenGrant",
+      "start": 305041115,
+      "end": 305041858,
+      "sha256": "348e79291fc060185ace56913dedbf8f11a78e8d4687965ea9e99f54ff84e5e7"
+    },
+    {
+      "name": "authMethods",
+      "start": 305029809,
+      "end": 305030936,
+      "sha256": "e998b6a434472751fb0cf9e3ea2b5bc294f4956c88a807d8202e31b866d0bc7c"
+    },
+    {
+      "name": "endpointPolicy",
+      "start": 305030936,
+      "end": 305031127,
+      "sha256": "292efa5ca0a1c6646705eb56b8249842a9211e5f1e0cb62b51fd2ae90e6c85ef"
+    },
+    {
+      "name": "clientMetadata",
+      "start": 305031127,
+      "end": 305031513,
+      "sha256": "85aa3d00c45f81f8bfebb9bf6f44b11f2dd2bb95c68cc85d5c76f6ea7219b81a"
+    },
+    {
+      "name": "scope",
+      "start": 305032155,
+      "end": 305032467,
+      "sha256": "80a72cb83a2975599bb9ab1518f6fe3b310478af7575bd364f535c43002a16fa"
+    },
+    {
+      "name": "issuerCheck",
+      "start": 305028597,
+      "end": 305028886,
+      "sha256": "88d8daaaa15539234b1050f9bc5e5c85f5ad37e40a6d8a44323f7c884489a251"
+    },
+    {
+      "name": "exchangeRefresh",
+      "start": 305041858,
+      "end": 305042523,
+      "sha256": "3c92646d1794241a2a8378c75ac69d5d99eefbcf33c06a9e9583f5dbdf412897"
+    },
+    {
+      "name": "registration",
+      "start": 305043226,
+      "end": 305043744,
+      "sha256": "c843eeee44c9079dcf62ee4bcab00f549cf3f3c14e1afd2a589d1fe8799d0a80"
+    },
+    {
+      "name": "revocation",
+      "start": 305178419,
+      "end": 305179487,
+      "sha256": "9af1034d70740824a83aec1a93e658c4559c7427c41ccf9db720182998d9a8ad"
+    },
+    {
+      "name": "callback",
+      "start": 305191717,
+      "end": 305192835,
+      "sha256": "7b801264cade3b4ae87234cad36776d7b07fd629a8a81c8a8bb2ebc60d17813d"
+    },
+    {
+      "name": "state",
+      "start": 305199497,
+      "end": 305199635,
+      "sha256": "cd2f49665b8ed80279a56cd2c82542b767e538be68b9768a18aa9b409eeed65d"
+    },
+    {
+      "name": "pkce",
+      "start": 304757046,
+      "end": 304757986,
+      "sha256": "317590c366bb60159b042a1b6343a831d671f7dc3fcdcc2e827d20ce496ac79f"
+    },
+    {
+      "name": "providerClientMetadata",
+      "start": 305197439,
+      "end": 305197786,
+      "sha256": "2f6a2902c755cbfa56bf55d83d38cfb37abe2914e8b5f4cfcbcc5267cdffa5e3"
+    },
+    {
+      "name": "providerScope",
+      "start": 305226504,
+      "end": 305226999,
+      "sha256": "8a18cb5c052bf879405044b0dfe1ec7875262212c15d79aaf35e1b1d90bb4d7f"
+    },
+    {
+      "name": "providerRedirect",
+      "start": 305209629,
+      "end": 305210393,
+      "sha256": "cc3affd2074c6c2d69476fe10653b56a3f0ad80ec5e01ae07858f6af22548024"
+    },
+    {
+      "name": "callbackIssuer",
+      "start": 305124928,
+      "end": 305124992,
+      "sha256": "96b68f1b39b5a5fbbf991f909371950d5220f3844d9a781328a1166b201e92c0"
+    },
+    {
+      "name": "bundled-zod-core",
+      "start": 260913877,
+      "end": 260925569,
+      "sha256": "b5a04d327a1f168024f6bb78466824994dcbadcdf984986ed08f4dcdb76ad9d9"
+    },
+    {
+      "name": "bundled-zod-constructors",
+      "start": 260925570,
+      "end": 261020487,
+      "sha256": "d010acd51e312f3506c5c811c020d0cf7b970a48524aaf2a8691861061e900ad"
+    },
+    {
+      "name": "bundled-zod-coercion",
+      "start": 261243918,
+      "end": 261244653,
+      "sha256": "31640b33c9ebf95eb4b1be5358b2f7a8f1dbf10a6e4e6dabc5cf4ad961b75fa3"
+    },
+    {
+      "name": "native-lazy-schema",
+      "start": 304765520,
+      "end": 304766103,
+      "sha256": "f9b75526657458946d99d880ea68f053ffa7d296d2cdab1bed6c852d9958f2d5"
+    },
+    {
+      "name": "native-oauth-schema-definitions",
+      "start": 304778776,
+      "end": 304783571,
+      "sha256": "259fb6071b5d0096aaf2c7987b9fe83d98675ea977196260c44adce35ac103ae"
+    }
+  ],
+  "scope": "MCP OAuth only. Unchanged native SDK/application helpers execute in isolated JS contexts with fake data and caller-supplied fetch. OAuth schema definitions and all bundled Zod dependencies are unchanged native code. Error constructors are explicit adapters; auth-failure presence is compared without host-specific btoa error prose. Whole-CLI account login is not claimed. Branded client_name stays LingXi and provider-neutral DCR remains default; Anthropic-hosted CIMD is not adopted.",
+  "pkceCases": [
+    {
+      "bytes": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42
+      ],
+      "code_verifier": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+      "code_challenge": "RqIZl4LIgn8KxW9QO-nTnv7pf0CnNrksx9fF-CXP2FE"
+    },
+    {
+      "bytes": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43
+      ],
+      "code_verifier": "bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR",
+      "code_challenge": "RR9Jm001oevUIrg7GE_VcdPtEW5ij5PWNuDFVmjYUi4"
+    },
+    {
+      "bytes": [
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59
+      ],
+      "code_verifier": "rstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567",
+      "code_challenge": "-W2fQNWHxXFu4kvHApH628N4RuZGMLP0q-S4drRFv2w"
+    },
+    {
+      "bytes": [
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "code_verifier": "~abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",
+      "code_challenge": "kbQ8gY-HVTzU2uN8KX4DOfPa8A-4edBCRkGUH-pR5aU"
+    },
+    {
+      "bytes": [
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159,
+        160,
+        161,
+        162,
+        163,
+        164,
+        165,
+        166,
+        167,
+        168,
+        169
+      ],
+      "code_verifier": "9-._~abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL",
+      "code_challenge": "s220zVD_JaUogVTBn9NxZZM8V1AR1RO6VW3cpPA_ebo"
+    },
+    {
+      "bytes": [
+        255,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41
+      ],
+      "code_verifier": "5abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",
+      "code_challenge": "7ma8J-jjYnxsdStKaglbCZ7EGL6pXpcgCk0vqGj_ovs"
+    }
+  ],
+  "stateCase": {
+    "bytes": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "expected": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "challengeCases": [
+    {
+      "header": "Bearer resource_metadata=\"https://RS.EXAMPLE:443\", scope=\"read write\"",
+      "expected": {
+        "resource_metadata_url": "https://rs.example/",
+        "scope": "read write"
+      }
+    },
+    {
+      "header": "Bearer  scope=\"read\"",
+      "expected": {}
+    },
+    {
+      "header": "bearer scope=x, error=invalid_token",
+      "expected": {
+        "scope": "x",
+        "error": "invalid_token"
+      }
+    },
+    {
+      "header": "Bearer scope=\"\"",
+      "expected": {
+        "scope": "\"\""
+      }
+    },
+    {
+      "header": "Bearer resource_metadata=\"not a url\"",
+      "expected": {}
+    },
+    {
+      "header": "Basic realm=\"x\"",
+      "expected": {}
+    },
+    {
+      "header": "Bearer resource_metadata=\"http://localhost:31337/meta?x=1#hash\",error_description=\"try again\"",
+      "expected": {
+        "resource_metadata_url": "http://localhost:31337/meta?x=1#hash",
+        "error_description": "try again"
+      }
+    }
+  ],
+  "discoveryUrlCases": [
+    {
+      "base": "https://as.example/",
+      "prm": "https://as.example/.well-known/oauth-protected-resource",
+      "authorization": [
+        "https://as.example/.well-known/oauth-authorization-server",
+        "https://as.example/.well-known/openid-configuration"
+      ]
+    },
+    {
+      "base": "https://as.example/tenant/a",
+      "prm": "https://as.example/.well-known/oauth-protected-resource/tenant/a",
+      "authorization": [
+        "https://as.example/.well-known/oauth-authorization-server/tenant/a",
+        "https://as.example/.well-known/openid-configuration/tenant/a",
+        "https://as.example/tenant/a/.well-known/openid-configuration"
+      ]
+    },
+    {
+      "base": "https://as.example/tenant/a/?x=1#frag",
+      "prm": "https://as.example/.well-known/oauth-protected-resource/tenant/a?x=1",
+      "authorization": [
+        "https://as.example/.well-known/oauth-authorization-server/tenant/a",
+        "https://as.example/.well-known/openid-configuration/tenant/a",
+        "https://as.example/tenant/a/.well-known/openid-configuration"
+      ]
+    },
+    {
+      "base": "http://localhost:31337/mcp?aud=one%20two",
+      "prm": "http://localhost:31337/.well-known/oauth-protected-resource/mcp?aud=one%20two",
+      "authorization": [
+        "http://localhost:31337/.well-known/oauth-authorization-server/mcp",
+        "http://localhost:31337/.well-known/openid-configuration/mcp",
+        "http://localhost:31337/mcp/.well-known/openid-configuration"
+      ]
+    }
+  ],
+  "discoveryOutcomeCases": [
+    {
+      "status": 401,
+      "error": false,
+      "metadata": false
+    },
+    {
+      "status": 404,
+      "error": false,
+      "metadata": false
+    },
+    {
+      "status": 502,
+      "error": false,
+      "metadata": false
+    },
+    {
+      "status": 500,
+      "error": true,
+      "metadata": false
+    },
+    {
+      "status": 200,
+      "error": true,
+      "metadata": false
+    }
+  ],
+  "fallbackEndpointCases": [
+    {
+      "base": "http://localhost:31337/mcp",
+      "authorize": "http://localhost:31337/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state",
+      "registration": "http://localhost:31337/register",
+      "token": "http://localhost:31337/token"
+    },
+    {
+      "base": "https://as.example/tenant/path?old=1#frag",
+      "authorize": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state",
+      "registration": "https://as.example/register",
+      "token": "https://as.example/token"
+    },
+    {
+      "base": "https://AS.EXAMPLE:443/",
+      "authorize": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state",
+      "registration": "https://as.example/register",
+      "token": "https://as.example/token"
+    }
+  ],
+  "authorizeCases": [
+    {
+      "endpoint": "https://as.example/authorize",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2"
+    },
+    {
+      "endpoint": "https://as.example/authorize",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2"
+    },
+    {
+      "endpoint": "https://as.example/authorize",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read offline_access",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&prompt=consent&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2"
+    },
+    {
+      "endpoint": "https://as.example/authorize?keep=one%20two&client_id=old&client_id=duplicate#frag",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?keep=one+two&client_id=fake+%2B%7E%21*client&response_type=code&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2#frag"
+    },
+    {
+      "endpoint": "https://as.example/authorize?keep=one%20two&client_id=old&client_id=duplicate#frag",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?keep=one+two&client_id=fake+%2B%7E%21*client&response_type=code&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2#frag"
+    },
+    {
+      "endpoint": "https://as.example/authorize?keep=one%20two&client_id=old&client_id=duplicate#frag",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read offline_access",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?keep=one+two&client_id=fake+%2B%7E%21*client&response_type=code&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&prompt=consent&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2#frag"
+    },
+    {
+      "endpoint": "https://login.microsoftonline.com/tenant/authorize?prompt=select_account&prompt=consent",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://login.microsoftonline.com/tenant/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=select_account"
+    },
+    {
+      "endpoint": "https://login.microsoftonline.com/tenant/authorize?prompt=select_account&prompt=consent",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://login.microsoftonline.com/tenant/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=select_account"
+    },
+    {
+      "endpoint": "https://login.microsoftonline.com/tenant/authorize?prompt=select_account&prompt=consent",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read offline_access",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://login.microsoftonline.com/tenant/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=select_account"
+    },
+    {
+      "endpoint": "https://as.example/authorize?prompt=login&prompt=select_account",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=select_account"
+    },
+    {
+      "endpoint": "https://as.example/authorize?prompt=login&prompt=select_account",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=select_account"
+    },
+    {
+      "endpoint": "https://as.example/authorize?prompt=login&prompt=select_account",
+      "client_id": "fake +~!*client",
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read offline_access",
+      "state": "expected-state",
+      "challenge": "fixed-challenge",
+      "resource": "https://mcp.example/dir?a=1&b=2",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake+%2B%7E%21*client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&resource=https%3A%2F%2Fmcp.example%2Fdir%3Fa%3D1%26b%3D2&prompt=consent"
+    }
+  ],
+  "scopeCases": [
+    {
+      "as_scopes": [
+        "read"
+      ],
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&prompt=select_account"
+    },
+    {
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&prompt=select_account"
+    },
+    {
+      "client_scope": "",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&prompt=select_account"
+    },
+    {
+      "client_scope": "",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&prompt=select_account"
+    },
+    {
+      "client_scope": "curated",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "curated",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=curated&prompt=select_account"
+    },
+    {
+      "client_scope": "curated",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "curated offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=curated+offline_access&prompt=consent"
+    },
+    {
+      "resource_scopes": [
+        "read",
+        "write"
+      ],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "read write",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write&prompt=select_account"
+    },
+    {
+      "resource_scopes": [
+        "read",
+        "write"
+      ],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "read write offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+write+offline_access&prompt=consent"
+    },
+    {
+      "requested": "step up",
+      "resource_scopes": [
+        "read"
+      ],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "step up",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=step+up&prompt=select_account"
+    },
+    {
+      "requested": "step up",
+      "resource_scopes": [
+        "read"
+      ],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "step up offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=step+up+offline_access&prompt=consent"
+    },
+    {
+      "requested": "",
+      "resource_scopes": [],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "curated",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=curated&prompt=select_account"
+    },
+    {
+      "requested": "",
+      "resource_scopes": [],
+      "client_scope": "curated",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "curated offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=curated+offline_access&prompt=consent"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "configured",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "read",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=configured&prompt=select_account"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "configured",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "read offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=configured+offline_access&prompt=consent"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "read",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=&prompt=select_account"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "read offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=+offline_access&prompt=consent"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "configured",
+      "pending": true,
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "read",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read&prompt=select_account"
+    },
+    {
+      "resource_scopes": [
+        "read"
+      ],
+      "configured_scope": "configured",
+      "pending": true,
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "read offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&prompt=consent"
+    },
+    {
+      "client_scope": "read offline_access",
+      "as_scopes": [
+        "read"
+      ],
+      "sdk_scope": "read offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&prompt=consent"
+    },
+    {
+      "client_scope": "read offline_access",
+      "as_scopes": [
+        "read",
+        "offline_access"
+      ],
+      "sdk_scope": "read offline_access",
+      "expected": "https://as.example/authorize?response_type=code&client_id=fake-client&code_challenge=fixed-challenge&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&state=expected-state&scope=read+offline_access&prompt=consent"
+    }
+  ],
+  "authCases": [
+    {
+      "client": {
+        "client_id": "fake +~!*client"
+      },
+      "supported": [],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client"
+      },
+      "supported": [
+        "none"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client"
+      },
+      "supported": [
+        "client_secret_basic"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client"
+      },
+      "supported": [
+        "client_secret_post"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client"
+      },
+      "supported": [
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": ""
+      },
+      "supported": [],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": ""
+      },
+      "supported": [
+        "none"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": ""
+      },
+      "supported": [
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": ""
+      },
+      "supported": [
+        "client_secret_post"
+      ],
+      "method": "client_secret_post",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": ""
+      },
+      "supported": [
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake +/~é"
+      },
+      "supported": [],
+      "method": "client_secret_basic",
+      "headers": {
+        "authorization": "Basic ZmFrZSArfiEqY2xpZW50OmZha2UgKy9+6Q=="
+      },
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake +/~é"
+      },
+      "supported": [
+        "none"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake +/~é"
+      },
+      "supported": [
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {
+        "authorization": "Basic ZmFrZSArfiEqY2xpZW50OmZha2UgKy9+6Q=="
+      },
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake +/~é"
+      },
+      "supported": [
+        "client_secret_post"
+      ],
+      "method": "client_secret_post",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client&client_secret=fake+%2B%2F%7E%C3%A9"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake +/~é"
+      },
+      "supported": [
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {
+        "authorization": "Basic ZmFrZSArfiEqY2xpZW50OmZha2UgKy9+6Q=="
+      },
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake𐐀"
+      },
+      "supported": [],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake𐐀"
+      },
+      "supported": [
+        "none"
+      ],
+      "method": "none",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake𐐀"
+      },
+      "supported": [
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake𐐀"
+      },
+      "supported": [
+        "client_secret_post"
+      ],
+      "method": "client_secret_post",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client&client_secret=fake%F0%90%90%80"
+    },
+    {
+      "client": {
+        "client_id": "fake +~!*client",
+        "client_secret": "fake𐐀"
+      },
+      "supported": [
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "method": "client_secret_basic",
+      "headers": {},
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh",
+      "error": true
+    }
+  ],
+  "grantCases": [
+    {
+      "kind": "code",
+      "resource": null,
+      "url": "https://as.example/token",
+      "method": "POST",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      "body": "grant_type=authorization_code&code=fake+%2B%7E%21*code&code_verifier=fixed-verifier-43&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "kind": "code",
+      "resource": "https://mcp.example/mcp?space=one%20two",
+      "url": "https://as.example/token",
+      "method": "POST",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      "body": "grant_type=authorization_code&code=fake+%2B%7E%21*code&code_verifier=fixed-verifier-43&redirect_uri=http%3A%2F%2Flocalhost%3A31337%2Fcallback&resource=https%3A%2F%2Fmcp.example%2Fmcp%3Fspace%3Done%2520two&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "kind": "refresh",
+      "resource": null,
+      "url": "https://as.example/token",
+      "method": "POST",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&client_id=fake+%2B%7E%21*client"
+    },
+    {
+      "kind": "refresh",
+      "resource": "https://mcp.example/mcp?space=one%20two",
+      "url": "https://as.example/token",
+      "method": "POST",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      "body": "grant_type=refresh_token&refresh_token=fake+%2B%7E%21*refresh&resource=https%3A%2F%2Fmcp.example%2Fmcp%3Fspace%3Done%2520two&client_id=fake+%2B%7E%21*client"
+    }
+  ],
+  "registrationCases": [
+    {
+      "redirect_uri": "http://localhost:31337/callback",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://localhost:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "http://localhost:31337/callback",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://localhost:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"curated initial\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://localhost:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\",\"scope\":\"read write\"}"
+    },
+    {
+      "redirect_uri": "http://localhost:31337/callback",
+      "scope": "read write",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://localhost:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"read write\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "http://127.0.0.1:31337/callback",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://127.0.0.1:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "http://127.0.0.1:31337/callback",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://127.0.0.1:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"curated initial\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "http://127.0.0.1:31337/callback",
+      "scope": "read write",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://127.0.0.1:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\",\"scope\":\"read write\"}"
+    },
+    {
+      "redirect_uri": "http://127.0.0.1:31337/callback",
+      "scope": "read write",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"http://127.0.0.1:31337/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"read write\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "https://app.example/callback",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"https://app.example/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"web\"}"
+    },
+    {
+      "redirect_uri": "https://app.example/callback",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"https://app.example/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"curated initial\",\"application_type\":\"web\"}"
+    },
+    {
+      "redirect_uri": "https://app.example/callback",
+      "scope": "read write",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"https://app.example/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"web\",\"scope\":\"read write\"}"
+    },
+    {
+      "redirect_uri": "https://app.example/callback",
+      "scope": "read write",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"https://app.example/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"read write\",\"application_type\":\"web\"}"
+    },
+    {
+      "redirect_uri": "lingxi://callback",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"lingxi://callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "lingxi://callback",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"lingxi://callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"curated initial\",\"application_type\":\"native\"}"
+    },
+    {
+      "redirect_uri": "lingxi://callback",
+      "scope": "read write",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"lingxi://callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"application_type\":\"native\",\"scope\":\"read write\"}"
+    },
+    {
+      "redirect_uri": "lingxi://callback",
+      "scope": "read write",
+      "initial_scope": "curated initial",
+      "url": "https://as.example/register",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"client_name\":\"LingXi (fake-server)\",\"redirect_uris\":[\"lingxi://callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"read write\",\"application_type\":\"native\"}"
+    }
+  ],
+  "revocationCases": [
+    {
+      "auth_method": "client_secret_basic",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_basic",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_basic",
+      "client_secret": "",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_basic",
+      "client_secret": "",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_basic",
+      "client_secret": "fake +~!*é",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Basic ZmFrZSUyMCUyQn4hKmNsaWVudDpmYWtlJTIwJTJCfiEqJUMzJUE5",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_basic",
+      "client_secret": "fake +~!*é",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Basic ZmFrZSUyMCUyQn4hKmNsaWVudDpmYWtlJTIwJTJCfiEqJUMzJUE5",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "client_secret": "",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "client_secret": "",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "client_secret": "fake +~!*é",
+      "retry": false,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client&client_secret=fake+%2B%7E%21*%C3%A9"
+        }
+      ]
+    },
+    {
+      "auth_method": "client_secret_post",
+      "client_secret": "fake +~!*é",
+      "retry": true,
+      "requests": [
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token&client_id=fake+%2B%7E%21*client&client_secret=fake+%2B%7E%21*%C3%A9"
+        },
+        {
+          "url": "https://as.example/revoke",
+          "headers": {
+            "authorization": "Bearer fake-access",
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          "body": "token=fake+%2B%7E%21*token&token_type_hint=refresh_token"
+        }
+      ]
+    }
+  ],
+  "callbackCases": [
+    {
+      "request_url": "/callback?code=fake-code&state=expected-state",
+      "status": 200,
+      "page": {
+        "ok": true,
+        "heading": "Authentication successful",
+        "message": "You can close this tab and return to Claude Code."
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "code",
+          "code": "fake-code"
+        }
+      ]
+    },
+    {
+      "request_url": "/callback?code=fake-code&state=wrong",
+      "status": 400,
+      "page": {
+        "ok": false,
+        "heading": "Authentication failed",
+        "message": "Invalid state parameter. Close this tab and try again from Claude Code."
+      },
+      "observations": []
+    },
+    {
+      "request_url": "/callback?code=fake-code&state=expected-state&state=expected-state",
+      "status": 400,
+      "page": {
+        "ok": false,
+        "heading": "Authentication failed",
+        "message": "Invalid state parameter. Close this tab and try again from Claude Code."
+      },
+      "observations": []
+    },
+    {
+      "request_url": "/callback?code=first&code=second&state=expected-state",
+      "status": 200,
+      "page": {
+        "ok": true,
+        "heading": "Authentication successful",
+        "message": "You can close this tab and return to Claude Code."
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "code",
+          "code": "first,second"
+        }
+      ]
+    },
+    {
+      "request_url": "/callback?code=&state=expected-state",
+      "observations": []
+    },
+    {
+      "request_url": "/callback?code=fake-code&error=&state=expected-state",
+      "status": 200,
+      "page": {
+        "ok": true,
+        "heading": "Authentication successful",
+        "message": "You can close this tab and return to Claude Code."
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "code",
+          "code": "fake-code"
+        }
+      ]
+    },
+    {
+      "request_url": "/callback?error=access_denied&error_description=fake%20refusal&error_uri=https%3A%2F%2Fas.example%2Ferror&state=expected-state",
+      "status": 200,
+      "page": {
+        "ok": false,
+        "heading": "Authentication failed",
+        "message": "Close this tab and try again from Claude Code.",
+        "detail": "access_denied: fake refusal"
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "error",
+          "message": "OAuth error: access_denied - fake refusal (See: https://as.example/error)"
+        }
+      ]
+    },
+    {
+      "request_url": "/callback?code=fake-code&state=expected-state&iss=https%3A%2F%2Fas.example",
+      "status": 200,
+      "page": {
+        "ok": true,
+        "heading": "Authentication successful",
+        "message": "You can close this tab and return to Claude Code."
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "code",
+          "code": "fake-code",
+          "iss": "https://as.example"
+        }
+      ]
+    },
+    {
+      "request_url": "/callback?code=fake-code&state=expected-state&iss=one&iss=two",
+      "status": 200,
+      "page": {
+        "ok": true,
+        "heading": "Authentication successful",
+        "message": "You can close this tab and return to Claude Code."
+      },
+      "observations": [
+        {
+          "kind": "cleanup"
+        },
+        {
+          "kind": "code",
+          "code": "fake-code",
+          "iss": "one"
+        }
+      ]
+    },
+    {
+      "request_url": "/favicon.ico",
+      "status": 404,
+      "page": {
+        "ok": false,
+        "heading": "Not found",
+        "message": "This is the Claude Code MCP OAuth callback listener. It only handles /callback. If your OAuth provider redirected here, the registered redirect_uri must be http://localhost:31337/callback."
+      },
+      "observations": []
+    }
+  ]
+}

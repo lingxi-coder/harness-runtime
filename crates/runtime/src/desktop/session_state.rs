@@ -40,13 +40,15 @@ mod retention;
 pub use crate::branch_recovery::capture_branch_recovery;
 pub use resume::capture_resume_cost;
 mod storage_recovery;
-mod tool_execution;
 pub mod team_chat;
-pub use team_chat::{BotChatScope, BotChatCursor, ChatAuthor, ChatSourceMessage, ChatInputBatch, ChatInputAck};
+mod tool_execution;
 use attempts::AttemptProjection;
 use lingxi_core::host::{
     DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
     ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
+};
+pub use team_chat::{
+    BotChatCursor, BotChatScope, ChatAuthor, ChatInputAck, ChatInputBatch, ChatSourceMessage,
 };
 use tool_execution::ToolProjection;
 
@@ -157,7 +159,9 @@ fn decode_projection_snapshot(
     let cost = fields
         .remove("cost")
         .ok_or_else(|| CostPersistError::Storage("session snapshot has no cost state".into()))?;
-    let team_chat = fields.remove("team_chat").ok_or_else(|| CostPersistError::Storage("session snapshot has no Chat cursor".into()))?;
+    let team_chat = fields
+        .remove("team_chat")
+        .ok_or_else(|| CostPersistError::Storage("session snapshot has no Chat cursor".into()))?;
     let terminals = fields.remove("fusion_terminals").ok_or_else(|| {
         CostPersistError::Storage("session snapshot has no Fusion terminal projection".into())
     })?;
@@ -176,7 +180,8 @@ fn decode_projection_snapshot(
         ));
     }
     Ok(SessionProjectionSnapshot {
-        team_chat: serde_json::from_value(team_chat).map_err(|e| CostPersistError::Storage(e.to_string()))?,
+        team_chat: serde_json::from_value(team_chat)
+            .map_err(|e| CostPersistError::Storage(e.to_string()))?,
         tool_executions: serde_json::from_value(tools)
             .map_err(|e| CostPersistError::Storage(e.to_string()))?,
         native_receipts: serde_json::from_value(receipts)
@@ -933,7 +938,8 @@ impl SessionStateCoordinator {
         }
         let state_relative = PathBuf::from("session-state").join(session_id.as_uuid().to_string());
         let journal = DurableJournal::open_under(lingxi_home.as_ref(), &state_relative)
-            .map_err(map_journal_error)?.with_max_record_bytes(128 * 1024 * 1024);
+            .map_err(map_journal_error)?
+            .with_max_record_bytes(128 * 1024 * 1024);
         let (queue_tx, queue_rx) = mpsc::channel(COST_QUEUE_CAPACITY);
         let (close_tx, _close_rx) = watch::channel(false);
         Ok(Arc::new(Self {
@@ -1207,10 +1213,19 @@ impl SessionStateCoordinator {
                     }
                     SessionMutation::ChatInput { batch, ack } => {
                         let worker = state.clone();
-                        let result = tokio::task::spawn_blocking(move || worker.persist_chat_input(batch)).await
-                            .map_err(|error| CostPersistError::Storage(format!("Chat input persistence worker failed: {error}")))
-                            .and_then(|result| result);
-                        if let Err(error @ (CostPersistError::Storage(_) | CostPersistError::Frozen(_))) = &result {
+                        let result =
+                            tokio::task::spawn_blocking(move || worker.persist_chat_input(batch))
+                                .await
+                                .map_err(|error| {
+                                    CostPersistError::Storage(format!(
+                                        "Chat input persistence worker failed: {error}"
+                                    ))
+                                })
+                                .and_then(|result| result);
+                        if let Err(
+                            error @ (CostPersistError::Storage(_) | CostPersistError::Frozen(_)),
+                        ) = &result
+                        {
                             state.durability_gate.freeze(error.to_string());
                         }
                         let _ = ack.send(result);
@@ -2347,7 +2362,8 @@ fn decode_session_event(value: serde_json::Value) -> Result<SessionEvent, CostPe
     }
     let (tag, payload) = envelope.into_iter().next().expect("one tag was validated");
     match tag.as_str() {
-        "ChatInput" => serde_json::from_value(payload).map(SessionEvent::ChatInput)
+        "ChatInput" => serde_json::from_value(payload)
+            .map(SessionEvent::ChatInput)
             .map_err(|error| CostPersistError::Storage(error.to_string())),
         "ToolExecution" => serde_json::from_value(payload)
             .map(SessionEvent::ToolExecution)
@@ -2392,7 +2408,9 @@ fn fold_session_entry(
     let event = decode_session_event(entry.event.clone())
         .map_err(|error| CostPersistError::Storage(error.to_string()))?;
     match event {
-        SessionEvent::ChatInput(batch) => team_chat::fold_chat_input(team_chat, batch, session_id, &entry.event_id),
+        SessionEvent::ChatInput(batch) => {
+            team_chat::fold_chat_input(team_chat, batch, session_id, &entry.event_id)
+        }
         event @ (SessionEvent::ToolExecution(_) | SessionEvent::NativeReceipt(_)) => tools
             .fold(&event, session_id, &entry.event_id)
             .map_err(|e| CostPersistError::Storage(e.0)),

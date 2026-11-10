@@ -178,6 +178,12 @@ pub async fn tool_to_wire_deferred(
     defer: bool,
 ) -> SourceToolWireDefinition {
     let mut definition = tool_to_wire(tool, opts).await;
+    if defer {
+        if let Some(description) = tool.prompt_for_loading_mode(true) {
+            definition.description =
+                crate::apply_prompt_tool_override(tool.name(), opts, description);
+        }
+    }
     definition.defer_loading = defer;
     definition
 }

@@ -2631,6 +2631,7 @@ async fn run_fallback_prompt_turn(
 /// Request normal cancellation of retained print tasks without dropping their
 /// execution futures. The owning service continues polling settlement.
 pub(super) async fn shutdown_tasks(runtime: &Runtime) {
+    runtime.orchestrator.cancel_sdk_mcp_authentication();
     stop_print_tasks(runtime).await;
 }
 

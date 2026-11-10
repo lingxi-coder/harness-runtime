@@ -436,7 +436,7 @@ fn resource_link_error_line(block: JsonValueView<'_>) -> Result<Vec<u16>, ()> {
 /// that shape wins even when raw input carried an extra text property. Only
 /// empty or non-array content consults top-level error through JavaScript
 /// String; a nonempty array with no recognized blocks stays Unknown error.
-fn native_mcp_error_detail(content: &UJP, error: Option<&UJP>) -> UJP {
+pub fn native_mcp_error_detail(content: &UJP, error: Option<&UJP>) -> UJP {
     if let Some(length) = content.array_len("").filter(|length| *length > 0) {
         let mut lines = Vec::<Vec<u16>>::new();
         for index in 0..length {
@@ -889,6 +889,10 @@ pub struct MCPTool {
     mcp_role: Option<String>,
     /// Actual host config and discovered definition; never derived from aliases.
     capability_identity: Option<tool_api::McpToolIdentity>,
+    /// Original host configuration provenance for native tool-hook inputs.
+    server_provenance: Option<mcp::McpServerProvenance>,
+    /// Native connector deny/ask names, derived only from the admitted config.
+    deny_aliases: Vec<String>,
     session_tool_lease: std::sync::RwLock<Option<tool_api::SessionToolGrantLease>>,
 }
 
@@ -930,6 +934,8 @@ impl MCPTool {
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
+            server_provenance: None,
+            deny_aliases: Vec::new(),
             session_tool_lease: std::sync::RwLock::new(None),
         }
     }
@@ -978,6 +984,8 @@ impl MCPTool {
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
+            server_provenance: None,
+            deny_aliases: Vec::new(),
             session_tool_lease: std::sync::RwLock::new(None),
         }
     }
@@ -986,6 +994,25 @@ impl MCPTool {
     #[must_use]
     pub fn with_capability_identity(mut self, identity: tool_api::McpToolIdentity) -> Self {
         self.capability_identity = Some(identity);
+        self
+    }
+
+    /// Bind the server's original configuration key/source before its tool
+    /// names are normalized for the model or an agent-scoped registry slot.
+    #[must_use]
+    pub fn with_server_provenance(mut self, config: &mcp::McpServerConfig) -> Self {
+        self.server_provenance = Some(mcp::McpServerProvenance::from_config(config));
+        self.deny_aliases = config
+            .sdk_connector_deny_key()
+            .and_then(|key| {
+                let full_name = self.full_name.as_deref()?;
+                let prefix = format!("mcp__{}__", config.authored_name().normalized());
+                let tool_part = full_name.strip_prefix(&prefix)?;
+                let alias = format!("mcp__{key}__{tool_part}");
+                (alias != full_name).then_some(alias)
+            })
+            .into_iter()
+            .collect();
         self
     }
 
@@ -1696,6 +1723,20 @@ impl Tool for MCPTool {
         self.capability_identity.as_ref()
     }
 
+    fn mcp_server_provenance(&self) -> Option<&mcp::McpServerProvenance> {
+        self.server_provenance.as_ref()
+    }
+
+    fn mcp_deny_aliases(&self) -> &[String] {
+        &self.deny_aliases
+    }
+
+    fn prompt_for_loading_mode(&self, loaded_through_tool_search: bool) -> Option<UJP> {
+        self.bound_desc.as_ref().map(|description| {
+            mcp::truncate_description_source(description, loaded_through_tool_search)
+        })
+    }
+
     fn bind_session_tool_lease(&self, lease: tool_api::SessionToolGrantLease) {
         *self
             .session_tool_lease
@@ -1969,10 +2010,11 @@ impl Tool for MCPTool {
         }
     }
     async fn prompt(&self, _: &PromptOptions) -> UJP {
-        // The system-prompt `<tools>` blurb is the same exact source description
-        // as the per-tool wire entry (client.ts:1786-1794).
+        // Native keeps the source description for UI use and applies the
+        // inline budget here; ToolSearch loads select their separate budget.
         self.bound_desc
-            .clone()
+            .as_ref()
+            .map(|description| mcp::truncate_description_source(description, false))
             .unwrap_or_else(|| "Use MCP to dispatch to an MCP-server-provided tool.".into())
     }
 
@@ -2023,6 +2065,7 @@ impl Tool for MCPTool {
             .bound_server_key
             .clone()
             .unwrap_or_else(|| server.clone());
+        let key_is_internal = self.bound_server_key.is_some();
         // Despite the oracle field's historical `Bytes` suffix, `W` is
         // `JSON.stringify(input).length`: JavaScript UTF-16 code units.
         let tool_input_size_bytes = arguments
@@ -2165,6 +2208,7 @@ impl Tool for MCPTool {
 
         // The wire form of a `ToolUseId` is its bare (serde-transparent) string.
         let tool_use_id_str = tool_use_id.as_ref().map(|tuid| tuid.to_string());
+        let sdk_verdict = ctx.mcp_auto_mode_verdict.clone();
 
         // -- G07/G08: MCP tool-call auto-background race ---------------------
         // Resolve the transport kind for `getMcpAutoBackgroundMs` (`Wc_`) from
@@ -2172,11 +2216,19 @@ impl Tool for MCPTool {
         // lingxi has no `"sse-ide"`/`"ws-ide"` IDE variants, so that IDE
         // exclusion is inert here but PRESERVED inside the helper. A missing
         // config falls back to an empty kind (never IDE) — the default gate.
-        let transport_kind = match registry.get_config(&dispatch_key).await {
-            Some(cfg) => auth_kind_from_spec(&cfg.spec).0.to_string(),
-            None => String::new(),
+        let dispatch_config = if key_is_internal {
+            registry.get_config_by_key(&dispatch_key).await
+        } else {
+            registry.get_config(&dispatch_key).await
         };
-        let auto_bg_ms = if inline_chat {
+        let (transport_kind, disable_auto_background) = match dispatch_config {
+            Some(cfg) => (
+                auth_kind_from_spec(&cfg.spec).0.to_string(),
+                cfg.metadata.sdk_disable_auto_background,
+            ),
+            None => (String::new(), false),
+        };
+        let auto_bg_ms = if inline_chat || disable_auto_background {
             0
         } else {
             crate::auto_background::get_mcp_auto_background_ms(
@@ -2203,13 +2255,15 @@ impl Tool for MCPTool {
         };
         let Some(task_registry) = bg_registry else {
             let res = registry
-                .call_tool_with_auth_retry_guarded(
+                .call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
                     &dispatch_key,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
                     on_progress,
                     dispatch_guard,
+                    key_is_internal,
+                    sdk_verdict,
                 )
                 .await;
             return process_mcp_call_result(
@@ -2266,14 +2320,17 @@ impl Tool for MCPTool {
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let call_fut = registry.call_tool_with_auth_retry_guarded(
-                    &call_server,
-                    &dispatch_full_name,
-                    arguments,
-                    tool_use_id_str.as_deref(),
-                    on_progress,
-                    dispatch_guard,
-                );
+                let call_fut = registry
+                    .call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
+                        &call_server,
+                        &dispatch_full_name,
+                        arguments,
+                        tool_use_id_str.as_deref(),
+                        on_progress,
+                        dispatch_guard,
+                        key_is_internal,
+                        sdk_verdict,
+                    );
                 tokio::pin!(call_fut);
                 // Fires on the mcp_task cancel token (`TaskStop`, once
                 // registered) OR the parent turn/abort token (`ctx.cancel`).
@@ -3770,6 +3827,7 @@ pub async fn build_registered_mcp_tools(
                         registry.output_schema_parser_handle(table_key, &dto.full_name),
                     )
                     .with_bound_server_key(table_key.clone())
+                    .with_server_provenance(config)
                     .with_capability_identity(
                         tool_api::McpToolIdentity::from_config_tool(config, dto),
                     );
@@ -3825,6 +3883,65 @@ mod tests {
 
     fn fixture_json(source: &str) -> UJP {
         UJP::parse(source).expect("test JSON source is valid")
+    }
+
+    #[tokio::test]
+    async fn native_322_mcp_description_budgets_reach_loaded_wire() {
+        // The live 2.1.322 oracle observes 4,096 and 16,384 UTF-16 units
+        // before the same 13-unit suffix. Discovery must retain the source.
+        let description = format!("{}😀{}", "a".repeat(4095), "z".repeat(17_000));
+        let tool: Arc<dyn Tool> = Arc::new(MCPTool::new_for_tool(
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            ),
+            "mcp__wire_audit__echo".into(),
+            description.clone().into(),
+            fixture_json(r#"{"type":"object"}"#),
+            None,
+            None,
+            None,
+            false,
+            false,
+        ));
+        assert_eq!(
+            tool.description(
+                &fixture_json("{}"),
+                &DescriptionOptions {
+                    is_non_interactive_session: true
+                },
+            )
+            .await,
+            description,
+        );
+        let options = PromptOptions::default();
+        let inline = tool_api::wire::tool_to_wire(tool.as_ref(), &options).await;
+        assert_eq!(
+            inline.description.string_at(""),
+            Some(format!("{}… [truncated]", "a".repeat(4095)).as_str())
+        );
+        let expected = format!("{}😀{}… [truncated]", "a".repeat(4095), "z".repeat(12_287));
+        let deferred = tool_api::wire::tool_to_wire_deferred(tool.as_ref(), &options, true).await;
+        assert_eq!(deferred.description.string_at(""), Some(expected.as_str()));
+        assert!(deferred.defer_loading);
+
+        let tools = vec![tool];
+        let state =
+            tool_api::defer::DeferralState::new(tool_api::defer::ToolSearchMode::Enabled, false);
+        state.mark_loaded(["mcp__wire_audit__echo".to_owned()]);
+        let mut wire = vec![inline.clone()];
+        tool_api::wire::apply_defer_loading(&mut wire, &tools, &state);
+        assert!(wire[0].defer_loading);
+        assert_eq!(wire[0].description, inline.description);
+        // A registered Mod's replacement remains authoritative across loading.
+        let mut overridden = vec![inline];
+        overridden[0].description = "custom Mod description".into();
+        tool_api::wire::apply_defer_loading(&mut overridden, &tools, &state);
+        assert_eq!(
+            overridden[0].description.string_at(""),
+            Some("custom Mod description")
+        );
     }
 
     #[tokio::test]
@@ -6666,6 +6783,7 @@ mod resource_tool_gating_tests {
         McpToolDto {
             server_name: server_name.into(),
             tool_name: tool_name.into(),
+            wire_tool_name: None,
             description: format!("{tool_name} tool").into(),
             input_schema: source_fixture(&json!({"type":"object"})),
             output_schema: None,
@@ -6715,6 +6833,14 @@ mod resource_tool_gating_tests {
         ctx.mcp_registry = Some(registry.clone());
         let built = build_registered_mcp_tools(&registry, ctx.clone()).await;
         assert_eq!(built[0].1[0].mcp_tool_identity(), Some(&identity));
+        assert_eq!(
+            built[0].1[0].mcp_server_provenance(),
+            Some(&mcp::McpServerProvenance {
+                name: "server/a".into(),
+                source: "user".into()
+            }),
+            "hook provenance keeps the original config key rather than its normalized alias",
+        );
         let tool = MCPTool::new_for_tool(
             ctx,
             definition.full_name,
@@ -6744,6 +6870,63 @@ mod resource_tool_gating_tests {
             "an RPC retry captured before revoke must lose authority"
         );
         assert!(tool.dispatch_guard().is_err());
+    }
+
+    #[tokio::test]
+    async fn raw_utf16_config_name_survives_registered_tool_catalog_provenance() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let config = mcp::parse_mcp_json_string(
+            r#"{"mcpServers":{"wire \ud800":{"command":"fake"}}}"#,
+            ConfigScope::Dynamic,
+        )
+        .unwrap()
+        .remove(0);
+        let key = config.name.clone();
+        let mut definition = dto(&key, "echo");
+        definition.full_name = format!("mcp__{}__echo", config.normalized_name_for_mcp());
+        registry.connections.write().await.insert(
+            key.clone(),
+            McpConnectionState::Connected {
+                config,
+                connection_id: lingxi_core::types::McpConnectionId::new(),
+                capabilities: caps(false),
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![definition],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut context = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        context.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, context).await;
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].1[0].name(), "mcp__wire____echo");
+        let provenance = built[0].1[0].mcp_server_provenance().unwrap();
+        assert_eq!(
+            provenance.name.utf16_units(),
+            &[119, 105, 114, 101, 32, 0xd800]
+        );
+        assert_eq!(
+            serde_json::to_string(provenance).unwrap(),
+            r#"{"name":"wire \ud800","source":"dynamic"}"#
+        );
+        assert_eq!(registry.get_config("wire__").await.unwrap().name, key);
+        assert_eq!(
+            registry
+                .resolve_wire_tool_name("wire__", "mcp__wire____echo", Some(&key))
+                .await
+                .as_deref(),
+            Some("echo")
+        );
     }
 
     #[tokio::test]
