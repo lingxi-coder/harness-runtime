@@ -168,6 +168,7 @@ Raw timing observations are in `outputs/performance-probes.json`. They are singl
   - `mobile_linux_sandbox_uses_selected_profile_for_project_source_writes_and_cwd`: existing `.atlas-workspaces/apps` versus `.atlas/.apps` expectation mismatch.
   - `connect_http_fetch_timeout_drops_slow_post`: existing timeout returns a routed error while the test expects a pending call.
   - `kill_tree_terminates_grandchildren`: host rejects process-group SIGKILL with `EPERM`.
+- Final primary-workspace integration build: blocked by a concurrent change in untouched `crates/llm-runtime/src/service.rs:6818`: the pinned SDK `AnthropicRequestPolicy` has no `plain_text_message_content_indices` field (E0560). This field is added in the primary workspace diff and is absent from the optimization patch. The landed filesystem files match the tested isolated source; full primary-workspace acceptance remains blocked by that SDK mismatch.
 - Rustfmt and scoped diff checks passed. Two independent implementation reviews found no remaining actionable regression after the PDF/FIFO corrections.
 
 Commands and target-by-target results are recorded in `outputs/verification.json`; baseline reproduction logs remain under `work/`. The first all-feature build ran out of disk space; its log is retained and the completed retry is the reported result.
