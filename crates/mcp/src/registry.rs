@@ -3576,14 +3576,18 @@ impl McpRegistry {
             if let Some(raw_conn) = &self.raw_conn {
                 if let Some(connection) = raw_conn.connection_for(connection_id) {
                     let cwd = std::env::current_dir().unwrap_or_default();
-                    let client_base = McpClient::with_roots(
-                        config.name.clone(),
-                        cwd,
-                        self.additional_roots.clone(),
-                        connection.clone(),
-                        self.hook_dispatcher.clone(),
-                    )
-                    .await;
+                    let client_base = if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+                        McpClient::new_sdk_hosted(config.name.clone(), cwd, connection.clone()).await
+                    } else {
+                        McpClient::with_roots(
+                            config.name.clone(),
+                            cwd,
+                            self.additional_roots.clone(),
+                            connection.clone(),
+                            self.hook_dispatcher.clone(),
+                        )
+                        .await
+                    };
                     let client_base = match &self.json_schema_validator {
                         Some(validator) => client_base.with_json_schema_validator(Arc::clone(validator)),
                         None => client_base,

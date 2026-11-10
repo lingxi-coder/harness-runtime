@@ -14,7 +14,7 @@ use lingxi_core::host::*;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::McpConnectionId;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::control_plane::StdioControlPlane;
@@ -93,11 +93,20 @@ impl SdkMcpTransport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .find(|endpoint| endpoint.server == server)
-            .cloned()
-            .ok_or_else(|| format!("MCP server {server} is not connected"))?;
-        let message = jsonrpc_message_from_projection(message)
-            .map_err(|error| format!("Invalid MCP message: {error}"))?;
+            .find(|endpoint| endpoint.server == server && !endpoint.closed.is_cancelled())
+            .cloned();
+        let Some(endpoint) = endpoint else {
+            // Native acknowledges late/unknown SDK server messages without
+            // delivering them into another connection.
+            return Ok(());
+        };
+        let message = match jsonrpc_message_from_projection(message) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::debug!(server, %error, "Ignoring invalid SDK MCP message");
+                return Ok(());
+            }
+        };
         endpoint
             .inbound
             .send(message)
@@ -213,6 +222,42 @@ fn projection_from_jsonrpc_message(
 ) -> Result<Utf16JsonProjection, jsonrpc::ConnectionError> {
     let source = serde_json::to_string(message).map_err(jsonrpc::RouterError::Serialize)?;
     Utf16JsonProjection::parse(&source).map_err(projection_error)
+}
+
+fn sdk_wire_message(
+    message: &jsonrpc::Message,
+) -> Result<Utf16JsonProjection, jsonrpc::ConnectionError> {
+    let source = projection_from_jsonrpc_message(message)?;
+    let (order, omit_empty_params): (&[&str], bool) = match message {
+        jsonrpc::Message::Request(request) => (
+            &["method", "params", "jsonrpc", "id"],
+            jsonrpc_method_is(&request.method, "tools/list"),
+        ),
+        jsonrpc::Message::Response(response) if response.error.is_some() => {
+            (&["jsonrpc", "id", "error"], false)
+        }
+        jsonrpc::Message::Response(_) => (&["result", "jsonrpc", "id"], false),
+        jsonrpc::Message::Notification(notification) => (
+            &["jsonrpc", "method", "params"],
+            jsonrpc_method_is(&notification.method, "notifications/initialized"),
+        ),
+    };
+    let fields = order
+        .iter()
+        .filter_map(|name| {
+            let value = source.subprojection(&format!("/{name}")).ok()?;
+            if *name == "params"
+                && omit_empty_params
+                && value
+                    .object_entries()
+                    .is_some_and(|entries| entries.is_empty())
+            {
+                return None;
+            }
+            Some(((*name).to_owned(), value))
+        })
+        .collect();
+    Utf16JsonProjection::object(fields).map_err(projection_error)
 }
 
 fn projection_from_jsonrpc_payload(payload: &jsonrpc::JsonPayload) -> Option<Utf16JsonProjection> {
@@ -333,7 +378,7 @@ fn valid_manifest_result(value: &Utf16JsonProjection) -> bool {
     }
     if meta
         .get_property("progressToken")
-        .is_some_and(|value| value.as_str().is_none() && value.as_number().is_none())
+        .is_some_and(|value| value.code_units().is_none() && value.as_number().is_none())
     {
         return false;
     }
@@ -342,34 +387,18 @@ fn valid_manifest_result(value: &Utf16JsonProjection) -> bool {
             task.object_entries().is_some()
                 && task
                     .get_property("taskId")
-                    .is_some_and(|task_id| task_id.as_str().is_some())
+                    .is_some_and(|task_id| task_id.code_units().is_some())
         })
 }
 
 fn has_sdk_initialize_capabilities(params: &Utf16JsonProjection) -> bool {
-    let Some(capabilities) = params.get_property("capabilities") else {
-        return false;
-    };
-    if !capabilities
-        .object_entries()
-        .is_some_and(|entries| entries.len() == 2)
-    {
-        return false;
-    }
-    let roots = capabilities.get_property("roots");
-    let elicitation = capabilities.get_property("elicitation");
-    roots.is_some_and(|roots| {
-        roots
-            .object_entries()
-            .is_some_and(|entries| entries.len() == 1)
-            && roots
-                .get_property("listChanged")
-                .is_some_and(|list_changed| list_changed.as_bool() == Some(true))
-    }) && elicitation.is_some_and(|elicitation| {
-        elicitation
-            .object_entries()
-            .is_some_and(|entries| entries.is_empty())
-    })
+    params
+        .get_property("capabilities")
+        .is_some_and(|capabilities| {
+            capabilities
+                .object_entries()
+                .is_some_and(|entries| entries.is_empty())
+        })
 }
 
 struct EndpointConnectGuard {
@@ -399,24 +428,43 @@ impl Drop for SdkConnectGuard<'_> {
     }
 }
 
-async fn send_message(
+struct PendingSdkMessage {
+    id: String,
+    response: oneshot::Receiver<Result<Utf16JsonProjection, String>>,
+    initialize: bool,
+    bounded: bool,
+}
+
+fn sdk_control_deadline(message: &jsonrpc::Message) -> bool {
+    // Native Kdr: method + non-null id => a JSON-RPC request. Its caller
+    // already owns the MCP deadline; only notifications/responses need the
+    // control-plane acknowledgement timeout.
+    !matches!(message, jsonrpc::Message::Request(_))
+}
+
+async fn prepare_message(
     endpoint: &Endpoint,
     plane: &StdioControlPlane,
     message: jsonrpc::Message,
-) -> Result<(), jsonrpc::ConnectionError> {
+) -> Result<Option<PendingSdkMessage>, jsonrpc::ConnectionError> {
     match replay_manifest(endpoint, &message) {
         Replay::Response(response) => {
-            return endpoint
+            endpoint
                 .inbound
                 .send(jsonrpc::Message::Response(response))
-                .map_err(|_| closed())
+                .map_err(|_| closed())?;
+            return Ok(None);
         }
-        Replay::Swallow => return Ok(()),
+        Replay::Swallow => return Ok(None),
         Replay::Forward => {}
+    }
+    if endpoint.closed.is_cancelled() {
+        return Err(closed());
     }
     let initialize = matches!(&message, jsonrpc::Message::Request(request)
         if jsonrpc_method_is(&request.method, "initialize"));
-    let wire = projection_from_jsonrpc_message(&message)?;
+    let bounded = sdk_control_deadline(&message);
+    let wire = sdk_wire_message(&message)?;
     let request = Utf16JsonProjection::object(vec![
         ("subtype".into(), "mcp_message".into()),
         ("server_name".into(), endpoint.server.as_str().into()),
@@ -424,22 +472,47 @@ async fn send_message(
     ])
     .expect("MCP control request has unique fields");
     let (id, response) = plane.send_request(request, None).await;
+    Ok(Some(PendingSdkMessage {
+        id,
+        response,
+        initialize,
+        bounded,
+    }))
+}
+
+async fn await_control_reply(
+    endpoint: &Endpoint,
+    plane: &StdioControlPlane,
+    pending: PendingSdkMessage,
+) -> Result<(), jsonrpc::ConnectionError> {
+    let PendingSdkMessage {
+        id,
+        response,
+        initialize,
+        bounded,
+    } = pending;
     let request_id = Utf16JsonProjection::from(id.as_str());
+    let receive = async {
+        if bounded {
+            tokio::time::timeout(Duration::from_millis(70_000), response)
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ())?
+                .map_err(|_| ())
+        } else {
+            response.await.map_err(|_| ())?.map_err(|_| ())
+        }
+    };
     let payload = tokio::select! {
-        result = tokio::time::timeout(Duration::from_millis(70_000), response) => match result {
-            Ok(Ok(Ok(payload))) => payload,
-            _ => {plane.cancel_request(&request_id).await;return Err(closed());}
+        result = receive => match result {
+            Ok(payload) => payload,
+            Err(()) => { plane.cancel_request(&request_id).await; return Err(closed()); }
         },
-        () = endpoint.closed.cancelled() => {plane.cancel_request(&request_id).await;return Err(closed());}
+        () = endpoint.closed.cancelled() => {
+            plane.cancel_request(&request_id).await; return Err(closed());
+        }
     };
     if payload.contains_property("mcp_response") {
-        if initialize {
-            if let Ok(reply) = payload.subprojection("/mcp_response") {
-                if let Ok(result) = reply.subprojection("/result") {
-                    capture_initialize(endpoint, &result);
-                }
-            }
-        }
         let reply_source = payload
             .subprojection("/mcp_response")
             .map_err(projection_error)?;
@@ -447,7 +520,49 @@ async fn send_message(
             let error = <serde_json::Error as serde::de::Error>::custom(error.to_string());
             jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Deserialize(error))
         })?;
+        if initialize {
+            if let Ok(result) = reply_source.subprojection("/result") {
+                capture_initialize(endpoint, &result);
+            }
+        }
         endpoint.inbound.send(reply).map_err(|_| closed())?;
+    }
+    Ok(())
+}
+
+async fn queue_message(
+    endpoint: Arc<Endpoint>,
+    plane: Arc<StdioControlPlane>,
+    message: jsonrpc::Message,
+) -> Result<(), jsonrpc::ConnectionError> {
+    let Some(pending) = prepare_message(&endpoint, &plane, message).await? else {
+        return Ok(());
+    };
+    // Admit frames in writer order, but wait for host replies independently.
+    // Otherwise a server-side request (elicitation/ping) can deadlock behind
+    // the tool call whose completion depends on that very reply.
+    tokio::spawn(async move {
+        if await_control_reply(&endpoint, &plane, pending)
+            .await
+            .is_err()
+        {
+            endpoint.closed.cancel();
+            if let Some(connection) = endpoint.connection.get() {
+                connection.close();
+            }
+        }
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+async fn send_message(
+    endpoint: &Endpoint,
+    plane: &StdioControlPlane,
+    message: jsonrpc::Message,
+) -> Result<(), jsonrpc::ConnectionError> {
+    if let Some(pending) = prepare_message(endpoint, plane, message).await? {
+        await_control_reply(endpoint, plane, pending).await?;
     }
     Ok(())
 }
@@ -493,15 +608,18 @@ impl McpTransport for SdkMcpTransport {
         let writer = Box::pin(futures::sink::unfold(
             (sender, plane),
             |(endpoint, plane), message| async move {
-                send_message(&endpoint, &plane, message).await?;
+                queue_message(endpoint.clone(), plane.clone(), message).await?;
                 Ok((endpoint, plane))
             },
         ));
-        let connection = Arc::new(jsonrpc::Connection::from_message_streams(
-            reader,
-            writer,
-            Some("Method not found".into()),
-        ));
+        let connection = Arc::new(
+            jsonrpc::Connection::from_message_streams_with_initial_request_id(
+                reader,
+                writer,
+                Some("Method not found".into()),
+                0,
+            ),
+        );
         endpoint
             .connection
             .set(connection.clone())
@@ -511,9 +629,7 @@ impl McpTransport for SdkMcpTransport {
             disarmed: false,
         };
         let client = Arc::new(
-            ::mcp::McpClient::new(server.clone(), self.cwd.clone(), connection)
-                .await
-                .with_transport_kind(McpTransportKind::SdkControl),
+            ::mcp::McpClient::new_sdk_hosted(server.clone(), self.cwd.clone(), connection).await,
         );
         endpoint
             .client
@@ -577,7 +693,9 @@ impl McpTransport for SdkMcpTransport {
             .client
             .get()
             .expect("initialized client handle")
-            .initialize()
+            .initialize_with_client_capabilities(
+                &Utf16JsonProjection::parse("{}").expect("SDK capabilities are an empty object"),
+            )
             .await
             .map_err(sdk_error)?;
         endpoint
@@ -976,11 +1094,37 @@ mod tests {
             .contains(&"mcp__fixture__factory-backed".into()));
         assert!(runtime.mcp_registry.get_config("fixture").await.is_none());
         runtime.orchestrator.connect_sdk_mcp_servers(configs).await;
-        runtime
+        let registry_client = runtime
             .mcp_registry
             .ensure_connected_client("fixture")
             .await
             .expect("registry must use the factory's paired raw-connection provider");
+        let transport = plane.sdk_mcp_transport().unwrap();
+        let endpoint = transport
+            .endpoints
+            .lock()
+            .unwrap()
+            .values()
+            .find(|endpoint| endpoint.server == "fixture")
+            .cloned()
+            .unwrap();
+        let connection = endpoint.connection.get().unwrap();
+        for method in ["roots/list", "elicitation/create"] {
+            assert!(
+                connection.local_registered_handler(method).await.is_none(),
+                "registry SDK wrapper must not reinstall {method}"
+            );
+        }
+        assert_eq!(
+            registry_client
+                .server_capabilities_raw()
+                .await
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"tools":{"listChanged":true}}"#
+        );
+        drop(transport);
         let gate = runtime.enforcing_permission_gate.as_ref().unwrap();
         assert!(gate
             .tool_wide_deny_names()
@@ -1089,6 +1233,277 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    fn native_fixture() -> Value {
+        serde_json::from_str(include_str!("../../tests/fixtures/mcp_sdk_2_1_322.json")).unwrap()
+    }
+
+    #[test]
+    fn native_322_control_fixture_matches_sdk_message_source_bytes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mcp_sdk_control_2_1_322.json"
+        ))
+        .unwrap();
+        for raw in fixture["nativeMessages"].as_array().unwrap() {
+            let raw = raw.as_str().unwrap();
+            let source = Utf16JsonProjection::parse(raw).unwrap();
+            // These are outbound reference frames. The native MCP ingress
+            // decoder intentionally normalizes params/_meta field order;
+            // deserialize only the RPC envelope and retain payload source.
+            let message: jsonrpc::Message = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                sdk_wire_message(&message)
+                    .unwrap()
+                    .to_json_string()
+                    .unwrap(),
+                raw
+            );
+            if source.string_at("/method") == Some("tools/list") {
+                let mut with_empty_params = source.clone();
+                with_empty_params
+                    .set_field("params", Utf16JsonProjection::parse("{}").unwrap())
+                    .unwrap();
+                let message: jsonrpc::Message =
+                    serde_json::from_str(&with_empty_params.to_json_string().unwrap()).unwrap();
+                assert_eq!(
+                    sdk_wire_message(&message)
+                        .unwrap()
+                        .to_json_string()
+                        .unwrap(),
+                    raw,
+                    "empty SDK list params must be omitted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_322_manifest_replay_and_deadline_fixture_matches() {
+        let fixture = native_fixture();
+        assert_eq!(fixture["version"], "2.1.322");
+        for case in fixture["replayCases"].as_array().unwrap() {
+            let (endpoint, _receiver) = endpoint();
+            if let Some(manifest) = case["input"].get("manifest") {
+                *endpoint.manifest.lock().unwrap() = Some(Manifest {
+                    initialize: manifest
+                        .get("initializeResult")
+                        .map(|value| Utf16JsonProjection::from_serde_value(value).unwrap()),
+                    tools: manifest
+                        .get("toolsListResult")
+                        .map(|value| Utf16JsonProjection::from_serde_value(value).unwrap()),
+                    swallow_initialized: false,
+                });
+            }
+            for (message, expected) in case["input"]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(case["outputs"].as_array().unwrap())
+            {
+                let source = Utf16JsonProjection::from_serde_value(message).unwrap();
+                let actual = match replay_manifest(
+                    &endpoint,
+                    &jsonrpc_message_from_projection(&source).unwrap(),
+                ) {
+                    Replay::Forward => json!({"forward":true}),
+                    Replay::Swallow => json!({"swallow":true}),
+                    Replay::Response(response) => {
+                        json!({"reply":serde_json::to_value(response).unwrap()})
+                    }
+                };
+                assert_eq!(&actual, expected, "{}: {message}", case["input"]["name"]);
+            }
+        }
+        for case in fixture["deadlineCases"].as_array().unwrap() {
+            let source = Utf16JsonProjection::from_serde_value(&case["message"]).unwrap();
+            assert_eq!(
+                sdk_control_deadline(&jsonrpc_message_from_projection(&source).unwrap()),
+                case["bounded"].as_bool().unwrap(),
+                "{}",
+                case["message"]
+            );
+        }
+        for case in fixture["utf16MetaCases"].as_array().unwrap() {
+            let result = Utf16JsonProjection::parse(&format!(
+                r#"{{"_meta":{}}}"#,
+                case["metaJson"].as_str().unwrap()
+            ))
+            .unwrap();
+            assert_eq!(
+                valid_manifest_result(&result),
+                case["accepted"].as_bool().unwrap(),
+                "{}",
+                case["metaJson"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sdk_outbound_reply_is_admitted_before_earlier_request_settles() {
+        let (tx, mut outbound) = mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(tx));
+        let (endpoint, _inbound) = endpoint();
+        let endpoint = Arc::new(endpoint);
+        for value in native_fixture()["concurrency"]["entered"]
+            .as_array()
+            .unwrap()
+        {
+            let source = Utf16JsonProjection::from_serde_value(value).unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                queue_message(
+                    endpoint.clone(),
+                    plane.clone(),
+                    jsonrpc_message_from_projection(&source).unwrap(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let mut methods = Vec::new();
+        for _ in 0..2 {
+            let OutboundMsg::Line(line) =
+                tokio::time::timeout(Duration::from_secs(2), outbound.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("request")
+            };
+            let request: Value = serde_json::from_str(&line).unwrap();
+            methods.push(request["request"]["message"].clone());
+        }
+        assert_eq!(
+            methods,
+            native_fixture()["concurrency"]["entered"]
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert!(
+            !endpoint.closed.is_cancelled(),
+            "neither unanswered host reply serializes the writer"
+        );
+        endpoint.closed.cancel();
+        // Both independent waiters must cancel their broker entries on close.
+        for _ in 0..2 {
+            let OutboundMsg::Line(line) =
+                tokio::time::timeout(Duration::from_secs(2), outbound.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("cancel")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["type"],
+                "control_cancel_request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sdk_initialized_notification_omits_empty_params() {
+        let (tx, mut outbound) = mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(tx));
+        let (endpoint, _inbound) = endpoint();
+        let message = jsonrpc_message_from_projection(
+            &Utf16JsonProjection::parse(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let pending = prepare_message(&endpoint, &plane, message)
+            .await
+            .unwrap()
+            .unwrap();
+        let OutboundMsg::Line(line) = outbound.recv().await.unwrap() else {
+            panic!("request")
+        };
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            request["request"]["message"],
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        );
+        plane
+            .cancel_request(&Utf16JsonProjection::from(pending.id.as_str()))
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sdk_peer_requests_preserve_utf16_ids_and_native_raw_response_order() {
+        let (tx, mut outbound) = mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(tx));
+        let platform = Arc::new(platform_posix::PosixMcpTransport::new());
+        let transport = SdkMcpTransport::new(
+            crate::desktop::DesktopMcpServices {
+                transport: platform.clone(),
+                raw_connections: platform,
+            },
+            plane.clone(),
+            PathBuf::from("/tmp"),
+        );
+        let connection = transport
+            .connect(&McpTransportSpec::SdkControl {
+                control_channel_id: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        transport
+            .deliver("fixture", &Utf16JsonProjection::parse("{}").unwrap())
+            .unwrap();
+        transport
+            .deliver(
+                "missing",
+                &Utf16JsonProjection::parse(r#"{"jsonrpc":"2.0","id":4,"method":"ping"}"#).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            outbound.try_recv().is_err(),
+            "invalid and unknown messages are ignored"
+        );
+        for method in [
+            "roots/list",
+            "elicitation/create",
+            "fixture/unknown",
+            "ping",
+        ] {
+            let input = Utf16JsonProjection::parse(&format!(
+                r#"{{"jsonrpc":"2.0","id":"peer\ud800","method":"{method}"}}"#
+            ))
+            .unwrap();
+            transport.deliver("fixture", &input).unwrap();
+            let OutboundMsg::Line(line) =
+                tokio::time::timeout(Duration::from_secs(2), outbound.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("MCP response")
+            };
+            let frame = Utf16JsonProjection::parse(&line).unwrap();
+            let message = frame
+                .subprojection("/request/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap();
+            let expected = if method == "ping" {
+                r#"{"result":{},"jsonrpc":"2.0","id":"peer\ud800"}"#
+            } else {
+                r#"{"jsonrpc":"2.0","id":"peer\ud800","error":{"code":-32601,"message":"Method not found"}}"#
+            };
+            assert_eq!(message, expected, "{method}");
+            let ack = Utf16JsonProjection::from_serde_value(&json!({"type":"control_response","response":{"subtype":"success","request_id":frame.string_at("/request_id").unwrap(),"response":{}}})).unwrap();
+            plane.resolve_response(&ack).await;
+        }
+        transport
+            .disconnect(connection.connection_id)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]

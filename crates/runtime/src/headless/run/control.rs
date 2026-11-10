@@ -59,6 +59,13 @@ fn resolve_set_proactivity_offer_bypass(
     }
 }
 
+fn sdk_message_server_is_connected(status: &Utf16JsonProjection, server: &str) -> bool {
+    (0..status.array_len("/mcpServers").unwrap_or(0)).any(|index| {
+        status.string_at(&format!("/mcpServers/{index}/name")) == Some(server)
+            && status.string_at(&format!("/mcpServers/{index}/status")) == Some("connected")
+    })
+}
+
 pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetModelTarget {
     // CC: `fr != null` — in JS `!= null` covers both `null` and `undefined`, so
     // an explicit JSON `null` is treated as absent (→ default), not a type
@@ -414,18 +421,25 @@ pub(super) async fn dispatch_control_request(
             Err(error) => writer.reply_error(request_id, &error),
         },
         "mcp_message" => {
-            let result = match (
+            if let (Some(server), Ok(message), Some(transport)) = (
                 field("server_name").and_then(JsonValueView::as_str),
                 request_projection.subprojection("/message"),
                 control_plane.sdk_mcp_transport(),
             ) {
-                (Some(server), Ok(message), Some(transport)) => transport.deliver(server, &message),
-                _ => Err("Invalid MCP message".to_owned()),
-            };
-            match result {
-                Ok(()) => writer.reply_success(request_id, None),
-                Err(error) => writer.reply_error(request_id, &error),
+                let connected = orchestrator
+                    .sdk_mcp_status()
+                    .await
+                    .ok()
+                    .is_some_and(|status| sdk_message_server_is_connected(&status, server));
+                if connected {
+                    if let Err(error) = transport.deliver(server, &message) {
+                        tracing::debug!(server, %error, "Ignoring late SDK MCP message");
+                    }
+                }
             }
+            // Native acknowledges this control subtype even for unknown
+            // servers, missing wrapper fields, or invalid JSON-RPC payloads.
+            writer.reply_success(request_id, None);
         }
         "mcp_read_resource" => {
             let result = match (
@@ -1619,6 +1633,15 @@ mod tests {
     use super::*;
     use crate::headless::run::PrintAuxTaskGroup;
 
+    #[test]
+    fn sdk_message_delivery_requires_connected_server_and_unknown_names_are_ignored() {
+        let status = Utf16JsonProjection::parse(r#"{"mcpServers":[{"name":"ready","status":"connected"},{"name":"starting","status":"pending"},{"name":"failed","status":"failed"}]}"#).unwrap();
+        assert!(sdk_message_server_is_connected(&status, "ready"));
+        for name in ["starting", "failed", "unknown"] {
+            assert!(!sdk_message_server_is_connected(&status, name));
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_initialize_alias_request(
         runtime: &Runtime,
@@ -1639,8 +1662,9 @@ mod tests {
             r#"{{"type":"control_request","request_id":"{id}","request":{request}}}"#
         ))
         .unwrap();
+        let subtype = frame.string_at("/request/subtype").unwrap_or("initialize");
         dispatch_control_request(
-            "initialize",
+            subtype,
             id,
             &frame,
             writer,
@@ -1671,6 +1695,53 @@ mod tests {
             panic!("initialize must return one control response")
         };
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_322_malformed_sdk_envelopes_are_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let stream = Arc::new(
+            crate::headless::stream_json::StreamJsonStream::new_placeholder(
+                crate::headless::io::Output::new(tokio::io::sink()),
+            ),
+        );
+        let runtime = super::super::tests::fixture_runtime(stream, root.path()).await;
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let outbound = Arc::new(tx);
+        let writer = ControlPlaneWriter::new(outbound.clone());
+        let cancel = tokio::sync::watch::channel(false).0;
+        let lifecycle = crate::headless::queued_commands::QueueLifecycle::new(
+            outbound.clone(),
+            "sdk-outer-envelope".to_owned(),
+        );
+        let plane = crate::headless::control_plane::StdioControlPlane::new(outbound.clone());
+        let end = Arc::new(tokio::sync::Notify::new());
+        let tasks = Arc::new(PrintAuxTaskGroup::default());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp_sdk_control_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["ingressCases"].as_array().unwrap() {
+            let reply = dispatch_initialize_alias_request(
+                &runtime,
+                &writer,
+                &outbound,
+                &mut receiver,
+                case["name"].as_str().unwrap(),
+                &case["request"].to_string(),
+                &cancel,
+                &lifecycle,
+                &plane,
+                &end,
+                &tasks,
+            )
+            .await;
+            assert_eq!(
+                reply["response"]["subtype"], case["responseSubtype"],
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[tokio::test]

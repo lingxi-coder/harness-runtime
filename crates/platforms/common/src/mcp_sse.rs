@@ -30,8 +30,8 @@ use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
 use lingxi_core::host::mcp::McpError;
 use lingxi_llm_client::transport::http_backend as reqwest;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
-use std::sync::Arc;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -98,6 +98,9 @@ pub enum SseConnectError {
     /// Authorization header value was invalid (non-ASCII, control chars).
     #[error("invalid auth token: {0}")]
     InvalidAuth(String),
+    /// EventSource rejects a successful response with the wrong media type.
+    #[error("SSE error: Invalid content type, expected \"text/event-stream\"")]
+    InvalidContentType,
     /// The stream ended, or produced a bad `endpoint` event, before the POST
     /// url was known. Upstream rejects its connect promise from inside the
     /// `endpoint` listener for exactly these cases.
@@ -161,29 +164,28 @@ fn build_headers<H>(
     auth_token: Option<&str>,
     extra_headers: &H,
     accept_value: &'static str,
+    protocol_version: Option<&str>,
 ) -> Result<HeaderMap, SseConnectError>
 where
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
 {
-    let mut h = HeaderMap::new();
-    h.insert(ACCEPT, HeaderValue::from_static(accept_value));
-    h.insert(
-        USER_AGENT,
-        HeaderValue::try_from(user_agent())
-            .map_err(|e| SseConnectError::Transport(e.to_string()))?,
-    );
-    if let Some(token) = auth_token {
-        let v = HeaderValue::try_from(token)
-            .map_err(|e| SseConnectError::InvalidAuth(e.to_string()))?;
-        h.insert(HeaderName::from_static("x-lingxi-ide-authorization"), v);
-    }
-    for (k, v) in extra_headers {
-        let name = HeaderName::try_from(k.as_str())
-            .map_err(|e| SseConnectError::Transport(format!("bad header name {k}: {e}")))?;
-        let val = HeaderValue::try_from(v.as_str())
-            .map_err(|e| SseConnectError::Transport(format!("bad header value: {e}")))?;
-        h.insert(name, val);
-    }
+    let mut h =
+        crate::mcp_http::build_common_headers(auth_token, extra_headers, None, protocol_version)
+            .map_err(|error| match error {
+                crate::mcp_http::HttpConnectError::InvalidAuth(detail) => {
+                    SseConnectError::InvalidAuth(detail)
+                }
+                crate::mcp_http::HttpConnectError::Transport(detail) => {
+                    SseConnectError::Transport(detail)
+                }
+                other => SseConnectError::Transport(other.to_string()),
+            })?;
+    let required = if accept_value == "text/event-stream" {
+        &["text/event-stream"][..]
+    } else {
+        &["application/json", "text/event-stream"][..]
+    };
+    crate::mcp_http::extend_accept(&mut h, required);
     Ok(h)
 }
 
@@ -232,7 +234,7 @@ where
         .map_err(|e| SseConnectError::Transport(e.to_string()))?;
 
     // ---- Open the SSE event-stream GET ----
-    let get_headers = build_headers(auth_token, extra_headers, "text/event-stream")?;
+    let get_headers = build_headers(auth_token, extra_headers, "text/event-stream", None)?;
     let response = match tokio::time::timeout(
         MCP_SSE_HEADER_TIMEOUT,
         client.get(url).headers(get_headers).send(),
@@ -273,6 +275,17 @@ where
         });
     }
 
+    // The legacy EventSource implementation uses this case-sensitive prefix
+    // test. Streamable HTTP's POST MIME parser is a different contract.
+    if !response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"))
+    {
+        return Err(SseConnectError::InvalidContentType);
+    }
+
     let byte_stream = response.bytes_stream();
     let mut event_stream = byte_stream.eventsource();
 
@@ -281,6 +294,10 @@ where
     // `Message`s the Connection wants to POST.
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
+    let initialize_request = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let protocol_version = Arc::new(Mutex::new(None::<String>));
+    let reader_initialize_request = initialize_request.clone();
+    let reader_protocol_version = protocol_version.clone();
 
     // Carries the resolved POST url (or the reason there will not be one) from
     // the reader task to the connect, which cannot complete without it in
@@ -293,7 +310,15 @@ where
     // SSE reader task: parse `data:` JSON frames and forward as Message.
     let reader_inbound_tx = inbound_tx.clone();
     tokio::spawn(async move {
-        while let Some(item) = event_stream.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = reader_inbound_tx.closed() => break,
+                item = event_stream.next() => item,
+            };
+            let Some(item) = item else {
+                break;
+            };
             match item {
                 Ok(event) => {
                     // A NAMED `endpoint` event is the legacy handshake, not a
@@ -310,11 +335,24 @@ where
                     // claude-code's SDK uses default-event SSE (no `event:` name)
                     // with the `data:` field carrying the JSON-RPC frame. Skip
                     // keep-alive comments / empty data lines.
-                    if event.data.is_empty() {
+                    if event.data.is_empty() || !crate::mcp_http::is_message_event(&event.event) {
                         continue;
                     }
                     match mcp::decode_native_mcp_frame(event.data.as_bytes()) {
                         Ok(msg) => {
+                            if let Some(request) = reader_initialize_request
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                            {
+                                crate::mcp_http::observe_protocol_response(
+                                    request,
+                                    &msg,
+                                    &mut reader_protocol_version
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
+                            }
                             if reader_inbound_tx.send(msg).is_err() {
                                 // Connection dropped; stop reading.
                                 break;
@@ -369,19 +407,31 @@ where
     let post_client = client.clone();
     tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
-            // claude-code's SSEClientTransport POST sends application/json;
-            // the Accept header is also kept on POST for symmetry with the
-            // GET, matching claude-code's SDK which sets both transports'
-            // Accept to `text/event-stream`.
-            let mut headers =
-                match build_headers(post_auth.as_deref(), &post_extra, "text/event-stream") {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::error!(error = %e, "mcp sse: failed to build POST headers");
-                        break;
-                    }
-                };
+            // Native's legacy POST wrapper requires both response media types;
+            // its EventSource GET advertises only text/event-stream.
+            let version = protocol_version
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let mut headers = match build_headers(
+                post_auth.as_deref(),
+                &post_extra,
+                "application/json, text/event-stream",
+                version.as_deref(),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(error = %e, "mcp sse: failed to build POST headers");
+                    break;
+                }
+            };
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            let frame_value = serde_json::to_value(&frame).unwrap_or_default();
+            if frame_value["method"] == "initialize" {
+                *initialize_request
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frame_value);
+            }
 
             let response = tokio::time::timeout(
                 MCP_SSE_HEADER_TIMEOUT,

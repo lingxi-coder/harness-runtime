@@ -22,7 +22,7 @@ use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use lingxi_llm_client::transport::http_backend as reqwest;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -53,11 +53,15 @@ async fn receive_notifications<H>(
     let mut last_event_id: Option<String> = None;
     let mut retry_ms = 250u64;
     loop {
-        let mut headers = {
+        let headers = {
             let sid = session_id
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match build_headers(auth.as_deref(), &extra, sid.as_deref()) {
+            let version = protocol_version
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match build_common_headers(auth.as_deref(), &extra, sid.as_deref(), version.as_deref())
+            {
                 Ok(headers) => headers,
                 Err(_) => {
                     let _ = fatal.send(());
@@ -65,17 +69,8 @@ async fn receive_notifications<H>(
                 }
             }
         };
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        headers.remove(CONTENT_TYPE);
-        if let Some(version) = protocol_version
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            if let Ok(value) = HeaderValue::from_str(version) {
-                headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
-            }
-        }
+        let mut headers = headers;
+        extend_accept(&mut headers, &["text/event-stream"]);
         if let Some(id) = &last_event_id {
             if let Ok(value) = HeaderValue::from_str(id) {
                 headers.insert(HeaderName::from_static("last-event-id"), value);
@@ -101,15 +96,6 @@ async fn receive_notifications<H>(
             }
             if !response.status().is_success() {
                 return true;
-            }
-            if !response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with("text/event-stream"))
-            {
-                let _ = fatal.send(());
-                return false;
             }
             // Servers may not retain notifications while GET is disconnected.
             // Reconcile after every attachment, including the initial list/GET race.
@@ -146,7 +132,7 @@ async fn receive_notifications<H>(
                 if event.id.len() <= 4096 {
                     last_event_id = (!event.id.is_empty()).then_some(event.id);
                 }
-                if event.data.is_empty() {
+                if event.data.is_empty() || !is_message_event(&event.event) {
                     continue;
                 }
                 if event.data.len() > 8 * 1024 * 1024 {
@@ -227,7 +213,7 @@ impl HttpRequestCancellation {
 
 /// Literal `Accept` header value for Streamable HTTP. Matches claude-code's
 /// `MCP_STREAMABLE_HTTP_ACCEPT` const (`client.ts:471`) byte-for-byte.
-const STREAMABLE_HTTP_ACCEPT: &str = "application/json, text/event-stream";
+const STREAMABLE_HTTP_ACCEPT: &[&str] = &["application/json", "text/event-stream"];
 
 /// `User-Agent` value emitted by this client. Matches claude-code's
 /// `getMCPUserAgent()` shape: `claude-code/<version>`.
@@ -270,40 +256,226 @@ impl From<HttpConnectError> for McpError {
     }
 }
 
-fn build_headers<H>(
+/// Native's HTTP response guard first parses Content-Type, then falls back to
+/// its trimmed essence for malformed parameters unless the remainder contains
+/// a comma. This intentionally differs from legacy EventSource's prefix test.
+pub(crate) fn content_type_essence(value: &str) -> Option<String> {
+    let (raw_type, parameters) = value.split_once(';').unwrap_or((value, ""));
+    let essence = raw_type.trim_matches(js_whitespace).to_ascii_lowercase();
+    if essence.is_empty() {
+        return None;
+    }
+    let valid_type = essence.split_once('/').is_some_and(|(top, sub)| {
+        !top.is_empty()
+            && !sub.is_empty()
+            && top.bytes().all(mime_token_byte)
+            && sub.bytes().all(mime_token_byte)
+    });
+    if valid_type
+        && (parameters.is_empty()
+            || parameters
+                .chars()
+                .all(|character| u32::from(character) <= 255)
+                && valid_mime_parameters(parameters.as_bytes()))
+    {
+        return Some(essence);
+    }
+    let start = essence.encode_utf16().count();
+    if value
+        .encode_utf16()
+        .skip(start)
+        .any(|unit| unit == u16::from(b','))
+    {
+        None
+    } else {
+        Some(essence)
+    }
+}
+
+fn mime_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+fn valid_mime_parameters(mut input: &[u8]) -> bool {
+    loop {
+        while input.first() == Some(&b' ') {
+            input = &input[1..];
+        }
+        let name_length = input
+            .iter()
+            .take_while(|byte| mime_token_byte(**byte))
+            .count();
+        if name_length == 0 {
+            return false;
+        }
+        input = &input[name_length..];
+        while input.first() == Some(&b' ') {
+            input = &input[1..];
+        }
+        if input.first() != Some(&b'=') {
+            return false;
+        }
+        input = &input[1..];
+        while input.first() == Some(&b' ') {
+            input = &input[1..];
+        }
+        if input.first() == Some(&b'"') {
+            input = &input[1..];
+            loop {
+                let Some((&byte, rest)) = input.split_first() else {
+                    return false;
+                };
+                input = rest;
+                if byte == b'"' {
+                    break;
+                }
+                if byte == b'\\' {
+                    let Some((&escaped, rest)) = input.split_first() else {
+                        return false;
+                    };
+                    if escaped != 11 && escaped < 32 {
+                        return false;
+                    }
+                    input = rest;
+                } else if byte != 11 && (byte < 32 || byte == 127) {
+                    return false;
+                }
+            }
+        } else {
+            let length = input
+                .iter()
+                .take_while(|byte| mime_token_byte(**byte))
+                .count();
+            if length == 0 {
+                return false;
+            }
+            input = &input[length..];
+        }
+        while input.first() == Some(&b' ') {
+            input = &input[1..];
+        }
+        if input.is_empty() {
+            return true;
+        }
+        if input.first() != Some(&b';') {
+            return false;
+        }
+        input = &input[1..];
+    }
+}
+
+pub(crate) fn is_message_event(event: &str) -> bool {
+    event.is_empty() || event == "message"
+}
+
+fn decode_http_json_frames(body: &[u8]) -> Result<Vec<JsonRpcMessage>, jsonrpc::CodecError> {
+    let source = String::from_utf8_lossy(body);
+    let projection = Utf16JsonProjection::parse(&source)
+        .map_err(|error| jsonrpc::CodecError::MessageDecode(error.to_string()))?;
+    let Some(length) = projection.array_len("") else {
+        return mcp::decode_native_mcp_frame(body).map(|message| vec![message]);
+    };
+    (0..length)
+        .map(|index| {
+            let item = projection
+                .subprojection(&format!("/{index}"))
+                .and_then(|item| item.to_json_string())
+                .map_err(|error| jsonrpc::CodecError::MessageDecode(error.to_string()))?;
+            mcp::decode_native_mcp_frame(item.as_bytes())
+        })
+        .collect()
+}
+
+pub(crate) fn build_common_headers<H>(
     auth_token: Option<&str>,
     extra_headers: &H,
     session_id: Option<&str>,
+    protocol_version: Option<&str>,
 ) -> Result<HeaderMap, HttpConnectError>
 where
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
 {
-    let mut h = HeaderMap::new();
-    h.insert(ACCEPT, HeaderValue::from_static(STREAMABLE_HTTP_ACCEPT));
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    h.insert(
-        USER_AGENT,
-        HeaderValue::try_from(user_agent())
-            .map_err(|e| HttpConnectError::Transport(e.to_string()))?,
-    );
+    let mut entries = vec![("User-Agent".to_owned(), user_agent())];
     if let Some(token) = auth_token {
-        let v = HeaderValue::try_from(token)
+        let _ = HeaderValue::try_from(token)
             .map_err(|e| HttpConnectError::InvalidAuth(e.to_string()))?;
-        h.insert(HeaderName::from_static("x-lingxi-ide-authorization"), v);
+        entries.push(("X-LingXi-Ide-Authorization".to_owned(), token.to_owned()));
+    }
+    for (name, value) in [
+        ("mcp-session-id", session_id),
+        ("mcp-protocol-version", protocol_version),
+    ] {
+        if let Some(value) = value {
+            entries.push((name.to_owned(), value.to_owned()));
+        }
     }
     for (k, v) in extra_headers {
-        let name = HeaderName::try_from(k.as_str())
-            .map_err(|e| HttpConnectError::Transport(format!("bad header name {k}: {e}")))?;
-        let val = HeaderValue::try_from(v.as_str())
-            .map_err(|e| HttpConnectError::Transport(format!("bad header value: {e}")))?;
-        h.insert(name, val);
+        // Object spread replaces an exactly-spelled property, but distinct
+        // spellings survive until Headers joins their case-insensitive names.
+        if let Some((_, value)) = entries.iter_mut().find(|(name, _)| name == k) {
+            value.clone_from(v);
+        } else {
+            entries.push((k.clone(), v.clone()));
+        }
     }
-    if let Some(sid) = session_id {
-        let v = HeaderValue::try_from(sid)
-            .map_err(|e| HttpConnectError::Transport(format!("bad session id: {e}")))?;
-        h.insert(HeaderName::from_static("mcp-session-id"), v);
+    let mut h = HeaderMap::new();
+    for (raw_name, raw_value) in entries {
+        let name = HeaderName::try_from(raw_name.as_str()).map_err(|error| {
+            HttpConnectError::Transport(format!("bad header name {raw_name}: {error}"))
+        })?;
+        let value = raw_value.trim_matches([' ', '\t', '\r', '\n']);
+        let value = match h
+            .get(&name)
+            .and_then(|value: &HeaderValue| value.to_str().ok())
+        {
+            Some(existing) => format!("{existing}, {value}"),
+            None => value.to_owned(),
+        };
+        h.insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|error| {
+                HttpConnectError::Transport(format!("bad header value: {error}"))
+            })?,
+        );
     }
     Ok(h)
+}
+
+pub(crate) fn extend_accept(headers: &mut HeaderMap, required: &[&str]) {
+    let mut values = Vec::new();
+    if let Some(accept) = headers.get(ACCEPT).and_then(|value| value.to_str().ok()) {
+        for value in accept.split(',') {
+            let value = value.trim().to_ascii_lowercase();
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+    }
+    for value in required {
+        if !values.iter().any(|existing| existing == value) {
+            values.push((*value).to_owned());
+        }
+    }
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_str(&values.join(", ")).expect("validated Accept values remain valid"),
+    );
+}
+
+fn build_headers<H>(
+    auth_token: Option<&str>,
+    extra_headers: &H,
+    session_id: Option<&str>,
+    protocol_version: Option<&str>,
+) -> Result<HeaderMap, HttpConnectError>
+where
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    let mut headers =
+        build_common_headers(auth_token, extra_headers, session_id, protocol_version)?;
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    extend_accept(&mut headers, STREAMABLE_HTTP_ACCEPT);
+    Ok(headers)
 }
 
 /// Open an MCP Streamable HTTP connection.
@@ -319,11 +491,12 @@ where
 /// emitted HTTP request).
 ///
 /// `fetch_timeout` bounds the time-to-response-*headers* of each outbound POST
-/// (claude-code `jHs`/`YJr` — the fetch resolves once headers arrive and the
+/// (Claude Code's fetch wrapper — fetch resolves once headers arrive and the
 /// timer is cleared, so a streaming `text/event-stream` body is read afterwards
 /// WITHOUT this bound). `None` disables the bound (byte-identical to the prior
 /// behavior). Callers pass `mcp::client::mcp_http_fetch_timeout_for(..)` (default
-/// `60_000`ms). A POST that exceeds it is dropped like any other POST failure.
+/// `60_000`ms). A POST that exceeds it fails its pending call through the local
+/// transport-error mapping, without closing the connection.
 ///
 /// # Errors
 ///
@@ -361,7 +534,7 @@ where
 
     // Validate header construction eagerly so configuration errors surface at
     // connect-time rather than on the first POST.
-    let _ = build_headers(auth_token, extra_headers, None)?;
+    let _ = build_headers(auth_token, extra_headers, None, None)?;
 
     // Inbound: frames produced by the POST writer task (from JSON or SSE
     // response bodies). Outbound: frames the Connection wants to POST.
@@ -417,7 +590,8 @@ where
                     let is_probe = frame_value["method"] == "server/discover";
                     let mut headers = {
                         let sid = writer_sid.lock().unwrap();
-                        match build_headers(post_auth.as_deref(), &post_extra, sid.as_deref()) {
+                        let version = writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match build_headers(post_auth.as_deref(), &post_extra, sid.as_deref(), version.as_deref()) {
                             Ok(h) => h,
                             Err(e) => {
                                 tracing::error!(error = %e, "mcp http: failed to build POST headers");
@@ -426,15 +600,13 @@ where
                         }
                     };
 
-                    if let Some(version) = writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-                        if let Ok(value) = HeaderValue::from_str(version) {
-                            headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
-                        }
+                    if frame_value["method"] == "initialize" {
+                        headers.remove("mcp-session-id");
                     }
 
                     apply_body_derived_headers(&mut headers, &frame_value);
 
-                    // `jHs`/`YJr`: the fetch timeout bounds only the time-to-response
+                    // The native fetch timeout bounds only the time-to-response
                     // (`.send()` resolves on headers, like `await fetch(...)`); once we
                     // hold the response the streaming SSE body is read without this bound.
                     let send_fut = client.post(&post_url).headers(headers).json(&frame).send();
@@ -471,7 +643,9 @@ where
                     // requests (MCP Streamable HTTP §session).
                     if let Some(sid_val) = response.headers().get("mcp-session-id") {
                         if let Ok(val) = sid_val.to_str() {
-                            *writer_sid.lock().unwrap() = Some(val.to_string());
+                            if !val.is_empty() {
+                                *writer_sid.lock().unwrap() = Some(val.to_string());
+                            }
                         }
                     }
 
@@ -510,28 +684,35 @@ where
                         }
                         return;
                     }
-                    if frame_value["method"] == "notifications/initialized" {
-                        let _ = initialized_tx.send(());
+                    if response.status().as_u16() == 202 {
+                        let _ = response.bytes().await;
+                        if frame_value["method"] == "notifications/initialized" {
+                            let _ = initialized_tx.send(());
+                        }
+                        return;
                     }
-                    if response.status().as_u16() == 202 || response.status().as_u16() == 204 {
+                    // A notification/response POST has no request whose answer
+                    // could be delivered. Native drains and ignores its body.
+                    if !matches!(&frame, JsonRpcMessage::Request(_)) {
+                        let _ = response.bytes().await;
                         return;
                     }
 
-                    let content_type = response
+                    let content_type_header = response
                         .headers()
                         .get(CONTENT_TYPE)
                         .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_lowercase();
+                        .map(str::to_owned);
+                    let content_type = content_type_header.as_deref().and_then(content_type_essence);
 
-                    if content_type.starts_with("text/event-stream") {
+                    if content_type.as_deref() == Some("text/event-stream") {
                         // Streaming body: parse with eventsource-stream.
                         let mut events = response.bytes_stream().eventsource();
                         let mut probe_answered = false;
                         while let Some(item) = events.next().await {
                             match item {
                                 Ok(ev) => {
-                                    if ev.data.is_empty() {
+                                    if ev.data.is_empty() || !is_message_event(&ev.event) {
                                         continue;
                                     }
                                     match mcp::decode_native_mcp_frame(ev.data.as_bytes()) {
@@ -581,8 +762,9 @@ where
                                 let _ = inbound_tx.send(error);
                             }
                         }
-                    } else {
-                        // Single JSON object response.
+                    } else if content_type.as_deref() == Some("application/json") {
+                        // JSON may carry one message or an array. Native
+                        // validates the whole array before forwarding entries.
                         match response.bytes().await {
                             Ok(body) => {
                                 // Fetch's Response.json() strips one leading
@@ -592,14 +774,16 @@ where
                                 let body = body
                                     .strip_prefix(b"\xef\xbb\xbf")
                                     .unwrap_or(body.as_ref());
-                                match mcp::decode_native_mcp_frame(body) {
-                                Ok(msg) => {
+                                match decode_http_json_frames(body) {
+                                Ok(messages) => {
+                                  for msg in messages {
                                     observe_protocol_response(
                                         &frame_value,
                                         &msg,
                                         &mut writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                                     );
                                     let _ = inbound_tx.send(msg);
+                                  }
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, "mcp http: response not valid MCP JSON-RPC");
@@ -622,6 +806,11 @@ where
                                 }
                             }
                         }
+                    } else if let Some(error) = outbound_transport_error(
+                        &frame,
+                        &format!("Unexpected content type: {}", content_type_header.as_deref().unwrap_or("null")),
+                    ) {
+                        let _ = inbound_tx.send(error);
                     }
                         };
                         tokio::select! { biased; _=request_abort.cancelled()=>{}, _=process_frame=>{} }
@@ -641,16 +830,16 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(sid) = sid {
-            if let Ok(mut headers) = build_headers(post_auth.as_deref(), &post_extra, Some(&sid)) {
-                if let Some(version) = protocol_version
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    if let Ok(value) = HeaderValue::from_str(version) {
-                        headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
-                    }
-                }
+            let version = protocol_version
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Ok(headers) = build_common_headers(
+                post_auth.as_deref(),
+                &post_extra,
+                Some(&sid),
+                version.as_deref(),
+            ) {
                 // Explicit async disconnect waits for this bounded cleanup before a catalog process exits.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
@@ -682,6 +871,14 @@ where
 }
 
 fn apply_body_derived_headers(headers: &mut HeaderMap, request: &serde_json::Value) {
+    // Native applies these fields to request envelopes only (`uoe`), never
+    // to notifications/responses that happen to carry the same metadata.
+    if !request
+        .get("id")
+        .is_some_and(|id| id.is_string() || id.is_number())
+    {
+        return;
+    }
     let Some(version) = request
         .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
         .and_then(serde_json::Value::as_str)
@@ -738,7 +935,7 @@ fn js_whitespace(character: char) -> bool {
     matches!(character, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
-fn observe_protocol_response(
+pub(crate) fn observe_protocol_response(
     request: &serde_json::Value,
     response: &JsonRpcMessage,
     protocol_version: &mut Option<String>,
@@ -864,6 +1061,107 @@ async fn bounded_error_body(response: reqwest::Response, max_bytes: usize) -> St
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod remote_322_oracle_tests {
+    use super::*;
+
+    fn fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/mcp_remote_2_1_322.json")).unwrap()
+    }
+
+    #[test]
+    fn response_mime_essence_matches_shipped_parser_including_quoted_controls() {
+        for case in fixture()["mimeCases"].as_array().unwrap() {
+            assert_eq!(
+                case["value"]
+                    .as_str()
+                    .and_then(content_type_essence)
+                    .as_deref(),
+                case["essence"].as_str(),
+                "{case:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn configured_header_merging_and_delete_match_shipped_transport() {
+        let fixture = fixture();
+        for case in fixture["headerCases"].as_array().unwrap() {
+            let configured: lingxi_core::host::McpHeaders =
+                serde_json::from_value(case["headers"].clone()).unwrap();
+            let mut headers = build_headers(
+                None,
+                &configured,
+                case["sessionId"].as_str(),
+                case["protocolVersion"].as_str(),
+            )
+            .unwrap();
+            if case["method"] == "initialize" {
+                headers.remove("mcp-session-id");
+            }
+            // Product/version user-agent adaptation is outside these source
+            // helper cases; Native supplies it through the owning host wrapper.
+            headers.remove("user-agent");
+            let actual: serde_json::Map<String, serde_json::Value> = headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))
+                .collect();
+            assert_eq!(
+                serde_json::Value::Object(actual),
+                case["expected"],
+                "{case:?}"
+            );
+        }
+        let mut headers = build_common_headers(
+            None,
+            &lingxi_core::host::McpHeaders::new(),
+            Some("wire-session-322"),
+            Some("2025-11-25"),
+        )
+        .unwrap();
+        headers.remove("user-agent");
+        let actual: serde_json::Map<String, serde_json::Value> = headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))
+            .collect();
+        assert_eq!(serde_json::Value::Object(actual), fixture["deleteHeaders"]);
+        for case in fixture["bodyHeaderCases"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            apply_body_derived_headers(&mut headers, &case["request"]);
+            let actual: serde_json::Map<String, serde_json::Value> = headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))
+                .collect();
+            assert_eq!(
+                serde_json::Value::Object(actual),
+                case["expected"],
+                "{case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_response_arrays_preserve_native_source_values_and_validate_atomically() {
+        for case in fixture()["jsonCases"].as_array().unwrap() {
+            if !case["error"].is_null() {
+                continue;
+            }
+            let decoded =
+                decode_http_json_frames(case["responseRaw"].as_str().unwrap().as_bytes()).unwrap();
+            let actual =
+                Utf16JsonProjection::parse(&serde_json::to_string(&decoded).unwrap()).unwrap();
+            let expected =
+                Utf16JsonProjection::parse(case["receivedRaw"].as_str().unwrap()).unwrap();
+            assert!(actual.semantically_eq(&expected), "{case:?}");
+            assert_eq!(actual.string_units("/0/result/text").unwrap(), vec![0xd800]);
+        }
+        assert!(decode_http_json_frames(
+            br#"[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"invalid","id":2,"result":{}}]"#
+        )
+        .is_err());
+    }
 }
 
 #[cfg(test)]

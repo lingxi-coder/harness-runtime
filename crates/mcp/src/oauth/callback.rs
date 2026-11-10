@@ -11,6 +11,7 @@
 //! `redirect_uri` before opening the browser (claude-code's `listen(0)`
 //! pattern). Ported from `anthropic-oauth::callback`.
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -92,8 +93,9 @@ impl CallbackListener {
     /// "the registered redirect_uri must be {T}" copy).
     ///
     /// # Errors
-    /// [`CallbackError::StateMismatch`] on a CSRF mismatch; other variants on a
-    /// malformed request or socket failure.
+    /// Provider errors and listener failures terminate the flow. A mismatched
+    /// state receives a 400 page while the listener keeps waiting for its own
+    /// callback.
     pub async fn accept(
         self,
         expected_state: &str,
@@ -129,24 +131,26 @@ impl CallbackListener {
         expected_issuer: Option<&str>,
         issuer_parameter_supported: bool,
     ) -> Result<CallbackParams, CallbackError> {
+        let mut pending = FuturesUnordered::new();
         loop {
-            let (stream, _) = self
-                .listener
-                .accept()
-                .await
-                .map_err(|e| CallbackError::Bind(e.to_string()))?;
-            match handle_connection(stream, expected_state, redirect_uri).await {
-                Ok(Some(result)) => {
-                    validate_callback_issuer(
-                        result.issuer.as_deref(),
-                        expected_issuer,
-                        issuer_parameter_supported,
-                    )?;
-                    return Ok(result.params);
+            tokio::select! {
+                accepted=self.listener.accept()=>{
+                    let (stream,_)=accepted.map_err(|error|CallbackError::Bind(error.to_string()))?;
+                    pending.push(handle_connection(stream,expected_state,redirect_uri));
                 }
-                // Non-/callback path (e.g. favicon) — already 404'd; keep waiting.
-                Ok(None) => continue,
-                Err(e) => return Err(e),
+                connection=pending.next(), if !pending.is_empty()=>{
+                    match connection.expect("nonempty callback connection set") {
+                        Ok(Some(result))=>{
+                            validate_callback_issuer(result.issuer.as_deref(),expected_issuer,issuer_parameter_supported)?;
+                            return Ok(result.params);
+                        }
+                        // Native's HTTP server answers a mismatched state but
+                        // keeps the flow alive; malformed/closed client sockets
+                        // likewise cannot terminate another callback's flow.
+                        Ok(None)|Err(CallbackError::InvalidRequest(_))|Err(CallbackError::StateMismatch)=>continue,
+                        Err(error)=>return Err(error),
+                    }
+                }
             }
         }
     }
@@ -157,19 +161,36 @@ impl CallbackListener {
 ///
 /// Branch ordering mirrors claude-code's `/callback` handler (binary offset
 /// 208249900): state-mismatch (400) → `error` param (200) → `code` (200);
-/// any non-`/callback` path → 404. On state-mismatch and on an `error` param,
-/// the styled page is served first AND then the flow is aborted with an error.
+/// any non-`/callback` path → 404. State mismatch keeps the flow alive; a
+/// provider error serves its page and aborts the flow.
 async fn handle_connection(
     mut stream: TcpStream,
     expected_state: &str,
     redirect_uri: &str,
 ) -> Result<Option<CallbackResult>, CallbackError> {
-    let mut buf = vec![0u8; 4096];
-    let n = stream
-        .read(&mut buf)
-        .await
-        .map_err(|e| CallbackError::InvalidRequest(e.to_string()))?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+    const MAX_CALLBACK_HEADER_BYTES: usize = 16 * 1024;
+    let mut buf = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let count = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| CallbackError::InvalidRequest(error.to_string()))?;
+        if count == 0 {
+            return Err(CallbackError::InvalidRequest(
+                "incomplete HTTP request".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk[..count]);
+        if buf.len() > MAX_CALLBACK_HEADER_BYTES {
+            let _ = write_response(&mut stream, "431 Request Header Fields Too Large", "").await;
+            return Ok(None);
+        }
+        if buf.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let req = String::from_utf8_lossy(&buf);
 
     let line = req
         .lines()
@@ -197,33 +218,37 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
         return Ok(None);
     }
 
-    let mut code = None;
-    let mut state = None;
-    let mut error = None;
-    let mut error_description = None;
-    let mut issuer = None;
-    let mut issuer_seen = false;
+    // Node's legacy url.parse(...,true) parser returns an array for
+    // duplicate query keys. State arrays never equal the expected string;
+    // code/error arrays are truthy and stringify by joining with commas.
+    let mut codes = Vec::new();
+    let mut states = Vec::new();
+    let mut errors = Vec::new();
+    let mut descriptions = Vec::new();
+    let mut error_uris = Vec::new();
+    let mut issuers = Vec::new();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        let value = value.into_owned();
-        match key.as_ref() {
-            "code" if code.is_none() => code = Some(value),
-            "state" if state.is_none() => state = Some(value),
-            "error" if error.is_none() => error = Some(value),
-            "error_description" if error_description.is_none() => error_description = Some(value),
-            // URLSearchParams decodes keys as well as values and returns the
-            // first duplicate. Empty `iss` is falsy in the SDK helper.
-            "iss" if !issuer_seen => {
-                issuer = (!value.is_empty()).then_some(value);
-                issuer_seen = true;
-            }
-            _ => {}
-        }
+        let values = match key.as_ref() {
+            "code" => &mut codes,
+            "state" => &mut states,
+            "error" => &mut errors,
+            "error_description" => &mut descriptions,
+            "error_uri" => &mut error_uris,
+            "iss" => &mut issuers,
+            _ => continue,
+        };
+        values.push(value.into_owned());
     }
-
+    let state = (states.len() == 1).then(|| states[0].as_str());
+    // Unlike state/code, Native normalizes iss through jTn: first array
+    // element, with an empty first value treated as absent.
+    let issuer = issuers.first().filter(|value| !value.is_empty()).cloned();
+    let truthy = |values: &Vec<String>| {
+        values.len() > 1 || values.first().is_some_and(|value| !value.is_empty())
+    };
     // (1) state-check first (claude `state !== expectedState`): serve a 400 page
-    //     then abort. claude treats a missing `state` as a mismatch too.
-    let state = state.unwrap_or_default();
-    if state != expected_state {
+    //     and keep waiting. Native treats a missing/duplicate state as a mismatch.
+    if state != Some(expected_state) {
         let body = render_page(
             false,
             "Authentication failed",
@@ -232,12 +257,15 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
         );
         // Serve the page BEFORE returning so the browser shows it.
         let _ = write_response(&mut stream, "400 Bad Request", &body).await;
-        return Err(CallbackError::StateMismatch);
+        return Ok(None);
     }
 
     // (2) provider `error` param: serve a 200 page with the error detail, abort.
-    if let Some(err) = error {
-        let detail = format!("{}: {}", err, error_description.unwrap_or_default());
+    if truthy(&errors) {
+        let error = errors.join(",");
+        let description = descriptions.join(",");
+        let error_uri = error_uris.join(",");
+        let detail = format!("{error}: {description}");
         let body = render_page(
             false,
             "Authentication failed",
@@ -245,11 +273,22 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
             Some(&detail),
         );
         let _ = write_response(&mut stream, "200 OK", &body).await;
-        return Err(CallbackError::Provider(detail));
+        let mut message = format!("OAuth error: {error}");
+        if truthy(&descriptions) {
+            message.push_str(&format!(" - {description}"));
+        }
+        if truthy(&error_uris) {
+            message.push_str(&format!(" (See: {error_uri})"));
+        }
+        return Err(CallbackError::Provider(message));
     }
 
     // (3) success: a `code` is present → serve the success page and return.
-    let code = code.ok_or_else(|| CallbackError::InvalidRequest("missing code".into()))?;
+    if !truthy(&codes) {
+        return Ok(None);
+    }
+    let code = codes.join(",");
+    let state = state.expect("state checked above").to_owned();
     let body = render_page(
         true,
         "Authentication successful",
@@ -446,9 +485,18 @@ mod tests {
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("EXPECTED", RU).await });
         let resp = send_get(port, "/callback?code=abc&state=WRONG").await;
-        let result = server.await.expect("join");
-        assert!(matches!(result, Err(CallbackError::StateMismatch)));
-        // claude serves a 400 page even though the flow aborts.
+        assert!(
+            !server.is_finished(),
+            "mismatched callback must not abort the active flow"
+        );
+        let success = send_get(port, "/callback?code=valid&state=EXPECTED").await;
+        let result = server
+            .await
+            .expect("join")
+            .expect("valid callback after mismatch");
+        assert_eq!(result.code, "valid");
+        assert!(success.contains("200 OK"));
+        // Native serves a400 page and waits for the correct callback.
         assert!(resp.contains("400 Bad Request"));
         assert!(body_of(&resp)
             .contains("Invalid state parameter. Close this tab and try again from LingXi."));
@@ -521,6 +569,92 @@ mod tests {
             .expect_err("mismatched iss rejected");
         assert!(matches!(error, CallbackError::InvalidRequest(_)));
         assert!(response.contains("200 OK"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_issuer_uses_first_value_for_optional_and_required_validation() {
+        // Native jTn preserves the first value from legacy url.parse arrays.
+        // A later matching iss cannot hide a mismatching first issuer.
+        for required in [false, true] {
+            for (first, second, valid) in [
+                ("https://attacker.example", "https://as.example.com", false),
+                ("https://as.example.com", "https://attacker.example", true),
+                ("", "https://as.example.com", !required),
+            ] {
+                let listener = CallbackListener::bind(0).await.unwrap();
+                let port = listener.port();
+                let server = tokio::spawn(async move {
+                    listener
+                        .accept_with_issuer("S", RU, Some("https://as.example.com"), required)
+                        .await
+                });
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs([
+                        ("code", "abc"),
+                        ("state", "S"),
+                        ("iss", first),
+                        ("iss", second),
+                    ])
+                    .finish();
+                let response = send_get(port, &format!("/callback?{query}")).await;
+                assert!(response.contains("200 OK"));
+                let result = server.await.unwrap();
+                assert_eq!(
+                    result.is_ok(),
+                    valid,
+                    "required={required}, first={first}, second={second}"
+                );
+                if !valid {
+                    assert!(matches!(result, Err(CallbackError::InvalidRequest(_))));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_and_stalled_requests_do_not_block_a_valid_callback() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S", RU).await });
+        let mut stalled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stalled
+            .write_all(b"GET /callback?code=stalled&state=S HTTP/1.1\r\nHost:")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        let mut fragmented = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        for part in [
+            b"GET /callback?code=fragmented&state=S HTTP/1.1\r\n".as_slice(),
+            b"Host: localhost\r\n",
+            b"\r\n",
+        ] {
+            fragmented.write_all(part).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fragmented.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(String::from_utf8_lossy(&response).contains("200 OK"));
+        assert_eq!(server.await.unwrap().unwrap().code, "fragmented");
+        drop(stalled);
+    }
+
+    #[tokio::test]
+    async fn duplicate_state_is_rejected_then_duplicate_code_is_joined() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S", RU).await });
+        let response = send_get(port, "/callback?code=bad&state=S&state=S").await;
+        assert!(response.contains("400 Bad Request"));
+        assert!(!server.is_finished());
+        let response = send_get(port, "/callback?code=first&code=second&error=&state=S").await;
+        assert!(response.contains("200 OK"));
+        assert_eq!(server.await.unwrap().unwrap().code, "first,second");
     }
 
     #[tokio::test]

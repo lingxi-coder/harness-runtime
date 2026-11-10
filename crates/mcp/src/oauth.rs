@@ -64,6 +64,10 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub mod callback;
 
+#[cfg(test)]
+#[path = "oauth/native_322_tests.rs"]
+mod native_322_tests;
+
 pub use callback::{CallbackError, CallbackListener, CallbackParams};
 
 #[derive(Debug, Clone)]
@@ -527,9 +531,19 @@ impl From<CallbackError> for OAuthError {
 #[must_use]
 pub fn generate_pkce() -> (String, String) {
     let mut rng = rand::rng();
-    let bytes: [u8; 32] = std::array::from_fn(|_| rng.random::<u8>());
-    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let bytes: [u8; 43] = std::array::from_fn(|_| rng.random::<u8>());
+    pkce_from_random_bytes(&bytes)
+}
 
+fn pkce_from_random_bytes(bytes: &[u8; 43]) -> (String, String) {
+    // Native's shipped generator draws 43 bytes and indexes the RFC7636
+    // alphabet with byte %66, rather than base64-encoding 32 random bytes.
+    const ALPHABET: &[u8; 66] =
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+    let verifier: String = bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(*byte) % 66]))
+        .collect();
     let mut h = Sha256::new();
     h.update(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(h.finalize());
@@ -537,12 +551,12 @@ pub fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Generate a 16-byte CSRF state token, base64url-encoded (no padding). Sent
+/// Generate a 32-byte CSRF state token, base64url-encoded (no padding). Sent
 /// in the authorize URL and validated against the redirect callback's `state`.
 #[must_use]
 pub fn generate_state_token() -> String {
     let mut rng = rand::rng();
-    let bytes: [u8; 16] = std::array::from_fn(|_| rng.random::<u8>());
+    let bytes: [u8; 32] = std::array::from_fn(|_| rng.random::<u8>());
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -559,6 +573,8 @@ pub fn generate_state_token() -> String {
 struct ProtectedResourceMetadata {
     #[serde(default)]
     authorization_servers: Vec<String>,
+    #[serde(default)]
+    scopes_supported: Option<Vec<String>>,
     /// RFC 9728 `resource` — REQUIRED, matching the oracle's PRM schema
     /// `Wot=Ia({resource:pe().url(), authorization_servers:...optional(), …})`
     /// (@181753670): `resource` alone carries no `.optional()`, so
@@ -621,8 +637,9 @@ pub(crate) fn parse_www_authenticate_challenge(header: &str) -> WwwAuthChallenge
     if !gate_ok {
         return WwwAuthChallenge::default();
     }
-    let resource_metadata_url =
-        challenge_param(header, "resource_metadata").filter(|url| url::Url::parse(url).is_ok());
+    let resource_metadata_url = challenge_param(header, "resource_metadata")
+        .and_then(|value| url::Url::parse(&value).ok())
+        .map(|url| url.to_string());
     WwwAuthChallenge {
         resource_metadata_url,
         scope: challenge_param(header, "scope"),
@@ -761,6 +778,7 @@ struct DiscoveredAuthServer {
     /// guard. The standard SDK carries this exact value through authorize and
     /// authorization-code requests.
     resource: Option<String>,
+    resource_scopes_supported: Option<Vec<String>>,
     /// RFC 8414's issuer field, not `authorization_servers[0]` from PRM.
     issuer: Option<String>,
     issuer_parameter_supported: bool,
@@ -770,23 +788,81 @@ struct DiscoveredAuthServer {
 /// origin and any path component (RFC 8414 §3: the well-known segment is
 /// inserted after the host, before the issuer path).
 fn well_known_url(base: &str, suffix: &str) -> String {
-    // Split scheme://host[:port] from the path. We avoid a `url` dep (not in
-    // mcp's tree); the inputs are validated server URLs from config.
-    let without_scheme = base.split_once("://");
-    match without_scheme {
-        Some((scheme, rest)) => {
-            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-            let path = path.trim_end_matches('/');
-            if path.is_empty() {
-                format!("{scheme}://{host}/.well-known/{suffix}")
-            } else {
-                // RFC 8414 path-aware form: /.well-known/{suffix}/{path}
-                format!("{scheme}://{host}/.well-known/{suffix}/{path}")
-            }
-        }
-        // No scheme — treat the whole thing as host.
-        None => format!("{base}/.well-known/{suffix}"),
+    let Ok(mut url) = url::Url::parse(base) else {
+        return format!("{base}/.well-known/{suffix}");
+    };
+    let path = url
+        .path()
+        .strip_suffix('/')
+        .unwrap_or(url.path())
+        .to_owned();
+    url.set_path(&format!("/.well-known/{suffix}{path}"));
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn authorization_metadata_urls(base: &str) -> Result<Vec<String>, OAuthError> {
+    let url = url::Url::parse(base).map_err(|error| {
+        OAuthError::Discovery(format!("invalid authorization server URL: {error}"))
+    })?;
+    let origin = url.origin().ascii_serialization();
+    let path = url.path().strip_suffix('/').unwrap_or(url.path());
+    let mut urls = vec![
+        format!("{origin}/.well-known/oauth-authorization-server{path}"),
+        format!("{origin}/.well-known/openid-configuration{path}"),
+    ];
+    if !path.is_empty() {
+        urls.push(format!("{origin}{path}/.well-known/openid-configuration"));
     }
+    Ok(urls)
+}
+
+const MCP_OAUTH_PROTOCOL_VERSION: &str = "2025-11-25";
+
+async fn fetch_discovery_response(
+    http: &Arc<dyn HttpTransport>,
+    url: &str,
+    accept: bool,
+) -> Result<lingxi_core::types::HttpResponse, OAuthError> {
+    let mut headers = vec![(
+        "MCP-Protocol-Version".into(),
+        MCP_OAUTH_PROTOCOL_VERSION.into(),
+    )];
+    if accept {
+        headers.push(("Accept".into(), "application/json".into()));
+    }
+    http.request(HttpRequest {
+        method: HttpMethod::Get,
+        url: url.to_owned(),
+        headers,
+        body: None,
+        body_bytes: None,
+        timeout: Some(OAUTH_HTTP_TIMEOUT),
+    })
+    .await
+    .map_err(|error| OAuthError::Discovery(format!("transport: {error}")))
+}
+
+async fn discover_authorization_metadata(
+    http: &Arc<dyn HttpTransport>,
+    base: &str,
+) -> Result<Option<AuthServerMetadataDocument>, OAuthError> {
+    for candidate in authorization_metadata_urls(base)? {
+        let response = fetch_discovery_response(http, &candidate, true).await?;
+        if !(200..300).contains(&response.status) {
+            if (400..500).contains(&response.status) || response.status == 502 {
+                continue;
+            }
+            return Err(OAuthError::Discovery(format!(
+                "HTTP {} fetching {candidate}",
+                response.status
+            )));
+        }
+        return serde_json::from_str(&response.body)
+            .map(Some)
+            .map_err(|error| OAuthError::Discovery(format!("decode {candidate}: {error}")));
+    }
+    Ok(None)
 }
 
 /// One discovery `GET` returning a parsed JSON body, or `Err` on non-200.
@@ -806,7 +882,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
         .request(req)
         .await
         .map_err(|e| OAuthError::Discovery(format!("transport: {e}")))?;
-    if resp.status != 200 {
+    if !(200..300).contains(&resp.status) {
         return Err(OAuthError::Discovery(format!(
             "HTTP {} fetching {url}",
             resp.status
@@ -856,6 +932,25 @@ async fn discover_auth_server(
     configured_url: Option<&str>,
     resource_metadata_url: Option<&str>,
 ) -> Result<DiscoveredAuthServer, OAuthError> {
+    discover_auth_server_for_flow(
+        http,
+        server_url,
+        configured_url,
+        resource_metadata_url,
+        false,
+    )
+    .await
+}
+
+/// Interactive SDK auth supports the default endpoints when discovery finds
+/// no metadata. The public discovery-only helper retains its error contract.
+async fn discover_auth_server_for_flow(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    configured_url: Option<&str>,
+    resource_metadata_url: Option<&str>,
+    allow_default_endpoints: bool,
+) -> Result<DiscoveredAuthServer, OAuthError> {
     if let Some(cfg) = configured_url {
         if !cfg.starts_with("https://") {
             return Err(OAuthError::Discovery(format!(
@@ -870,35 +965,86 @@ async fn discover_auth_server(
             get_json::<AuthServerMetadataDocument>(http, cfg),
             discover_protected_resource(&protected_http, server_url, resource_metadata_url),
         )?;
-        return Ok(discovered_metadata(
+        let resource_scopes = protected_resource
+            .as_ref()
+            .and_then(|(metadata, _)| metadata.scopes_supported.clone());
+        return discovered_metadata(
             metadata,
             protected_resource.map(|(_, resource)| resource),
-        ));
+            resource_scopes,
+        );
     }
 
-    // RFC 9728: protected-resource probe → issuer → RFC 8414. A challenge-named
-    // URL (§24c) is fetched AT THAT EXACT ADDRESS; otherwise fall back to the
-    // well-known guess on the server itself.
     let protected_resource =
         discover_protected_resource(http, server_url, resource_metadata_url).await?;
     let resource = protected_resource
         .as_ref()
         .map(|(_, resource)| resource.clone());
-    if let Some((pr, resource)) = protected_resource {
-        if let Some(issuer) = pr.authorization_servers.first() {
-            let as_url = well_known_url(issuer, "oauth-authorization-server");
-            if let Ok(meta) = get_json::<AuthServerMetadataDocument>(http, &as_url).await {
-                return Ok(discovered_metadata(meta, Some(resource)));
-            }
+    let resource_scopes = protected_resource
+        .as_ref()
+        .and_then(|(metadata, _)| metadata.scopes_supported.clone());
+    let server = url::Url::parse(server_url)
+        .map_err(|error| OAuthError::Discovery(format!("invalid MCP server URL: {error}")))?;
+    let issuer = protected_resource
+        .as_ref()
+        .and_then(|(metadata, _)| metadata.authorization_servers.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            server
+                .join("/")
+                .expect("hierarchical MCP endpoint")
+                .to_string()
+        });
+    match discover_authorization_metadata(http, &issuer).await {
+        Ok(Some(metadata)) => return discovered_metadata(metadata, resource, resource_scopes),
+        // SDK v9t propagates genuine HTTP/JSON failures. A missing document
+        // (4xx/502 at every candidate) is the distinct default-endpoint case.
+        Err(error) if allow_default_endpoints => return Err(error),
+        Ok(None) | Err(_) => {}
+    }
+    // The application preflight retains its path-aware legacy discovery
+    // after the standard origin/PRM chain has no usable metadata.
+    if server.path() != "/" {
+        match discover_authorization_metadata(http, server_url).await {
+            Ok(Some(metadata)) => return discovered_metadata(metadata, resource, resource_scopes),
+            Err(error) if allow_default_endpoints => return Err(error),
+            Ok(None) | Err(_) => {}
         }
     }
-
-    // Fallback: RFC 8414 directly against the server URL (path-aware).
-    let as_url = well_known_url(server_url, "oauth-authorization-server");
-    Ok(discovered_metadata(
-        get_json::<AuthServerMetadataDocument>(http, &as_url).await?,
-        resource,
-    ))
+    if allow_default_endpoints {
+        // Native Ces/kn/th use these paths relative to the selected AS when
+        // TZr returned no metadata. Do not invent an issuer or advertised
+        // scopes; the PRM resource binding still carries through the flow.
+        let issuer =
+            url::Url::parse(&issuer).map_err(|error| OAuthError::Discovery(error.to_string()))?;
+        let endpoint = |path| {
+            issuer
+                .join(path)
+                .map(String::from)
+                .map_err(|error| OAuthError::Discovery(error.to_string()))
+        };
+        return Ok(DiscoveredAuthServer {
+            metadata: AuthServerMetadata {
+                authorization_endpoint: endpoint("/authorize")?,
+                token_endpoint: endpoint("/token")?,
+                registration_endpoint: Some(endpoint("/register")?),
+                scopes_supported: None,
+                scope: None,
+                default_scope: None,
+                revocation_endpoint: None,
+                revocation_endpoint_auth_methods_supported: None,
+                token_endpoint_auth_methods_supported: None,
+            },
+            resource,
+            resource_scopes_supported: resource_scopes,
+            issuer: None,
+            issuer_parameter_supported: false,
+        });
+    }
+    Err(OAuthError::Discovery(format!(
+        "no usable metadata at {}",
+        authorization_metadata_urls(&issuer)?[0]
+    )))
 }
 
 async fn discover_protected_resource(
@@ -906,34 +1052,58 @@ async fn discover_protected_resource(
     server_url: &str,
     resource_metadata_url: Option<&str>,
 ) -> Result<Option<(ProtectedResourceMetadata, String)>, OAuthError> {
-    let pr_url = match resource_metadata_url {
-        Some(named) => named.to_string(),
+    let mut pr_url = match resource_metadata_url {
+        Some(named) => url::Url::parse(named)
+            .map_err(|error| {
+                OAuthError::Discovery(format!("invalid resource metadata URL: {error}"))
+            })?
+            .to_string(),
         None => well_known_url(server_url, "oauth-protected-resource"),
     };
-    match get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
-        Ok(pr) => {
-            let resource = validated_resource_url(server_url, &pr.resource)?;
-            Ok(Some((pr, resource)))
-        }
-        // A missing or undecodable PRM is an optional discovery probe. The
-        // configured RFC 8414 URL still determines AS metadata, while a valid
-        // PRM contributes its RFC 8707 resource indicator to the OAuth wire.
-        Err(_) => Ok(None),
+    let mut response = fetch_discovery_response(http, &pr_url, false).await?;
+    let server = url::Url::parse(server_url)
+        .map_err(|error| OAuthError::Discovery(format!("invalid MCP server URL: {error}")))?;
+    if resource_metadata_url.is_none()
+        && server.path() != "/"
+        && ((400..500).contains(&response.status) || response.status == 502)
+    {
+        pr_url = server
+            .join("/.well-known/oauth-protected-resource")
+            .map_err(|error| OAuthError::Discovery(error.to_string()))?
+            .to_string();
+        response = fetch_discovery_response(http, &pr_url, false).await?;
     }
+    if !(200..300).contains(&response.status) {
+        return Ok(None);
+    }
+    let Ok(metadata) = serde_json::from_str::<ProtectedResourceMetadata>(&response.body) else {
+        return Ok(None);
+    };
+    let resource = validated_resource_url(server_url, &metadata.resource)?;
+    Ok(Some((metadata, resource)))
 }
 
 fn discovered_metadata(
     document: AuthServerMetadataDocument,
     resource: Option<String>,
-) -> DiscoveredAuthServer {
-    DiscoveredAuthServer {
+    resource_scopes_supported: Option<Vec<String>>,
+) -> Result<DiscoveredAuthServer, OAuthError> {
+    for endpoint in [
+        &document.metadata.authorization_endpoint,
+        &document.metadata.token_endpoint,
+    ] {
+        url::Url::parse(endpoint)
+            .map_err(|error| OAuthError::Discovery(format!("invalid OAuth endpoint: {error}")))?;
+    }
+    Ok(DiscoveredAuthServer {
         metadata: document.metadata,
         resource,
+        resource_scopes_supported,
         issuer: document.issuer,
         issuer_parameter_supported: document
             .authorization_response_iss_parameter_supported
             .unwrap_or(false),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -944,18 +1114,114 @@ fn discovered_metadata(
 /// `ClaudeAuthProvider.clientMetadata` (auth.ts:1417-1437):
 /// `grant_types:[authorization_code, refresh_token]`, `response_types:[code]`,
 /// `token_endpoint_auth_method:none`.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct RegistrationRequest<'a> {
+    client_name: String,
     redirect_uris: Vec<&'a str>,
     grant_types: Vec<&'a str>,
     response_types: Vec<&'a str>,
     token_endpoint_auth_method: &'a str,
-    client_name: String,
-    /// Advertised scope, mirrored into the client metadata when the auth server
-    /// publishes one (auth.ts:1426-1434, `getScopeFromMetadata`). Omitted (per
-    /// RFC 7591) when no scope is available.
-    #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'a str>,
+    application_type: &'static str,
+    scope_precedes_application_type: bool,
+}
+
+impl Serialize for RegistrationRequest<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(6 + usize::from(self.scope.is_some())))?;
+        map.serialize_entry("client_name", &self.client_name)?;
+        map.serialize_entry("redirect_uris", &self.redirect_uris)?;
+        map.serialize_entry("grant_types", &self.grant_types)?;
+        map.serialize_entry("response_types", &self.response_types)?;
+        map.serialize_entry(
+            "token_endpoint_auth_method",
+            self.token_endpoint_auth_method,
+        )?;
+        // Jd appends application_type after provider client metadata; th's
+        // scope spread retains an existing key's position or appends it.
+        if self.scope_precedes_application_type {
+            if let Some(scope) = self.scope {
+                map.serialize_entry("scope", scope)?;
+            }
+        }
+        map.serialize_entry("application_type", self.application_type)?;
+        if !self.scope_precedes_application_type {
+            if let Some(scope) = self.scope {
+                map.serialize_entry("scope", scope)?;
+            }
+        }
+        map.end()
+    }
+}
+
+fn client_application_type(redirect_uri: &str) -> &'static str {
+    let Ok(url) = url::Url::parse(redirect_uri) else {
+        return "web";
+    };
+    if !matches!(url.scheme(), "http" | "https") || is_oauth_loopback(&url) {
+        "native"
+    } else {
+        "web"
+    }
+}
+
+fn is_oauth_loopback(url: &url::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    )
+}
+
+fn token_endpoint_url(endpoint: &str) -> Result<url::Url, OAuthError> {
+    let url = url::Url::parse(endpoint)
+        .map_err(|error| OAuthError::Token(format!("invalid token endpoint: {error}")))?;
+    if url.scheme() != "https" && !is_oauth_loopback(&url) {
+        return Err(OAuthError::Token(format!(
+            "OAuth token endpoint must use HTTPS or a loopback host: {url}"
+        )));
+    }
+    Ok(url)
+}
+
+fn form_body<'a>(form: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish()
+}
+
+/// JavaScript encodeURIComponent, used only by revocation Basic auth. Token
+/// grants use raw Latin-1 btoa bytes and URLSearchParams uses form encoding.
+fn encode_uri_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn token_basic_authorization(client_id: &str, client_secret: &str) -> Result<String, OAuthError> {
+    if client_secret.is_empty() {
+        return Err(OAuthError::Token(
+            "client_secret_basic authentication requires a client_secret".into(),
+        ));
+    }
+    let bytes = format!("{client_id}:{client_secret}")
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).ok())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            OAuthError::Token("Invalid character in client_secret_basic credentials".into())
+        })?;
+    Ok(format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// DCR response — we only need the issued `client_id`.
@@ -976,6 +1242,25 @@ pub async fn register_client(
     server_name: &str,
     scope: Option<&str>,
 ) -> Result<String, OAuthError> {
+    register_client_with_scope_order(
+        http,
+        registration_endpoint,
+        redirect_uri,
+        server_name,
+        scope,
+        false,
+    )
+    .await
+}
+
+async fn register_client_with_scope_order(
+    http: &Arc<dyn HttpTransport>,
+    registration_endpoint: &str,
+    redirect_uri: &str,
+    server_name: &str,
+    scope: Option<&str>,
+    scope_precedes_application_type: bool,
+) -> Result<String, OAuthError> {
     let body = RegistrationRequest {
         redirect_uris: vec![redirect_uri],
         grant_types: vec!["authorization_code", "refresh_token"],
@@ -985,16 +1270,15 @@ pub async fn register_client(
         // the LingXi rebrand but mirror the per-server suffix.
         client_name: format!("LingXi ({server_name})"),
         scope,
+        application_type: client_application_type(redirect_uri),
+        scope_precedes_application_type,
     };
     let body = serde_json::to_string(&body)
         .map_err(|e| OAuthError::Registration(format!("encode: {e}")))?;
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: registration_endpoint.to_string(),
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            ("accept".into(), "application/json".into()),
-        ],
+        headers: vec![("Content-Type".into(), "application/json".into())],
         body: Some(body),
         body_bytes: None,
         timeout: Some(OAUTH_HTTP_TIMEOUT),
@@ -1181,24 +1465,148 @@ fn build_authorize_url_with_resource(
 ) -> (String, String, String) {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state_token();
-    let mut url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
-        meta.authorization_endpoint,
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(&state),
-        urlencoding::encode(&challenge),
+    let url = authorize_url_from_material(
+        &meta.authorization_endpoint,
+        client_id,
+        redirect_uri,
+        scope,
+        resource,
+        &state,
+        &challenge,
     );
+    (url, verifier, state)
+}
+
+fn set_query_pair(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some(index) = pairs.iter().position(|(name, _)| name == key) {
+        pairs[index].1 = value.to_owned();
+        let mut current = 0;
+        pairs.retain(|(name, _)| {
+            let retain = name != key || current == index;
+            current += 1;
+            retain
+        });
+    } else {
+        pairs.push((key.to_owned(), value.to_owned()));
+    }
+}
+
+fn authorize_url_from_material(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+    state: &str,
+    challenge: &str,
+) -> String {
+    authorize_url_from_material_with_scope(
+        endpoint,
+        client_id,
+        redirect_uri,
+        scope,
+        resource,
+        state,
+        challenge,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_url_from_material_with_scope(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+    state: &str,
+    challenge: &str,
+    provider_scope: Option<(&AuthServerMetadata, Option<&str>)>,
+) -> String {
+    // Actual flow discovery validates endpoint URLs. Keep the public helper's
+    // existing infallible signature for callers with already-validated DTOs.
+    let Ok(mut url) = url::Url::parse(endpoint) else {
+        return endpoint.to_owned();
+    };
+    let mut pairs = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    for (key, value) in [
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+        ("redirect_uri", redirect_uri),
+        ("state", state),
+    ] {
+        if !value.is_empty() || key != "state" {
+            set_query_pair(&mut pairs, key, value);
+        }
+    }
     if !scope.is_empty() {
-        url.push_str(&format!("&scope={}", urlencoding::encode(scope)));
+        set_query_pair(&mut pairs, "scope", scope);
+    }
+    if scope.split(' ').any(|value| value == "offline_access") {
+        pairs.push(("prompt".into(), "consent".into()));
     }
     if let Some(resource) = resource {
-        let separator = if url.contains('?') { '&' } else { '?' };
-        url.push(separator);
-        url.push_str("resource=");
-        url.push_str(&urlencoding::encode(resource));
+        set_query_pair(&mut pairs, "resource", resource);
     }
-    (url, verifier, state)
+    if let Some((metadata, configured_scope)) = provider_scope {
+        let current_scope = pairs
+            .iter()
+            .find(|(key, _)| key == "scope")
+            .map(|(_, value)| value.as_str());
+        if let Some(resolved_scope) = configured_scope.or(current_scope) {
+            if let Some(final_scope) = with_offline_access(Some(resolved_scope), metadata) {
+                if Some(final_scope.as_str()) != current_scope {
+                    set_query_pair(&mut pairs, "scope", &final_scope);
+                }
+            }
+        }
+    }
+    normalize_authorization_prompt(&url, &mut pairs);
+    let query = form_body(
+        pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    url.set_query(Some(&query));
+    url.to_string()
+}
+
+fn normalize_authorization_prompt(url: &url::Url, pairs: &mut Vec<(String, String)>) {
+    let host = url.host_str().unwrap_or_default();
+    let microsoft = [
+        "login.microsoftonline.com",
+        "login.microsoftonline.us",
+        "login.partner.microsoftonline.cn",
+        "login.chinacloudapi.cn",
+    ]
+    .contains(&host)
+        || host.ends_with(".b2clogin.com")
+        || host.ends_with(".ciamlogin.com");
+    let prompts = pairs
+        .iter()
+        .filter(|(name, _)| name == "prompt")
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let retained = prompts
+        .iter()
+        .filter(|value| !microsoft || value.as_str() != "consent")
+        .cloned()
+        .collect::<Vec<_>>();
+    if retained.len() != prompts.len() || retained.len() > 1 {
+        pairs.retain(|(name, _)| name != "prompt");
+        if let Some(value) = retained
+            .iter()
+            .find(|value| value.as_str() == "consent")
+            .or_else(|| retained.last())
+        {
+            pairs.push(("prompt".into(), value.clone()));
+        }
+    }
 }
 
 /// POST a form-encoded grant to the token endpoint and parse the response,
@@ -1222,24 +1630,21 @@ async fn post_token_grant_with_headers(
     form: &[(&str, &str)],
     extra_headers: &[(&str, String)],
 ) -> Result<(Tokens, u16, String), OAuthError> {
-    let body = form
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
+    let token_endpoint = token_endpoint_url(token_endpoint)?.to_string();
+    let body = form_body(form.iter().copied());
     let mut headers = vec![
         (
-            "content-type".into(),
+            "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ),
-        ("accept".into(), "application/json".into()),
+        ("Accept".into(), "application/json".into()),
     ];
     for (k, v) in extra_headers {
         headers.push(((*k).to_string(), v.clone()));
     }
     let req = HttpRequest {
         method: HttpMethod::Post,
-        url: token_endpoint.to_string(),
+        url: token_endpoint,
         headers,
         body: Some(body),
         body_bytes: None,
@@ -1380,13 +1785,13 @@ async fn exchange_code_with_resource(
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
         ("code_verifier", verifier),
+        ("redirect_uri", redirect_uri),
     ];
     if let Some(resource) = resource {
         form.push(("resource", resource));
     }
+    form.push(("client_id", client_id));
     let (mut tokens, _status, _body) =
         post_token_grant(http, clock, &meta.token_endpoint, &form).await?;
     tokens.client_id = Some(client_id.to_string());
@@ -1543,6 +1948,9 @@ async fn refresh_tokens_once(
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
+    if let Some(resource) = resource {
+        form.push(("resource", resource));
+    }
     let mut extra_headers: Vec<(&str, String)> = Vec::new();
     let supported = meta
         .token_endpoint_auth_methods_supported
@@ -1555,17 +1963,13 @@ async fn refresh_tokens_once(
             let secret = client_secret.unwrap_or_default();
             extra_headers.push((
                 "authorization",
-                format!(
-                    "Basic {}",
-                    base64::engine::general_purpose::STANDARD
-                        .encode(format!("{client_id}:{secret}"))
-                ),
+                token_basic_authorization(client_id, secret)?,
             ));
         }
         // `Cc(e,t,r)`: `client_id` always, `client_secret` when present.
         TokenAuthMethod::SecretPost => {
             form.push(("client_id", client_id));
-            if let Some(secret) = client_secret {
+            if let Some(secret) = client_secret.filter(|secret| !secret.is_empty()) {
                 form.push(("client_secret", secret));
             }
         }
@@ -1573,9 +1977,6 @@ async fn refresh_tokens_once(
         TokenAuthMethod::SecretBasic | TokenAuthMethod::None => {
             form.push(("client_id", client_id));
         }
-    }
-    if let Some(resource) = resource {
-        form.push(("resource", resource));
     }
     match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
         .await
@@ -1688,6 +2089,33 @@ fn curated_metadata_scope(meta: &AuthServerMetadata, has_explicit_metadata_url: 
     String::new()
 }
 
+/// Native SDK Gd: explicit step-up scope, PRM advertised scopes, then the
+/// public client's metadata scope. Public clients advertise refresh_token.
+fn sdk_requested_scope(
+    requested: Option<&str>,
+    resource_scopes: Option<&[String]>,
+    client_scope: Option<&str>,
+    metadata: &AuthServerMetadata,
+) -> Option<String> {
+    let prm_scope = resource_scopes.map(|scopes| scopes.join(" "));
+    let mut scope = requested
+        .filter(|scope| !scope.is_empty())
+        .or_else(|| prm_scope.as_deref().filter(|scope| !scope.is_empty()))
+        .or(client_scope)
+        .map(str::to_owned);
+    if let Some(value) = scope.as_mut().filter(|scope| !scope.is_empty()) {
+        if metadata
+            .scopes_supported
+            .as_ref()
+            .is_some_and(|scopes| scopes.iter().any(|scope| scope == "offline_access"))
+            && !value.split(' ').any(|scope| scope == "offline_access")
+        {
+            value.push_str(" offline_access");
+        }
+    }
+    scope
+}
+
 /// Append `offline_access` to the authorize-URL scope when the server
 /// advertises it — 1:1 with the binary's `D$p(e,t)`. `scope` mirrors JS `e`:
 /// `None` is JS `null` (no scope resolved at all), `Some(s)` a resolved scope
@@ -1743,6 +2171,7 @@ fn with_offline_access(scope: Option<&str>, meta: &AuthServerMetadata) -> Option
 /// The `r === null` guard is why a genuine no-scope request (no explicit
 /// metadata URL, no curated scope) stays scope-less even when the server
 /// advertises `offline_access` — the cc 2.1.196 "don't over-ask" fix.
+#[cfg(test)]
 fn authorize_url_scope(
     scope: &str,
     has_explicit_metadata_url: bool,
@@ -1884,11 +2313,12 @@ async fn perform_oauth_flow_inner(
 
     let result: Result<Tokens, OAuthError> = async {
     // 1. Discovery.
-    let discovered = discover_auth_server(
+    let discovered = discover_auth_server_for_flow(
         http,
         server_url,
         oauth.auth_server_metadata_url.as_deref(),
         resource_metadata_url,
+        true,
     )
     .await?;
     let meta = &discovered.metadata;
@@ -1900,23 +2330,16 @@ async fn perform_oauth_flow_inner(
     let port = listener.port();
     let redirect_uri = format!("http://localhost:{port}/callback");
 
-    // 3. Advertised scope (used both for DCR client metadata and the authorize
-    //    URL). A `scope_override` (a cached step-up scope from a prior 403
-    //    `insufficient_scope`) takes precedence so the authorize URL requests
-    //    the elevated scope (auth.ts:909-935 / 1625-1637). Otherwise the scope
-    //    is the CURATED metadata scope — cc 2.1.196 fix, binary
-    //    `getCuratedMetadataScope`: the non-standard `scope` / `default_scope`
-    //    metadata strings when published, and the full `scopes_supported`
-    //    catalog ONLY when the user explicitly configured
-    //    `authServerMetadataUrl` (`if(this.serverConfig.oauth?.
-    //    authServerMetadataUrl && Array.isArray(this._metadata?.
-    //    scopes_supported)) return this._metadata.scopes_supported.join(" ")`).
-    //    With no scope specified anywhere the request carries NO scope — it
-    //    must NOT ask for the whole advertised catalog.
-    let scope = match scope_override {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => curated_metadata_scope(&meta, oauth.auth_server_metadata_url.is_some()),
-    };
+    // The SDK resolves requested scope, PRM scopes, then client metadata.
+    // Its offline_access addition also belongs in DCR, before the provider's
+    // later configured-scope override in redirectToAuthorization.
+    let curated_scope = curated_metadata_scope(meta, oauth.auth_server_metadata_url.is_some());
+    let scope = sdk_requested_scope(
+        scope_override,
+        discovered.resource_scopes_supported.as_deref(),
+        Some(&curated_scope),
+        meta,
+    );
 
     // 4. Client id — configured, else dynamic client registration.
     let client_id = if let Some(id) = &oauth.client_id {
@@ -1927,30 +2350,29 @@ async fn perform_oauth_flow_inner(
                 "no client_id configured and server advertises no registration_endpoint".into(),
             )
         })?;
-        let dcr_scope = (!scope.is_empty()).then_some(scope.as_str());
-        register_client(http, reg, &redirect_uri, server_name, dcr_scope).await?
+        let dcr_scope = scope.as_deref().filter(|scope| !scope.is_empty());
+        register_client_with_scope_order(http, reg, &redirect_uri, server_name, dcr_scope, !curated_scope.is_empty()).await?
     };
 
-    // 5. Authorize URL (PKCE inside) + surface it to the host. The authorize
-    //    scope (unlike the DCR scope) gains `offline_access` when the server
-    //    advertises it (binary `redirectToAuthorization` → `D$p`), so refresh
-    //    tokens keep being issued now that the catalog is no longer requested.
-    //    Mirror the binary's scope resolution 1:1 (`redirectToAuthorization`):
-    //      t = authServerMetadataUrl ? getCuratedMetadataScope() : undefined
-    //      n = the scope actually placed in the URL (absent when empty)
-    //      r = t ?? n            (JS nullish: t="" is kept; undefined → n)
-    //      o = r === null ? null : D$p(r, metadata)
-    //    Only when `o` is non-null does the URL carry a scope, so a genuine
-    //    no-scope request (no explicit metadata URL + no curated scope) stays
-    //    scope-less even when the server advertises `offline_access`.
-    let authorize_scope =
-        authorize_url_scope(&scope, oauth.auth_server_metadata_url.is_some(), &meta);
-    let (auth_url, verifier, state) = build_authorize_url_with_resource(
-        meta,
+    // The application overrides SDK scope with explicit server configuration
+    // except during step-up. Preserve an explicitly empty curated scope.
+    let configured_scope = if scope_override.is_some_and(|scope| !scope.is_empty()) {
+        None
+    } else {
+        oauth.scopes.as_deref().filter(|scope| !scope.is_empty()).or_else(||
+            oauth.auth_server_metadata_url.as_ref().map(|_| curated_scope.as_str()))
+    };
+    let (verifier, challenge) = generate_pkce();
+    let state = generate_state_token();
+    let auth_url = authorize_url_from_material_with_scope(
+        &meta.authorization_endpoint,
         &client_id,
         &redirect_uri,
-        &authorize_scope,
+        scope.as_deref().unwrap_or_default(),
         discovered.resource.as_deref(),
+        &state,
+        &challenge,
+        Some((meta, configured_scope)),
     );
     on_auth_url(&auth_url);
 
@@ -2070,9 +2492,9 @@ fn parse_manual_callback_input_with_issuer(
     let mut issuer_seen = false;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "state" => state = Some(value.into_owned()),
-            "error" => provider_error = Some(value.into_owned()),
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            "error" if provider_error.is_none() => provider_error = Some(value.into_owned()),
             "iss" if !issuer_seen => {
                 let value = value.into_owned();
                 issuer = (!value.is_empty()).then_some(value);
@@ -2428,7 +2850,10 @@ pub async fn revoke_token(
     )];
 
     // auth.ts:411-428 client-auth precedence.
-    match (client_id, client_secret) {
+    match (
+        client_id.filter(|value| !value.is_empty()),
+        client_secret.filter(|value| !value.is_empty()),
+    ) {
         (Some(id), Some(secret)) => {
             if auth_method == "client_secret_post" {
                 form.push(("client_id".into(), id.into()));
@@ -2437,8 +2862,8 @@ pub async fn revoke_token(
                 // client_secret_basic: base64(urlencode(id):urlencode(secret)).
                 let basic = format!(
                     "{}:{}",
-                    urlencoding::encode(id),
-                    urlencoding::encode(secret)
+                    encode_uri_component(id),
+                    encode_uri_component(secret)
                 );
                 headers.push((
                     "authorization".into(),
@@ -2455,10 +2880,10 @@ pub async fn revoke_token(
     }
 
     let encode_body = |form: &[(String, String)]| {
-        form.iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&")
+        form_body(
+            form.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
     };
 
     let req = HttpRequest {
@@ -2479,7 +2904,7 @@ pub async fn revoke_token(
 
     // auth.ts:434-457: 401 fallback → retry with Bearer, clearing client creds.
     if resp.status == 401 {
-        if let Some(at) = access_token {
+        if let Some(at) = access_token.filter(|value| !value.is_empty()) {
             form.retain(|(k, _)| k != "client_id" && k != "client_secret");
             let mut retry_headers: Vec<(String, String)> = headers
                 .into_iter()

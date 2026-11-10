@@ -99,7 +99,9 @@ extracted helpers, not execution of the complete executable.
 ## Limits
 
 Live SDK, HTTP/SSE, and auto-classifier `PermissionDenied` paths were not
-exercised. The five payload serializers and scope/source precedence have
+exercised in this first phase. The [transport/OAuth follow-up](mcp-transports-oauth-2.1.322.md)
+adds bounded SDK, HTTP/SSE, and OAuth verification. The five payload serializers
+and scope/source precedence have
 fixture coverage. Hook provenance itself preserves arbitrary UTF-16 strings;
 the wider MCP configuration catalog still represents authored server names
 as Rust strings. Prototype-sensitive interpolation inherits the existing

@@ -32,6 +32,23 @@ use serde::{Deserialize, Serialize};
 
 type JsonProjection = Utf16JsonProjection;
 
+struct ProgressForwarderGuard(Option<tokio::task::JoinHandle<()>>);
+impl Drop for ProgressForwarderGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+struct SdkPingHandler;
+#[async_trait::async_trait]
+impl jsonrpc::InboundHandler for SdkPingHandler {
+    async fn handle(&self, request: jsonrpc::Request) -> jsonrpc::Response {
+        jsonrpc::Response::success(request.id, serde_json::json!({}))
+    }
+}
+
 use crate::connection::McpDroppedToolRecord;
 use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
@@ -840,6 +857,29 @@ impl McpClient {
         Self::with_hook_dispatcher(server_name, cwd, connection, None).await
     }
 
+    /// SDK-hosted connections advertise no roots or elicitation capabilities.
+    /// Leave those handlers unregistered while preserving generic ping and
+    /// the ordinary constructors' platform capability handlers.
+    pub async fn new_sdk_hosted(
+        server_name: impl Into<String>,
+        cwd: PathBuf,
+        connection: Arc<jsonrpc::Connection>,
+    ) -> Self {
+        connection
+            .register_handler("ping", Arc::new(SdkPingHandler))
+            .await;
+        Self::with_roots_and_handlers(
+            server_name,
+            cwd,
+            new_shared_roots(Vec::new()),
+            connection,
+            None,
+            false,
+        )
+        .await
+        .with_transport_kind(McpTransportKind::SdkControl)
+    }
+
     /// Like [`Self::new`], but wires an optional [`HookDispatcher`] into the
     /// registered [`ElicitationCreateHandler`] so an incoming
     /// `elicitation/create` can consult the `Elicitation` hook.
@@ -887,29 +927,50 @@ impl McpClient {
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
+        Self::with_roots_and_handlers(
+            server_name,
+            cwd,
+            additional_roots,
+            connection,
+            dispatcher,
+            true,
+        )
+        .await
+    }
+
+    async fn with_roots_and_handlers(
+        server_name: impl Into<String>,
+        cwd: PathBuf,
+        additional_roots: SharedRoots,
+        connection: Arc<jsonrpc::Connection>,
+        dispatcher: Option<Arc<dyn HookDispatcher>>,
+        capability_handlers: bool,
+    ) -> Self {
         let server_name = server_name.into();
-        connection
-            .register_handler(
-                "roots/list",
-                Arc::new(RootsListHandler {
-                    cwd: cwd.clone(),
-                    additional: additional_roots,
-                }),
-            )
-            .await;
         // Shared with the handler so the auto-background race can ask this
         // client whether a dialog is open (MON-08). One Arc, two owners.
         let elicitation_pending = Arc::new(AtomicUsize::new(0));
-        connection
-            .register_handler(
-                "elicitation/create",
-                Arc::new(ElicitationCreateHandler::with_dispatcher_and_counter(
-                    server_name.clone(),
-                    dispatcher,
-                    Arc::clone(&elicitation_pending),
-                )),
-            )
-            .await;
+        if capability_handlers {
+            connection
+                .register_handler(
+                    "roots/list",
+                    Arc::new(RootsListHandler {
+                        cwd: cwd.clone(),
+                        additional: additional_roots,
+                    }),
+                )
+                .await;
+            connection
+                .register_handler(
+                    "elicitation/create",
+                    Arc::new(ElicitationCreateHandler::with_dispatcher_and_counter(
+                        server_name.clone(),
+                        dispatcher,
+                        Arc::clone(&elicitation_pending),
+                    )),
+                )
+                .await;
+        }
 
         Self {
             elicitation_pending,
@@ -1319,10 +1380,48 @@ impl McpClient {
     /// `instructions` string is truncated (see [`truncate_description`])
     /// and stored in [`McpClient::server_instructions`].
     pub async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
+        let capabilities = (self.transport_kind == McpTransportKind::SdkControl)
+            .then(|| Utf16JsonProjection::parse("{}").expect("SDK client capabilities are empty"));
+        self.initialize_with_capabilities_override(capabilities.as_ref())
+            .await
+    }
+
+    /// Initialize an SDK-hosted connection without advertising ordinary
+    /// platform capabilities. This explicit host boundary does not alter the
+    /// standard initialize contract used by stdio, HTTP, SSE, or providers.
+    pub async fn initialize_with_client_capabilities(
+        &self,
+        capabilities: &Utf16JsonProjection,
+    ) -> Result<ServerCapabilitiesDto, McpClientError> {
+        if capabilities.object_entries().is_none() {
+            return Err(McpClientError::Rpc(
+                "MCP client capabilities must be an object".into(),
+            ));
+        }
+        self.initialize_with_capabilities_override(Some(capabilities))
+            .await
+    }
+
+    async fn initialize_with_capabilities_override(
+        &self,
+        capabilities: Option<&Utf16JsonProjection>,
+    ) -> Result<ServerCapabilitiesDto, McpClientError> {
         let mut params = InitializeParams::default();
         params.capabilities.elicitation = self.elicitation.legacy.wire();
         let params_source = serde_json::to_string(&params)
             .map_err(|error| McpClientError::Rpc(error.to_string().into()))?;
+        let params_source = if let Some(capabilities) = capabilities {
+            let mut source = Utf16JsonProjection::parse(&params_source)
+                .map_err(|error| McpClientError::Rpc(error.to_string().into()))?;
+            source
+                .set_field("capabilities", capabilities.clone())
+                .map_err(|error| McpClientError::Rpc(error.to_string().into()))?;
+            source
+                .to_json_string()
+                .map_err(|error| McpClientError::Rpc(error.to_string().into()))?
+        } else {
+            params_source
+        };
         let response_source = self
             .connection
             .call_raw_json("initialize", params_source)
@@ -1953,103 +2052,78 @@ impl McpClient {
         // measurements agree (and paused-time tests are deterministic).
         let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
 
-        // MCP.4: subscribe to inbound notifications BEFORE the request is sent
-        // (so no early `notifications/progress` is missed) and spawn a forwarder
-        // matching by the minted `progressToken`. The `progressToken` is minted
-        // (and stamped into `_meta`, altering the outgoing request body) ONLY when
-        // both a callback and a toolUseId exist (the `onProgress && toolUseId`
-        // gate — outgoing request-body parity is locked to that surface). When a
-        // token IS stamped, the listener also resets the idle watchdog on every
-        // matching progress note.
         let progress_active = on_progress.is_some() && tool_use_id.is_some();
-        let forwarder = if progress_active {
-            // The MCP SDK uses the outgoing request id as the progressToken; the
-            // router owns request ids here, so we mint a process-unique token and
-            // stamp it into `_meta.progressToken` for the server to echo back.
-            let token = format!(
-                "lingxi-mcp-progress-{}",
-                NEXT_PROGRESS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            );
-            meta.insert(
-                "progressToken".to_string(),
-                serde_json::Value::String(token.clone()),
-            );
-            let callback = on_progress.expect("progress_active implies Some(callback)");
-            let mut notifications = self.connection.notifications();
-            let activity = last_activity.clone();
-            Some(tokio::spawn(async move {
-                loop {
-                    match notifications.recv().await {
-                        Ok(n) => {
-                            if !jsonrpc_method_is(&n.method, "notifications/progress") {
-                                continue;
-                            }
-                            let Some(params) = n.params.as_ref() else {
-                                continue;
-                            };
-                            let Ok(p) = Utf16JsonProjection::parse(params.as_json()) else {
-                                continue;
-                            };
-                            if p.string_at("/progressToken") != Some(token.as_str()) {
-                                continue;
-                            }
-                            // Reset the idle watchdog: a matching progress note is
-                            // liveness (claude-code onprogress: `v = Date.now()`).
-                            if let Ok(mut a) = activity.lock() {
-                                *a = tokio::time::Instant::now();
-                            }
-                            // SDK `onprogress` payload: `{progress, total?, message?}`
-                            // (`client.ts:3109-3111`).
-                            let progress = p.number_at("/progress").unwrap_or(0.0);
-                            let total = p.number_at("/total");
-                            let message = p.subprojection("/message").ok().filter(|value| {
-                                value
-                                    .at_pointer("")
-                                    .and_then(|value| value.code_units())
-                                    .is_some()
-                            });
-                            callback(McpProgressEvent {
-                                progress,
-                                total,
-                                message,
-                            });
-                        }
-                        // Fell behind the broadcast buffer — keep listening.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        // Connection's notification stream ended.
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
         let mut params = Utf16JsonProjection::object(vec![
             ("name".to_owned(), source_string(&tool_name)),
             ("arguments".to_owned(), input),
         ])
         .expect("fixed MCP tool-call members are unique");
-        if !meta.is_empty() {
-            let meta = Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(meta))
-                .expect("MCP tool metadata is generated JSON");
-            params
-                .set_field("_meta", meta)
-                .expect("MCP tool-call params are an object");
-        }
-
-        // Sub-second timeouts still report at least 1s to keep the
-        // user-facing error string stable. Round up using ceil semantics on
-        // the millis fraction so non-zero sub-second timeouts don't collapse
-        // to "after 0s".
+        let mut forwarder = None;
+        let call = if progress_active && self.transport_kind == McpTransportKind::SdkControl {
+            // Reserve the router's id once. Install the progress receiver and
+            // stamp that exact numeric id before the request can be written.
+            let callback = on_progress.expect("active progress callback");
+            self.connection
+                .start_call_raw_json_with_params("tools/call", |id| {
+                    let token = serde_json::to_value(id).expect("router request ids serialize");
+                    meta.insert("progressToken".into(), token.clone());
+                    forwarder = Some(self.spawn_progress_forwarder(
+                        Utf16JsonProjection::from_serde_value(&token).expect("request id is JSON"),
+                        last_activity.clone(),
+                        callback,
+                    ));
+                    params
+                        .set_field(
+                            "_meta",
+                            Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(meta))
+                                .expect("generated metadata is JSON"),
+                        )
+                        .expect("tool-call params are an object");
+                    params
+                        .to_json_string()
+                        .expect("generated MCP params are JSON")
+                })
+        } else {
+            if progress_active {
+                // Other transports retain their existing token contract.
+                let token = format!(
+                    "lingxi-mcp-progress-{}",
+                    NEXT_PROGRESS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                meta.insert(
+                    "progressToken".into(),
+                    serde_json::Value::String(token.clone()),
+                );
+                forwarder = Some(self.spawn_progress_forwarder(
+                    source_string(&token),
+                    last_activity.clone(),
+                    on_progress.expect("active progress callback"),
+                ));
+            }
+            if !meta.is_empty() {
+                params
+                    .set_field(
+                        "_meta",
+                        Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(meta))
+                            .expect("generated metadata is JSON"),
+                    )
+                    .expect("tool-call params are an object");
+            }
+            let params = self.request_params_projection("tools/call", params);
+            let params_json = params
+                .to_json_string()
+                .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+            self.connection
+                .start_call_raw_json_unbounded("tools/call", params_json)
+        };
+        let _forwarder_guard = ProgressForwarderGuard(forwarder);
+        let call = call.map_err(|error| mcp_client_error_from_rpc(&error))?;
         let secs = timeout.as_secs().max(1);
-        let params = self.request_params_projection("tools/call", params);
-        let params_json = params
-            .to_json_string()
-            .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
-        let fut = self
-            .connection
-            .call_raw_json_unbounded("tools/call", params_json);
+        let fut = async {
+            call.wait_raw_json()
+                .await
+                .map_err(jsonrpc::ConnectionError::from)
+        };
 
         // Race the call against the overall `BHs` timeout and — when enabled —
         // the `GLd` idle watchdog. When the idle watchdog is disabled (`ZERO`)
@@ -2082,13 +2156,60 @@ impl McpClient {
             }
         };
 
-        // The call settled — stop forwarding progress for this request.
-        if let Some(handle) = forwarder {
-            handle.abort();
-        }
-
+        drop(_forwarder_guard);
         let result = outcome?;
         self.validate_tool_result_output(full_name, result).await
+    }
+
+    fn spawn_progress_forwarder(
+        &self,
+        token: Utf16JsonProjection,
+        last_activity: Arc<std::sync::Mutex<tokio::time::Instant>>,
+        callback: McpProgressCallback,
+    ) -> tokio::task::JoinHandle<()> {
+        // Subscribe synchronously before the router enqueues the request, so
+        // even a peer replying immediately cannot outrun progress admission.
+        let mut notifications = self.connection.notifications();
+        tokio::spawn(async move {
+            loop {
+                match notifications.recv().await {
+                    Ok(notification) => {
+                        if !jsonrpc_method_is(&notification.method, "notifications/progress") {
+                            continue;
+                        }
+                        let Some(params) = notification.params.as_ref() else {
+                            continue;
+                        };
+                        let Ok(params) = Utf16JsonProjection::parse(params.as_json()) else {
+                            continue;
+                        };
+                        let matches = match token.number_at("") {
+                            Some(number) => params.number_at("/progressToken") == Some(number),
+                            None => params.string_units("/progressToken") == token.string_units(""),
+                        };
+                        if !matches {
+                            continue;
+                        }
+                        if let Ok(mut activity) = last_activity.lock() {
+                            *activity = tokio::time::Instant::now();
+                        }
+                        let message = params.subprojection("/message").ok().filter(|value| {
+                            value
+                                .at_pointer("")
+                                .and_then(|value| value.code_units())
+                                .is_some()
+                        });
+                        callback(McpProgressEvent {
+                            progress: params.number_at("/progress").unwrap_or(0.0),
+                            total: params.number_at("/total"),
+                            message,
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
     }
 
     /// Enumerate every prompt advertised by the server.
@@ -3881,6 +4002,135 @@ mod constructor_tests {
     }
 
     // -- MCP.4: `notifications/progress` is forwarded to the callback --------
+
+    #[tokio::test]
+    async fn sdk_hosted_constructor_does_not_install_ordinary_capability_handlers() {
+        let (connection, _peer_tx, _peer_rx) = paired_connection();
+        let client =
+            McpClient::new_sdk_hosted("fixture", PathBuf::from("/tmp"), connection.clone()).await;
+        assert_eq!(client.transport_kind, McpTransportKind::SdkControl);
+        assert!(connection.local_registered_handler("ping").await.is_some());
+        for method in ["roots/list", "elicitation/create"] {
+            assert!(
+                connection.local_registered_handler(method).await.is_none(),
+                "{method}"
+            );
+        }
+        let (ordinary, _peer_tx, _peer_rx) = paired_connection();
+        let _client = McpClient::new("fixture", PathBuf::from("/tmp"), ordinary.clone()).await;
+        for method in ["roots/list", "elicitation/create"] {
+            assert!(
+                ordinary.local_registered_handler(method).await.is_some(),
+                "{method}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sdk_capability_override_leaves_ordinary_initialize_contract_unchanged() {
+        for sdk in [false, true] {
+            let (connection, peer_tx, mut peer_rx) = paired_connection();
+            let client = if sdk {
+                McpClient::new_sdk_hosted("fixture", PathBuf::from("/tmp"), connection).await
+            } else {
+                McpClient::new("fixture", PathBuf::from("/tmp"), connection).await
+            };
+            let task = tokio::spawn(async move { client.initialize().await });
+            let frame = peer_rx.recv().await.unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+            let mut expected = InitializeParams::default();
+            expected.capabilities.elicitation =
+                lingxi_core::host::McpElicitationCapabilities::default()
+                    .legacy
+                    .wire();
+            let mut expected = serde_json::to_value(expected).unwrap();
+            if sdk {
+                expected["capabilities"] = serde_json::json!({});
+            }
+            assert_eq!(request["params"], expected, "SDK={sdk}");
+            let response = serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}
+            }});
+            peer_tx
+                .send(Bytes::from(format!("{response}\n")))
+                .await
+                .unwrap();
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sdk_progress_token_uses_reserved_numeric_id_and_subscribes_before_send() {
+        let (connection, peer_tx, mut peer_rx) = paired_connection();
+        // Consume an id first, so this test cannot pass by guessing a first id.
+        let first = connection
+            .start_call_raw_json_unbounded("ping", "{}".into())
+            .unwrap();
+        let request: serde_json::Value =
+            serde_json::from_slice(&peer_rx.recv().await.unwrap()).unwrap();
+        peer_tx
+            .send(Bytes::from(format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{}})
+            )))
+            .await
+            .unwrap();
+        first.wait_raw_json().await.unwrap();
+        let client = McpClient::new_sdk_hosted("fixture", PathBuf::from("/tmp"), connection).await;
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let callback: McpProgressCallback = Arc::new(move |event| {
+            progress_tx.send(event).unwrap();
+        });
+        let task = tokio::spawn(async move {
+            client
+                .call_tool_with_progress(
+                    "mcp__fixture__hold",
+                    source_object(),
+                    Some("toolu_sdk_probe"),
+                    Some(callback),
+                )
+                .await
+        });
+        let frame = peer_rx.recv().await.unwrap();
+        let request_source =
+            Utf16JsonProjection::parse(std::str::from_utf8(&frame).unwrap()).unwrap();
+        assert_eq!(
+            request_source
+                .subprojection("/params")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"name":"hold","arguments":{},"_meta":{"claudecode/toolUseId":"toolu_sdk_probe","progressToken":2}}"#,
+            "actual SDK McpClient outbound params must retain native field order",
+        );
+        let request: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(request["id"], 2);
+        assert_eq!(request["params"]["_meta"]["progressToken"], request["id"]);
+        assert_eq!(
+            request["params"]["_meta"]["claudecode/toolUseId"],
+            "toolu_sdk_probe"
+        );
+        // Send immediately: the receiver must already exist when the request arrives.
+        let notification = serde_json::json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":request["id"],"progress":3,"total":10,"message":"ready"}});
+        peer_tx
+            .send(Bytes::from(format!("{notification}\n")))
+            .await
+            .unwrap();
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(2), progress_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.progress, 3.0);
+        assert_eq!(progress.message, Some(source_string("ready")));
+        peer_tx
+            .send(Bytes::from(format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[]}})
+            )))
+            .await
+            .unwrap();
+        task.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn progress_notification_is_forwarded_to_callback() {
