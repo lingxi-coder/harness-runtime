@@ -946,4 +946,180 @@ mod tests {
             per_turn_effort: None,
         }
     }
+
+    #[derive(Default)]
+    struct HeldManualPreCompactProcess {
+        started: tokio::sync::Notify,
+        cleanup_started: tokio::sync::Notify,
+        cleanup_release: CancellationToken,
+        cleaned: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::ProcessRunner for HeldManualPreCompactProcess {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(
+            &self,
+            command: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+            assert!(command
+                .process_owner()
+                .is_some_and(|owner| owner.starts_with("manual-compact:")));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn spawn_background(
+            &self,
+            _: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
+        }
+
+        async fn kill(
+            &self,
+            _: &lingxi_core::host::ProcessHandle,
+        ) -> Result<(), mobile_linux_api::ProcessError> {
+            Ok(())
+        }
+
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            assert!(owner.starts_with("manual-compact:"));
+            self.cleanup_started.notify_one();
+            self.cleanup_release.cancelled().await;
+            self.cleaned
+                .store(true, std::sync::atomic::Ordering::Release);
+            vec![73]
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_and_selector_cancel_active_precompact_and_wait_for_owned_cleanup() {
+        for selector in [false, true] {
+            let process = Arc::new(HeldManualPreCompactProcess::default());
+            let mut registry = hooks::HookRegistry::new();
+            registry.register(hooks::HookDefinition {
+                id: lingxi_core::types::HookId::new(),
+                name: "manual-owned-precompact".into(),
+                events: vec![hooks::events::HookEventType::PreCompact],
+                if_condition: None,
+                executor: hooks::definition::HookExecutor::Command {
+                    command: "owned-precompact-fixture".into(),
+                    args: vec!["run".into()],
+                    env: Default::default(),
+                    cwd: None,
+                    shell: None,
+                },
+                source: hooks::HookSource::Settings(lingxi_core::types::SettingsScope::User),
+                blocking: true,
+                timeout: None,
+                priority: 0,
+                once: false,
+                status_message: None,
+                async_rewake: false,
+                async_timeout: None,
+                rewake_message: None,
+                on_failure: None,
+            });
+            let hook_executor = hooks::HookExecutorImpl::new(
+                Arc::new(tokio::sync::RwLock::new(registry)),
+                Arc::new(UnusedIdleHookHttp),
+                Arc::new(UnusedIdleHookRuntime),
+            )
+            .with_process_runner(
+                process.clone(),
+                Arc::new(tool_api::test_support::BypassSandbox),
+            );
+            let summary_client = Arc::new(RecordingSummaryClient::default());
+            let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+            let runner = Arc::new(
+                sidequery::ForkedAgentRunner::new()
+                    .with_side_query_client(summary_client.clone(), "test-compact-model".into()),
+            );
+            let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+                1_000_000,
+            ));
+            let orchestrator = ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::ToolRegistry::new()),
+                Arc::new(hook_executor),
+                Arc::new(crate::test_support::NoOpPermissionGate),
+                Arc::new(crate::test_support::MockOutputStream::new()),
+                Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+            .with_compaction(compactor)
+            .with_cache_safe_slot(slot);
+            let selected = lingxi_core::types::MessageId::new();
+            let original = vec![
+                lingxi_core::types::ConversationMessage::user(
+                    selected,
+                    "first accepted question".into(),
+                ),
+                assistant_message("first accepted answer"),
+                lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "second question".into(),
+                ),
+                assistant_message("second accepted answer"),
+            ];
+            orchestrator.session.lock().await.history = original.clone();
+            let cancel = CancellationToken::new();
+            // The selector consumes the canonical MessageId string used by
+            // picker rows, rather than the bare durable JSONL UUID.
+            let selected_uuid = selected.to_string();
+            let compact = async {
+                if selector {
+                    orchestrator
+                        .summarize_at(
+                            &selected_uuid,
+                            None,
+                            compaction::prompt::SummarizeDirection::From,
+                            cancel.clone(),
+                        )
+                        .await
+                } else {
+                    orchestrator.force_compact_with_cancel(cancel.clone()).await
+                }
+            };
+            tokio::pin!(compact);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut compact => panic!("compact finished before PreCompact cancellation: {result:?}"),
+                    () = process.started.notified() => {}
+                }
+            }).await.expect("active command PreCompact starts");
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut compact => panic!("compact released its owner before cleanup: {result:?}"),
+                    () = process.cleanup_started.notified() => {}
+                }
+            }).await.expect("cancellation signals the captured hook child owner");
+            assert!(
+                orchestrator.turn_gate.try_lock().is_err(),
+                "cleanup still owns the turn gate"
+            );
+            assert!(!process.cleaned.load(std::sync::atomic::Ordering::Acquire));
+            process.cleanup_release.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(5), compact)
+                .await
+                .expect("cancelled PreCompact settles after child cleanup");
+            assert!(
+                matches!(result, Err(lingxi_core::host::HandleError::ActionFailed(reason)) if reason == "Compaction canceled.")
+            );
+            assert!(process.cleaned.load(std::sync::atomic::Ordering::Acquire));
+            assert!(orchestrator.turn_gate.try_lock().is_ok());
+            assert_eq!(orchestrator.session.lock().await.history, original);
+            assert!(
+                summary_client.budgets.lock().unwrap().is_empty(),
+                "cancelled hook must not start a summary request"
+            );
+        }
+    }
 }

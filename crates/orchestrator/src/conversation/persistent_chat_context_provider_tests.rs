@@ -56,6 +56,21 @@ impl CanonicalBudgetProbe {
 
 #[async_trait]
 impl sidequery::SideQueryClient for CanonicalBudgetProbe {
+    async fn query_with_dispatch_admission_and_usage_observer(
+        &self,
+        request: sidequery::SideQueryRequest,
+        admission: llm_runtime::RequestDispatchAdmission,
+        observer: sidequery::ForkedUsageObserver,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        sidequery::SideQueryClient::query_with_dispatch_admission_and_usage_observer(
+            &self.provider,
+            request,
+            admission,
+            observer,
+        )
+        .await
+    }
+
     fn has_canonical_estimator(&self) -> bool {
         sidequery::SideQueryClient::has_canonical_estimator(&self.provider)
     }

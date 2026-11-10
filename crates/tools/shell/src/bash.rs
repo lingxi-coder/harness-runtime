@@ -3081,6 +3081,11 @@ impl Tool for BashTool {
         // non-streaming caller, in which case the run is awaited directly (no
         // behavior change).
         let cancel = ctx.cancel.clone();
+        let cwd_change_origin = match self.cwd_changed_firer.as_ref() {
+            Some(firer) => firer.capture_origin().await,
+            None => Some(hooks::cwd_changed_firer::CwdChangedOrigin::default()),
+        }
+        .map(hooks::cwd_changed_firer::CwdChangedOrigin::with_call_authority);
         let request_owner = match ctx.cancellation_scope {
             tool_api::context::ToolCancellationScope::ModelTurn => None,
             // The host-supplied tool ID is a correlation key, not an
@@ -4214,8 +4219,14 @@ impl Tool for BashTool {
                                         // A subagent's cwd is per-call (no shared
                                         // persistent shell) — never mutate it.
                                         if agent_cwd.is_none() {
-                                            (*self.shell_cwd.lock().unwrap())
-                                                .clone_from(&workspace);
+                                            if let Some(origin) = &cwd_change_origin {
+                                                origin
+                                                    .commit_if_current(async {
+                                                        (*self.shell_cwd.lock().unwrap())
+                                                            .clone_from(&workspace);
+                                                    })
+                                                    .await;
+                                            }
                                         }
                                         // `Y2n` appends `\nShell cwd was reset to
                                         // {Pt()}` where `Pt()` is the cwd AFTER the
@@ -4242,7 +4253,14 @@ impl Tool for BashTool {
                                         // A subagent's cwd is per-call — do not
                                         // advance the shared persistent shell.
                                         if agent_cwd.is_none() {
-                                            (*self.shell_cwd.lock().unwrap()).clone_from(&canon);
+                                            if let Some(origin) = &cwd_change_origin {
+                                                origin
+                                                    .commit_if_current(async {
+                                                        (*self.shell_cwd.lock().unwrap())
+                                                            .clone_from(&canon);
+                                                    })
+                                                    .await;
+                                            }
                                         }
                                         // BASH.4 `onCwdChangedForHooks(cwd, newCwd)`
                                         // (Shell.ts:409): fire the `CwdChanged` hook
@@ -4254,12 +4272,17 @@ impl Tool for BashTool {
                                         // a no-op when no firer is registered
                                         // (mobile / plain `new`) or when the hook is
                                         // absent — never breaks the cwd update.
-                                        if let Some(firer) = &self.cwd_changed_firer {
+                                        if let (Some(firer), Some(origin)) =
+                                            (&self.cwd_changed_firer, &cwd_change_origin)
+                                        {
                                             firer
-                                                .fire(hooks::CwdChangedFire {
-                                                    old: cwd.clone(),
-                                                    new: canon,
-                                                })
+                                                .fire_from_origin(
+                                                    hooks::CwdChangedFire {
+                                                        old: cwd.clone(),
+                                                        new: canon,
+                                                    },
+                                                    origin,
+                                                )
                                                 .await;
                                         }
                                     }

@@ -559,20 +559,21 @@ impl ConversationOrchestrator {
                     .clone()
                     .expect("durable prepared report row");
                 let uuid = message_id.as_uuid().to_string();
-                let result = writer
-                    .append_native_json_once_durable_for_session_with_tip(
-                        target.session_id,
-                        &format!("subagent-handback:{uuid}"),
-                        row,
-                    )
-                    .await;
-                self.reconcile_fusion_transcript_append(target.session_id, uuid, result)
-                    .await
-                    .map_err(|error| {
-                        OrchestratorError::Internal(format!(
-                            "main report persistence failed: {error}"
-                        ))
-                    })?;
+                let result = {
+                    let _append = self.transcript.storage_append_lock.lock().await;
+                    let result = writer
+                        .append_native_json_once_durable_for_session_with_tip(
+                            target.session_id,
+                            &format!("subagent-handback:{uuid}"),
+                            row,
+                        )
+                        .await;
+                    self.reconcile_fusion_transcript_append(target.session_id, uuid, result)
+                        .await
+                };
+                result.map_err(|error| {
+                    OrchestratorError::Internal(format!("main report persistence failed: {error}"))
+                })?;
             }
             {
                 let mut session = self.session.lock().await;

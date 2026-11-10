@@ -679,6 +679,11 @@ impl ProviderSideQueryClient {
         let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
             unreachable!("session backend returned above")
         };
+        if options.usage_observer.is_some() {
+            return Err(SideQueryError::InvalidResponse(
+                "usage observation requires a session-bound side-query client".into(),
+            ));
+        }
         if request.model_attempt.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "registered side query requires session accounting hooks".into(),
@@ -871,6 +876,30 @@ impl SideQueryClient for ProviderSideQueryClient {
     ) -> Result<SideQueryResponse, SideQueryError> {
         Ok(self
             .query_fork_with_admission(request, ForkedSideQueryOptions::default(), Some(admission))
+            .await?
+            .response)
+    }
+
+    async fn query_with_dispatch_admission_and_usage_observer(
+        &self,
+        request: SideQueryRequest,
+        admission: llm_runtime::RequestDispatchAdmission,
+        observer: crate::side_query::ForkedUsageObserver,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        if matches!(&self.backend, ProviderSideQueryBackend::Direct { .. }) {
+            return Err(SideQueryError::InvalidResponse(
+                "usage observation requires a session-bound side-query client".into(),
+            ));
+        }
+        Ok(self
+            .query_fork_with_admission(
+                request,
+                ForkedSideQueryOptions {
+                    usage_observer: Some(observer),
+                    ..Default::default()
+                },
+                Some(admission),
+            )
             .await?
             .response)
     }
@@ -3185,6 +3214,82 @@ mod tests {
             .expect("unregistered WireAttempt observed before finish");
         assert_eq!((usage.tokens.input, usage.tokens.output), (42, 7));
         assert_eq!(response.response.usage, usage);
+    }
+
+    #[tokio::test]
+    async fn direct_compaction_fork_requiring_usage_observation_rejects_before_dispatch() {
+        let transport = Arc::new(StubTransport::new("{}"));
+        let client = ProviderSideQueryClient::new("fixture-only", None, transport.clone());
+        let mut request = req(None);
+        request.query_source = QuerySource::Compaction;
+        request.model_attempt = None;
+        let observer = crate::ForkedUsageObserver::default();
+        let result = client
+            .query_fork(
+                request,
+                ForkedSideQueryOptions {
+                    usage_observer: Some(observer.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(SideQueryError::InvalidResponse(_))));
+        assert!(transport.received.lock().unwrap().is_empty());
+        assert!(observer.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_summary_rejects_a_client_without_partial_usage_observation() {
+        let transport = Arc::new(StubTransport::new("{}"));
+        let client = ProviderSideQueryClient::new("fixture-only", None, transport.clone());
+        let observer = crate::ForkedUsageObserver::default();
+        let result = client
+            .query_with_dispatch_admission_and_usage_observer(
+                req(None),
+                llm_runtime::RequestDispatchAdmission::new(|| true),
+                observer.clone(),
+            )
+            .await;
+        assert!(matches!(result, Err(SideQueryError::InvalidResponse(_))));
+        assert!(transport.received.lock().unwrap().is_empty());
+        assert!(observer.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_summary_observer_keeps_usage_after_real_sse_disconnect() {
+        let mut transport = StreamStubTransport::text_response("continuation note");
+        transport.frames.pop();
+        let mut delta: serde_json::Value =
+            serde_json::from_str(transport.frames.last().unwrap()).unwrap();
+        delta["delta"].as_object_mut().unwrap().remove("stop_reason");
+        *transport.frames.last_mut().unwrap() = delta.to_string();
+        let client = structured_session_client(Arc::new(transport), None);
+        let mut request = req(None);
+        request.model = "claude-sonnet-4-20250514".into();
+        request.query_source = QuerySource::Compaction;
+        request.api_attempts_left = Some(llm_runtime::ApiAttemptsLeft::new(1));
+        let observer = crate::ForkedUsageObserver::default();
+        let admitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = admitted.clone();
+        let result = client
+            .query_with_dispatch_admission_and_usage_observer(
+                request,
+                llm_runtime::RequestDispatchAdmission::new(move || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    true
+                }),
+                observer.clone(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(SideQueryError::Api(LlmError::StreamInterrupted { .. }))
+        ));
+        assert!(admitted.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let usage = observer
+            .snapshot()
+            .expect("observed paid usage survives failure");
+        assert_eq!((usage.tokens.input, usage.tokens.output), (1, 1));
     }
 
     #[tokio::test]

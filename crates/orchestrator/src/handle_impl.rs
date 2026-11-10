@@ -41,6 +41,9 @@ use tokio::process::Command;
 #[cfg(test)]
 #[path = "handle_impl/resume_transition_tests.rs"]
 mod resume_transition_tests;
+#[cfg(test)]
+#[path = "handle_impl/todo_transition_tests.rs"]
+mod todo_transition_tests;
 
 fn source_text_block(
     source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
@@ -1470,6 +1473,7 @@ impl ConversationOrchestrator {
                     .await?;
                 self.compaction_runtime.roll_over_total_tokens_context();
                 self.reset_session_scoped_runtime().await;
+                let append = self.transcript.storage_append_lock.lock().await;
                 let mut reports = self.main_reports.state.lock().await;
                 let mut s = self.session.lock().await;
                 let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
@@ -1485,6 +1489,7 @@ impl ConversationOrchestrator {
                 self.model_runtime.activate_cost_session(prepared_cost);
                 self.install_output_session(prepared_output);
                 s.history.clear();
+                crate::resume::todo_state::reset(&mut s);
                 if let Some(restore) = self
                     .model_runtime
                     .refusal_selection
@@ -1520,6 +1525,7 @@ impl ConversationOrchestrator {
                 drop(instruction_context);
                 drop(s);
                 drop(reports);
+                drop(append);
                 self.invoked_skill_session_guard.replace(new_session_id);
                 let profile_result = self.initialize_conversation_mode_locked().await.map(|_| ());
                 self.hooks.clear_session_hooks(old_session_id).await;
@@ -1756,6 +1762,7 @@ impl ConversationOrchestrator {
                     Some(runtime.prompt_snapshot_epoch.unwrap_or(0));
                 *self.prompt_runtime.context_rendering_hint.lock().await =
                     runtime.context_rendering_hint;
+                let append = self.transcript.storage_append_lock.lock().await;
                 let mut reports = self.main_reports.state.lock().await;
                 let mut s = self.session.lock().await;
                 let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
@@ -1786,6 +1793,7 @@ impl ConversationOrchestrator {
                 self.model_runtime.activate_cost_session(prepared_cost);
                 self.install_output_session(prepared_output);
                 s.history = history;
+                crate::resume::todo_state::restore(&mut s);
                 s.native_request_history = runtime.native_request_history.clone();
                 s.thinking_signature_stripped = runtime.thinking_signature_stripped;
                 s.thinking_stripped_messages = runtime.thinking_stripped_messages.clone();
@@ -1924,11 +1932,12 @@ impl ConversationOrchestrator {
                 drop(instruction_context);
                 drop(s);
                 drop(reports);
+                *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+                drop(append);
                 self.sync_thinking_signature_strip_flag_to_api().await;
                 self.restore_main_loop_latest_assistant_usage(
                     runtime.main_loop_latest_assistant_usage.clone(),
                 );
-                *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
                 let profile_result = self
                     .restore_conversation_profile_locked(fixed)
                     .await
@@ -3904,6 +3913,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
         self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
+        let _append = self.transcript.storage_append_lock.lock().await;
         let target = self.session.lock().await.session_id;
         for message in messages {
             let persisted_uuid = self
@@ -3933,6 +3943,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             })?;
         self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
+        let _append = self.transcript.storage_append_lock.lock().await;
         let message = if is_user {
             user_message_from_source(lingxi_core::types::MessageId::new(), text, false)?
         } else {
@@ -3967,6 +3978,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // one side of a session transition.
         self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
+        let _append = self.transcript.storage_append_lock.lock().await;
         let current = self.session.lock().await.session_id;
         let msg = user_message_from_source(lingxi_core::types::MessageId::new(), text, true)?;
         let persisted_uuid = self

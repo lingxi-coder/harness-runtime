@@ -670,6 +670,144 @@ async fn subagent_cd_does_not_advance_the_shared_live_cwd_cell() {
     );
 }
 
+struct CwdOwnerGuard {
+    retired: tokio_util::sync::CancellationToken,
+    commits: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl hooks::attachment::HookPublicationGuard for CwdOwnerGuard {
+    fn is_current(&self) -> bool {
+        !self.retired.is_cancelled()
+    }
+
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+        Some(self.retired.clone())
+    }
+
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let _lease = self.commits.lock().await;
+            tokio::select! {
+                biased;
+                () = self.retired.cancelled() => false,
+                () = publication => true,
+            }
+        })
+    }
+
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let _lease = self.commits.lock().await;
+            if self.retired.is_cancelled() {
+                return false;
+            }
+            mutation.await;
+            true
+        })
+    }
+}
+
+struct StalledCompletedCleanup {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl tool_api::SandboxRunner for StalledCompletedCleanup {
+    async fn wrap(
+        &self,
+        command: &str,
+        _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+        _platform: sandbox::runtime_config::Platform,
+        _bin_shell: Option<&str>,
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+        Ok(command.to_owned())
+    }
+
+    async fn cleanup_after_command(&self) {
+        self.entered.notify_one();
+        self.release.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn completed_foreground_cwd_readback_cannot_rehome_a_replacement_session() {
+    let _environment = maintain_lock();
+    let directory = TempDir::new().unwrap();
+    let workspace = std::fs::canonicalize(directory.path()).unwrap();
+    let old_destination = workspace.join("old-command-destination");
+    let replacement_cwd = workspace.join("replacement-session");
+    std::fs::create_dir(&old_destination).unwrap();
+    std::fs::create_dir(&replacement_cwd).unwrap();
+    let live_cwd = Arc::new(Mutex::new(workspace.clone()));
+    let runner = RecordingRunner::new(vec![Some(old_destination)], false);
+    let firer = RecordingFirer::new();
+    let cleanup_entered = Arc::new(tokio::sync::Notify::new());
+    let cleanup_release = Arc::new(tokio::sync::Notify::new());
+    let mut context = shell_test_ctx(runner.output.clone());
+    context
+        .session_cwd
+        .swap(workspace.clone(), context.trusted_dirs());
+    context.process = runner.clone();
+    context.sandbox_runner = Arc::new(StalledCompletedCleanup {
+        entered: cleanup_entered.clone(),
+        release: cleanup_release.clone(),
+    });
+    let tool = BashTool::new(context)
+        .with_live_cwd(live_cwd.clone())
+        .with_cwd_changed_firer(firer.clone());
+    let owner = Arc::new(CwdOwnerGuard {
+        retired: tokio_util::sync::CancellationToken::new(),
+        commits: Arc::new(tokio::sync::Mutex::new(())),
+    });
+    let call_owner: Arc<dyn hooks::attachment::HookPublicationGuard> = owner.clone();
+    let call = tokio::spawn(hooks::cwd_changed_firer::scope_cwd_change_authority(
+        Some(call_owner),
+        async move {
+            tool.call(
+                source_json!({"command":"cd old-command-destination"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+        },
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cleanup_entered.notified(),
+    )
+    .await
+    .expect("foreground process completed before cleanup stalled");
+    assert_eq!(runner.fg.lock().unwrap().len(), 1);
+    assert!(
+        runner.bg.lock().unwrap().is_empty(),
+        "this is a Completed result, never Backgrounded"
+    );
+    owner.retired.cancel();
+    {
+        let _drained = owner.commits.lock().await;
+        *live_cwd.lock().unwrap() = replacement_cwd.clone();
+    }
+    cleanup_release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), call)
+        .await
+        .expect("old completed call settles")
+        .expect("old task completes")
+        .expect("completed command keeps its result");
+    assert_eq!(*live_cwd.lock().unwrap(), replacement_cwd);
+    assert!(
+        firer.fires.lock().unwrap().is_empty(),
+        "old origin cannot fire a replacement session hook"
+    );
+}
+
 // ===== Finding #8 — `J2n` cwd-reset when the shell leaves the allowed dirs ====
 //
 // claude-code `J2n`: after a command, if the shell cwd moved away from the

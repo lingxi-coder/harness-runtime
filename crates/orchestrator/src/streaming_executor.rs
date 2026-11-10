@@ -410,6 +410,51 @@ impl<'a> StreamingToolExecutor<'a> {
         self.native_query_depth = native_query_depth;
     }
 
+    /// Register tools from an already-refused complete response without ever
+    /// starting hooks, approvals, or physical calls. Refusal settlement owns the
+    /// resulting Native not-run rows for both known and unknown tool names.
+    pub(crate) async fn add_refused_tool_with_context_owned(
+        &mut self,
+        id: ToolUseId,
+        name: String,
+        input: Utf16JsonProjection,
+        provider_id: Option<String>,
+        assistant_id: MessageId,
+        _dispatch_facts: crate::turn_loop::ToolUseDispatchFacts,
+    ) -> Result<(), crate::error::OrchestratorError> {
+        let resolved_tool = self.orch.find_tool_for_dispatch(&name);
+        let is_agent = resolved_tool
+            .as_ref()
+            .is_some_and(|tool| tool.name() == "Agent");
+        self.tool_use_lifecycle
+            .observe_assistant_row([(id.clone(), is_agent)]);
+        let boundary =
+            Arc::new(crate::turn_loop::tool_dispatch::RefusalToolCallBoundary::default());
+        boundary.close_for_refusal();
+        // A complete response already marked refused has no W1 work to run,
+        // including unknown-tool dispatch. Keep its identities pending only for
+        // the existing refusal settlement's exact not-run synthetic rows.
+        self.tools.push(TrackedTool {
+            id,
+            name,
+            input,
+            provider_id,
+            assistant_id,
+            resolved_tool,
+            status: ToolStatus::Queued,
+            is_concurrency_safe: false,
+            result: None,
+            result_siblings: Vec::new(),
+            prevent_continuation: false,
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
+            publications: Vec::new(),
+            refusal_call_boundary: Some(boundary),
+        });
+        Ok(())
+    }
+
     /// Admit a completed streamed ToolUse into the owned scheduler. Known
     /// handles are resolved exactly once here and carried into every core/Mod
     /// dispatch path; unknown tools enter the same actor registration order as

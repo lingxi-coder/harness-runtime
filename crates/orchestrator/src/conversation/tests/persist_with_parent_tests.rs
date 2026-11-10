@@ -578,6 +578,7 @@ async fn check_fusion_unacknowledged_resume_chain(foreground_before_retry: bool)
     let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
     {
         let _turn = orch.turn_gate.lock().await;
+        let _append = orch.transcript.storage_append_lock.lock().await;
         let failure = orch
             .reconcile_fusion_transcript_append(
                 id,
@@ -610,6 +611,7 @@ async fn check_fusion_unacknowledged_resume_chain(foreground_before_retry: bool)
         .unwrap();
     if foreground_before_retry {
         let _turn = orch.turn_gate.lock().await;
+        let _append = orch.transcript.storage_append_lock.lock().await;
         let failure = orch
             .reconcile_fusion_transcript_append(
                 id,

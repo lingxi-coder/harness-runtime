@@ -115,6 +115,35 @@ pub trait HookPublicationGuard: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
+/// Linearize a future's first poll with generation retirement without keeping
+/// the commit lease while an already-entered operation waits for completion.
+/// Retirement drains admitted commits, so either this first poll finishes
+/// before retirement returns or a retired generation never polls the future.
+pub async fn run_with_first_poll_admission<F>(
+    guard: &dyn HookPublicationGuard,
+    future: F,
+) -> Option<F::Output>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    let mut future = Box::pin(future);
+    let mut first_poll = None;
+    let admitted = guard
+        .commit_if_current(Box::pin(std::future::poll_fn(|context| {
+            first_poll = Some(future.as_mut().poll(context));
+            std::task::Poll::Ready(())
+        })))
+        .await;
+    if !admitted {
+        return None;
+    }
+    match first_poll.expect("an admitted first poll ran under its commit lease") {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => Some(future.await),
+    }
+}
+
 /// Sink the executor publishes each hook-run attachment to.
 ///
 /// The engine wires an implementation that appends one `type:"attachment"`

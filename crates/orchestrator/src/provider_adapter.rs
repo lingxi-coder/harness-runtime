@@ -363,13 +363,21 @@ mod mcp_token_projection_tests {
     }
 }
 
+#[cfg(test)]
+#[path = "provider_adapter_mcp_route_tests.rs"]
+mod mcp_route_tests;
+
 #[async_trait]
 impl tool_api::McpTokenCounter for ProviderApiAdapter {
     async fn count_mcp_content_tokens(
         &self,
         model: &str,
+        profile: &str,
         content: &Utf16JsonProjection,
     ) -> Result<Option<u64>, String> {
+        if model.trim().is_empty() || profile.trim().is_empty() {
+            return Ok(None);
+        }
         let Some(blocks) = mcp_content_text_blocks(content) else {
             return Ok(None);
         };
@@ -388,7 +396,7 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             refused_message_id: None,
         };
         self.service
-            .count_tokens_exact(model, None, None, vec![message], Vec::new())
+            .count_tokens_exact(model, Some(profile), None, vec![message], Vec::new())
             .await
             .map_err(|error| error.to_string())
     }
@@ -447,6 +455,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
     ) -> Option<llm_runtime::ProtocolFamily> {
         self.service.protocol_for_model(model, profile).ok()
+    }
+
+    fn reasoning_provider_for_model(&self, model: &str, profile: Option<&str>) -> Option<String> {
+        self.service.reasoning_provider_for_model(model, profile)
     }
 
     fn native_model_option_capability_for_request(
@@ -729,8 +741,11 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 
     async fn messages_create_buffered_stream(
         &self,
-        request: llm_runtime::MessagesCreateRequest,
+        mut request: llm_runtime::MessagesCreateRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        if crate::scheduled_turn::current().is_none() && request.opts.effort.is_none() {
+            request.opts.effort = self.current_effort();
+        }
         self.service.messages_create_buffered_stream(request).await
     }
 
@@ -739,7 +754,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         request: OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
         match request {
-            OrchestratorApiRequest::Main(request) => {
+            OrchestratorApiRequest::Main(mut request) => {
                 if let Some(settings) = crate::scheduled_turn::current() {
                     let llm_runtime::MessagesCreateRequest {
                         model: _,
@@ -788,6 +803,9 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                             },
                         )
                         .await;
+                }
+                if request.opts.effort.is_none() {
+                    request.opts.effort = self.current_effort();
                 }
                 self.service.messages_create(request).await
             }

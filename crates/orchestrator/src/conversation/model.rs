@@ -1588,6 +1588,7 @@ impl ConversationOrchestrator {
             .ok_or(session::jsonl::TranscriptWriterError::MissingMessageUuid)?
             .to_string();
         let _turn = self.turn_gate.lock().await;
+        let _append = self.transcript.storage_append_lock.lock().await;
         let result = writer
             .append_json_once_durable_for_session_with_tip(session_id, delivery_id, payload)
             .await;
@@ -1595,9 +1596,10 @@ impl ConversationOrchestrator {
             .await
     }
 
-    /// Called only while holding `turn_gate`, including after a failed fresh
-    /// append. A known complete visible row must enter the parent chain before
-    /// a foreground turn can run, even while publication remains unacknowledged.
+    /// Called only while holding `turn_gate` and `storage_append_lock`, which
+    /// must also cover the writer append. A complete visible row enters the
+    /// parent chain before foreground or lifecycle rows choose their parent,
+    /// even while publication remains unacknowledged after a failed fresh append.
     pub(super) async fn reconcile_fusion_transcript_append(
         &self,
         session_id: lingxi_core::types::SessionId,
@@ -3966,14 +3968,25 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let validated = self.validate_reasoning_selection(selection, model, provider_id);
         let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
         let legacy = |id: &str| Some(id.to_string());
-        let provider_id = provider_id.or_else(|| {
-            lingxi_core::host::model_capabilities::has_capability(
-                model,
-                lingxi_core::host::model_capabilities::ModelCapability::Effort,
-            )
-            .then_some("builtin")
-        });
-        let provider_id = provider_id.unwrap_or_default();
+        let resolved_provider = self.api.reasoning_provider_for_model(model, provider_id);
+        // Legacy API clients without a live catalog retain their named builtin
+        // policy. A configured profile name never supplies provider authority.
+        let legacy_provider =
+            if resolved_provider.is_none() && self.api.list_model_listings().is_empty() {
+                provider_id.or_else(|| {
+                    lingxi_core::host::model_capabilities::has_capability(
+                        model,
+                        lingxi_core::host::model_capabilities::ModelCapability::Effort,
+                    )
+                    .then_some("builtin")
+                })
+            } else {
+                None
+            };
+        let provider_id = resolved_provider
+            .as_deref()
+            .or(legacy_provider)
+            .unwrap_or_default();
         let model_lc = model.to_ascii_lowercase();
 
         match provider_id {
@@ -4029,53 +4042,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
-            "gemini" => {
-                if model_lc.starts_with("gemini-3.") {
-                    match &validated {
-                        lingxi_core::host::ReasoningSelection::Automatic => {
-                            (validated, ThinkingConfig::Automatic, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::Level { id } => (
-                            validated.clone(),
-                            ThinkingConfig::Adaptive,
-                            effort_level(id.as_str()),
-                            legacy(id.as_str()),
-                        ),
-                        lingxi_core::host::ReasoningSelection::Disabled => {
-                            (validated, ThinkingConfig::Disabled, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::Enabled => {
-                            (validated, ThinkingConfig::Adaptive, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::TokenBudget { .. } => {
-                            (validated, ThinkingConfig::Adaptive, None, None)
-                        }
-                    }
-                } else {
-                    match &validated {
-                        lingxi_core::host::ReasoningSelection::Automatic => {
-                            (validated, ThinkingConfig::Automatic, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => (
-                            validated.clone(),
-                            ThinkingConfig::Enabled {
-                                budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
-                            },
-                            None,
-                            None,
-                        ),
-                        lingxi_core::host::ReasoningSelection::Disabled => {
-                            (validated, ThinkingConfig::Disabled, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::Enabled => {
-                            (validated, ThinkingConfig::Adaptive, None, None)
-                        }
-                        lingxi_core::host::ReasoningSelection::Level { .. } => {
-                            (validated, ThinkingConfig::Adaptive, None, None)
-                        }
-                    }
+            "gemini" => match &validated {
+                lingxi_core::host::ReasoningSelection::Automatic => {
+                    (validated, ThinkingConfig::Automatic, None, None)
                 }
-            }
+                lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => (
+                    validated.clone(),
+                    ThinkingConfig::Enabled {
+                        budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
+                    },
+                    None,
+                    None,
+                ),
+                lingxi_core::host::ReasoningSelection::Level { id } => (
+                    validated.clone(),
+                    ThinkingConfig::Adaptive,
+                    effort_level(id.as_str()),
+                    legacy(id.as_str()),
+                ),
+                lingxi_core::host::ReasoningSelection::Disabled => {
+                    (validated, ThinkingConfig::Disabled, None, None)
+                }
+                lingxi_core::host::ReasoningSelection::Enabled => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+            },
             "deepseek" => match &validated {
                 lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
@@ -4159,7 +4150,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                _ => (validated, ThinkingConfig::Adaptive, None, None),
+                _ => (
+                    lingxi_core::host::ReasoningSelection::Automatic,
+                    ThinkingConfig::Automatic,
+                    None,
+                    None,
+                ),
             },
         }
     }

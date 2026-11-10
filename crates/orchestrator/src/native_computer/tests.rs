@@ -2857,6 +2857,78 @@ async fn completed_native_rows_stay_compacted_when_preparing_the_next_request() 
 }
 
 #[tokio::test]
+async fn cold_recovery_prunes_completed_work_and_retains_only_pending_calls() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    for index in 0..4 {
+        fixture.native().await;
+        let mut response = openai(json!([{"type":"screenshot"}]));
+        response.id = format!("prune-native-{index}");
+        set_continuation_response_id(&mut response);
+        let blocks = fixture.bind(&response).await.unwrap();
+        let dispatched = fixture.dispatch(blocks).await;
+        fixture.publish(&dispatched.results).await;
+        prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
+            .await
+            .unwrap();
+        if index == 3 {
+            break;
+        }
+        let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
+        prepare_projection(&fixture.orch, MODEL, None, &catalog)
+            .await
+            .unwrap()
+            .unwrap()
+            .submission
+            .unwrap()
+            .before_submit()
+            .await
+            .unwrap();
+        let mut ack = response_for_completed_prune(index);
+        set_continuation_response_id(&mut ack);
+        fixture.accept_response(&ack).await.unwrap();
+    }
+    fixture.forget_runtime().await;
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
+    let next = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixture.orch.computer_runtime.work.lock().await.len(), 1);
+    assert_eq!(
+        fixture
+            .orch
+            .computer_runtime
+            .state
+            .lock()
+            .await
+            .pending_receipts
+            .len(),
+        1
+    );
+    next.submission.unwrap().before_submit().await.unwrap();
+    let mut ack = response_for_completed_prune(3);
+    set_continuation_response_id(&mut ack);
+    fixture.accept_response(&ack).await.unwrap();
+    fixture.forget_runtime().await;
+    for _ in 0..3 {
+        let next = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.submission.is_none());
+        assert!(fixture.orch.computer_runtime.work.lock().await.is_empty());
+    }
+    assert_eq!(fixture.computer.calls.lock().unwrap().len(), 4);
+}
+
+fn response_for_completed_prune(index: usize) -> llm_runtime::HistoryResponse {
+    let mut ack = response(NativeComputerProvider::OpenAi, vec![]);
+    ack.id = format!("prune-ack-{index}");
+    ack.stop_reason = Some("end_turn".into());
+    ack
+}
+
+#[tokio::test]
 async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_boundary() {
     let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
     let (_, saved) = fixture.prepared_receipt().await;

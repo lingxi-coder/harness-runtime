@@ -6462,6 +6462,139 @@ mod tests {
         );
     }
 
+    fn reasoning_route_fixture() -> ApiService {
+        let base = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|provider| provider.profile_name == "anthropic")
+            .unwrap();
+        let providers = [
+            (
+                "office-sonnet",
+                ProviderId::AnthropicFirstParty,
+                ProtocolFamily::AnthropicMessages,
+            ),
+            (
+                "company-key#1",
+                ProviderId::OpenAI,
+                ProtocolFamily::OpenAiResponses,
+            ),
+            (
+                "google-work",
+                ProviderId::Gemini,
+                ProtocolFamily::GeminiGenerateContent,
+            ),
+            (
+                "coding-west",
+                ProviderId::OpenAICompatible {
+                    name: "deepseek".into(),
+                },
+                ProtocolFamily::OpenAiChat,
+            ),
+            (
+                "openai",
+                ProviderId::Custom {
+                    name: "unknown-lab".into(),
+                },
+                ProtocolFamily::OpenAiChat,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, id, protocol)| {
+            let mut provider = base.clone();
+            provider.profile_name = name.into();
+            provider.provider_id = id;
+            provider.protocol = protocol;
+            provider.base_url = "https://reasoning.example.test".into();
+            provider.wire_profile = None;
+            provider.connection = Default::default();
+            provider.auth = AuthStrategy::None;
+            provider.credential = CredentialConfig::None;
+            provider.models.truncate(1);
+            let model = &mut provider.models[0];
+            model.request_model = "reasoning-model".into();
+            model.display_model = "reasoning-model".into();
+            model.billing_model = "reasoning-model".into();
+            model.aliases.clear();
+            model.metadata = Default::default();
+            model.capabilities.reasoning = true;
+            provider
+        })
+        .collect();
+        ApiService::new(
+            Arc::new(ModelRuntime::from_config(ClientConfig { providers }).unwrap()),
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn reasoning_family_uses_selected_protocol_and_canonical_provider() {
+        let service = reasoning_route_fixture();
+        for (profile, family) in [
+            ("office-sonnet", "anthropic"),
+            ("company-key#1", "openai"),
+            ("google-work", "gemini"),
+            ("coding-west", "deepseek"),
+            ("openai", "unknown-lab"),
+        ] {
+            assert_eq!(
+                service
+                    .reasoning_provider_for_model("reasoning-model", Some(profile))
+                    .as_deref(),
+                Some(family)
+            );
+        }
+        assert!(service
+            .reasoning_provider_for_model("missing", Some("openai"))
+            .is_none());
+    }
+
+    #[test]
+    fn non_native_main_preserves_disabled_mode_and_explicit_request_effort() {
+        let service = reasoning_route_fixture()
+            .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        for profile in ["google-work", "coding-west", "company-key#1"] {
+            let request = MessagesCreateRequest::new(
+                "reasoning-model",
+                Some(profile),
+                None,
+                Vec::new(),
+                Vec::new(),
+            );
+            let (canonical, _) = service.build_main_message_request(request, false).unwrap();
+            assert_eq!(
+                canonical
+                    .input
+                    .thinking
+                    .as_ref()
+                    .and_then(|thinking| thinking.mode),
+                Some(lingxi_llm_client::protocol::ThinkingMode::Disabled)
+            );
+        }
+        let mut request = MessagesCreateRequest::new(
+            "reasoning-model",
+            Some("company-key#1"),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        request.opts.effort = Some(serde_json::json!("high"));
+        let (canonical, _) = service.build_main_message_request(request, false).unwrap();
+        assert_eq!(
+            canonical
+                .input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.effort),
+            Some(lingxi_llm_client::protocol::ReasoningEffort::High)
+        );
+    }
+
     #[test]
     fn side_query_builder_preserves_source_system_utf16_units() {
         let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
@@ -7114,8 +7247,16 @@ mod tests {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter =
+        let mut adapter =
             make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let mut config = adapter.client.configuration();
+        let model = &mut config.providers[0].models[0];
+        model.display_model = "claude-opus-4-8".into();
+        model.request_model = model.display_model.clone();
+        model.billing_model = model.display_model.clone();
+        model.aliases.clear();
+        adapter.client = Arc::new(adapter.client.reconfigured(config).unwrap());
+        assert!(adapter.native_api_system_route("claude-opus-4-8", None));
         let req = adapter
             .build_request(
                 "claude-opus-4-8",
@@ -7147,8 +7288,16 @@ mod tests {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter =
+        let mut adapter =
             make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let mut config = adapter.client.configuration();
+        let model = &mut config.providers[0].models[0];
+        model.display_model = "claude-sonnet-4-5".into();
+        model.request_model = model.display_model.clone();
+        model.billing_model = model.display_model.clone();
+        model.aliases.clear();
+        adapter.client = Arc::new(adapter.client.reconfigured(config).unwrap());
+        assert!(adapter.native_api_system_route("claude-sonnet-4-5", None));
         // claude-sonnet-4-5 IS in the `rhn` set → temperature:1 is sent.
         let req = adapter
             .build_request(

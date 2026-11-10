@@ -2283,3 +2283,7 @@ mod tests {
         );
     }
 }
+/// Serialize todo reminder tests that select V1/V2 through process variables.
+#[cfg(test)]
+pub(crate) static TODO_REMINDER_ENV_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());

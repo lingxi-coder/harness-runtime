@@ -341,6 +341,21 @@ pub trait SideQueryClient: Send + Sync {
         ))
     }
 
+    /// Preserve observed usage while enforcing dispatch admission. A client
+    /// that streams must publish cumulative snapshots before another await,
+    /// including snapshots from a query that later fails or is dropped.
+    async fn query_with_dispatch_admission_and_usage_observer(
+        &self,
+        _request: SideQueryRequest,
+        _admission: llm_runtime::RequestDispatchAdmission,
+        _observer: ForkedUsageObserver,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        Err(SideQueryError::InvalidResponse(
+            "dispatch admission with usage observation is unsupported by this side-query client"
+                .into(),
+        ))
+    }
+
     /// Retain a call's native assistant blocks for a cache-prefix fork.
     /// The default lets in-memory clients exercise the same denial loop.
     async fn query_fork(

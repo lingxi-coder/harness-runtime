@@ -35,6 +35,17 @@ struct SummaryClient {
 
 #[async_trait]
 impl sidequery::SideQueryClient for SummaryClient {
+    async fn query_with_dispatch_admission_and_usage_observer(
+        &self,
+        request: sidequery::SideQueryRequest,
+        admission: llm_runtime::RequestDispatchAdmission,
+        observer: sidequery::ForkedUsageObserver,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        let response = self.query_with_dispatch_admission(request, admission).await?;
+        observer.observe(response.usage);
+        Ok(response)
+    }
+
     async fn query_with_dispatch_admission(
         &self,
         request: sidequery::SideQueryRequest,
@@ -476,6 +487,7 @@ async fn actual_turn_uses_only_the_projection_and_keeps_canonical_history() {
 }
 
 include!("persistent_chat_context_provider_tests.rs");
+include!("persistent_chat_context_usage_tests.rs");
 
 #[tokio::test]
 async fn retries_reapply_the_verified_projection_without_calling_the_summarizer() {

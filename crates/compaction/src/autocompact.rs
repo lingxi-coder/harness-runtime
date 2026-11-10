@@ -26,6 +26,100 @@ use sidequery::{
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Usage from one actual summarizer fork, including an incomplete response.
+#[derive(Clone, Debug)]
+pub struct SummaryAttemptUsage {
+    /// Model inherited by this physical request.
+    pub model: String,
+    /// Captured provider profile for the request.
+    pub profile: Option<String>,
+    /// Canonical cumulative usage observed by this request only.
+    pub usage: Usage,
+    /// Time spent in this request, rather than the complete compaction pipeline.
+    pub duration: std::time::Duration,
+}
+
+/// Synchronous transfer to the caller's captured cost owner.
+pub type SummaryAttemptObserver = Arc<dyn Fn(SummaryAttemptUsage) + Send + Sync>;
+
+tokio::task_local! {
+    static SUMMARY_ATTEMPT_OBSERVER: SummaryAttemptObserver;
+}
+
+/// Bind the originating session's usage owner to every physical fork made by
+/// this compaction, including native reasks and fallback attempts. The guard
+/// below captures this observer before an await, so dropping the scope still
+/// transfers any partial usage already observed by an unfinished request.
+pub async fn with_summary_attempt_observer<F: std::future::Future>(
+    observer: SummaryAttemptObserver,
+    future: F,
+) -> F::Output {
+    SUMMARY_ATTEMPT_OBSERVER.scope(observer, future).await
+}
+
+struct SummaryAttemptGuard {
+    observer: Option<SummaryAttemptObserver>,
+    usage: sidequery::ForkedUsageObserver,
+    candidate_usage: Option<sidequery::ForkedUsageObserver>,
+    model: String,
+    profile: Option<String>,
+    started: std::time::Instant,
+}
+
+impl Drop for SummaryAttemptGuard {
+    fn drop(&mut self) {
+        let Some(usage) = self.usage.snapshot() else {
+            return;
+        };
+        if usage != Usage::default() {
+            if let Some(candidate) = &self.candidate_usage {
+                candidate.observe(usage);
+            }
+        }
+        if let Some(observer) = &self.observer {
+            observer(SummaryAttemptUsage {
+                model: self.model.clone(),
+                profile: self.profile.clone(),
+                usage,
+                duration: self.started.elapsed(),
+            });
+        }
+    }
+}
+
+async fn run_summary_attempt(
+    runner: &ForkedAgentRunner,
+    request: ForkedAgentRequest,
+    model: &str,
+    profile: Option<&str>,
+    candidate_usage: Option<sidequery::ForkedUsageObserver>,
+) -> Result<ForkedAgentResult, sidequery::ForkError> {
+    let guard = SummaryAttemptGuard {
+        observer: SUMMARY_ATTEMPT_OBSERVER.try_with(Arc::clone).ok(),
+        usage: sidequery::ForkedUsageObserver::default(),
+        candidate_usage,
+        model: model.to_owned(),
+        profile: profile.map(str::to_owned),
+        started: std::time::Instant::now(),
+    };
+    let request_observer =
+        (guard.observer.is_some() || guard.candidate_usage.is_some()).then(|| guard.usage.clone());
+    let response = runner
+        .run_with_usage_observer(request, request_observer)
+        .await;
+    match &response {
+        Ok(response) => guard.usage.observe(response.usage),
+        Err(sidequery::ForkError::Api(sidequery::SideQueryError::Partial { usage, .. })) => {
+            guard.usage.observe(*usage);
+        }
+        _ => {}
+    }
+    // This is the first action after a physical response, before summary
+    // validation, reask, fallback, result encoding or middleware continuation.
+    drop(guard);
+    response
+}
+
 /// Result of one autocompact pass.
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
@@ -121,12 +215,6 @@ impl CompactModelOverride {
     #[must_use]
     pub fn observed_usage(&self) -> Option<Usage> {
         self.observed_usage.snapshot()
-    }
-
-    fn observe(&self, usage: Usage) {
-        if usage != Usage::default() {
-            self.observed_usage.observe(usage);
-        }
     }
 }
 
@@ -615,29 +703,25 @@ impl Autocompactor {
                         .max_output_tokens
                         .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
                 };
-                let observed = runner
-                    .run_with_usage_observer(
-                        req.clone(),
+                let observed = run_summary_attempt(
+                    runner,
+                    req.clone(),
+                    &summary_model,
+                    summary_profile.as_deref(),
+                    model_override.map(|model| model.observed_usage.clone()),
+                )
+                .await;
+                let response = match observed {
+                    Ok(result) if preserve_tail => Ok(reask_missing_summary(
+                        runner,
+                        req,
+                        result,
+                        &prompt,
+                        &summary_model,
+                        summary_profile.as_deref(),
                         model_override.map(|model| model.observed_usage.clone()),
                     )
-                    .await;
-                if let (Some(model), Ok(result)) = (model_override, &observed) {
-                    model.observe(result.usage);
-                }
-                if let (
-                    Some(model),
-                    Err(sidequery::ForkError::Api(sidequery::SideQueryError::Partial {
-                        usage,
-                        ..
-                    })),
-                ) = (model_override, &observed)
-                {
-                    model.observe(*usage);
-                }
-                let response = match observed {
-                    Ok(result) if preserve_tail => {
-                        Ok(reask_missing_summary(runner, req, result, &prompt).await?)
-                    }
+                    .await?),
                     response => response,
                 };
                 let response_text = match &response {
@@ -981,6 +1065,9 @@ async fn reask_missing_summary(
     mut request: ForkedAgentRequest,
     original: ForkedAgentResult,
     prompt: &Utf16JsonProjection,
+    model: &str,
+    profile: Option<&str>,
+    candidate_usage: Option<sidequery::ForkedUsageObserver>,
 ) -> Result<ForkedAgentResult, CompactionError> {
     let text = require_forked_text_source(&original.final_text)?;
     let trimmed = crate::prompt::trim_compact_source_text(&text);
@@ -1009,7 +1096,9 @@ async fn reask_missing_summary(
         request
             .api_attempts_left
             .get_or_insert_with(|| llm_runtime::ApiAttemptsLeft::new(1));
-        if let Ok(retry) = runner.run(request).await {
+        if let Ok(retry) =
+            run_summary_attempt(runner, request, model, profile, candidate_usage).await
+        {
             if has_usable_summary_source(&retry.final_text) {
                 return Ok(retry);
             }

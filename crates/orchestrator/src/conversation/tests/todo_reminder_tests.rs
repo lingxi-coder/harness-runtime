@@ -2,6 +2,7 @@ use super::*;
 use crate::prompt::todo_reminder::{TaskReminderItem, TodoReminderTaskProvider};
 use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    TODO_REMINDER_ENV_LOCK as ENV_LOCK,
 };
 use crate::OrchestratorConfig;
 use lingxi_core::{TodoItem, TodoState};
@@ -13,10 +14,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-
-/// `std::env::set_var`/`remove_var` are not thread-safe; serialize the
-/// env-mutating tests (selection + killswitch) behind this lock.
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Minimal name-only tool for the tool-presence gates.
 struct NamedTool(&'static str);

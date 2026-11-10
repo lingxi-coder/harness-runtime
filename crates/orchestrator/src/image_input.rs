@@ -6,6 +6,7 @@
 
 use crate::error::OrchestratorError;
 use lingxi_core::types::ImageSource;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -164,20 +165,37 @@ fn base64_encode(data: &[u8]) -> String {
 /// is never rejected for "unsupported type" — it defaults to PNG like TS.
 ///
 /// # Errors
-/// Returns [`OrchestratorError::Internal`] only if the file cannot be read.
+/// Returns [`OrchestratorError::Internal`] if the path is not a regular file,
+/// cannot be read, or exceeds the attachment size limit.
 pub fn load_image_source(path: &Path) -> Result<ImageSource, OrchestratorError> {
     const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > MAX_IMAGE_BYTES {
-            return Err(OrchestratorError::Internal(format!(
-                "image {} exceeds {MAX_IMAGE_BYTES} bytes",
-                path.display()
-            )));
-        }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Opening a FIFO must not park a blocking worker before we can inspect
+        // the opened handle. Symlinks to ordinary pasted files remain valid.
+        options.custom_flags(nix::libc::O_NONBLOCK);
     }
-    let bytes = std::fs::read(path).map_err(|e| {
-        OrchestratorError::Internal(format!("could not read image {}: {e}", path.display()))
-    })?;
+    #[cfg(not(unix))]
+    if !std::fs::metadata(path)
+        .map_err(|e| image_read_error(path, e))?
+        .is_file()
+    {
+        return Err(non_regular_image_error(path));
+    }
+    let file = options.open(path).map_err(|e| image_read_error(path, e))?;
+    let metadata = file.metadata().map_err(|e| image_read_error(path, e))?;
+    if !metadata.is_file() {
+        return Err(non_regular_image_error(path));
+    }
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err(oversized_image_error(path, MAX_IMAGE_BYTES));
+    }
+    // Bound the actual read, not just the preceding metadata snapshot: the
+    // same regular file can grow while it is being read.
+    let bytes = read_bounded_image(file, path, MAX_IMAGE_BYTES)?;
     // Magic bytes win; extension is only a fallback hint; default PNG.
     let media_type = detect_media_type_from_bytes(&bytes)
         .or_else(|| media_type_for(path))
@@ -188,6 +206,39 @@ pub fn load_image_source(path: &Path) -> Result<ImageSource, OrchestratorError> 
     })
 }
 
+fn image_read_error(path: &Path, error: std::io::Error) -> OrchestratorError {
+    OrchestratorError::Internal(format!("could not read image {}: {error}", path.display()))
+}
+
+fn non_regular_image_error(path: &Path) -> OrchestratorError {
+    OrchestratorError::Internal(format!("image {} is not a regular file", path.display()))
+}
+
+fn oversized_image_error(path: &Path, max_bytes: u64) -> OrchestratorError {
+    OrchestratorError::Internal(format!(
+        "image {} exceeds {max_bytes} bytes",
+        path.display()
+    ))
+}
+
+fn read_bounded_image(
+    reader: impl Read,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, OrchestratorError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            OrchestratorError::Internal(format!("could not read image {}: {e}", path.display()))
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(oversized_image_error(path, max_bytes));
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +246,67 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn image_read_rejects_bytes_beyond_the_metadata_size_limit() {
+        let error =
+            read_bounded_image(std::io::repeat(0), Path::new("growing.png"), 32).unwrap_err();
+        assert!(error.to_string().contains("exceeds 32 bytes"));
+        assert_eq!(
+            read_bounded_image(&b"1234"[..], Path::new("exact.png"), 4).unwrap(),
+            b"1234"
+        );
+    }
+
+    #[test]
+    fn image_read_rejects_directories_and_oversized_regular_files() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_image_source(temp.path())
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
+        let path = temp.path().join("large.png");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(20 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(load_image_source(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_read_rejects_unconnected_fifo_without_waiting_for_a_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("paste.png");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let started = std::time::Instant::now();
+        assert!(load_image_source(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_read_accepts_symlinks_to_regular_pasted_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.png");
+        let link = temp.path().join("paste.png");
+        std::fs::write(&original, [0x89, b'P', b'N', b'G']).unwrap();
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        assert!(matches!(
+            load_image_source(&link).unwrap(),
+            ImageSource::Base64 { .. }
+        ));
+    }
 
     struct ReleaseDecoderOnDrop(Option<mpsc::SyncSender<()>>);
 

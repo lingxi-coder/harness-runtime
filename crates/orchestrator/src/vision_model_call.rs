@@ -491,21 +491,37 @@ fn covered_delegate_fingerprints(
 fn last_real_user_index(history: &[ConversationMessage]) -> Option<usize> {
     history
         .iter()
-        .rposition(|message| matches!(message, ConversationMessage::User { is_meta: false, .. }))
+        .rposition(|message| real_user_content(message).is_some())
+}
+
+fn real_user_content(message: &ConversationMessage) -> Option<&[ContentBlock]> {
+    match message {
+        ConversationMessage::User {
+            content,
+            is_meta: false,
+            ..
+        } if !content.iter().any(|block| match block {
+            ContentBlock::ToolResult { .. } => true,
+            // Native receipts are machine-owned User rows too. They must
+            // not split the human question from its screenshot results.
+            ContentBlock::ProviderContent { value, .. } => value
+                .string_at("/type")
+                .is_some_and(|kind| kind.starts_with("lingxi_computer_")),
+            _ => false,
+        }) =>
+        {
+            Some(content)
+        }
+        _ => None,
+    }
 }
 
 fn latest_real_user_text(history: &[ConversationMessage]) -> String {
     history
         .iter()
         .rev()
-        .find_map(|message| match message {
-            ConversationMessage::User {
-                content,
-                is_meta: false,
-                ..
-            } => Some(join_text_blocks(content)),
-            _ => None,
-        })
+        .find_map(real_user_content)
+        .map(join_text_blocks)
         .unwrap_or_default()
 }
 
@@ -515,24 +531,16 @@ fn prior_text_context(
 ) -> Vec<(MessageRole, String)> {
     let mut out = Vec::new();
     for message in history[..question_index].iter().rev() {
-        match message {
-            ConversationMessage::User {
-                content,
-                is_meta: false,
-                ..
-            } => {
-                let text = join_text_blocks(content);
-                if !text.is_empty() {
-                    out.push((MessageRole::User, text));
-                }
+        if let Some(content) = real_user_content(message) {
+            let text = join_text_blocks(content);
+            if !text.is_empty() {
+                out.push((MessageRole::User, text));
             }
-            ConversationMessage::Assistant { content, .. } => {
-                let text = join_text_blocks(content);
-                if !text.is_empty() {
-                    out.push((MessageRole::Assistant, text));
-                }
+        } else if let ConversationMessage::Assistant { content, .. } = message {
+            let text = join_text_blocks(content);
+            if !text.is_empty() {
+                out.push((MessageRole::Assistant, text));
             }
-            ConversationMessage::System { .. } | ConversationMessage::User { .. } => {}
         }
         if out.len() == 2 {
             break;
@@ -792,6 +800,125 @@ mod tests {
         let session = orch.session.lock().await;
         assert_eq!(session.history.len(), 1);
         drop(session);
+    }
+
+    #[tokio::test]
+    async fn image_tool_result_followed_by_text_result_keeps_the_human_question() {
+        let question = ConversationMessage::user(MessageId::new(), "Read the serial number".into());
+        let question_key = question.id().to_string();
+        let mut image_result = ConversationMessage::user_with_images(
+            MessageId::new(),
+            String::new(),
+            vec![lingxi_core::types::ImageSource::Url {
+                url: "https://example.com/tool-image.png".into(),
+            }],
+        );
+        let ConversationMessage::User { content, .. } = &mut image_result else {
+            unreachable!()
+        };
+        content.insert(
+            0,
+            serde_json::from_str(
+                r#"{"type":"tool_result","tool_use_id":"image-tool","content":"image captured"}"#,
+            )
+            .unwrap(),
+        );
+        let mut text_result = ConversationMessage::user(MessageId::new(), String::new());
+        let ConversationMessage::User { content, .. } = &mut text_result else {
+            unreachable!()
+        };
+        *content = vec![
+            serde_json::from_str(
+                r#"{"type":"tool_result","tool_use_id":"text-tool","content":"file read"}"#,
+            )
+            .unwrap(),
+            ContentBlock::Text {
+                text: "tool sibling text is not a new human question".into(),
+                citations: None,
+            },
+        ];
+        let mut receipt = ConversationMessage::user(MessageId::new(), String::new());
+        let ConversationMessage::User { content, .. } = &mut receipt else {
+            unreachable!()
+        };
+        *content = vec![ContentBlock::ProviderContent {
+            protocol: "openai_responses".into(),
+            value: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"type":"lingxi_computer_receipt","call_id":"image-tool"}"#,
+            )
+            .unwrap(),
+        }];
+        let history = vec![question.clone(), image_result, text_result.clone(), receipt];
+        let fingerprints = sidequery::collect_media_fingerprints(&history).unwrap();
+        assert_eq!(fingerprints.len(), 1);
+        let api = Arc::new(VisionAwareMockApiClient::new(
+            vec![],
+            media_route(),
+            VisionDelegationResult {
+                analysis: MediaAnalysis {
+                    question_key: question_key.clone(),
+                    media_fingerprints: fingerprints.clone(),
+                    model: "vision".into(),
+                    prompt_version: PROMPT_VERSION,
+                    created_at: std::time::SystemTime::UNIX_EPOCH,
+                    task_findings: vec!["Serial 1234".into()],
+                    media: vec![],
+                    cross_media_findings: vec![],
+                    truncated: false,
+                },
+                usage: cost::Usage::default(),
+                elapsed: std::time::Duration::ZERO,
+                retry_count: 0,
+                api_calls: 1,
+            },
+        ));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.session.lock().await.history = history.clone();
+        let prepared = VisionModelCallPreparer::new()
+            .prepare(
+                &orch,
+                ModelCallPath::Batched,
+                None,
+                None,
+                PreparedModelCall {
+                    history_snapshot: history,
+                    model: "text-only".into(),
+                    model_profile: Some("test".into()),
+                    outgoing_history_rewriter: None,
+                },
+            )
+            .await
+            .unwrap();
+        let packets = api.captured_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].question_key, question_key);
+        assert_eq!(packets[0].current_user_text, "Read the serial number");
+        assert_eq!(
+            sidequery::collect_media_fingerprints(&packets[0].media_messages).unwrap(),
+            fingerprints
+        );
+        assert!(packets[0].prior_text_context.is_empty());
+        let rendered = serde_json::to_string(&prepared.history_snapshot).unwrap();
+        assert!(rendered.contains("Serial 1234"));
+        assert!(!rendered.contains("\"type\":\"image\""));
+
+        let next_question = ConversationMessage::user(MessageId::new(), "Next question".into());
+        let later = vec![question, text_result, next_question];
+        assert_eq!(last_real_user_index(&later), Some(2));
+        assert_eq!(latest_real_user_text(&later), "Next question");
+        assert_eq!(
+            prior_text_context(&later, 2),
+            vec![(MessageRole::User, "Read the serial number".into())]
+        );
     }
 
     #[tokio::test]

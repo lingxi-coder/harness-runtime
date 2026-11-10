@@ -1763,7 +1763,6 @@ impl ConversationOrchestrator {
                     "could not persist scheduled fire: {error}"
                 ))
             })?;
-        *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid);
         Ok(())
     }
 
@@ -2454,6 +2453,7 @@ impl ConversationOrchestrator {
     }
 
     pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
+        let _append = self.transcript.storage_append_lock.lock().await;
         *self.transcript.last_jsonl_uuid.lock().await = last_uuid;
     }
 
@@ -4086,20 +4086,19 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra: source_object([]),
         };
-        let (outcome, last_uuid) = writer
-            .append_pending_prompt_message_once(&row)
+        let (outcome, last_uuid) = self
+            .append_pending_transcript_row(writer, &row)
             .await
             .map_err(|error| {
                 OrchestratorError::Internal(format!(
                     "pending prompt attachment append failed: {error}"
                 ))
             })?;
-        let last_uuid = last_uuid.ok_or_else(|| {
+        let _last_uuid = last_uuid.ok_or_else(|| {
             OrchestratorError::Internal(
                 "pending prompt attachment append completed without a transcript tip".into(),
             )
         })?;
-        *self.transcript.last_jsonl_uuid.lock().await = Some(last_uuid);
         let appended = outcome == session::jsonl::TranscriptAppendOutcome::Appended;
         if appended {
             telemetry::emit_session_appended(&session_id, &row.uuid);
@@ -4201,7 +4200,6 @@ impl ConversationOrchestrator {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
-                *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
                 telemetry::emit_session_appended(&session_id, &row.uuid);
             }
             Err(error) => {
@@ -4275,7 +4273,6 @@ impl ConversationOrchestrator {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
-                *self.transcript.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
             }
             Err(error) => {
@@ -4350,7 +4347,6 @@ impl ConversationOrchestrator {
         };
         match self.append_transcript_row(&writer, &row).await {
             Ok(()) => {
-                *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
                 telemetry::emit_session_appended(&session_id, &row.uuid);
             }
             Err(error) => {
@@ -4564,6 +4560,7 @@ impl ConversationOrchestrator {
             let mut message_ids = Vec::with_capacity(persisted_row_ids.len() + 1);
             message_ids.push(assistant_id.as_uuid().to_string());
             message_ids.extend(persisted_row_ids.iter().map(|id| id.as_uuid().to_string()));
+            let _append = self.transcript.storage_append_lock.lock().await;
             match writer.remove_retry_attempt_rows(&message_ids).await {
                 Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
                 Err(
@@ -4888,6 +4885,7 @@ impl ConversationOrchestrator {
                 Ok(Some(rewritten))
             };
         };
+        let explicit_parent = parent_override.is_some();
         let (session_id_str, plan_mode, parent_uuid) = {
             let session = self.session.lock().await;
             let parent = if pending_prompt_id.is_some() {
@@ -5198,9 +5196,9 @@ impl ConversationOrchestrator {
                 })
                 .map_err(|error| error.to_string())
         } else {
-            self.append_transcript_row(writer, &jmsg)
+            self.append_transcript_row_with_parent(writer, &jmsg, explicit_parent)
                 .await
-                .map(|()| (Some(uuid_for_chain.clone()), true))
+                .map(|_| (Some(uuid_for_chain.clone()), true))
                 .map_err(|error| error.to_string())
         };
         match append_result {
@@ -5210,7 +5208,6 @@ impl ConversationOrchestrator {
                         "pending prompt append completed without a transcript tip".into(),
                     ));
                 }
-                *self.transcript.last_jsonl_uuid.lock().await = last_uuid;
                 if newly_appended {
                     telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
                 }
@@ -5606,11 +5603,6 @@ impl ConversationOrchestrator {
                     // once under the same lease as its durable block batch.
                     self.replace_session_history_row(*turn_id, msg.clone())
                         .await;
-                    let mut parent = self.transcript.last_jsonl_uuid.lock().await.clone();
-                    for row in &mut rows {
-                        row.parent_uuid = parent;
-                        parent = Some(row.uuid.clone());
-                    }
                     let outcomes = self
                         .append_prepared_transcript_rows(writer, &mut rows)
                         .await;
@@ -5787,8 +5779,6 @@ impl ConversationOrchestrator {
                     .expect("extra metadata is an object");
                 match self.append_transcript_row(&writer, &jmsg).await {
                     Ok(()) => {
-                        *self.transcript.last_jsonl_uuid.lock().await =
-                            Some(line_uuid_for_commit.clone());
                         telemetry::emit_session_appended(
                             &session_id_for_commit,
                             &line_uuid_for_commit,
@@ -6148,18 +6138,17 @@ impl ConversationOrchestrator {
 
         let writer = Arc::clone(writer);
         let session_id_for_write = session_id.clone();
-        let mut jmsg_for_write = jmsg;
+        let jmsg_for_write = jmsg;
         let row_content = row.content.clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let persist = async move {
-            // Fenced attachment writers use the same lease. Pick the current
-            // parent only after admission, so an attachment that committed
-            // during session.append cannot leave this row with a stale parent.
-            let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
-            jmsg_for_write.parent_uuid.clone_from(&parent_uuid);
-            let result = match self.append_transcript_row(&writer, &jmsg_for_write).await {
-                Ok(()) => {
-                    *self.transcript.last_jsonl_uuid.lock().await = Some(row_uuid.clone());
+            // The common append transaction chooses and returns the parent
+            // after admission, including concurrent unfenced lifecycle rows.
+            let result = match self
+                .append_transcript_row_with_parent(&writer, &jmsg_for_write, false)
+                .await
+            {
+                Ok(parent_uuid) => {
                     telemetry::emit_session_appended(&session_id_for_write, &row_uuid);
                     for block in &row_content {
                         if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
@@ -6227,6 +6216,7 @@ impl ConversationOrchestrator {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(());
         };
+        let _append = self.transcript.storage_append_lock.lock().await;
         let mut removed = std::collections::HashMap::new();
         for row in rows {
             match writer.remove_message_by_uuid(&row.uuid).await {
@@ -6432,8 +6422,6 @@ impl ConversationOrchestrator {
             jmsg.parent_uuid.clone_from(&parent_uuid);
             let persisted = match self.append_transcript_row(&writer, &jmsg).await {
                 Ok(()) => {
-                    *self.transcript.last_jsonl_uuid.lock().await =
-                        Some(line_uuid_for_write.clone());
                     telemetry::emit_session_appended(&session_id_for_write, &line_uuid_for_write);
                     // O1: the batched path writes ONE merged line, so every
                     // `tool_use` block in it shares that line's uuid as its
@@ -7604,11 +7592,10 @@ impl ConversationOrchestrator {
         // Null is the existing writer's derived-parent placeholder. It resolves
         // the current tip only for a new row; retries retain their original parent.
         row.parent_uuid = None;
-        let (outcome, tip) = writer
-            .append_pending_prompt_message_once(&row)
+        let (outcome, _tip) = self
+            .append_pending_transcript_row(writer, &row)
             .await
             .map_err(|e| e.to_string())?;
-        *self.transcript.last_jsonl_uuid.lock().await = tip;
         if outcome == session::jsonl::TranscriptAppendOutcome::Appended {
             let mut state = self.session.lock().await;
             if reset {

@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hooks::cwd_changed_firer::{CwdChangedFire, CwdChangedFirer};
+use hooks::cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, CwdChangedOrigin};
 use hooks::events::HookEvent;
 #[cfg(test)]
 use hooks::registry::HookContext;
@@ -102,12 +102,33 @@ impl OrchestratorCwdChangedFirer {
 
 #[async_trait]
 impl CwdChangedFirer for OrchestratorCwdChangedFirer {
+    async fn capture_origin(&self) -> Option<CwdChangedOrigin> {
+        self.context_source
+            .current()
+            .await
+            .map(CwdChangedOrigin::from_context)
+    }
+
     async fn fire(&self, fire: CwdChangedFire) {
+        let Some(origin) = self.capture_origin().await else {
+            return;
+        };
+        self.fire_from_origin(fire, &origin).await;
+    }
+
+    async fn fire_from_origin(&self, fire: CwdChangedFire, origin: &CwdChangedOrigin) {
         // Update the orchestrator's shared current-cwd FIRST (mirrors
         // `setCwdState(new)` firing BEFORE `executeCwdChangedHooks` in
         // Shell.ts:409), so any hook that fires AFTER this `cd` reads the new dir.
-        if let Ok(mut g) = self.current_cwd.lock() {
-            g.clone_from(&fire.new);
+        if !origin
+            .commit_if_current(async {
+                if let Ok(mut g) = self.current_cwd.lock() {
+                    g.clone_from(&fire.new);
+                }
+            })
+            .await
+        {
+            return;
         }
         // Retained for the watcher-rebind step below (the hook `event` moves
         // `fire.new`); this is the cwd the file-changed watcher re-resolves its
@@ -120,19 +141,32 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
             old: fire.old,
             new: fire.new,
         };
-        let Some(ctx) = self.context_source.current().await else {
+        let Some(mut ctx) = origin.context.clone() else {
             return;
         };
+        ctx.cwd = new_cwd.clone();
+        ctx.publication_guard = origin.publication_guard.clone();
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the
         // caller's cwd update. The aggregate result is intentionally dropped —
         // `CwdChanged` is observational.
-        let _ = self.hooks.execute(event, ctx).await;
+        if !origin
+            .run_if_current(async {
+                let _ = self.hooks.execute(event, ctx).await;
+            })
+            .await
+        {
+            return;
+        }
         // A committed cwd rehome is a global Client render-version change in
         // Native. Keep it separate from site/plugin-scoped `ui.invalidate`
         // counters so nonmatching Client sites also observe the new token.
         if let Some(mod_host) = self.hooks.mod_host().await {
-            mod_host.note_client_ui_global_render_change().await;
+            origin
+                .commit_if_current(async {
+                    mod_host.note_client_ui_global_render_change().await;
+                })
+                .await;
         }
         // Watcher-rebind half of claude-code's `onCwdChanged` (function `g`):
         // AFTER the `CwdChanged` hooks fire, ask the file-changed watcher to
@@ -141,7 +175,11 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
         // watcher itself guards an unchanged cwd (`if(_===S)return`), so we fire
         // unconditionally. No-op when unset (mobile / no `FileChanged` hooks).
         if let Some(rebinder) = &self.watcher_rebinder {
-            rebinder.rebind(new_cwd);
+            origin
+                .commit_if_current(async {
+                    rebinder.rebind(new_cwd);
+                })
+                .await;
         }
     }
 }
@@ -309,16 +347,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn fire_maps_to_delivered_cwd_changed_event() {
-        // A Builtin hook subscribed to `CwdChanged` routed to a recording
-        // handler: firing the orchestrator firer must deliver a
-        // `HookEvent::CwdChanged { old, new }` carrying the fire's paths.
-        let seen: Arc<Mutex<Option<(PathBuf, PathBuf)>>> = Arc::new(Mutex::new(None));
-        let seen_transcript: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    fn recording_hook_executor(
+        seen: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
+        seen_transcript: Arc<Mutex<Option<PathBuf>>>,
+    ) -> Arc<HookExecutorImpl> {
         let handler = Arc::new(RecordingBuiltin {
-            seen: seen.clone(),
-            seen_transcript: seen_transcript.clone(),
+            seen,
+            seen_transcript,
         });
 
         let mut registry = HookRegistry::new();
@@ -351,10 +386,21 @@ mod tests {
             Arc::new(UnusedRuntime) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         );
         exec.register_builtin(handler);
+        Arc::new(exec)
+    }
+
+    #[tokio::test]
+    async fn fire_maps_to_delivered_cwd_changed_event() {
+        // A Builtin hook subscribed to `CwdChanged` routed to a recording
+        // handler: firing the orchestrator firer must deliver a
+        // `HookEvent::CwdChanged { old, new }` carrying the fire's paths.
+        let seen: Arc<Mutex<Option<(PathBuf, PathBuf)>>> = Arc::new(Mutex::new(None));
+        let seen_transcript: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let exec = recording_hook_executor(seen.clone(), seen_transcript.clone());
 
         let current_cwd = Arc::new(Mutex::new(PathBuf::from("/work")));
         let firer = OrchestratorCwdChangedFirer::new(
-            Arc::new(exec),
+            exec,
             PathBuf::from("/work"),
             PathBuf::from("/home/.lingxi/projects/-work/abc.jsonl"),
             current_cwd.clone(),
@@ -389,5 +435,73 @@ mod tests {
             "OrchestratorCwdChangedFirer must carry the constructor's transcript_path \
              into the HookContext (non-empty)"
         );
+    }
+
+    #[tokio::test]
+    async fn old_cwd_origin_cannot_mutate_or_fire_after_a_real_session_switch() {
+        use crate::test_support::{
+            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        };
+        use crate::{ConversationOrchestrator, OrchestratorConfig};
+        use lingxi_core::host::OrchestratorHandle;
+
+        let home = tempfile::tempdir().unwrap();
+        let old_cwd = home.path().join("before");
+        let next_cwd = home.path().join("replacement-session");
+        std::fs::create_dir_all(&old_cwd).unwrap();
+        std::fs::create_dir_all(&next_cwd).unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let seen_transcript = Arc::new(Mutex::new(None));
+        let hooks = recording_hook_executor(seen.clone(), seen_transcript.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tool_api::ToolRegistry::new()),
+                hooks.clone(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                old_cwd.clone(),
+            )
+            .with_config_home(home.path().to_path_buf()),
+        );
+        orch.attach_owned_session_switches();
+        let source = Arc::new(crate::HookContextSource::new(HookContext::default()));
+        source.attach(&orch);
+        let rebound = Arc::new(Mutex::new(Vec::new()));
+        let firer = OrchestratorCwdChangedFirer::new(
+            hooks,
+            old_cwd.clone(),
+            home.path().join("old-transcript.jsonl"),
+            orch.current_cwd.clone(),
+        )
+        .with_context_source(source)
+        .with_watcher_rebinder(Arc::new(RecordingRebinder {
+            seen: rebound.clone(),
+        }));
+        let old_origin = firer.capture_origin().await.unwrap();
+        let old_session = old_origin.context.as_ref().unwrap().session_id;
+        orch.clear_session().await.unwrap();
+        orch.change_working_directory(next_cwd.clone(), vec![next_cwd.clone()])
+            .await
+            .unwrap();
+        assert_ne!(orch.current_session_id().await, old_session);
+        *seen.lock().unwrap() = None;
+        *seen_transcript.lock().unwrap() = None;
+        firer
+            .fire_from_origin(
+                CwdChangedFire {
+                    old: old_cwd.clone(),
+                    new: old_cwd.join("stale-command-result"),
+                },
+                &old_origin,
+            )
+            .await;
+
+        assert_eq!(*orch.current_cwd.lock().unwrap(), next_cwd);
+        assert!(seen.lock().unwrap().is_none());
+        assert!(seen_transcript.lock().unwrap().is_none());
+        assert!(rebound.lock().unwrap().is_empty());
     }
 }

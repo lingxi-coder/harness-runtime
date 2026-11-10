@@ -14,7 +14,6 @@ use state::BackgroundSuggestionState;
 mod javascript;
 #[path = "prompt_suggestion_background_model.rs"]
 mod model_selection;
-use javascript::evaluate;
 
 fn null_projection() -> Utf16JsonProjection {
     Utf16JsonProjection::parse("null").expect("null is valid JSON")
@@ -94,7 +93,7 @@ impl ConversationOrchestrator {
         &self,
         cancel: &CancellationToken,
     ) -> Option<BackgroundSuggestionContext> {
-        if std::env::var("CLAUDE_CODE_SESSION_KIND").ok().as_deref() != Some("bg") {
+        if !lingxi_core::host::env::is_bg_session() {
             return None;
         }
         let disabled_surfaces =
@@ -120,11 +119,10 @@ impl ConversationOrchestrator {
         } else {
             None
         };
-        let assistant: Vec<_> = history
+        let count = history
             .iter()
             .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
-            .collect();
-        let count = assistant.len();
+            .count();
         let now = chrono::Utc::now().timestamp_millis();
         let (epoch, start, previous, mins) = {
             let mut state = self.background_suggestion_state();
@@ -176,13 +174,10 @@ impl ConversationOrchestrator {
                 ((now - state.previous_state_since_ms) as f64 / 60000.0).round(),
             )
         };
-        let messages = assistant.iter().map(|message| {
-            let content = match message {ConversationMessage::Assistant {content,..} => content, _ => unreachable!()};
-            json!({"type":"assistant","message":{"content":content},"isApiErrorMessage":self.is_prompt_suggestion_api_error(&message.id())})
-        }).collect::<Vec<_>>();
-        let assembled = evaluate("assemble", json!({"messages":messages,"lastCount":start}))?;
-        let text = assembled.string_at("/text").unwrap_or_default();
-        let tools = assembled.string_at("/tools").unwrap_or_default();
+        let assembled = javascript::assemble_history(&history, start, |id| {
+            self.is_prompt_suggestion_api_error(id)
+        })
+        .ok()?;
         let latest_ask = history
             .iter()
             .rev()
@@ -208,20 +203,8 @@ impl ConversationOrchestrator {
                 _ => None,
             })
             .unwrap_or_else(|| Utf16JsonProjection::from(""));
-        let prepared = javascript::evaluate_projection_result(
-            "prepare",
-            object_projection(vec![
-                ("text".into(), Utf16JsonProjection::from(text)),
-                (
-                    "previous".into(),
-                    Utf16JsonProjection::from(previous.as_str()),
-                ),
-                ("latestAsk".into(), latest_ask),
-                ("tools".into(), Utf16JsonProjection::from(tools)),
-                ("minutes".into(), projection_from_value(json!(mins))),
-            ]),
-        )
-        .ok()?;
+        let prepared =
+            javascript::prepare_assembled(&assembled, &previous, latest_ask, mins).ok()?;
         let no_text_result = if prepared
             .at_pointer("/hasText")
             .and_then(|value| value.as_bool())

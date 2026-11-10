@@ -43,21 +43,6 @@ pub(crate) fn native_refusal_retry_enabled(query_source: &str, refusal_retry_spe
     )
 }
 
-/// Preserve the native model-catalog route fence for same-model retries.
-pub(crate) async fn native_refusal_retry_route(
-    orch: &ConversationOrchestrator,
-    model: &str,
-) -> bool {
-    let profile = if let Some(route) =
-        crate::query_model::current().filter(|route| route.model.as_str() == model)
-    {
-        route.profile
-    } else {
-        orch.session.lock().await.model_profile.clone()
-    };
-    native_refusal_retry_route_for_request(orch, model, profile.as_deref()).await
-}
-
 /// Resolve the catalog fence from the model/profile that actually selected
 /// this response. Batched Mod responses can report a provider-side model name
 /// that differs from the route used for the physical request.

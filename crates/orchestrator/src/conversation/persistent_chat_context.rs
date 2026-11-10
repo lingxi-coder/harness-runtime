@@ -69,6 +69,55 @@ pub(crate) struct PersistentChatContext {
     prepared: std::sync::atomic::AtomicBool,
 }
 
+/// A cancelled query still owns the usage its provider has already reported.
+/// The captured scope pins the originating session; synchronous submission
+/// transfers settlement before this guard or its caller can be dropped.
+struct ChatSummaryUsageGuard {
+    scope: Option<cost::CostSessionScope>,
+    model_ref: cost::ModelRef,
+    observer: sidequery::ForkedUsageObserver,
+    started: std::time::Instant,
+    bus: Option<Arc<telemetry::AnalyticsBus>>,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+    submitted: bool,
+}
+
+impl ChatSummaryUsageGuard {
+    fn submit(
+        &mut self,
+        response: Option<&sidequery::SideQueryResponse>,
+    ) -> Option<cost::CostResponseReceipt> {
+        if self.submitted {
+            return None;
+        }
+        let usage = response
+            .map(|response| response.usage)
+            .or_else(|| self.observer.snapshot())?;
+        self.submitted = true;
+        self.scope.as_ref().map(|scope| {
+            let receipt = scope.submit_model_response(cost::CostModelResponse {
+                model_ref: self.model_ref.clone(),
+                usage,
+                duration: self.started.elapsed(),
+                retries: response.map_or(0, |response| response.retry_count),
+                cache_read_input_tokens: usage.tokens.cache_read,
+                cache_creation_input_tokens: usage.tokens.cache_write,
+                is_batch_request: false,
+                account: None,
+                bus: self.bus.clone(),
+            });
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            receipt
+        })
+    }
+}
+
+impl Drop for ChatSummaryUsageGuard {
+    fn drop(&mut self) {
+        let _ = self.submit(None);
+    }
+}
+
 fn error(code: &str) -> OrchestratorError {
     OrchestratorError::ApiCall(llm_runtime::LlmError::InvalidRequest {
         message: code.to_owned(),
@@ -862,37 +911,38 @@ impl ConversationOrchestrator {
             .map_err(|_| error(UNAVAILABLE))?;
         context.check(cancel)?;
         let started = std::time::Instant::now();
+        let observer = sidequery::ForkedUsageObserver::default();
+        let mut usage = ChatSummaryUsageGuard {
+            scope,
+            model_ref: crate::cost_wiring::model_ref_from_string(model, profile),
+            observer: observer.clone(),
+            started,
+            bus: self.model_runtime.analytics_bus.clone(),
+            calls: self.model_runtime.api_calls_recorded.clone(),
+            submitted: false,
+        };
         let dispatch_check = context.dispatch_check(cancel);
-        let query = context.config.client.query_with_dispatch_admission(
+        let query = context.config.client.query_with_dispatch_admission_and_usage_observer(
             summary_request,
             llm_runtime::RequestDispatchAdmission::new(move || dispatch_check()),
+            observer,
         );
         let response = match cancel {
             Some(cancel) => tokio::select! {
                 biased;
-                () = cancel.cancelled() => return Err(error("chat_context_authority_revoked")),
-                result = query => result,
+                () = cancel.cancelled() => Err(error("chat_context_authority_revoked")),
+                result = query => result.map_err(|_| error(UNAVAILABLE)),
             },
-            None => query.await,
+            None => query.await.map_err(|_| error(UNAVAILABLE)),
+        };
+        if let Some(receipt) = usage.submit(response.as_ref().ok()) {
+            let settlement = receipt.settle().await;
+            settlement
+                .persistence_result()
+                .clone()
+                .map_err(|_| error(UNAVAILABLE))?;
         }
-        .map_err(|_| error(UNAVAILABLE))?;
-        // Hand usage to the accounting owner before another fallible await.
-        let usage_receipt = scope.as_ref().map(|scope| {
-            scope.submit_model_response(cost::CostModelResponse {
-                model_ref: crate::cost_wiring::model_ref_from_string(model, profile),
-                usage: response.usage,
-                duration: started.elapsed(),
-                retries: response.retry_count,
-                cache_read_input_tokens: response.usage.tokens.cache_read,
-                cache_creation_input_tokens: response.usage.tokens.cache_write,
-                is_batch_request: false,
-                account: None,
-                bus: self.model_runtime.analytics_bus.clone(),
-            })
-        });
-        self.settle_compaction_usage(usage_receipt)
-            .await
-            .map_err(|_| error(UNAVAILABLE))?;
+        let response = response?;
         context.check(cancel)?;
         if !response.tool_calls.is_empty()
             || response.structured.is_some()
