@@ -1,0 +1,1 @@
+This job requests worktree isolation. Call EnterWorktree as your first action, before reading files or running commands, unless your cwd is already under `{dot_dir}/worktrees/`. If EnterWorktree fails, continue in place.

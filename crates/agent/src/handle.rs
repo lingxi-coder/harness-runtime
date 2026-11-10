@@ -400,6 +400,7 @@ pub struct PoolSubagentSpawner {
         Option<lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
+    conversation_mode: lingxi_core::host::session_context::ConversationMode,
     spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
     usage_recorder: Option<Arc<dyn SubagentUsageRecorder>>,
 }
@@ -408,10 +409,24 @@ pub struct PoolSubagentSpawner {
 pub type MobileWorkspaceCwdProvider =
     Arc<dyn Fn(Option<&std::path::Path>) -> Option<String> + Send + Sync>;
 
-/// Renders the subagent `<env>` block for a resolved model id (claude-code
-/// `tIm`). The static environment is captured by the closure at the composition
-/// root; only the resolved model id varies per spawn.
-pub type SubagentEnvRenderer = Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentPromptContext {
+    pub additional_context: Vec<String>,
+    pub system_suffix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentPromptTarget {
+    pub model: String,
+    pub model_profile: Option<String>,
+    pub policy: Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+    pub supports_system_turns: bool,
+}
+
+/// The composition root renders host context for the child's resolved route.
+pub type SubagentEnvRenderer = Arc<
+    dyn Fn(&SubagentPromptTarget, Option<&std::path::Path>) -> SubagentPromptContext + Send + Sync,
+>;
 
 /// Reads the LIVE default parent / main-loop model at spawn time (claude-code
 /// `getMainLoopModel()` off the current session). Returns `None` when the live
@@ -523,6 +538,7 @@ impl PoolSubagentSpawner {
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
+            conversation_mode: Default::default(),
             spawn_observer: None,
             usage_recorder: None,
         }
@@ -605,6 +621,15 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_session_interactive(mut self, interactive: bool) -> Self {
         self.session_interactive = Some(interactive);
+        self
+    }
+
+    #[must_use]
+    pub fn with_conversation_mode(
+        mut self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Self {
+        self.conversation_mode = mode;
         self
     }
 
@@ -1078,6 +1103,10 @@ impl PoolSubagentSpawner {
         observer_request.creator_team_name = None;
         observer_request.fork_context_messages = None;
         observer_request.fork_parent_system_prompt = None;
+        observer_request.fork_prompt_policy = None;
+        observer_request.fork_custom_system_prompt = None;
+        observer_request.fork_append_system_prompt = None;
+        observer_request.fork_role_system_prompt = None;
         observer_request.forked_skill_name = None;
         observer_request.forked_skill_attribution = None;
         observer_request.resumed_history = None;
@@ -1195,6 +1224,20 @@ impl PoolSubagentSpawner {
 - For clear communication with the user the assistant MUST avoid using emojis.\n\
 - Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n\
 - Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create. (Files written as input to another tool are fine; this note is about report files.)";
+
+    pub(crate) fn subagent_prompt_appendix(rewrite: bool) -> (&'static str, &'static str) {
+        if rewrite {
+            (
+                include_str!("templates/subagent_consent_rewritten.md"),
+                include_str!("templates/subagent_notes_rewritten.md"),
+            )
+        } else {
+            (
+                Self::SUBAGENT_CONSENT_PARAGRAPH,
+                Self::SUBAGENT_NOTES_TRAILER,
+            )
+        }
+    }
 }
 
 /// The persistent / resumable subagent seam (claude-code `run_in_background` +

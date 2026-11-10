@@ -365,6 +365,7 @@ mod tests {
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 session_interactive: None,
+                prompt_policy: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -399,6 +400,10 @@ mod tests {
             cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
             fork_parent_effort: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             cwd: None,
             depth: 0,
             observer: None,
@@ -2338,6 +2343,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     fusion_input(Some("implement")),
                     SubagentInvocationContext {
                         session_interactive: None,
+                        prompt_policy: None,
                         available_tool_names: None,
                         cancellation_token: tokio_util::sync::CancellationToken::new(),
                         permission_pause_observer: None,
@@ -2451,6 +2457,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
@@ -2567,6 +2574,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
@@ -5911,6 +5919,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 source_fixture(&serde_json::json!({})),
                 lingxi_core::host::tool_invoker::SubagentInvocationContext {
                     session_interactive: None,
+                    prompt_policy: None,
                     available_tool_names: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -7022,6 +7031,17 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             vec![parent_assistant_with_tool_use()],
         );
         ctx.fork_parent_system_prompt = Some(parent_bytes.to_string().into());
+        ctx.fork_custom_system_prompt = Some("CUSTOM COMPLETE OVERRIDE".into());
+        ctx.fork_append_system_prompt = Some("APPENDED USER INSTRUCTIONS".into());
+        ctx.fork_role_system_prompt = Some("SPECIALIZED ROLE".into());
+        let saved_policy = lingxi_core::host::prompt_policy::resolve_prompt_policy(
+            lingxi_core::host::prompt_policy::PromptTarget::for_model(
+                Default::default(),
+                "claude-opus-5",
+            ),
+        )
+        .metadata();
+        ctx.fork_prompt_policy = Some(saved_policy.clone());
         let input = serde_json::json!({
             "description": "fork it",
             "prompt": "Do the subtask",
@@ -7044,6 +7064,31 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             Some(parent_bytes),
             "fork child must carry the parent's exact rendered system prompt bytes"
         );
+        assert_eq!(
+            inv[0]
+                .request
+                .fork_custom_system_prompt
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("CUSTOM COMPLETE OVERRIDE")
+        );
+        assert_eq!(
+            inv[0]
+                .request
+                .fork_append_system_prompt
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("APPENDED USER INSTRUCTIONS")
+        );
+        assert_eq!(
+            inv[0]
+                .request
+                .fork_role_system_prompt
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("SPECIALIZED ROLE")
+        );
+        assert_eq!(inv[0].request.fork_prompt_policy, Some(saved_policy));
 
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
@@ -7591,10 +7636,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx);
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: true,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -7641,10 +7687,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ));
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: true,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 workflow_authoring_available: false,
                 bash_precommit_skills: Default::default(),
@@ -7717,10 +7764,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx);
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: true,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -7793,10 +7841,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         }));
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: true,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -7891,6 +7940,83 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ]
     }
 
+    #[test]
+    fn build_prompt_matches_native_319_artifact() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let saved_fork = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        let saved_steer = std::env::var("LINGXI_SUBAGENT_STEER").ok();
+        std::env::remove_var("LINGXI_SUBAGENT_STEER");
+        lingxi_core::host::subscription::set_current_subscription(None);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/tool_prompts_319.json"
+        ))
+        .unwrap();
+        let mut comparisons = Vec::new();
+        for row in fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["tool"] == "Agent")
+        {
+            let fork = row["fork"].as_bool().unwrap();
+            let lean = row["lean"].as_bool().unwrap();
+            std::env::set_var("LINGXI_FORK_SUBAGENT", if fork { "1" } else { "0" });
+            let actual = AgentTool::build_prompt_with_async_agents(
+                &prompt_agents(),
+                &[],
+                false,
+                true,
+                Some(if lean {
+                    "claude-opus-5-5"
+                } else {
+                    "claude-sonnet-4-6"
+                }),
+                true,
+            );
+            let mut expected = row["output"]
+                .as_str()
+                .unwrap()
+                .replace(".claude/agents/", ".lingxi/agents/");
+            if !fork {
+                // The native fixture keeps the fork feature enabled while
+                // withholding fork availability/background. LingXi disables
+                // the feature with env=0 here and still runs ordinary agents
+                // in the background by default. Do not advertise the fixture's
+                // extra explicit-background-only restriction on this host.
+                let native_explicit_background_note = "\n- **Background agents**: an agent runs in the background only if you pass `run_in_background: true`, and a call that passes it may still run in the foreground or be refused. When an agent does run in the background, the call returns at once without its report, and you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead. After launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.";
+                if !lean {
+                    assert!(expected.contains(native_explicit_background_note));
+                    expected = expected.replace(native_explicit_background_note, "");
+                }
+            }
+            comparisons.push((lean, fork, actual, expected));
+        }
+        for (key, saved) in [
+            ("LINGXI_FORK_SUBAGENT", saved_fork),
+            ("LINGXI_SUBAGENT_STEER", saved_steer),
+        ] {
+            if let Some(saved) = saved {
+                std::env::set_var(key, saved);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        for (lean, fork, actual, expected) in comparisons {
+            if actual != expected {
+                let first = actual
+                    .chars()
+                    .zip(expected.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                panic!("Agent lean={lean} fork={fork} differs at character {first}: actual={:?}; expected={:?}",
+                    actual.chars().skip(first).take(240).collect::<String>(),
+                    expected.chars().skip(first).take(240).collect::<String>());
+            }
+        }
+    }
+
     // The binary's Agent-tool prompt is `CGf({model:e,…})` and splits on
     // `m = qk(e)` (`tool_api::dh_simple_system_prompt`): `if(m){…SHORT…}` then
     // `return …LONG…`. The port used to DISCARD `PromptOptions`, so a
@@ -7920,10 +8046,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         assert!(long.contains("\n\n## Writing the prompt\n\n"));
         assert!(long.contains("Example usage:\n\n<example>"));
 
-        // `Dh(undefined) === false` ⇒ an unknown model also takes the LONG arm.
+        // Unknown routes use generic Lean.
         assert_eq!(
             AgentTool::build_prompt(&agents, &[], false, None, true),
-            long
+            short
         );
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
@@ -7985,16 +8111,15 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     // (`lingxi_core::host::live_sessions::subagent_steer_is_default`, used by the system
     // prompt) — it just wasn't consulted here.
     #[test]
-    fn build_prompt_steer_gate_drops_the_reach_lead() {
+    fn build_prompt_319_delegation_guidance_is_shared_across_steers() {
         let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_SUBAGENT_STEER");
         let agents = prompt_agents();
         let default_steer = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        assert!(default_steer.contains(
-            "\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
-        ));
+        assert!(default_steer
+            .contains(include_str!("templates/when_to_use_319.md").trim_end_matches('\n')));
         let long_default = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, true);
         assert!(long_default.contains("\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls."));
 
@@ -8003,10 +8128,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let long_steered = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, true);
         std::env::remove_var("LINGXI_SUBAGENT_STEER");
 
-        assert!(steered.contains(
-            "\n\n## When to use\n\nFor a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
-        ));
-        assert!(!steered.contains("Reach for this when the task matches"));
+        assert!(
+            steered.contains(include_str!("templates/when_to_use_319.md").trim_end_matches('\n'))
+        );
+        assert!(steered.contains("When in doubt, don't spawn."));
         // The LONG arm's `${g?…:""}` pair is dropped too.
         assert!(!long_steered.contains("should be used proactively"));
         assert!(!long_steered.contains("in parallel\", you MUST send a single message"));
@@ -8323,6 +8448,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             },
         ));
         let p_pro = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        let p_generic = AgentTool::build_prompt(&agents, &[], false, Some("gpt-5.5"), true);
         lingxi_core::host::subscription::set_current_subscription(None);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
@@ -8344,6 +8470,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         assert!(p_pro.contains(
             "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs — otherwise background it so the user can interject."
         ));
+        assert_eq!(
+            p_generic, p_default,
+            "Claude's subscription policy does not apply to a generic bundle"
+        );
     }
 
     // A non-pro tier (e.g. max) does NOT trip the pro gate.
@@ -8428,40 +8558,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         );
     }
 
-    // Native 2.1.319 keeps fork availability enabled by default in headless
-    // sessions; the background policy is evaluated independently.
+    // Native 2.1.319 enables fork availability in headless sessions by default.
+    // Background execution is a separate gate, covered by core's native matrix.
     #[test]
-    fn build_prompt_fork_available_headless_by_default_and_with_env() {
-        let _g = AGENT_PROMPT_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
-            agent_type: "general-purpose".into(),
-            when_to_use: "anything".into(),
-            when_to_use_lean: None,
-            tools_description: "All tools".into(),
-        }];
-        lingxi_core::host::session_flags::set_non_interactive_session(true);
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        let p_unset = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        let p_env = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        lingxi_core::host::session_flags::set_non_interactive_session(false);
-        assert!(
-            p_unset.contains("forks yourself"),
-            "Native 2.1.319 keeps default headless fork availability"
-        );
-        assert!(!p_unset
-            .contains("specify a subagent_type parameter to select which agent type to use"));
-        assert!(
-            p_env.contains("forks yourself"),
-            "explicit env true enables fork text even when headless"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_prompt_fork_availability_matches_native_in_both_session_modes() {
+    fn build_prompt_fork_gate_defaults_on_when_non_interactive() {
         let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -8474,26 +8574,70 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let prior_global = lingxi_core::host::session_flags::is_non_interactive_session();
         let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
         lingxi_core::host::session_flags::set_non_interactive_session(true);
-        // Native 2.1.319 defaults to available in both owning-session modes.
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-
-        let interactive =
-            lingxi_core::host::session_flags::scope_non_interactive_session(false, async {
-                AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
-            });
-        let headless =
-            lingxi_core::host::session_flags::scope_non_interactive_session(true, async {
-                AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
-            });
-        let (interactive, headless) = tokio::join!(interactive, headless);
-
-        assert!(interactive.contains("forks yourself"));
-        assert!(headless.contains("forks yourself"));
+        let p_unset = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+        let p_env = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         match prior_env {
             Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
             None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
         }
         lingxi_core::host::session_flags::set_non_interactive_session(prior_global);
+        assert!(
+            p_unset.contains("forks yourself"),
+            "319 keeps fork availability in headless sessions"
+        );
+        assert!(!p_unset
+            .contains("specify a subagent_type parameter to select which agent type to use"));
+        assert!(
+            p_env.contains("forks yourself"),
+            "explicit env true enables fork text even when headless"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_prompt_fork_gate_is_available_in_both_task_local_session_modes() {
+        let _g = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            when_to_use_lean: None,
+            tools_description: "All tools".into(),
+        }];
+        let prior_global = lingxi_core::host::session_flags::is_non_interactive_session();
+        let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        lingxi_core::host::session_flags::set_non_interactive_session(true);
+        // Native 319 keeps availability ON in both modes, while the task-local
+        // mode still remains isolated from the process-wide fallback.
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+
+        let interactive =
+            lingxi_core::host::session_flags::scope_non_interactive_session(false, async {
+                (
+                    AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true),
+                    lingxi_core::host::session_flags::effective_non_interactive_session(),
+                )
+            });
+        let headless =
+            lingxi_core::host::session_flags::scope_non_interactive_session(true, async {
+                (
+                    AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true),
+                    lingxi_core::host::session_flags::effective_non_interactive_session(),
+                )
+            });
+        let (interactive, headless) = tokio::join!(interactive, headless);
+
+        match prior_env {
+            Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
+            None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
+        }
+        lingxi_core::host::session_flags::set_non_interactive_session(prior_global);
+        assert!(interactive.0.contains("forks yourself"));
+        assert!(headless.0.contains("forks yourself"));
+        assert!(!interactive.1);
+        assert!(headless.1);
     }
 
     // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent
@@ -9165,6 +9309,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 }
                 let context = SubagentInvocationContext {
                     session_interactive: Some(interactive),
+                    prompt_policy: None,
                     available_tool_names: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,

@@ -2153,6 +2153,7 @@ mod tests {
         let tool = ExitPlanModeTool::new(bctx);
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: true,
@@ -2428,6 +2429,7 @@ mod tests {
             .with_gate(gate);
         let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

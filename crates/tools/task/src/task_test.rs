@@ -2099,6 +2099,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskListTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -2121,6 +2122,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskListTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -2145,6 +2147,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskCreateTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -2167,6 +2170,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskCreateTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,

@@ -1787,6 +1787,7 @@ impl ConversationOrchestrator {
             user_context_message: None,
             tool_use_options: tool_api::ToolUseOptions {
                 session_interactive: None,
+                prompt_policy: None,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
@@ -2214,11 +2215,23 @@ impl ConversationOrchestrator {
         model: &str,
         tools: &[lingxi_core::host::SourceToolWireDefinition],
     ) -> Result<sidequery::CacheSafeParams, lingxi_core::settings::SettingsError> {
-        let (fork_context_messages, session_id, model_profile) = {
+        let (fork_context_messages, session_id) = {
             let s = self.session.lock().await;
             let fork_context_messages = s.model_context_history();
-            (fork_context_messages, s.session_id, s.model_profile.clone())
+            (fork_context_messages, s.session_id)
         };
+        let (routed_model, routed_profile) = self.current_prompt_route().await;
+        let mut prompt_policy = self.current_prompt_policy().await?;
+        if routed_model != model && prompt_policy.target.request_model != model {
+            prompt_policy = self
+                .prompt_policy_for_mode_route(
+                    model,
+                    routed_profile.as_deref(),
+                    prompt_policy.target.mode,
+                )
+                .await?;
+        }
+        let model_profile = prompt_policy.target.profile_name.clone();
         let task_deliveries = self
             .task_deliveries_for_snapshot(&fork_context_messages)
             .await;
@@ -2258,6 +2271,7 @@ impl ConversationOrchestrator {
             user_context_message,
             tool_use_options: tool_api::ToolUseOptions {
                 session_interactive: None,
+                prompt_policy: Some(prompt_policy),
                 output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
@@ -2299,9 +2313,16 @@ impl ConversationOrchestrator {
     /// successful API call (the `save_cache_safe_params` site). `None`/empty
     /// system collapses to `None` (a turn with no system prompt records nothing).
     pub(crate) async fn save_current_turn_system_prompt(&self, system: Option<&SystemPromptInput>) {
-        *self.prompt_runtime.current_turn_system_prompt.lock().await = system
+        let source = system
             .map(Self::system_prompt_source_text)
             .filter(|text| !source_text_is_empty(text));
+        let policy = self
+            .current_prompt_policy()
+            .await
+            .ok()
+            .map(|policy| policy.metadata());
+        *self.prompt_runtime.current_turn_system_prompt.lock().await =
+            source.map(|source| (source, policy));
     }
 
     pub(crate) fn system_prompt_source_text(system: &SystemPromptInput) -> Utf16JsonProjection {
@@ -2335,6 +2356,20 @@ impl ConversationOrchestrator {
     /// prompt. Read by the fork dispatch path to seed each tool's
     /// `ToolUseContext::fork_parent_system_prompt`.
     pub(crate) async fn current_turn_system_prompt(&self) -> Option<Utf16JsonProjection> {
+        self.prompt_runtime
+            .current_turn_system_prompt
+            .lock()
+            .await
+            .clone()
+            .map(|(source, _)| source)
+    }
+
+    pub(crate) async fn current_turn_prompt_state(
+        &self,
+    ) -> Option<(
+        Utf16JsonProjection,
+        Option<lingxi_core::host::prompt_policy::PromptPolicyMetadata>,
+    )> {
         self.prompt_runtime
             .current_turn_system_prompt
             .lock()

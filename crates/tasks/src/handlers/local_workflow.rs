@@ -1610,6 +1610,10 @@ fn make_request(
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         // `agent(prompt, { schema })` → structured output. The opt is a JSON
         // Schema object; carry it as its serialised form for the runner to force.
         schema: opts

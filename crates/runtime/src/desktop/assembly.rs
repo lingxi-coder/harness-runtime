@@ -2285,6 +2285,7 @@ pub async fn build_with_credential_stack(
         .with_instruction_provider(instruction_provider.clone())
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_session_interactive(interactive_session)
+        .with_conversation_mode(construction_mode)
         .with_api_client(subagent_api)
         .with_usage_recorder(subagent_usage_recorder)
         .with_model_resolution_context_provider(model_resolution_context_provider.clone())
@@ -5626,7 +5627,11 @@ pub async fn build_with_credential_stack(
         }
         tools_inner.register_builtin(workflow_tool.clone());
     }
-    if let Some(read_tools) = cfg.team_invocation.as_ref().and_then(|p| p.read_tools.as_ref()) {
+    if let Some(read_tools) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|p| p.read_tools.as_ref())
+    {
         super::team_process::read_tools::register(&mut tools_inner, read_tools.clone());
     }
     let registered_mcp_tools =
@@ -5736,7 +5741,6 @@ pub async fn build_with_credential_stack(
     // capability and SDK refusal latch are supplied by ApiService during
     // request preparation.
     let native_policy_host_facts_provider = {
-        let tools = tools.clone();
         let search_tools_opt_in = cfg.search_tools_opt_in
             || cfg.restricted_tools.as_ref().is_some_and(|names| {
                 names
@@ -5745,10 +5749,10 @@ pub async fn build_with_credential_stack(
                     .any(|name| matches!(name.trim(), "Glob" | "Grep"))
             });
         move || {
-            let model = tools.main_loop_model();
             orchestrator::conversation::NativePolicyHostFacts {
                 search_tools_opt_in: Some(search_tools_opt_in),
-                simple_system_prompt: Some(tool_api::dh_simple_system_prompt(model.as_deref())),
+                // Filled from the immutable selected prompt policy at request time.
+                simple_system_prompt: None,
                 thinking_resumption: orchestrator::conversation::NativeThinkingResumptionHostFacts {
                     disable_experimental_betas: Some(
                         llm_runtime::model::thinking_binding_controls::
@@ -6452,20 +6456,27 @@ pub async fn build_with_credential_stack(
     //
     // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
-        (false, false)
-    } else {
-        resolve_memory_feature_gates(
-            memory::auto_memory_enabled(
-                &memory::AutoMemoryEnv::from_process_env(),
-                effective_settings.settings.auto_memory_enabled,
-            ),
-            is_env_truthy("LINGXI_SESSION_MEMORY"),
-        )
-    };
+    let (memory_prefetch_on, session_memory_on) =
+        if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
+            (false, false)
+        } else {
+            resolve_memory_feature_gates(
+                memory::auto_memory_enabled(
+                    &memory::AutoMemoryEnv::from_process_env(),
+                    effective_settings.settings.auto_memory_enabled,
+                ),
+                is_env_truthy("LINGXI_SESSION_MEMORY"),
+            )
+        };
     let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
-            side_query_client.clone(), Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>, &home, &cfg.cwd)),
+        (true, Some(home)) => {
+            orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
+                side_query_client.clone(),
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+                &home,
+                &cfg.cwd,
+            ))
+        }
         _ => orch_builder,
     };
 
@@ -6541,9 +6552,18 @@ pub async fn build_with_credential_stack(
     // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
     let orch_builder = match (session_memory_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
-            side_query_client.clone(), default_model_id.clone(), memory::session_memory::SessionMemoryConfig {enabled:true,..Default::default()},
-            &home, Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>)),
+        (true, Some(home)) => {
+            orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
+                side_query_client.clone(),
+                default_model_id.clone(),
+                memory::session_memory::SessionMemoryConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                &home,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+            ))
+        }
         _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);

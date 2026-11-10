@@ -34,6 +34,7 @@ pub struct ModelRuntime {
 pub(crate) struct RouteEntry {
     identity_generation: Option<u64>,
     profile: lingxi_llm_client::protocol::ProviderProfile,
+    prompt_provider_id: String,
     protocol: ProtocolFamily,
     provider_id: ProviderId,
     auth: AuthStrategy,
@@ -337,6 +338,44 @@ impl ModelRuntime {
             requested,
         )
         .map_err(crate::upstream::error)
+    }
+
+    /// Resolve prompt identity from one immutable route/catalog snapshot.
+    pub fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        if self.source.is_some() {
+            return self.current().prompt_target(model, profile, mode);
+        }
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let selected = entry
+            .profile
+            .models
+            .iter()
+            .find(|selected| {
+                selected.request_model == route.request_model
+                    && selected.display_model == route.display_model
+                    && selected.billing_model == route.pricing_model.billing_model
+            })
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(lingxi_core::host::prompt_policy::PromptTarget::from_route(
+            mode,
+            &entry.prompt_provider_id,
+            &route.request_model,
+            selected
+                .foundry
+                .as_ref()
+                .map(|foundry| foundry.model_id.as_str()),
+            selected.metadata.family.as_deref(),
+            Some(&route.profile_name),
+        ))
     }
 
     /// Resolve the SDK wire family before adapting durable history. Per-model
@@ -786,11 +825,20 @@ impl ModelRuntime {
             validate_provider_profile(&provider)?;
             let base_url = provider.base_url.clone();
             let signing = provider.signing.clone();
+            let prompt_provider_id = provider
+                .wire_profile
+                .as_ref()
+                .map_or_else(
+                    || crate::upstream::provider_name(&provider.provider_id),
+                    |profile| profile.provider_id.as_str(),
+                )
+                .to_owned();
             routes.insert(
                 provider.profile_name.clone(),
                 RouteEntry {
                     identity_generation: None,
                     profile: crate::upstream::profile(&provider)?,
+                    prompt_provider_id,
                     protocol: provider.protocol,
                     provider_id: provider.provider_id,
                     auth: provider.auth,
@@ -3783,6 +3831,10 @@ mod auth_snapshot_tests;
 #[cfg(test)]
 #[path = "client_dynamic_auth_tests.rs"]
 mod dynamic_auth_tests;
+
+#[cfg(test)]
+#[path = "client_prompt_target_tests.rs"]
+mod prompt_target_tests;
 
 #[cfg(test)]
 mod shared_client_regression {

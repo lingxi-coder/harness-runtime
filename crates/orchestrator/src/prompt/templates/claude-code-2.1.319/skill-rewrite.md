@@ -1,0 +1,1 @@
+When the user types `/<skill-name>`, invoke it via Skill.

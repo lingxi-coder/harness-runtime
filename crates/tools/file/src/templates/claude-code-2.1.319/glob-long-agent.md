@@ -1,0 +1,2 @@
+
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)

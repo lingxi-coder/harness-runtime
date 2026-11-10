@@ -826,6 +826,7 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
         }
         let invocation = SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
@@ -840,6 +841,9 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
                 messages: ctx.prompt_messages.clone(),
                 system_prompt: None,
                 parent_effort: None,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+                role_system_prompt: None,
             }),
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             agent_name: ctx.agent_name.clone(),

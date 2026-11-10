@@ -430,6 +430,40 @@ pub async fn resolve_subagent_tools_with_handback(
     ),
     ToolResolutionError,
 > {
+    resolve_subagent_tools_with_handback_and_policy(
+        registry,
+        agent_def,
+        deny_context,
+        child_selection,
+        None,
+        depth,
+        coordinator_mode,
+        agent_mcp_tools,
+        supplied,
+        handback_gates,
+    )
+    .await
+}
+
+pub async fn resolve_subagent_tools_with_handback_and_policy(
+    registry: &tool_api::ToolRegistry,
+    agent_def: &AgentDefinition,
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+    child_selection: Option<&ResolvedModelSelection>,
+    prompt_policy: Option<Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
+    depth: u32,
+    coordinator_mode: bool,
+    agent_mcp_tools: &[Arc<dyn Tool>],
+    supplied: Option<&Arc<dyn Tool>>,
+    handback_gates: HandbackToolGates,
+) -> Result<
+    (
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+        Vec<String>,
+        bool,
+    ),
+    ToolResolutionError,
+> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
@@ -488,6 +522,7 @@ pub async fn resolve_subagent_tools_with_handback(
             is_scheduled_turn: false,
             model: child_selection.map(|selection| selection.model.clone()),
             model_profile: child_selection.and_then(|selection| selection.model_profile.clone()),
+            prompt_policy,
             output_style_is_default: None,
             plan_mode_hybrid_search: None,
             workflow_authoring_available: false,
@@ -632,6 +667,18 @@ mod tests {
                 )
             } else if self.name == "RouteFacts" {
                 format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+            } else if self.name == "PolicyFacts" {
+                opts.prompt_policy
+                    .as_ref()
+                    .map(|policy| {
+                        format!(
+                            "{}:{}:{}",
+                            policy.target.mode.as_str(),
+                            policy.target.provider_id,
+                            policy.bundle_id
+                        )
+                    })
+                    .unwrap_or_else(|| "missing policy".into())
             } else {
                 self.name.into()
             };
@@ -914,6 +961,45 @@ mod tests {
                         .as_str()
                 )
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_system_and_tool_prompts_share_the_selected_policy() {
+        use lingxi_core::host::prompt_policy::{resolve_prompt_policy, PromptTarget};
+        use lingxi_core::host::session_context::ConversationMode;
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("PolicyFacts"));
+        let definition = agent_def(all_policy());
+        for mode in [ConversationMode::Chat, ConversationMode::Code] {
+            for (provider, underlying) in [("openrouter", "claude-opus-5"), ("kimi", "kimi-k2.5")] {
+                let policy = Arc::new(resolve_prompt_policy(PromptTarget::from_route(
+                    mode,
+                    provider,
+                    "shared-model",
+                    Some(underlying),
+                    None,
+                    Some(provider),
+                )));
+                let (schemas, _, _) = resolve_subagent_tools_with_handback_and_policy(
+                    &registry,
+                    &definition,
+                    &NativeMcpDenyContext::default(),
+                    None,
+                    Some(policy.clone()),
+                    0,
+                    false,
+                    &[],
+                    None,
+                    HandbackToolGates::default(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    schemas[0].description.string_at(""),
+                    Some(format!("{}:{}:{}", mode.as_str(), provider, policy.bundle_id).as_str())
+                );
+            }
         }
     }
 

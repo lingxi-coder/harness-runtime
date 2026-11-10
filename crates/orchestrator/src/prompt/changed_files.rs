@@ -149,8 +149,7 @@ pub fn render_changed_file(file: &ChangedFile, read_tool_name: &str) -> String {
     let note = changed_file_note(&file.filename);
     if file.snippet.is_empty() {
         format!(
-            "{note} The diff is omitted here because other changed files this turn already \
-filled the snippet budget; use {read_tool_name} if you need the current content."
+            "{note} The changes are not shown here; use {read_tool_name} if you need the current content."
         )
     } else {
         format!(
@@ -335,6 +334,25 @@ pub fn render_snippet(before: &str, after: &str, tab_aware_separator: bool) -> S
 mod tests {
     use super::*;
 
+    #[test]
+    fn changed_file_bodies_match_319_native_renderer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["changedFiles"].as_array().unwrap() {
+            let file = ChangedFile {
+                filename: case["filename"].as_str().unwrap().to_owned(),
+                snippet: case["snippet"].as_str().unwrap().to_owned(),
+                image: None,
+            };
+            assert_eq!(
+                render_changed_file(&file, "Read"),
+                case["body"].as_str().unwrap()
+            );
+        }
+    }
+
     fn file(snippet: &str) -> ChangedFile {
         ChangedFile {
             filename: "/tmp/a.rs".into(),
@@ -384,7 +402,7 @@ mod tests {
     fn omitted_arm_is_byte_exact() {
         assert_eq!(
             render_changed_file(&file(""), "Read"),
-            "Note: /tmp/a.rs changed on disk since you last read it. That's usually deliberate, so take it as the current state rather than reverting it; if the change looks wrong, say so rather than undoing it yourself — otherwise no need to call it out. The diff is omitted here because other changed files this turn already filled the snippet budget; use Read if you need the current content."
+            "Note: /tmp/a.rs changed on disk since you last read it. That's usually deliberate, so take it as the current state rather than reverting it; if the change looks wrong, say so rather than undoing it yourself — otherwise no need to call it out. The changes are not shown here; use Read if you need the current content."
         );
     }
 

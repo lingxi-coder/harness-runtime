@@ -18,9 +18,10 @@
 //!   bundled bfs/ugrep). External builds always steer toward `Glob`/`Grep`, so
 //!   we hardcode the non-embedded path (Glob/Grep bullets present, `find`/`grep`
 //!   in the avoid-list, no `find -regex` alternation note).
-//! - **Monitor-tool sleep bullets dropped.** The TS `feature('MONITOR_TOOL')`
-//!   branch adds Monitor-specific bullets; `Monitor` is a deferred tool here, so
-//!   we take the non-Monitor branch verbatim.
+//! - **Monitor and notification capabilities are independent.** Monitor is
+//!   disabled by default and omitted on mobile. Background Bash completion
+//!   notifications still work, so their guidance is retained without advertising
+//!   Monitor or a foreground-sleep block.
 //! - **Sandbox section reflects the Rust [`SandboxRuntimeConfig`].** claude-code
 //!   drives `getSimpleSandboxSection` off `SandboxManager` getters; we drive the
 //!   same shape off the Rust `SandboxRuntimeConfig`. `read.allowWithinDeny`
@@ -39,14 +40,6 @@
 //!   (`includeCoAuthoredBy: false` / a custom `attribution` object) is
 //!   unmodelled here — see [`attribution_texts`] for the residual.
 //!
-//! ## BASH.4 note (cwd persistence)
-//!
-//! The header sentence "The working directory persists between commands, but
-//! shell state does not." is kept verbatim because it is what claude-code sends
-//! (prompt parity). The actual cwd-persistence BEHAVIOR is a SEPARATE deferred
-//! batch (BASH.4): today each `BashTool::call` spawns a fresh shell with
-//! `cwd = workspace`, so this sentence is currently ASPIRATIONAL until BASH.4
-//! lands the per-session cwd carry-over.
 
 use crate::bash::{
     bash_background_max_timeout_ms, bash_default_timeout_ms, bash_max_timeout_ms,
@@ -54,6 +47,23 @@ use crate::bash::{
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sandbox::runtime_config::SandboxRuntimeConfig;
+
+fn working_directory_guidance() -> &'static str {
+    let maintain = lingxi_core::host::env::is_env_truthy(
+        std::env::var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR")
+            .ok()
+            .as_deref(),
+    );
+    working_directory_guidance_for(maintain)
+}
+
+fn working_directory_guidance_for(maintain_project_directory: bool) -> &'static str {
+    if maintain_project_directory {
+        "Every call starts in the start folder: a `cd` does not carry over."
+    } else {
+        "`cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder; otherwise it stays where it was."
+    }
+}
 
 // ===== Wire tool-name literals (string literals, NOT cross-crate imports) ====
 
@@ -124,14 +134,16 @@ fn background_usage_note() -> Option<String> {
     if background_tasks_disabled() {
         return None;
     }
-    Some(
+    Some(format!(
         "You can use the `run_in_background` parameter to run the command in the background. \
          Only use this if you don't need the result immediately and are OK being notified when \
          the command completes later. You do not need to check the output right away - you'll be \
          notified when it finishes. You do not need to use '&' at the end of the command when \
-         using this parameter."
-            .to_string(),
-    )
+         using this parameter. With `run_in_background` the timeout is instead how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}ms / {} minutes, max {}ms / {} hours); at that limit it is stopped and you are notified.",
+        BASH_BACKGROUND_DEFAULT_TIMEOUT_MS / 60_000,
+        bash_background_max_timeout_ms(),
+        bash_background_max_timeout_ms() / 3_600_000,
+    ))
 }
 
 /// Port of claude-code 2.1.238 `JQd()` — the gate on the CONCISE prompt's
@@ -250,13 +262,17 @@ struct AttributionTexts {
 }
 
 fn attribution_texts() -> AttributionTexts {
+    attribution_texts_with_defaults(COMMIT_ATTRIBUTION, PR_ATTRIBUTION)
+}
+
+fn attribution_texts_with_defaults(default_commit: &str, default_pr: &str) -> AttributionTexts {
     let (commit, pr) = lingxi_core::host::session_flags::attribution();
     let (commit, pr) = resolve_attribution(
         commit,
         pr,
         lingxi_core::host::session_flags::include_co_authored_by(),
-        COMMIT_ATTRIBUTION,
-        PR_ATTRIBUTION,
+        default_commit,
+        default_pr,
     );
     AttributionTexts {
         commit_units: commit
@@ -706,6 +722,8 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     lines.join("\n")
 }
 
+const GITHUB_MENTION_GUIDANCE: &str = r#"GitHub notifies the owner of any `@name` written in a PR, issue, or comment. Write a bare `@name` only for a real login you mean to notify. Put roles, placeholders, and code (`@human`, `@reviewer`, `@types/node`) in backticks or drop the `@`, even when copied from project files."#;
+
 // ===== Git / PR section =====================================================
 
 /// Port of `getCommitAndPRInstructions` (`prompt.ts:42`), EXTERNAL-USER branch.
@@ -816,6 +834,8 @@ git commit -m \"$(cat <<'EOF'
 {PRECOMMIT_SUGGESTION}# Creating pull requests
 Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
 
+{GITHUB_MENTION_GUIDANCE}
+
 IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
 
 1. Run the following bash commands in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:
@@ -848,6 +868,7 @@ Important:
 # Other common operations
 - View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"
         .replace("{TASK_TOOL}", task_tool)
+        .replace("{GITHUB_MENTION_GUIDANCE}", GITHUB_MENTION_GUIDANCE)
         .replace("{COMMIT_STEP_SUFFIX}", &commit_step_suffix)
         .replace("{COMMIT_HEREDOC_SUFFIX}", &commit_heredoc_suffix)
         .replace("{PR_BODY_SUFFIX}", &pr_body_suffix)
@@ -933,12 +954,9 @@ pub(crate) fn simple_prompt_with_precommit(
         Bullet::Item("Always quote file paths that contain spaces with double quotes in your command (e.g., cd \"path with spaces/file.txt\")".into()),
         Bullet::Item("Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it. In particular, never prepend `cd <current-directory>` to a `git` command \u{2014} `git` already operates on the current working tree, and the compound triggers a permission prompt.".into()),
         Bullet::Item(format!(
-            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes). With `run_in_background` the timeout is instead how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}ms / {} minutes, max {}ms / {} hours); at that limit it is stopped and you are notified.",
+            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes for a foreground command). By default, your command will timeout after {default_timeout_ms}ms ({} minutes).",
             max_timeout_ms / 60_000,
-            default_timeout_ms / 60_000,
-            BASH_BACKGROUND_DEFAULT_TIMEOUT_MS / 60_000,
-            bash_background_max_timeout_ms(),
-            bash_background_max_timeout_ms() / 3_600_000
+            default_timeout_ms / 60_000
         )),
     ];
     if let Some(note) = background_note {
@@ -952,9 +970,7 @@ pub(crate) fn simple_prompt_with_precommit(
     let mut lines: Vec<String> = vec![
         "Executes a given bash command and returns its output.".into(),
         String::new(),
-        // KEPT VERBATIM — prompt parity (see module-doc BASH.4 note: cwd
-        // persistence is currently aspirational until BASH.4 lands).
-        "The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).".into(),
+        format!("{} Shell state does not persist. The shell environment is initialized from the user's profile (bash or zsh).", working_directory_guidance()),
         String::new(),
         format!("IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:"),
         String::new(),
@@ -1018,11 +1034,11 @@ fn concise_git_section(
     if !should_include_git_instructions() {
         return String::new();
     }
-    let mut section = "# Git\n\
+    let mut section = format!("# Git\n\
      - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
      - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
-     - Commit or push only when the user asks. If on the default branch, branch first."
-        .to_string();
+     - {GITHUB_MENTION_GUIDANCE}\n\
+     - Commit or push only when the user asks. If on the default branch, branch first.");
 
     let mut attribution_lines: Vec<String> = Vec::new();
     if !attribution.commit_units.is_empty() {
@@ -1113,7 +1129,21 @@ pub(crate) fn simple_prompt_concise_with_precommit(
     sandbox: &SandboxRuntimeConfig,
     precommit_suggestion: &str,
 ) -> Utf16JsonProjection {
-    let attribution = attribution_texts();
+    simple_prompt_concise_with_bundle(sandbox, precommit_suggestion, true)
+}
+
+/// Generic Lean keeps explicit user attribution and supplies no Claude-branded
+/// default. The native template retains its synchronized attribution behavior.
+pub(crate) fn simple_prompt_concise_with_bundle(
+    sandbox: &SandboxRuntimeConfig,
+    precommit_suggestion: &str,
+    native: bool,
+) -> Utf16JsonProjection {
+    let attribution = if native {
+        attribution_texts()
+    } else {
+        attribution_texts_with_defaults("", "")
+    };
     let sandbox_text = sandbox_section(sandbox);
     let markers = AttributionMarkers::choose(&[precommit_suggestion, &sandbox_text]);
     // CONCISE avoid-list — claude-code 2.1.238 `hcT` picks it with the SAME
@@ -1128,7 +1158,7 @@ pub(crate) fn simple_prompt_concise_with_precommit(
         "Executes a bash command and returns its output.".into(),
         // `i=hXa()` is null on posix ⇒ no leading advisory; first real line is "".
         String::new(),
-        "- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.".into(),
+        format!("- {} Prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.", working_directory_guidance()),
         format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
     ];
     // UNCONDITIONAL in 2.1.238: `hcT` emits this as a bare array element and no
@@ -1143,7 +1173,7 @@ pub(crate) fn simple_prompt_concise_with_precommit(
         lines.push("- Commands are cheap to run and their errors are informative: run the straightforward command rather than perfecting it mentally first, and adjust from what it prints.".into());
     }
     lines.push(format!(
-        "- `timeout` is in milliseconds: default {}, max {}.",
+        "- `timeout` is in milliseconds: default {}, max {} for a foreground command.",
         bash_default_timeout_ms(),
         bash_max_timeout_ms()
     ));
@@ -1215,6 +1245,166 @@ mod tests {
     }
 
     #[test]
+    fn working_directory_guidance_matches_native_319() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/tool_prompts_319.json"
+        ))
+        .unwrap();
+        for row in fixture["bashCwdCases"].as_array().unwrap() {
+            assert_eq!(
+                working_directory_guidance_for(row["maintainProjectDirectory"].as_bool().unwrap()),
+                row["output"].as_str().unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn git_sections_match_native_319() {
+        let _guard = env_lock();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/bash_prompt_319.json"
+        ))
+        .unwrap();
+        for lean in [false, true] {
+            for explicit in [false, true] {
+                let attribution = AttributionTexts {
+                    commit_units: if explicit {
+                        COMMIT_ATTRIBUTION.encode_utf16().collect()
+                    } else {
+                        Vec::new()
+                    },
+                    pr_units: if explicit {
+                        PR_ATTRIBUTION.encode_utf16().collect()
+                    } else {
+                        Vec::new()
+                    },
+                };
+                let markers = AttributionMarkers::choose(&[]);
+                let text = if lean {
+                    concise_git_section("", &attribution, &markers)
+                } else {
+                    commit_and_pr_instructions("", &attribution, &markers)
+                };
+                let actual = prompt_text(project_prompt_with_attribution(
+                    &text,
+                    &attribution,
+                    &markers,
+                ));
+                let row = fixture["cases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| {
+                        row["lean"] == lean
+                            && row["monitor"] == false
+                            && row["attribution"] == if explicit { "explicit" } else { "none" }
+                    })
+                    .unwrap();
+                let expected = row["output"].as_str().unwrap();
+                let marker = if lean {
+                    "# Git\n"
+                } else {
+                    "# Committing changes with git\n"
+                };
+                let expected = expected[expected.find(marker).unwrap()..]
+                    .replace("Generated with [Claude Code]", "Generated with [LingXi]");
+                assert_eq!(actual, expected, "lean={lean} explicit={explicit}");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_bash_prompts_match_native_319_with_host_capabilities() {
+        let _guard = env_lock();
+        let keys = [
+            "LINGXI_DISABLE_BACKGROUND_TASKS",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            "LINGXI_DISABLE_GIT_INSTRUCTIONS",
+            "LINGXI_GORSE_PLOVER",
+            "LINGXI_ENABLE_TASKS",
+            "LINGXI_BASH_DEFAULT_TIMEOUT_MS",
+            "LINGXI_BASH_MAX_TIMEOUT_MS",
+            "LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+        ];
+        let saved = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        let saved_attribution = lingxi_core::host::session_flags::attribution();
+        let saved_author = lingxi_core::host::session_flags::include_co_authored_by();
+        let saved_git = lingxi_core::host::session_flags::include_git_instructions();
+        lingxi_core::host::session_flags::set_attribution(None, None);
+        lingxi_core::host::session_flags::set_include_co_authored_by(None);
+        lingxi_core::host::session_flags::set_include_git_instructions(Some(true));
+        let actual = [
+            prompt_text(simple_prompt(&disabled_sandbox())),
+            prompt_text(simple_prompt_concise(&disabled_sandbox(), None)),
+        ];
+        lingxi_core::host::session_flags::set_attribution(saved_attribution.0, saved_attribution.1);
+        lingxi_core::host::session_flags::set_include_co_authored_by(saved_author);
+        lingxi_core::host::session_flags::set_include_git_instructions(saved_git);
+        for (key, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/bash_prompt_319.json"
+        ))
+        .unwrap();
+        for (lean, actual) in [false, true].into_iter().zip(actual) {
+            let row = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| {
+                    row["lean"] == lean
+                        && row["monitor"] == true
+                        && row["attribution"] == "explicit"
+                })
+                .unwrap();
+            let mut expected = row["output"]
+                .as_str()
+                .unwrap()
+                .replace("Generated with [Claude Code]", "Generated with [LingXi]")
+                .replace(
+                    "default 600000ms / 10 minutes",
+                    &format!(
+                        "default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}ms / {} minutes",
+                        BASH_BACKGROUND_DEFAULT_TIMEOUT_MS / 60_000
+                    ),
+                )
+                .replace(
+                    "default 600000, max",
+                    &format!("default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}, max"),
+                );
+            if lean {
+                expected = expected.replace(" Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.", "");
+            } else {
+                expected = expected.replace("  - Use the Monitor tool to stream events from a background process (each stdout line is a notification). For one-shot \"wait until done,\" use Bash with run_in_background instead.\n", "");
+                expected = expected.replace("  - Long leading `sleep` commands are blocked. To poll until a condition is met, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`) — you get a notification when the loop exits. Do not chain shorter sleeps to work around the block.", "  - If you must poll an external process, use a check command (e.g. `gh run view`) rather than sleeping first.\n  - If you must sleep, keep the duration short to avoid blocking the user.");
+            }
+            if actual != expected {
+                let first = actual
+                    .chars()
+                    .zip(expected.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                panic!(
+                    "Bash lean={lean} differs at character {first}: actual={:?}; expected={:?}",
+                    actual.chars().skip(first).take(240).collect::<String>(),
+                    expected.chars().skip(first).take(240).collect::<String>()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn prompt_contains_locked_anchors() {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1228,7 +1418,7 @@ mod tests {
         // cwd-persistence sentence (kept verbatim for parity).
         assert!(
             p.contains(
-                "The working directory persists between commands, but shell state does not."
+                "`cd` carries to the next call only in the main session, if the command succeeds"
             ),
             "missing cwd-persistence anchor"
         );
@@ -1318,7 +1508,7 @@ mod tests {
         assert_eq!(crate::bash::BASH_DEFAULT_TIMEOUT_MS, 120_000);
         assert!(
             p.contains(
-                "You may specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). By default, your command will timeout after 120000ms (2 minutes)."
+                "You may specify an optional timeout in milliseconds (up to 600000ms / 10 minutes for a foreground command). By default, your command will timeout after 120000ms (2 minutes)."
             ),
             "missing/incorrect timeout sentence; got prompt:\n{p}"
         );
@@ -1721,6 +1911,40 @@ mod tests {
         let (commit, pr) = resolve_attribution(None, None, None, "COMMIT", "PR");
         assert_eq!(commit.string_at(""), Some("COMMIT"));
         assert_eq!(pr.string_at(""), Some("PR"));
+    }
+
+    #[test]
+    fn generic_lean_omits_native_identity_and_preserves_custom_attribution() {
+        let _guard = env_lock();
+        let saved_attribution = lingxi_core::host::session_flags::attribution();
+        let saved_author = lingxi_core::host::session_flags::include_co_authored_by();
+        let saved_git = lingxi_core::host::session_flags::include_git_instructions();
+        let saved_env = std::env::var_os("LINGXI_DISABLE_GIT_INSTRUCTIONS");
+        std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
+        lingxi_core::host::session_flags::set_attribution(None, None);
+        lingxi_core::host::session_flags::set_include_co_authored_by(None);
+        lingxi_core::host::session_flags::set_include_git_instructions(Some(true));
+        let generic = simple_prompt_concise_with_bundle(&disabled_sandbox(), "", false);
+        lingxi_core::host::session_flags::set_attribution(
+            Some("Co-Authored-By: Project Bot <bot@example.com>".into()),
+            Some("Project PR footer".into()),
+        );
+        let custom = simple_prompt_concise_with_bundle(&disabled_sandbox(), "", false);
+        lingxi_core::host::session_flags::set_attribution(saved_attribution.0, saved_attribution.1);
+        lingxi_core::host::session_flags::set_include_co_authored_by(saved_author);
+        lingxi_core::host::session_flags::set_include_git_instructions(saved_git);
+        match saved_env {
+            Some(value) => std::env::set_var("LINGXI_DISABLE_GIT_INSTRUCTIONS", value),
+            None => std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
+        }
+        let generic = generic.string_at("").unwrap();
+        assert!(!generic.contains("Claude"));
+        assert!(!generic.contains("anthropic.com"));
+        assert!(!generic.contains("claude.com"));
+        assert!(generic.contains("# Git"));
+        let custom = custom.string_at("").unwrap();
+        assert!(custom.contains("Co-Authored-By: Project Bot <bot@example.com>"));
+        assert!(custom.contains("Project PR footer"));
     }
 
     /// `{ commit: i.commit ?? n, pr: i.pr ?? r }` — naming ONE field overrides

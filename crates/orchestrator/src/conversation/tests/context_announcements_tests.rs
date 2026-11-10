@@ -680,6 +680,26 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
             })
             .collect::<Vec<_>>();
         orch.restore_resume_runtime_metadata(&rows).await;
+        // Native selects the last valid static prefix independently of context
+        // routing. Check that before the host's first-request bundle migration
+        // deliberately rebuilds this legacy snapshot without policy metadata.
+        if name == "invalid-latest-does-not-fall-back-to-older-inline" {
+            assert_eq!(
+                orch.prompt_runtime
+                    .prompt_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .system_prompt,
+                vec![case["prior"][0]["attachment"]["systemPrompt"][0]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()],
+                "static prefix restoration keeps its independent last-valid behavior"
+            );
+        }
+
         let expected_inline = case["expected"]["selectedRendering"] == "inline";
         assert_eq!(
             !orch.uses_announced_context().await,
@@ -747,22 +767,15 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
                 "durable rows keep the user first and append typed reminders in source order"
             );
         }
-        if name == "invalid-latest-does-not-fall-back-to-older-inline" {
-            assert_eq!(
-                orch.prompt_runtime
-                    .prompt_snapshot
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
-                    .system_prompt,
-                vec![case["prior"][0]["attachment"]["systemPrompt"][0]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()],
-                "static prefix restoration keeps its independent last-valid behavior"
-            );
-        }
+        assert!(
+            orch.prompt_runtime
+                .prompt_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.prompt_policy == Some(prepared.prompt_policy.metadata())),
+            "request preparation invalidates legacy snapshots; any replacement has current bundle metadata"
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 use super::cleanup::McpCleanupGuard;
 use super::{
-    workflow_transcript_subdir_override, PoolSubagentSpawner, APPEND_SUBAGENT_PROMPT_GATE_ENV,
-    APPEND_SUBAGENT_PROMPT_VALUE_ENV, FUSION_RESERVED_AGENT_TYPE,
+    workflow_transcript_subdir_override, PoolSubagentSpawner, SubagentPromptContext,
+    APPEND_SUBAGENT_PROMPT_GATE_ENV, APPEND_SUBAGENT_PROMPT_VALUE_ENV, FUSION_RESERVED_AGENT_TYPE,
 };
 use crate::builtins::WORKFLOW_SUBAGENT_TYPE;
 use crate::context::SubagentContext;
@@ -490,6 +490,29 @@ fn strict_optional_source_string(
 }
 
 impl PoolSubagentSpawner {
+    pub(crate) fn apply_subagent_prompt_context(
+        context: &mut SubagentContext,
+        rendered: SubagentPromptContext,
+    ) {
+        if let (Some(body), Some(suffix)) =
+            (&context.rendered_system_prompt, rendered.system_suffix)
+        {
+            context.rendered_system_prompt = Some(Arc::new(append_generated_system_text(
+                body,
+                &format!("\n\n{suffix}"),
+            )));
+        }
+        if rendered.additional_context.is_empty() {
+            return;
+        }
+        let model = crate::runner::resolve_model(context);
+        crate::prompt_policy::inject_context(
+            &mut context.prompt_messages,
+            &rendered.additional_context,
+            lingxi_core::host::model_capabilities::prompt_system_turns_for(&model),
+        );
+    }
+
     /// Resolve a spawn's [`AgentDefinition`] from `subagent_type`, including its
     /// model preference.
     ///
@@ -712,6 +735,7 @@ impl PoolSubagentSpawner {
         self.resolve_tools_with_handback(
             agent_def,
             child_selection.as_ref(),
+            None,
             depth,
             agent_mcp_tools,
             None,
@@ -724,6 +748,7 @@ impl PoolSubagentSpawner {
         &self,
         agent_def: &AgentDefinition,
         child_selection: Option<&crate::model_resolution::ResolvedModelSelection>,
+        prompt_policy: Option<Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
         // The resolved subagent's own recursion depth — gates its `Agent` tool
         // against Claude's configured maximum spawn depth. Threaded from
         // `request.depth`.
@@ -760,11 +785,12 @@ impl PoolSubagentSpawner {
             .coordinator_mode
             .get()
             .is_some_and(|mode| mode.is_enabled());
-        crate::tool_resolver::resolve_subagent_tools_with_handback(
+        crate::tool_resolver::resolve_subagent_tools_with_handback_and_policy(
             registry.as_ref(),
             agent_def,
             &deny_context,
             child_selection,
+            prompt_policy,
             depth,
             coordinator_mode,
             agent_mcp_tools,
@@ -826,13 +852,16 @@ impl PoolSubagentSpawner {
             match &fork_parent_system_prompt {
                 Some(parent) => Some(Arc::new(parent.clone())),
                 None => def.system_prompt.as_ref().map(|body| {
+                    let rewrite = match &def.model {
+                        AgentModel::Explicit(model) => {
+                            lingxi_core::host::model_capabilities::lean_rewrite_for(model)
+                        }
+                        _ => false,
+                    };
+                    let (consent, notes) = Self::subagent_prompt_appendix(rewrite);
                     Arc::new(append_generated_system_text(
                         body,
-                        &format!(
-                            "\n\n{}\n\n{}",
-                            Self::SUBAGENT_CONSENT_PARAGRAPH,
-                            Self::SUBAGENT_NOTES_TRAILER
-                        ),
+                        &format!("\n\n{consent}\n\n{notes}"),
                     ))
                 }),
             };
@@ -893,6 +922,8 @@ impl PoolSubagentSpawner {
             transcript_fs: None,
             resumed_history: None,
             rendered_system_prompt,
+            prompt_policy: None,
+            prompt_state: None,
             mobile_runtime_environment_reminder: None,
             instruction_context: Default::default(),
             instruction_context_is_override: false,
@@ -1330,49 +1361,82 @@ impl PoolSubagentSpawner {
         // the main thread's cascade because they share its query generator;
         // here the loops are separate, so it is passed down.
         ctx.refusal_fallback_chain = self.refusal_fallback_chain.clone();
-        // Append the subagent `<env>` block (claude-code 2.1.186 `tIm`, after the
-        // `Notes:` trailer) on the NON-fork path only — the fork path replays the
-        // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.
-        // Rendered with THIS spawn's resolved model id so a model-override agent's
-        // env line matches the model it actually runs as. Unfilled cell ⇒ no-op.
-        if !is_fork_spawn {
-            if let (Some(render), Some(body)) = (
-                self.subagent_env_renderer.get(),
-                ctx.rendered_system_prompt.as_ref(),
-            ) {
-                let model_id = crate::runner::resolve_model(&ctx);
-                // Per-agent cwd (worktree isolation / explicit `cwd`) → the env
-                // block's `Working directory` + the "git worktree" notice, so the
-                // isolated agent forms absolute paths under it.
-                let cwd_override = request.cwd.as_deref().map(std::path::Path::new);
-                let env = render(&model_id, cwd_override);
-                ctx.rendered_system_prompt = Some(Arc::new(append_generated_system_text(
-                    body,
-                    &format!("\n\n{env}"),
-                )));
+        let prompt_mode = inherit
+            .tool_invoker
+            .trusted_session_profile()
+            .filter(|profile| {
+                origin_session_id.is_none_or(|id| {
+                    lingxi_core::types::SessionId::parse_prefixed(&profile.session_id) == Some(id)
+                })
+            })
+            .map_or(self.conversation_mode, |profile| profile.mode);
+        let model_id = crate::runner::resolve_model(&ctx);
+        let model_profile = child_selection
+            .as_ref()
+            .and_then(|selection| selection.model_profile.as_deref());
+        let prompt_target = crate::prompt_policy::resolve_target(
+            self.api_client.as_deref(),
+            &model_id,
+            model_profile,
+            prompt_mode,
+        )
+        .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        let fork_policy = is_fork_spawn
+            .then(|| request.fork_prompt_policy.clone())
+            .flatten();
+        let role = is_fork_spawn
+            .then(|| request.fork_role_system_prompt.clone())
+            .flatten()
+            .or_else(|| ctx.agent_definition.system_prompt.clone())
+            .or_else(|| {
+                is_fork_spawn
+                    .then(|| {
+                        self.builtins
+                            .get("general-purpose")
+                            .and_then(|definition| definition.system_prompt.clone())
+                    })
+                    .flatten()
+            });
+        let mut prompt_state = crate::prompt_policy::SubagentPromptState {
+            initial_policy: prompt_target.policy.clone(),
+            role,
+            fork_prefix: request.fork_parent_system_prompt.clone(),
+            fork_policy,
+            custom_system_prompt: is_fork_spawn
+                .then(|| request.fork_custom_system_prompt.clone())
+                .flatten(),
+            append_system_prompt: is_fork_spawn
+                .then(|| request.fork_append_system_prompt.clone())
+                .flatten(),
+            environment: self.subagent_env_renderer.get().cloned(),
+            cwd: request.cwd.as_ref().map(std::path::PathBuf::from),
+            addendum: request.system_prompt_addendum.clone(),
+            operator_suffix: append_subagent_system_prompt_suffix(),
+            tool_registry: self.tool_registry.get(),
+            system_renderer: None,
+            seeded_context: Default::default(),
+            replace_initial_context: request.resumed_history.is_some(),
+        };
+        let rendered = prompt_state.render(&prompt_target);
+        ctx.rendered_system_prompt = rendered.system;
+        if !rendered.reuses_fork_prefix {
+            if let Some(messages) = ctx.fork_context_messages.as_mut() {
+                crate::prompt_policy::remove_native_environment_context(messages);
+                prompt_state.seeded_context = crate::prompt_policy::inject_context(
+                    messages,
+                    &rendered.context,
+                    rendered.system_turns,
+                );
+            } else {
+                prompt_state.seeded_context = crate::prompt_policy::inject_context(
+                    &mut ctx.prompt_messages,
+                    &rendered.context,
+                    rendered.system_turns,
+                );
             }
         }
-        // Per-spawn system-prompt addendum (workflow HBp/IBp NOTE): appended
-        // AFTER the Notes trailer + env block so it is the final content the model
-        // sees. Used when the caller specifies an explicit agentType in a workflow
-        // agent() call.
-        if let Some(addendum) = &request.system_prompt_addendum {
-            if let Some(body) = ctx.rendered_system_prompt.as_ref() {
-                ctx.rendered_system_prompt = Some(Arc::new(append_source_text(body, addendum)));
-            }
-        }
-        // (CLI-15) `--append-subagent-system-prompt <prompt>`: the operator's
-        // suffix, appended to EVERY Task-tool subagent's system prompt and
-        // therefore to nested subagents too (they spawn through this same
-        // function in the same process).
-        if let Some(suffix) = append_subagent_system_prompt_suffix() {
-            if let Some(body) = ctx.rendered_system_prompt.as_ref() {
-                ctx.rendered_system_prompt = Some(Arc::new(append_generated_system_text(
-                    body,
-                    &format!("\n\n{suffix}"),
-                )));
-            }
-        }
+        ctx.prompt_policy = Some(prompt_target.policy);
+        ctx.prompt_state = Some(Arc::new(prompt_state));
         // Hand the child the parent's tool invoker + budget enforcer + our model
         // API seam (recursion-lock / budget-inheritance invariants).
         ctx.parent_agent_id = request.creator_agent_id;
@@ -1529,6 +1593,7 @@ impl PoolSubagentSpawner {
             .resolve_tools_with_handback(
                 &ctx.agent_definition,
                 child_selection.as_ref(),
+                ctx.prompt_policy.clone(),
                 request.depth,
                 &agent_mcp.tools,
                 handback_tool.as_ref(),

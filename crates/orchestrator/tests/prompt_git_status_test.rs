@@ -43,6 +43,8 @@ fn probe_returns_some_inside_clean_repo() {
 #[test]
 fn env_block_marks_git_repo_true_but_emits_no_git_status_lines() {
     let ctx = SystemPromptContext {
+        native_system_turns: None,
+        prompt_policy: None,
         cwd: PathBuf::from("/dummy"), // probe is NOT called by env_block
         platform: "darwin".into(),
         model: "claude-opus-4-7".into(),
@@ -76,6 +78,8 @@ fn env_block_marks_git_repo_true_but_emits_no_git_status_lines() {
 #[test]
 fn env_block_marks_git_repo_false_when_no_git_status() {
     let ctx = SystemPromptContext {
+        native_system_turns: None,
+        prompt_policy: None,
         cwd: PathBuf::from("/dummy"),
         platform: "darwin".into(),
         model: "claude-opus-4-7".into(),

@@ -101,26 +101,17 @@ const GREP_MAX_RESULT_SIZE_CHARS: usize = 20_000;
 /// Everything down to the "Output modes:" bullet — the gated Agent bullet and
 /// the tail live in [`GREP_DESCRIPTION_AGENT_BULLET`] / [`GREP_DESCRIPTION_TAIL`]
 /// (ST-03).
-const GREP_DESCRIPTION_HEAD: &str = r#"A powerful search tool built on ripgrep
-
-  Usage:
-  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` through a registered shell tool. The Grep tool has been optimized for correct permissions and access.
-  - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
-  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
-  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-"#;
+const GREP_DESCRIPTION_HEAD: &str = include_str!("templates/claude-code-2.1.319/grep-long-head.md");
 
 /// ST-03: the oracle wraps this ONE line in `${DZ()==="default"?…:""}` (2.1.238
 /// `Wka`, source text @286224735) — under a non-default subagent steer the whole
 /// line, newline included, disappears from the middle of the bullet list. Port
 /// gate: `lingxi_core::host::live_sessions::subagent_steer_is_default()`.
 const GREP_DESCRIPTION_AGENT_BULLET: &str =
-    "  - Use Agent tool (if available) for open-ended searches requiring multiple rounds\n";
+    include_str!("templates/claude-code-2.1.319/grep-long-agent.md");
 
 /// The bullets that follow the gated Agent line.
-const GREP_DESCRIPTION_TAIL: &str = r#"  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
-  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`
-"#;
+const GREP_DESCRIPTION_TAIL: &str = include_str!("templates/claude-code-2.1.319/grep-long-tail.md");
 
 /// `Wka(e)`'s long arm, with the Agent bullet gated exactly as upstream.
 fn grep_description(steer_is_default: bool) -> String {
@@ -137,12 +128,10 @@ fn grep_description(steer_is_default: bool) -> String {
 /// default models. `${ns}`=Bash; the two em-dashes are U+2014. The regex
 /// snippets render with single backslashes (`function\s+\w+`, `interface\{\}`)
 /// — the JS template literal's `\\` collapse to one `\` in the final string.
-const GREP_PROMPT_SHORT: &str = r#"Content search built on ripgrep. Prefer this over `grep`/`rg` via a registered shell tool — results integrate with the permission UI and file links.
+const GREP_PROMPT_SHORT: &str = include_str!("templates/claude-code-2.1.319/grep-lean.md");
 
-- Full regex syntax (e.g. "log.*Error", "function\s+\w+"). Ripgrep, not grep — escape literal braces (`interface\{\}`).
-- Filter with `glob` (e.g. "**/*.tsx") or `type` (e.g. "js", "py", "rust").
-- `output_mode`: "content" (matching lines), "files_with_matches" (paths only, default), or "count".
-- `multiline: true` for patterns that span lines."#;
+const GREP_PROMPT_SHORT_REWRITE: &str =
+    include_str!("templates/claude-code-2.1.319/grep-lean-rewrite.md");
 
 /// `applyHeadLimit` (`GrepTool.ts:110-128`). `limit==Some(0)` → unlimited
 /// escape hatch; otherwise slice `[offset, offset+limit)` and report the
@@ -1127,12 +1116,11 @@ impl Tool for GrepTool {
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
-        // Model-gated, mirroring claude-code `prompt({model:e}){return Wka(e)}`
-        // where `Wka(e){if(qk(e))return SHORT; return LONG}` (2.1.238 source text
-        // @286224735). `description(){return Wka(void 0)}` is hard-pinned to the
-        // LONG (`qk(undefined)`=false). Predicate shared with TodoWrite via
-        // `tool_api`.
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        // The request's bundle owns style selection and Claude-only rewrites.
+        if tool_api::prompt_uses_lean(opts) {
+            if tool_api::prompt_uses_rewrite(opts) {
+                return GREP_PROMPT_SHORT_REWRITE.into();
+            }
             GREP_PROMPT_SHORT.into()
         } else {
             grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default()).into()
@@ -2034,13 +2022,14 @@ mod tests {
             )
             .await;
         assert_eq!(d, grep_description(true));
-        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        // prompt(model:claude-sonnet-4-6) selects the native long template.
         let long_prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -2050,6 +2039,7 @@ mod tests {
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short_prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,

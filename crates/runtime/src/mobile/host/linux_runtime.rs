@@ -303,7 +303,8 @@ pub(super) fn build_mobile_subagent_env_renderer(
         .unwrap_or_else(|| mobile_linux_api::guest_paths::WORKSPACE_ROOT.to_string());
 
     Arc::new(
-        move |model_id: &str, cwd_override: Option<&std::path::Path>| {
+        move |target: &agent::handle::SubagentPromptTarget,
+              cwd_override: Option<&std::path::Path>| {
             let visible_cwd = mobile_workspace_cwd_provider(cwd_override)
                 .or_else(|| {
                     cwd_override.and_then(|path| {
@@ -313,8 +314,8 @@ pub(super) fn build_mobile_subagent_env_renderer(
                     })
                 })
                 .unwrap_or_else(|| default_visible_cwd.clone());
-            orchestrator::prompt::subagent_env::subagent_env_block(
-                model_id,
+            orchestrator::prompt::subagent_env::subagent_env_block_for_target(
+                target,
                 std::path::Path::new(&visible_cwd),
                 is_git_repo,
                 &platform,

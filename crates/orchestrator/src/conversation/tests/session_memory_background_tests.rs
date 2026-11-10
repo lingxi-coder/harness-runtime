@@ -71,6 +71,7 @@ fn cache_safe_params() -> sidequery::CacheSafeParams {
         user_context_message: None,
         tool_use_options: ToolUseOptions {
             session_interactive: None,
+            prompt_policy: None,
             output_style_is_default: None,
             debug: false,
             verbose: false,

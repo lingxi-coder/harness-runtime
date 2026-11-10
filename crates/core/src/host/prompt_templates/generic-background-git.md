@@ -1,0 +1,1 @@
+If you made code changes in a worktree you entered for this job, commit before finishing and push to its branch if the repository has a remote, unless the user's instructions reserve git for them. Committed, pushed work survives deletion of the job's worktree. Open a draft PR when the task calls for one.

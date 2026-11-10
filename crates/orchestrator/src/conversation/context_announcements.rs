@@ -84,6 +84,12 @@ impl ConversationOrchestrator {
             {
                 return rendering;
             }
+            // A bundle migration discards the cached prompt body and permits
+            // recording its replacement. The admitted profile's context lane
+            // remains independent of that cache lifetime.
+            if let Some(rendering) = *self.prompt_runtime.context_rendering_hint.lock().await {
+                return rendering;
+            }
         }
         self.config.context_rendering
     }

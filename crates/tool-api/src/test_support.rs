@@ -301,6 +301,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         native_query_depth: None,
         options: ToolUseOptions {
             session_interactive: None,
+            prompt_policy: None,
             output_style_is_default: None,
             debug: false,
             verbose: false,
@@ -335,6 +336,10 @@ pub fn fresh_ctx() -> ToolUseContext {
         cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
         fork_parent_system_prompt: None,
         fork_parent_effort: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         cwd: None,
         depth: 0,
         observer: None,

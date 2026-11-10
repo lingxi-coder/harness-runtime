@@ -2165,6 +2165,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
+        .with_conversation_mode(cfg.session_mode)
         .with_model_resolution_context_provider(model_resolution_context_provider.clone())
         .with_default_model(resolved_default_model.clone())
         .with_permission_mode(resolved_permission_mode)

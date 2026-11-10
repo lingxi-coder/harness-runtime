@@ -125,6 +125,12 @@ impl RegistryToolInvoker {
 
 #[async_trait]
 impl ToolInvoker for RegistryToolInvoker {
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.trusted_session_profile.clone()
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
@@ -150,6 +156,7 @@ impl ToolInvoker for RegistryToolInvoker {
             available_tool_names: None,
             options: crate::context::ToolUseOptions {
                 session_interactive: None,
+                prompt_policy: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -186,6 +193,10 @@ impl ToolInvoker for RegistryToolInvoker {
             cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
             fork_parent_effort: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             cwd: None,
             depth: 0,
             observer: None,
@@ -369,6 +380,7 @@ impl RegistryToolInvoker {
                 available_tool_names: ctx.available_tool_names.clone(),
                 options: crate::context::ToolUseOptions {
                     session_interactive: ctx.session_interactive,
+                    prompt_policy: None,
                     output_style_is_default: None,
                     debug: false,
                     verbose: false,
@@ -408,6 +420,10 @@ impl RegistryToolInvoker {
                 cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
                 fork_parent_system_prompt: None,
                 fork_parent_effort: None,
+                fork_prompt_policy: None,
+                fork_custom_system_prompt: None,
+                fork_append_system_prompt: None,
+                fork_role_system_prompt: None,
                 cwd: None,
                 depth: 0,
                 observer: None,
@@ -425,6 +441,7 @@ impl RegistryToolInvoker {
             .unwrap_or_else(|| "subagent".into());
         tool_use_ctx.options.model_profile = ctx.parent_model_profile.clone();
         tool_use_ctx.options.session_interactive = ctx.session_interactive;
+        tool_use_ctx.options.prompt_policy = ctx.prompt_policy.clone();
         tool_use_ctx.options.is_non_interactive_session = ctx.is_non_interactive_session;
         tool_use_ctx.messages = ctx.current_history.clone();
         tool_use_ctx.available_tool_names = ctx.available_tool_names.clone();
@@ -467,6 +484,20 @@ impl RegistryToolInvoker {
             .fork_context
             .as_ref()
             .and_then(|fork| fork.parent_effort.clone());
+        tool_use_ctx.fork_prompt_policy =
+            ctx.prompt_policy.as_ref().map(|policy| policy.metadata());
+        tool_use_ctx.fork_custom_system_prompt = ctx
+            .fork_context
+            .as_ref()
+            .and_then(|fork| fork.custom_system_prompt.clone());
+        tool_use_ctx.fork_append_system_prompt = ctx
+            .fork_context
+            .as_ref()
+            .and_then(|fork| fork.append_system_prompt.clone());
+        tool_use_ctx.fork_role_system_prompt = ctx
+            .fork_context
+            .as_ref()
+            .and_then(|fork| fork.role_system_prompt.clone());
         tool_use_ctx.cwd = ctx.cwd.clone();
         tool_use_ctx.depth = ctx.depth;
         tool_use_ctx.observer = ctx.observer.clone();
@@ -1494,6 +1525,9 @@ mod tests {
                     Option<lingxi_core::types::ConversationMessage>,
                     Vec<lingxi_core::types::ContentBlock>,
                     Option<serde_json::Value>,
+                    Option<Utf16JsonProjection>,
+                    Option<Utf16JsonProjection>,
+                    Option<Utf16JsonProjection>,
                 )>,
             >,
         >,
@@ -1559,6 +1593,9 @@ mod tests {
                 ctx.assistant_message,
                 ctx.same_turn_tool_uses,
                 ctx.fork_parent_effort,
+                ctx.fork_custom_system_prompt,
+                ctx.fork_append_system_prompt,
+                ctx.fork_role_system_prompt,
             ));
             Ok(ToolCallResult {
                 data: json!({}),
@@ -1639,6 +1676,7 @@ mod tests {
 
         let mut invocation = SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -1650,6 +1688,9 @@ mod tests {
                 messages: vec![policy.clone()],
                 system_prompt: Some("exact parent system".into()),
                 parent_effort: Some(serde_json::json!("low")),
+                custom_system_prompt: Some("custom override".into()),
+                append_system_prompt: Some("append instructions".into()),
+                role_system_prompt: Some("original role".into()),
             }),
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
@@ -1691,6 +1732,9 @@ mod tests {
             captured_assistant_message,
             captured_same_turn_tool_uses,
             captured_parent_effort,
+            captured_custom_system,
+            captured_append_system,
+            captured_role_system,
         ) = captured_guard
             .as_ref()
             .expect("NameRecordingTool::call ran");
@@ -1742,6 +1786,24 @@ mod tests {
             Some(&serde_json::json!("low")),
             "the current parent's effort replaces stale inherited context"
         );
+        assert_eq!(
+            captured_custom_system
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("custom override")
+        );
+        assert_eq!(
+            captured_append_system
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("append instructions")
+        );
+        assert_eq!(
+            captured_role_system
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("original role")
+        );
         drop(captured_guard);
 
         let next_policy = lingxi_core::types::ConversationMessage::user_meta(
@@ -1767,10 +1829,10 @@ mod tests {
             input: json!({"file_path":"next-prior.txt"}),
             provider_id: None,
         };
-        invocation.fork_context = None;
         invocation.current_history = vec![next_policy.clone()];
         invocation.assistant_message = Some(next_assistant_row.clone());
         invocation.same_turn_tool_uses = vec![next_sibling_tool_use.clone()];
+        invocation.fork_context = None;
         invoker
             .invoke("NameRecordingTool", json!({}), invocation)
             .await
@@ -1785,6 +1847,7 @@ mod tests {
             captured.10.is_none(),
             "a call without a fork carrier clears stale parent effort"
         );
+        assert!(captured.11.is_none() && captured.12.is_none() && captured.13.is_none());
     }
 
     #[tokio::test]
@@ -1801,6 +1864,7 @@ mod tests {
                 json!({}),
                 SubagentInvocationContext {
                     session_interactive: None,
+                    prompt_policy: None,
                     available_tool_names: None,
                     cancellation_token: tokio_util::sync::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -1960,6 +2024,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn nested_dispatch_replaces_a_previous_requests_prompt_policy() {
+        use lingxi_core::host::prompt_policy::{resolve_prompt_policy, PromptTarget};
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let native = Arc::new(resolve_prompt_policy(PromptTarget::for_model(
+            ConversationMode::Code,
+            "claude-sonnet-4-6",
+        )));
+        let generic = Arc::new(resolve_prompt_policy(PromptTarget::for_model(
+            ConversationMode::Chat,
+            "kimi-k2.5",
+        )));
+        let mut first = no_ctx();
+        first.prompt_policy = Some(native);
+        let first = invoker
+            .invoke_detailed("TestEcho", json!({}), first)
+            .await
+            .unwrap();
+        let mut next = no_ctx();
+        next.tool_context_state = first.context_state;
+        next.prompt_policy = Some(generic.clone());
+        let second = invoker
+            .invoke_detailed("TestEcho", json!({}), next)
+            .await
+            .unwrap();
+        let context = second
+            .context_state
+            .as_ref()
+            .unwrap()
+            .downcast_arc::<ToolUseContext>()
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            context.options.prompt_policy.as_ref().unwrap(),
+            &generic
+        ));
+
+        // A legacy caller omitting the field also clears a stale native policy;
+        // its next description uses the ordinary model-based fallback.
+        let mut legacy = no_ctx();
+        legacy.tool_context_state = second.context_state;
+        let result = invoker
+            .invoke_detailed("TestEcho", json!({}), legacy)
+            .await
+            .unwrap();
+        assert!(result
+            .context_state
+            .unwrap()
+            .downcast_arc::<ToolUseContext>()
+            .unwrap()
+            .options
+            .prompt_policy
+            .is_none());
+    }
+
     // ──── enforcement 3b: permission gate before dispatch ──────────────
     use lingxi_core::host::permission_gate::{
         PermissionDecision as GateDecision, PermissionGate as Gate,
@@ -2067,6 +2187,7 @@ mod tests {
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2354,6 +2475,7 @@ mod tests {
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2508,6 +2630,7 @@ mod tests {
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
             session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,

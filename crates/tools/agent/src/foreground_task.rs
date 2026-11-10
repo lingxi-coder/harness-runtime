@@ -661,6 +661,10 @@ mod tests {
             fork_context_messages: Some(vec![]),
             instruction_context: None,
             fork_parent_system_prompt: Some("original inherited system prompt".into()),
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             creator_agent_id: Some(lingxi_core::types::AgentId::new()),
             effort: Some(serde_json::json!("high")),
             ..Default::default()

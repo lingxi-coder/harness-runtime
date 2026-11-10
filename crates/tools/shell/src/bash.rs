@@ -2999,14 +2999,8 @@ impl Tool for BashTool {
         if self.ctx.requires_inline_foreground() {
             return "Execute a shell command in the foreground. The default and maximum timeout are 120000 ms. Background execution and promotion are unavailable. Cancellation and timeout stop the command and wait for its process tree to be reaped. Prefer absolute paths; working-directory changes affect only this Chat.".into();
         }
-        // BASH.6/BASH.7 — 1:1 with claude-code
-        // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
-        // The `Dh(model)` "simple system prompt" gate (binary @~195159752)
-        // selects the SHORT current-gen variant vs the LONG classic one; the
-        // session/subagent model is threaded via `PromptOptions::model`, and
-        // `None` mirrors the binary's `Dh(undefined)` → LONG. BOTH variants are
-        // driven by the live sandbox runtime config on this context (the SHORT
-        // `qUp` calls the SAME `yXa()`/`sandbox_section`).
+        // Claude retains its native long/lean selection; generic bundles use
+        // Lean with the same actual sandbox and background capabilities.
         // (/sandbox) Use the effective config so the prompt reflects the live
         // toggle (the frozen config until `/sandbox` flips the shared cell).
         let sandbox_runtime = self.ctx.effective_sandbox_runtime();
@@ -3014,10 +3008,11 @@ impl Tool for BashTool {
             opts.bash_precommit_skills,
             opts.bash_precommit_session_generation,
         );
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            crate::prompt::simple_prompt_concise_with_precommit(
+        if tool_api::prompt_uses_lean(opts) {
+            crate::prompt::simple_prompt_concise_with_bundle(
                 &sandbox_runtime,
                 &precommit_suggestion,
+                tool_api::prompt_uses_native(opts),
             )
         } else {
             crate::prompt::simple_prompt_with_precommit(&sandbox_runtime, &precommit_suggestion)
@@ -8559,8 +8554,10 @@ mod tests {
                     },
                 );
                 let opts = PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
+                    model: Some("claude-sonnet-4-6".into()),
                     bash_precommit_session_generation: generation,
                     bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
                         custom_verify: expected["skills"]["verify"].as_bool().unwrap(),
@@ -8573,6 +8570,7 @@ mod tests {
                 let verbose = tool.prompt(&opts).await.string_at("").unwrap().to_owned();
                 let concise = clone
                     .prompt(&PromptOptions {
+                        prompt_policy: None,
                         is_scheduled_turn: false,
                         session_id: None,
                         model: Some("claude-opus-4-8".into()),
@@ -8610,10 +8608,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_default_model_none_returns_long_variant() {
-        // Default opts (model=None) ⇒ `Dh(None)` false ⇒ LONG prompt. The
-        // byte-locked LONG anchors must still hold (regression guard for the
-        // existing parity tests).
+    async fn prompt_default_model_none_returns_generic_lean_variant() {
+        let _guard = crate::prompt::background_env_lock();
+        // A standalone caller without a model resolves the generic Lean
+        // bundle, including its attribution policy.
         let out = ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -8628,19 +8626,22 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(
-            p.starts_with("Executes a given bash command and returns its output."),
-            "LONG prompt opening missing; got:\n{p}"
+            p.starts_with("Executes a bash command and returns its output.\n\n"),
+            "generic Lean prompt opening missing; got:\n{p}"
         );
         assert!(
             p.contains(
-                "The working directory persists between commands, but shell state does not."
+                "`cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories."
             ),
-            "LONG cwd sentence missing"
+            "319 cwd guidance missing"
         );
         assert!(
-            p.contains("# Committing changes with git"),
-            "LONG committing-changes header missing"
+            p.contains("# Git\n"),
+            "generic Lean git instructions missing"
         );
+        assert!(!p.contains("# Committing changes with git"));
+        assert!(!p.contains("Co-Authored-By: Claude"));
+        assert!(!p.contains("claude.com/claude-code"));
     }
 
     #[tokio::test]
@@ -8668,6 +8669,7 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let opts = PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             model: Some("claude-opus-4-8".into()),
@@ -8686,7 +8688,7 @@ mod tests {
         );
         // Working-directory bullet (em-dash U+2014, straight apostrophe).
         assert!(
-            p.contains("- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile."),
+            p.contains("- `cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder; otherwise it stays where it was. Prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile."),
             "SHORT working-directory bullet missing/incorrect; got:\n{p}"
         );
         // IMPORTANT avoid-list bullet — claude-code 2.1.238 `hcT` selects it with
@@ -8705,7 +8707,7 @@ mod tests {
         );
         // Raw timeout bullet (no `/ N minutes` conversion).
         assert!(
-            p.contains("- `timeout` is in milliseconds: default 120000, max 600000."),
+            p.contains("- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command."),
             "SHORT timeout bullet missing/incorrect; got:\n{p}"
         );
         // Detached run_in_background bullet (background note enabled by default,
@@ -8718,12 +8720,14 @@ mod tests {
             !p.contains("Foreground `sleep` is blocked"),
             "Monitor clause must be absent by default (amber-sentinel off)"
         );
-        // CONCISE `# Git` section — three fixed bullets, NO attribution bullets,
-        // NO LONG "Committing changes with git" header.
+        // Native concise Git includes 319's mention-notification guidance.
         assert!(
-            p.contains("# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first."),
+            p.contains("# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- GitHub notifies the owner of any `@name` written in a PR, issue, or comment."),
             "SHORT `# Git` section missing/incorrect; got:\n{p}"
         );
+        assert!(p.contains(
+            "- Commit or push only when the user asks. If on the default branch, branch first."
+        ));
         assert!(
             !p.contains("# Committing changes with git"),
             "SHORT prompt must not carry the LONG git section"

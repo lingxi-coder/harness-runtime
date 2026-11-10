@@ -612,8 +612,12 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
-        let long_opts = PromptOptions::default();
+        let long_opts = PromptOptions {
+            model: Some("claude-sonnet-4-6".into()),
+            ..PromptOptions::default()
+        };
         let short_opts = PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             include_examples: false,
@@ -634,7 +638,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let long_on = root_text(&tool.prompt(&long_opts).await);
         let short_on = root_text(&tool.prompt(&short_opts).await);
         assert!(long_on.contains("authenticated access.\n- Exception: claude.ai/code/artifact/{uuid} URLs (including preview.claude.ai) ARE fetchable \u{2014} WebFetch uses your claude.ai login. Use WebFetch for these, not curl or a headless browser (those return the SPA shell or a Cloudflare 403, not the content).\n\n- Fetches content from a specified URL"));
-        assert!(short_on.contains("use an authenticated MCP tool or `gh` for those instead. Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403).\n- HTTP is upgraded to HTTPS."));
+        assert!(short_on.contains("use an authenticated MCP tool or `gh` for those instead. Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403).\n- Fails on localhost and other hostnames without a dot; for a local server, use curl via a registered shell tool.\n- HTTP is upgraded to HTTPS."));
 
         telemetry::test_clear_flag("tengu_cobalt_plinth");
         telemetry::test_clear_flag("allow_cobalt_plinth");
@@ -644,7 +648,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     async fn prompt_gates_short_vs_long_with_auth_prefix() {
         let _cache_guard = crate::testsupport::web_globals_lock().await;
         // 1:1 with claude-code `CMi(model)`: a current-gen model gets the SHORT
-        // variant; the default (no model) gets the LONG = `IMPORTANT: WebFetch
+        // variant; a classic Claude model gets the LONG = `IMPORTANT: WebFetch
         // WILL FAIL…` auth-prefix + the DESCRIPTION.
         let _env = SKIP_ENV_LOCK.lock().await;
         let prev = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
@@ -653,10 +657,17 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
 
-        // Default (model=None) ⇒ LONG: auth-prefix, then the DESCRIPTION body. The
+        // Classic Claude ⇒ LONG: auth-prefix, then the DESCRIPTION body. The
         // `access.\n${GSd}` template (DESCRIPTION starts with `\n`) yields a blank
         // line between the prefix and the first bullet.
-        let long = root_text(&tool.prompt(&PromptOptions::default()).await);
+        let long = root_text(
+            &tool
+                .prompt(&PromptOptions {
+                    model: Some("claude-sonnet-4-6".into()),
+                    ..PromptOptions::default()
+                })
+                .await,
+        );
         assert!(
             long.starts_with("IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs."),
             "LONG must lead with the auth-warning prefix; got {long:?}"
@@ -669,6 +680,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let short = root_text(
             &tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
