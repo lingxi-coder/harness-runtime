@@ -923,8 +923,8 @@ fn test_rule_pattern_impl(
         None => (stripped, false),
     };
 
-    let target = Path::new("/").join(native_ignore_case_fold(&rel_str));
     let matched = if source_units {
+        let target = Path::new("/").join(&rel_str);
         let Some(matcher) = cached_source_glob(stripped) else {
             return RulePatternMatch::NoMatch;
         };
@@ -939,6 +939,7 @@ fn test_rule_pattern_impl(
         }
         matcher.matched_path_or_any_parents(&target) == Some(false)
     } else {
+        let target = Path::new("/").join(native_ignore_case_fold(&rel_str));
         let Some(gitignore) = cached_gitignore(stripped) else {
             return RulePatternMatch::NoMatch;
         };
@@ -1201,12 +1202,13 @@ impl SourceGlobMatcher {
             return Some(false);
         };
         let relative = target.strip_prefix("/").ok()?;
-        for (index, path) in relative.ancestors().enumerate() {
+        let folded = native_ignore_case_fold(relative.to_str()?);
+        for (index, path) in Path::new(&folded).ancestors().enumerate() {
             let is_dir = index > 0;
             if (!self.is_only_dir || is_dir)
                 && path
                     .to_str()
-                    .is_some_and(|candidate| regex.is_match(&native_ignore_case_fold(candidate)))
+                    .is_some_and(|candidate| regex.is_match(candidate))
             {
                 return Some(self.is_whitelist);
             }
@@ -1234,11 +1236,44 @@ enum SourceGlobBuildError {
     BudgetExceeded,
 }
 
-fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<std::collections::HashMap<String, Option<Arc<SourceGlobMatcher>>>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+const COMPILED_PATTERN_CACHE_CAPACITY: usize = 256;
+
+/// FIFO replacement bounds retained artifacts while continuing to admit rules
+/// introduced after startup. Hits do not reorder entries or allocate. More
+/// simultaneously active patterns than the capacity can still cause churn.
+struct CompiledPatternCache<T> {
+    entries: indexmap::IndexMap<String, T>,
+    capacity: usize,
+}
+
+impl<T> CompiledPatternCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: indexmap::IndexMap::new(),
+            capacity,
+        }
+    }
+
+    fn get(&self, pattern: &str) -> Option<&T> {
+        self.entries.get(pattern)
+    }
+
+    fn insert(&mut self, pattern: String, compiled: T) {
+        if self.capacity == 0 {
+            return;
+        }
+        if !self.entries.contains_key(&pattern) && self.entries.len() == self.capacity {
+            self.entries.shift_remove_index(0);
+        }
+        self.entries.insert(pattern, compiled);
+    }
+}
+
+fn cached_compilation<T: Clone>(
+    cache: &std::sync::Mutex<CompiledPatternCache<T>>,
+    pattern: &str,
+    build: impl FnOnce() -> T,
+) -> T {
     {
         let guard = cache
             .lock()
@@ -1247,14 +1282,23 @@ fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>
             return hit.clone();
         }
     }
-    let built = build_source_glob(pattern).map(Arc::new);
-    let mut guard = cache
+    // Compilation stays outside the shared lock. Concurrent cold callers may
+    // compile the same immutable pattern; replacement still retains one slot.
+    let built = build();
+    cache
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if guard.len() < 256 {
-        guard.insert(pattern.to_string(), built.clone());
-    }
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(pattern.to_string(), built.clone());
     built
+}
+
+fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = Mutex<CompiledPatternCache<Option<Arc<SourceGlobMatcher>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE
+        .get_or_init(|| Mutex::new(CompiledPatternCache::new(COMPILED_PATTERN_CACHE_CAPACITY)));
+    cached_compilation(cache, pattern, || build_source_glob(pattern).map(Arc::new))
 }
 
 /// One `ignore().add(pattern).ignores(component)` check for Native `mh`'s
@@ -1454,51 +1498,25 @@ fn glob_regex_hex_digit(byte: u8) -> Option<u8> {
 
 fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::Gitignore>> {
     use std::sync::{Arc, Mutex, OnceLock};
-    type Cache =
-        Mutex<std::collections::HashMap<String, Option<Arc<ignore::gitignore::Gitignore>>>>;
+    type Cache = Mutex<CompiledPatternCache<Option<Arc<ignore::gitignore::Gitignore>>>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    {
-        let guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(hit) = guard.get(pattern) {
-            return hit.clone();
+    let cache = CACHE
+        .get_or_init(|| Mutex::new(CompiledPatternCache::new(COMPILED_PATTERN_CACHE_CAPACITY)));
+    cached_compilation(cache, pattern, || {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
+        let folded_pattern = native_ignore_case_fold(pattern);
+        if let Err(e) = builder.add_line(None, &folded_pattern) {
+            // An unbuildable glob (e.g. an unbalanced char class) matches
+            // nothing. Surface the native-compatibility failure on compilation.
+            tracing::warn!(
+                pattern = %pattern,
+                error = %e,
+                "permission rule has an unparseable glob; the rule will not match"
+            );
+            return None;
         }
-    }
-    let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
-    let folded_pattern = native_ignore_case_fold(pattern);
-    if let Err(e) = builder.add_line(None, &folded_pattern) {
-        // An unbuildable glob (e.g. an unbalanced char class) matches nothing.
-        // That is fail-CLOSED for an allow rule (safe) but fail-OPEN for a deny
-        // rule (the deny silently does nothing), and it diverges from npm
-        // `ignore`, which is more lenient — so surface it rather than swallow.
-        tracing::warn!(
-            pattern = %pattern,
-            error = %e,
-            "permission rule has an unparseable glob; the rule will not match"
-        );
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.len() < 256 {
-            guard.insert(pattern.to_string(), None);
-        }
-        return None;
-    }
-    let Ok(gitignore) = builder.build() else {
-        return None;
-    };
-    let compiled = Arc::new(gitignore);
-    {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.len() < 256 {
-            guard.insert(pattern.to_string(), Some(compiled.clone()));
-        }
-    }
-    Some(compiled)
+        builder.build().ok().map(Arc::new)
+    })
 }
 
 /// ECMAScript non-Unicode `/i` canonicalization used by bundled node-ignore.
@@ -1629,6 +1647,7 @@ fn native_ignore_case_fold_glob_impl(
         pattern.to_owned()
     };
     let chars = normalized.chars().collect::<Vec<_>>();
+    let mut occupied_markers = None;
     let mut out = String::new();
     let mut classes = Vec::new();
     let mut class_markers = std::collections::HashMap::<Vec<char>, char>::new();
@@ -1777,7 +1796,13 @@ fn native_ignore_case_fold_glob_impl(
         if members.is_empty() && !empty_class && rewritten_class.is_none() {
             return Err(SourceGlobBuildError::Invalid);
         }
-        while char::from_u32(marker_code).is_none_or(|marker| pattern.contains(marker)) {
+        let occupied_markers = occupied_markers.get_or_insert_with(|| {
+            pattern
+                .chars()
+                .filter(|ch| *ch >= '\u{e000}')
+                .collect::<HashSet<_>>()
+        });
+        while char::from_u32(marker_code).is_none_or(|marker| occupied_markers.contains(&marker)) {
             marker_code += 1;
         }
         let marker = char::from_u32(marker_code).ok_or(SourceGlobBuildError::Invalid)?;
@@ -2445,6 +2470,128 @@ pub fn path_in_allowed_working_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_pattern_cache_admits_and_hits_after_saturation() {
+        let cache =
+            std::sync::Mutex::new(CompiledPatternCache::new(COMPILED_PATTERN_CACHE_CAPACITY));
+        for index in 0..COMPILED_PATTERN_CACHE_CAPACITY {
+            assert_eq!(
+                cached_compilation(&cache, &format!("initial-{index}"), || index),
+                index
+            );
+        }
+        assert_eq!(cached_compilation(&cache, "current", || 999), 999);
+        assert_eq!(
+            cached_compilation(&cache, "current", || panic!(
+                "current pattern was not retained"
+            )),
+            999
+        );
+        let guard = cache.lock().unwrap();
+        assert_eq!(guard.entries.len(), COMPILED_PATTERN_CACHE_CAPACITY);
+        assert!(guard.get("initial-0").is_none());
+        assert_eq!(guard.get("initial-1"), Some(&1));
+    }
+
+    #[test]
+    fn compiled_pattern_cache_retains_negative_and_exhausted_results() {
+        let cache = std::sync::Mutex::new(CompiledPatternCache::new(2));
+        let absent = cached_compilation(&cache, "invalid", || {
+            None::<std::sync::Arc<SourceGlobMatcher>>
+        });
+        assert!(absent.is_none());
+        assert!(cached_compilation(&cache, "invalid", || panic!("negative cache miss")).is_none());
+        let exhausted = cached_compilation(&cache, "exhausted", || {
+            Some(std::sync::Arc::new(exhausted_source_glob()))
+        })
+        .unwrap();
+        let repeated =
+            cached_compilation(&cache, "exhausted", || panic!("exhausted cache miss")).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&exhausted, &repeated));
+        assert!(repeated.regex.is_none());
+
+        cached_compilation(&cache, "valid", || {
+            build_source_glob("valid").map(std::sync::Arc::new)
+        });
+        let guard = cache.lock().unwrap();
+        assert_eq!(guard.entries.len(), 2);
+        assert!(
+            guard.get("invalid").is_none(),
+            "FIFO evicts the oldest result"
+        );
+        assert!(guard.get("exhausted").is_some());
+        assert!(guard.get("valid").is_some());
+    }
+
+    #[test]
+    fn source_case_fold_is_idempotent_for_every_utf16_unit() {
+        let units = (0..=u16::MAX).collect::<Vec<_>>();
+        let mapped = crate::source_input::exact_operation_strings(&[&units]).unwrap();
+        let folded = native_ignore_case_fold(&mapped[0]);
+        assert_eq!(native_ignore_case_fold(&folded), folded);
+    }
+
+    #[test]
+    fn source_ancestor_matching_matches_per_ancestor_fold_reference() {
+        fn previous_match(matcher: &SourceGlobMatcher, target: &Path) -> Option<bool> {
+            let regex = matcher.regex.as_ref()?;
+            let folded_target = native_ignore_case_fold(target.to_str()?);
+            let relative = Path::new(&folded_target).strip_prefix("/").ok()?;
+            for (index, path) in relative.ancestors().enumerate() {
+                if (!matcher.is_only_dir || index > 0)
+                    && path.to_str().is_some_and(|candidate| {
+                        regex.is_match(&native_ignore_case_fold(candidate))
+                    })
+                {
+                    return Some(matcher.is_whitelist);
+                }
+            }
+            None
+        }
+
+        let paths = [
+            "/Parent/File.TXT".encode_utf16().collect::<Vec<_>>(),
+            "/Parent/Child/grandchild".encode_utf16().collect(),
+            "/\u{00b5}/\u{03a3}/name".encode_utf16().collect(),
+            vec![b'/' as u16, 0xd800, b'/' as u16, b'X' as u16],
+            "/\u{e000}/\u{10000}/file".encode_utf16().collect(),
+        ];
+        for pattern in ["parent", "parent/", "*.txt", "p*/**", "[a-z]/**", "?"] {
+            let pattern = pattern.encode_utf16().collect::<Vec<_>>();
+            for path in &paths {
+                let mapped =
+                    crate::source_input::exact_operation_strings(&[&pattern, path]).unwrap();
+                let matcher = build_source_glob(&mapped[0]).unwrap();
+                let target = Path::new(&mapped[1]);
+                assert_eq!(
+                    matcher.matched_path_or_any_parents(target),
+                    previous_match(&matcher, target),
+                    "pattern={pattern:?}, path={path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_class_markers_match_original_pattern_occupancy_order() {
+        for pattern in [
+            "[a][b][a]",
+            "\u{e000}[a]\u{e001}[b]\u{e003}[a][c]",
+            "\\\u{e000}[A-Z][b]",
+            "[\u{e000}][a][\u{e000}]",
+        ] {
+            let (_, classes) = native_ignore_case_fold_glob(pattern).unwrap();
+            let mut marker_code = 0xe000;
+            for (actual, _) in classes {
+                while char::from_u32(marker_code).is_none_or(|marker| pattern.contains(marker)) {
+                    marker_code += 1;
+                }
+                assert_eq!(Some(actual), char::from_u32(marker_code), "{pattern:?}");
+                marker_code += 1;
+            }
+        }
+    }
 
     #[test]
     fn wide_unicode_classes_stay_compact_and_match_through_the_public_path() {

@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use tool_api::context::ToolUseContext;
 use tool_api::native_output::{
-    parse_object, string_array, OutputField, OutputFieldType, UnknownOutputKeys,
+    parse_object, validate_string_array, OutputField, OutputFieldType, UnknownOutputKeys,
 };
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -60,9 +60,9 @@ use crate::grep::{
     is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG, SEARCH_INCOMPLETE_NOTE,
 };
 use crate::shared::{
-    open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
-    search_path_is_read_denied, search_read_deny_policy, ReadDenyPolicy, SearchResolutionError,
-    SearchResolutionSnapshot,
+    open_rooted_search_file, prepare_search_read_policy, run_search_candidate_hook,
+    run_search_preparation_hook, search_path_is_read_denied, ReadDenyPolicy, SearchControl,
+    SearchResolutionError, SearchResolutionSnapshot, SearchStop, SearchWalkError, StableTopK,
 };
 
 /// Tool name byte-lock.
@@ -436,7 +436,7 @@ impl Tool for GlobTool {
             ],
             UnknownOutputKeys::Strip,
         )?;
-        string_array(output, "/filenames", TOOL_NAME, "filenames")?;
+        validate_string_array(output, "/filenames", TOOL_NAME, "filenames")?;
         Ok(parsed)
     }
     fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
@@ -643,8 +643,8 @@ impl Tool for GlobTool {
         // pattern at the search root (`config/secret.txt` would still be listed
         // under `sub/config/secret.txt`). Grep already did the split
         // (`grep.rs`); Glob now matches it.
-        let deny_globs = self.ctx.effective_read_deny_exclude_globs(&canon_base);
-        let read_deny_policy = search_read_deny_policy(&self.ctx, &base, &canon_base);
+        let (deny_globs, read_deny_policy) =
+            prepare_search_read_policy(&self.ctx, &base, &canon_base);
         let search_resolution = SearchResolutionSnapshot::capture(&base, &canon_base, &deny_globs);
         for p in &deny_globs {
             let neg = if p.starts_with('/') {
@@ -686,35 +686,38 @@ impl Tool for GlobTool {
 
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
-        // (The TS path shells `rg` with an execFile timeout + SIGKILL; the
-        // in-process equivalent is a deadline checked each walk step. No tokio
-        // timer / new dep needed — the walk is synchronous CPU/IO work.)
+        // The blocking walk checks deadline and cancellation between entries;
+        // an OS filesystem syscall itself cannot be interrupted here.
         let is_wsl = self.ctx.platform.as_str() == "wsl";
         let timeout = ripgrep_timeout(is_wsl);
         let deadline = started + timeout;
+        let (control, _search_owner) = SearchControl::new(deadline, _ctx.cancel.clone());
+        let call_control = control.clone();
 
         let search_path = base.clone();
         let search_path_for_hook = base.clone();
-        let (mut hits, timed_out) =
-            lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
-                // This is deliberately after the deny overrides have been built
-                // and immediately before the walk is created. The test hook swaps
-                // a symlink at this exact preparation boundary.
-                run_search_preparation_hook(&search_path_for_hook);
-                search_resolution.verify()?;
-                glob_walk(
-                    canon_base,
-                    overrides,
-                    no_ignore,
-                    hidden,
-                    deadline,
-                    search_resolution,
-                    read_deny_policy,
-                )
-            })
-            .await
-            .map_err(|e| ToolError::Io(e.to_string().into()))?
-            .map_err(|error| search_resolution_error(&search_path, error))?;
+        let (hits, total, timed_out) = lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
+            // This is deliberately after the deny overrides have been built
+            // and immediately before the walk is created. The test hook swaps
+            // a symlink at this exact preparation boundary.
+            run_search_preparation_hook(&search_path_for_hook);
+            search_resolution.verify()?;
+            glob_walk(
+                canon_base,
+                overrides,
+                no_ignore,
+                hidden,
+                control,
+                search_resolution,
+                read_deny_policy,
+            )
+        })
+        .await
+        .map_err(|e| ToolError::Io(e.to_string().into()))?
+        .map_err(|error| search_resolution_error(&search_path, error))?;
+        call_control
+            .check_cancellation()
+            .map_err(|_| ToolError::Aborted)?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete); a timeout WITH
@@ -723,14 +726,7 @@ impl Tool for GlobTool {
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()));
         }
 
-        let total = hits.len();
-        // Oldest-first by mtime, matching claude-code `--sort=modified`
-        // (`utils/glob.ts:94`) + `slice(0, limit)` keeping the OLDEST 100.
-        hits.sort_by(|a, b| a.1.cmp(&b.1)); // oldest first
         let truncated = total > MAX_GLOB_MATCHES;
-        if truncated {
-            hits.truncate(MAX_GLOB_MATCHES);
-        }
 
         // Relativize each hit against the canonicalized LIVE cwd (TS
         // `files.map(toRelativePath)`, `GlobTool.ts:166`, where `toRelativePath`
@@ -759,6 +755,9 @@ impl Tool for GlobTool {
                 .expect("Glob result is an object");
         }
         let model_content = map_glob_result_text(&data);
+        call_control
+            .check_cancellation()
+            .map_err(|_| ToolError::Aborted)?;
         Ok(ToolCallResult {
             data,
             model_content,
@@ -776,10 +775,10 @@ fn glob_walk(
     overrides: ignore::overrides::Override,
     no_ignore: bool,
     hidden: bool,
-    deadline: Instant,
+    control: SearchControl,
     search_resolution: SearchResolutionSnapshot,
     read_deny_policy: Option<ReadDenyPolicy>,
-) -> Result<(Vec<(PathBuf, SystemTime)>, bool), SearchResolutionError> {
+) -> Result<(Vec<(PathBuf, SystemTime)>, usize, bool), SearchWalkError> {
     search_resolution.verify()?;
     let mut wb = WalkBuilder::new(&canon_base);
     wb.overrides(overrides);
@@ -796,12 +795,18 @@ fn glob_walk(
     }
 
     let mut timed_out = false;
-    let mut hits: Vec<(PathBuf, SystemTime)> = Vec::new();
+    let mut hits = StableTopK::new(Some(MAX_GLOB_MATCHES), |a: &(PathBuf, SystemTime), b| {
+        a.1.cmp(&b.1)
+    });
     for entry in wb.build() {
         search_resolution.verify()?;
-        if Instant::now() >= deadline {
-            timed_out = true;
-            break;
+        match control.check() {
+            Ok(()) => {}
+            Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+            Err(SearchStop::TimedOut) => {
+                timed_out = true;
+                break;
+            }
         }
         let entry = match entry {
             Ok(e) => e,
@@ -828,10 +833,20 @@ fn glob_walk(
         hits.push((path.to_path_buf(), mtime));
     }
     search_resolution.verify()?;
-    Ok((hits, timed_out))
+    match control.check() {
+        Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+        Err(SearchStop::TimedOut) => timed_out = true,
+        Ok(()) => {}
+    }
+    let total = hits.total();
+    Ok((hits.into_sorted(), total, timed_out))
 }
 
-fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolError {
+fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
+    let error = match error {
+        SearchWalkError::Cancelled => return ToolError::Aborted,
+        SearchWalkError::Resolution(error) => error,
+    };
     let reason = match error {
         SearchResolutionError::SearchRootChanged => {
             "its symlink resolution changed after permission was checked"
@@ -846,6 +861,96 @@ fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_optimizer_glob_walk_retains_only_oldest_hundred_and_counts_all() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        for index in 0..750 {
+            let path = root.join(format!("f{index:04}.txt"));
+            std::fs::write(&path, "x").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(index as i64, 0))
+                .unwrap();
+        }
+        let resolution = SearchResolutionSnapshot::capture(&root, &root, &[]);
+        let (control, _owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
+        let (hits, total, timed_out) = glob_walk(
+            root.clone(),
+            OverrideBuilder::new(&root).build().unwrap(),
+            true,
+            true,
+            control,
+            resolution,
+            None,
+        )
+        .unwrap();
+        assert_eq!(total, 750);
+        assert_eq!(hits.len(), MAX_GLOB_MATCHES);
+        assert!(!timed_out);
+        for (index, (path, _)) in hits.iter().enumerate() {
+            assert_eq!(
+                path.file_name().unwrap(),
+                format!("f{index:04}.txt").as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn search_optimizer_glob_empty_and_partial_deadlines_remain_distinct() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(root.join("one.txt"), "x").unwrap();
+        let (expired, _expired_owner) = SearchControl::new(Instant::now(), None);
+        let resolution = SearchResolutionSnapshot::capture(&root, &root, &[]);
+        let (hits, total, timed_out) = glob_walk(
+            root.clone(),
+            OverrideBuilder::new(&root).build().unwrap(),
+            true,
+            true,
+            expired,
+            resolution.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(timed_out && hits.is_empty());
+        assert_eq!(total, 0);
+        let (control, _owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
+        let checks = AtomicUsize::new(0);
+        let control = control.with_test_stop(move || {
+            (checks.fetch_add(1, Ordering::Relaxed) >= 2).then_some(SearchStop::TimedOut)
+        });
+        let (hits, total, timed_out) = glob_walk(
+            root.clone(),
+            OverrideBuilder::new(&root).build().unwrap(),
+            true,
+            true,
+            control,
+            resolution,
+            None,
+        )
+        .unwrap();
+        assert!(timed_out);
+        assert_eq!(total, 1);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_optimizer_glob_cancellation_returns_aborted() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("one.txt"), "x").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let result = GlobTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"pattern":"**/*"})),
+                tool_api::test_support::fresh_ctx_cancelled(),
+                fresh_tx(),
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::Aborted)));
+    }
 
     #[tokio::test]
     async fn native_322_glob_projections_and_repeated_roots() {

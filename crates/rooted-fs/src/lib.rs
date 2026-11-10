@@ -220,7 +220,7 @@ where
 }
 
 fn read_opened_tail_bytes(
-    mut file: std::fs::File,
+    file: std::fs::File,
     relative: &Path,
     max_bytes: u64,
 ) -> Result<Vec<u8>, FsError> {
@@ -228,11 +228,21 @@ fn read_opened_tail_bytes(
         .metadata()
         .map_err(|error| map_io(relative, error))?
         .len();
+    read_opened_tail_bytes_at_length(file, relative, max_bytes, length)
+}
+
+fn read_opened_tail_bytes_at_length(
+    mut file: std::fs::File,
+    relative: &Path,
+    max_bytes: u64,
+    length: u64,
+) -> Result<Vec<u8>, FsError> {
     let start = length.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(start))
         .map_err(|error| map_io(relative, error))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(length - start)
+        .read_to_end(&mut bytes)
         .map_err(|error| map_io(relative, error))?;
     Ok(bytes)
 }
@@ -317,6 +327,39 @@ pub enum RootedFsError {
     /// The final component is not a regular file (for example, a FIFO).
     #[error("requested final path component is not a regular file")]
     NotRegularFile,
+    /// A caller cancelled a chunked snapshot before all bytes were consumed.
+    #[error("rooted file read cancelled")]
+    Cancelled,
+}
+
+fn read_snapshot_bytes(
+    file: &mut std::fs::File,
+    relative: &Path,
+) -> Result<Vec<u8>, RootedFsError> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+    Ok(bytes)
+}
+
+fn read_snapshot_bytes_cancellable(
+    file: &mut std::fs::File,
+    relative: &Path,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<Vec<u8>, RootedFsError> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 65_536];
+    loop {
+        if should_cancel() {
+            return Err(RootedFsError::Cancelled);
+        }
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(bytes),
+            Ok(length) => bytes.extend_from_slice(&chunk[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(RootedFsError::Fs(map_io(relative, error))),
+        }
+    }
 }
 
 fn resolution_changed(requested: &Path, approved: &Path) -> RootedFsError {
@@ -1772,16 +1815,18 @@ mod imp {
         atomic_write_inner(root, relative, bytes, options, None, || {})
     }
 
-    fn read_file_after_permission_inner<F>(
+    fn read_file_after_permission_inner<F, R>(
         root: &Path,
         relative: &Path,
         requested: &Path,
         approved: &Path,
         expected: Option<&FileMutationIdentity>,
         after_permission: F,
+        read_body: R,
     ) -> Result<RootedFileSnapshot, RootedFsError>
     where
         F: FnOnce(),
+        R: FnOnce(&mut std::fs::File) -> Result<Vec<u8>, RootedFsError>,
     {
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
@@ -1828,9 +1873,7 @@ mod imp {
         let metadata = file
             .metadata()
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        let bytes = read_body(&mut file)?;
         Ok(RootedFileSnapshot {
             size: metadata.len(),
             modified: metadata.modified().ok(),
@@ -1845,7 +1888,20 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, None, || {})
+        read_file_after_permission_inner(root, relative, requested, approved, None, || {}, |file| read_snapshot_bytes(file, relative))
+    }
+
+    pub(super) fn read_file_after_permission_cancellable(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(
+            root, relative, requested, approved, None, || {},
+            |file| read_snapshot_bytes_cancellable(file, relative, should_cancel),
+        )
     }
 
     pub(super) fn read_file_after_permission_pinned(
@@ -1855,7 +1911,7 @@ mod imp {
         approved: &Path,
         expected: &FileMutationIdentity,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {})
+        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {}, |file| read_snapshot_bytes(file, relative))
     }
 
     pub(super) fn open_file_after_permission(
@@ -1910,6 +1966,7 @@ mod imp {
             approved,
             None,
             after_permission,
+            |file| read_snapshot_bytes(file, relative),
         )
     }
 
@@ -2097,13 +2154,13 @@ mod imp {
         mark_delete(&file, relative)
     }
 
-    pub(super) fn lock_exclusive_pinned(
+    pub(super) fn prepare_lock_exclusive_pinned(
         root: &Path,
         relative: &Path,
         _dir_mode: u32,
         _file_mode: u32,
         expected: Option<&RootIdentity>,
-    ) -> Result<RootedFileLock, FsError> {
+    ) -> Result<RootedFileLockRequest, FsError> {
         let (parent, file_name) = open_parent_checked(root, relative, true, expected)?;
         let file = open_regular(
             &parent,
@@ -2114,16 +2171,16 @@ mod imp {
             FILE_OPEN_IF,
             FILE_ATTRIBUTE_NORMAL,
         )?;
-        file.lock_exclusive()
-            .map_err(|error| map_io(relative, error))?;
         let guard = RootedFileLock {
             _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: expected
                 .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
         };
-        guard.validate_current()?;
-        Ok(guard)
+        Ok(RootedFileLockRequest {
+            guard,
+            relative: relative.to_path_buf(),
+        })
     }
 
     pub(super) fn try_lock_exclusive(
@@ -2239,6 +2296,45 @@ pub struct RootedFileLock {
     _file: Option<std::fs::File>,
     path: String,
     validation: Option<(PathBuf, PathBuf, RootIdentity)>,
+}
+
+/// An opened lock file retained across nonblocking acquisition attempts.
+/// Dropping a pending request closes its handle; dropping an acquired result
+/// explicitly releases the advisory lock through [`RootedFileLock`].
+pub struct RootedFileLockRequest {
+    guard: RootedFileLock,
+    relative: PathBuf,
+}
+
+/// Result of one nonblocking attempt on the same opened lock file.
+pub enum RootedFileLockAttempt {
+    Acquired(RootedFileLock),
+    Contended(RootedFileLockRequest),
+}
+
+impl RootedFileLockRequest {
+    fn acquire(self) -> Result<RootedFileLock, FsError> {
+        let file = self.guard._file.as_ref().expect("lock file is present");
+        FileExt::lock_exclusive(file).map_err(|error| map_io(&self.relative, error))?;
+        self.guard.validate_current()?;
+        Ok(self.guard)
+    }
+
+    /// Try the retained handle once, validating the root and file identity
+    /// after acquisition exactly as the blocking pinned-lock API does.
+    pub fn try_acquire(self) -> Result<RootedFileLockAttempt, FsError> {
+        let file = self.guard._file.as_ref().expect("lock file is present");
+        match FileExt::try_lock_exclusive(file) {
+            Ok(()) => {
+                self.guard.validate_current()?;
+                Ok(RootedFileLockAttempt::Acquired(self.guard))
+            }
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                Ok(RootedFileLockAttempt::Contended(self))
+            }
+            Err(error) => Err(map_io(&self.relative, error)),
+        }
+    }
 }
 
 impl RootedFileLock {
@@ -2791,6 +2887,19 @@ pub fn read_file_after_permission(
     imp::read_file_after_permission(root, relative, requested, approved)
 }
 
+/// Read through the same permission and rooted-handle checks as
+/// [`read_file_after_permission`], polling cancellation before each 64 KiB
+/// chunk. Cancellation never returns a partial snapshot.
+pub fn read_file_after_permission_cancellable(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    should_cancel: impl FnMut() -> bool,
+) -> Result<RootedFileSnapshot, RootedFsError> {
+    imp::read_file_after_permission_cancellable(root, relative, requested, approved, should_cancel)
+}
+
 /// Open a regular file after checking that `requested` still resolves to
 /// `approved`. The returned handle is opened through a fixed, no-follow
 /// directory-handle chain, so callers can safely read it without reopening a
@@ -2945,7 +3054,21 @@ pub fn lock_exclusive_pinned(
     file_mode: u32,
     expected: Option<&RootIdentity>,
 ) -> Result<RootedFileLock, FsError> {
-    imp::lock_exclusive_pinned(root, relative, dir_mode, file_mode, expected)
+    prepare_lock_exclusive_pinned(root, relative, dir_mode, file_mode, expected)?.acquire()
+}
+
+/// Open a root-confined lock once so asynchronous callers can retry contention
+/// without reopening its pathname or holding a blocking worker while waiting.
+/// Opening and each acquisition attempt still perform synchronous filesystem
+/// work and belong on a blocking worker when called from an async runtime.
+pub fn prepare_lock_exclusive_pinned(
+    root: &Path,
+    relative: &Path,
+    dir_mode: u32,
+    file_mode: u32,
+    expected: Option<&RootIdentity>,
+) -> Result<RootedFileLockRequest, FsError> {
+    imp::prepare_lock_exclusive_pinned(root, relative, dir_mode, file_mode, expected)
 }
 
 /// Try to acquire an exclusive root-confined lock without waiting on lock
@@ -3014,6 +3137,23 @@ pub fn truncate_file_pinned(
     expected: Option<&RootIdentity>,
 ) -> Result<(), FsError> {
     imp::truncate_file_pinned(root, relative, length, expected)
+}
+
+#[cfg(all(unix, test))]
+std::thread_local! {
+    // One-shot injection between a successful pathname type check and openat.
+    static AFTER_READ_REGULAR_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(unix, test))]
+fn run_after_read_regular_check_hook() {
+    AFTER_READ_REGULAR_CHECK_HOOK.with(|hook| {
+        let callback = hook.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
 }
 
 #[cfg(unix)]
@@ -3541,7 +3681,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| map_unix_io(relative, error))?;
@@ -3792,7 +3932,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| map_unix_io(relative, error))?;
@@ -4100,16 +4240,18 @@ mod imp {
         result
     }
 
-    fn read_file_after_permission_inner<F>(
+    fn read_file_after_permission_inner<F, R>(
         root: &Path,
         relative: &Path,
         requested: &Path,
         approved: &Path,
         expected: Option<&FileMutationIdentity>,
         after_permission: F,
+        read_body: R,
     ) -> Result<RootedFileSnapshot, RootedFsError>
     where
         F: FnOnce(),
+        R: FnOnce(&mut std::fs::File) -> Result<Vec<u8>, RootedFsError>,
     {
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
@@ -4140,7 +4282,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| RootedFsError::Fs(map_unix_io(relative, error)))?;
@@ -4157,11 +4299,8 @@ mod imp {
         let metadata = file
             .metadata()
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
-        let mut bytes = Vec::new();
         let mut reader = file;
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        let bytes = read_body(&mut reader)?;
         Ok(RootedFileSnapshot {
             size: metadata.len(),
             modified: metadata.modified().ok(),
@@ -4179,7 +4318,20 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, None, || {})
+        read_file_after_permission_inner(root, relative, requested, approved, None, || {}, |file| read_snapshot_bytes(file, relative))
+    }
+
+    pub(super) fn read_file_after_permission_cancellable(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(
+            root, relative, requested, approved, None, || {},
+            |file| read_snapshot_bytes_cancellable(file, relative, should_cancel),
+        )
     }
 
     pub(super) fn read_file_after_permission_pinned(
@@ -4189,7 +4341,7 @@ mod imp {
         approved: &Path,
         expected: &FileMutationIdentity,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {})
+        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {}, |file| read_snapshot_bytes(file, relative))
     }
 
     pub(super) fn open_file_after_permission(
@@ -4244,6 +4396,7 @@ mod imp {
             approved,
             None,
             after_permission,
+            |file| read_snapshot_bytes(file, relative),
         )
     }
 
@@ -4269,7 +4422,11 @@ mod imp {
         relative: &Path,
     ) -> Result<(), RootedFsError> {
         match fs::statat(parent, file_name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => Ok(()),
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
+                #[cfg(test)]
+                run_after_read_regular_check_hook();
+                Ok(())
+            }
             Ok(_) => Err(RootedFsError::NotRegularFile),
             Err(rustix::io::Errno::NOENT) => Err(RootedFsError::Fs(FsError::NotFound(
                 relative.display().to_string(),
@@ -4446,13 +4603,13 @@ mod imp {
             .map_err(|error| map_unix_io(relative, error))
     }
 
-    pub(super) fn lock_exclusive_pinned(
+    pub(super) fn prepare_lock_exclusive_pinned(
         root: &Path,
         relative: &Path,
         dir_mode: u32,
         file_mode: u32,
         expected: Option<&RootIdentity>,
-    ) -> Result<RootedFileLock, FsError> {
+    ) -> Result<RootedFileLockRequest, FsError> {
         let (parent, file_name) = open_parent_checked(root, relative, true, dir_mode, expected)?;
         let fd = fs::openat(
             &parent,
@@ -4463,16 +4620,16 @@ mod imp {
         .map_err(|error| map_unix_io(relative, error))?;
         ensure_opened_regular(&fd, relative)?;
         let file = std::fs::File::from(fd);
-        file.lock_exclusive()
-            .map_err(|error| map_io(relative, error))?;
         let guard = RootedFileLock {
             _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: expected
                 .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
         };
-        guard.validate_current()?;
-        Ok(guard)
+        Ok(RootedFileLockRequest {
+            guard,
+            relative: relative.to_path_buf(),
+        })
     }
 
     pub(super) fn try_lock_exclusive(
@@ -4631,6 +4788,16 @@ mod imp {
         _relative: &Path,
         _requested: &Path,
         _approved: &Path,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
+    pub(super) fn read_file_after_permission_cancellable(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+        _should_cancel: impl FnMut() -> bool,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
         Err(RootedFsError::Fs(unsupported()))
     }
@@ -4829,13 +4996,13 @@ mod imp {
         Err(unsupported())
     }
 
-    pub(super) fn lock_exclusive_pinned(
+    pub(super) fn prepare_lock_exclusive_pinned(
         _root: &Path,
         _relative: &Path,
         _dir_mode: u32,
         _file_mode: u32,
         _expected: Option<&RootIdentity>,
-    ) -> Result<RootedFileLock, FsError> {
+    ) -> Result<RootedFileLockRequest, FsError> {
         Err(unsupported())
     }
 
@@ -5641,6 +5808,112 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn permission_checked_reads_reject_fifo_swaps_before_data_or_cancellation() {
+        // Run the synchronous opens on disposable threads so a regression is
+        // reported by a bounded receive rather than hanging the test runner.
+        for operation in 0..4 {
+            for initially_fifo in [false, true] {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let directory = tempfile::tempdir().unwrap();
+                    let root = directory.path().canonicalize().unwrap();
+                    let relative = Path::new("candidate.txt");
+                    let requested = root.join(relative);
+                    let make_fifo = |path: &Path| {
+                        assert!(std::process::Command::new("mkfifo")
+                            .arg(path)
+                            .status()
+                            .unwrap()
+                            .success());
+                    };
+                    if initially_fifo {
+                        make_fifo(&requested);
+                    } else {
+                        std::fs::write(&requested, b"regular before stat").unwrap();
+                        let swapped = requested.clone();
+                        AFTER_READ_REGULAR_CHECK_HOOK.with(|hook| {
+                            *hook.borrow_mut() = Some(Box::new(move || {
+                                std::fs::remove_file(&swapped).unwrap();
+                                make_fifo(&swapped);
+                            }));
+                        });
+                    }
+                    let mut cancellation_polls = 0;
+                    let result = match operation {
+                        0 => read_file_after_permission(&root, relative, &requested, &requested)
+                            .map(|_| ()),
+                        1 => open_file_after_permission(&root, relative, &requested, &requested)
+                            .map(|_| ()),
+                        _ => read_file_after_permission_cancellable(
+                            &root,
+                            relative,
+                            &requested,
+                            &requested,
+                            || {
+                                cancellation_polls += 1;
+                                operation == 2
+                            },
+                        )
+                        .map(|_| ()),
+                    };
+                    assert_eq!(
+                        cancellation_polls, 0,
+                        "descriptor validation precedes data access"
+                    );
+                    if initially_fifo {
+                        assert!(
+                            matches!(result, Err(RootedFsError::NotRegularFile)),
+                            "initial non-regular-file error is preserved: {result:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(result,
+                            Err(RootedFsError::Fs(FsError::OutsideWorkspace(ref path)))
+                                if path == &relative.display().to_string()),
+                            "the opened FIFO must fail descriptor validation: {result:?}"
+                        );
+                    }
+                    tx.send(()).unwrap();
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(5)).expect(
+                    "snapshot, streaming, and cancellable opens must not wait for a FIFO writer",
+                );
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rooted_tail_and_pinned_text_reads_reject_fifo_without_a_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("candidate.log");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(root.path().join(relative))
+            .status()
+            .unwrap()
+            .success());
+        let root_path = root.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let pin = root_identity(&root_path).unwrap();
+            assert!(matches!(
+                read_tail_bytes(&root_path, relative, 16),
+                Err(FsError::OutsideWorkspace(_))
+            ));
+            assert!(matches!(
+                read_to_string_pinned(&root_path, relative, Some(&pin)),
+                Err(FsError::OutsideWorkspace(_))
+            ));
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("bounded tails and pinned text reads must reject a FIFO before reading it");
+        worker.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stable_leaf_symlink_read_uses_approved_target() {
         let root = tempfile::tempdir().unwrap();
         let root_path = std::fs::canonicalize(root.path()).unwrap();
@@ -6035,6 +6308,145 @@ mod tests {
             std::fs::read(root.path().join(relative)).unwrap(),
             b"published"
         );
+    }
+
+    #[test]
+    fn tail_read_uses_the_metadata_snapshot_under_growth_and_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("growing.log");
+        let path = root.path().join(relative);
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let length = file.metadata().unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"appended after metadata")
+            .unwrap();
+        assert_eq!(
+            read_opened_tail_bytes_at_length(file, relative, 4, length).unwrap(),
+            b"6789",
+        );
+
+        // A shrinking file returns only the still-readable snapshot suffix.
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let length = file.metadata().unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(8)
+            .unwrap();
+        assert_eq!(
+            read_opened_tail_bytes_at_length(file, relative, 4, length).unwrap(),
+            b"67",
+        );
+        assert_eq!(read_tail_bytes(root.path(), relative, 0).unwrap(), b"");
+        assert_eq!(
+            read_tail_bytes(root.path(), relative, 100).unwrap(),
+            b"01234567"
+        );
+
+        // Even an append after a zero-sized snapshot window yields no bytes.
+        let file = std::fs::File::open(&path).unwrap();
+        let length = file.metadata().unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"more")
+            .unwrap();
+        assert!(read_opened_tail_bytes_at_length(file, relative, 0, length)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn cancellable_snapshot_keeps_permission_errors_and_stops_between_chunks() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let relative = Path::new("large.txt");
+        let requested = root.join(relative);
+        let body = vec![b'x'; 4 * 65_536];
+        std::fs::write(&requested, &body).unwrap();
+        let complete =
+            read_file_after_permission_cancellable(&root, relative, &requested, &requested, || {
+                false
+            })
+            .unwrap();
+        let ordinary = read_file_after_permission(&root, relative, &requested, &requested).unwrap();
+        assert_eq!(complete.bytes, ordinary.bytes);
+        assert_eq!(complete.size, ordinary.size);
+        assert_eq!(complete.modified, ordinary.modified);
+        assert_eq!(complete.mode, ordinary.mode);
+        let mut polls = 0;
+        let result =
+            read_file_after_permission_cancellable(&root, relative, &requested, &requested, || {
+                polls += 1;
+                polls == 3
+            });
+        assert!(matches!(result, Err(RootedFsError::Cancelled)));
+        assert_eq!(polls, 3);
+
+        let outside = root.join("unapproved.txt");
+        assert!(matches!(
+            read_file_after_permission_cancellable(&root, relative, &requested, &outside, || true),
+            Err(RootedFsError::SymlinkResolutionChanged),
+        ));
+    }
+
+    #[test]
+    fn pending_pinned_lock_retries_the_same_handle_and_validates_after_acquisition() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("lease.lock");
+        let pin = root_identity(root.path()).unwrap();
+        let holder =
+            lock_exclusive_pinned(root.path(), relative, 0o700, 0o600, Some(&pin)).unwrap();
+        let request =
+            prepare_lock_exclusive_pinned(root.path(), relative, 0o700, 0o600, Some(&pin)).unwrap();
+        let file_identity = opened_file_identity(request.guard._file.as_ref().unwrap()).unwrap();
+        let request = match request.try_acquire().unwrap() {
+            RootedFileLockAttempt::Contended(pending) => pending,
+            RootedFileLockAttempt::Acquired(_) => panic!("holder owns the lock"),
+        };
+        assert_eq!(
+            opened_file_identity(request.guard._file.as_ref().unwrap()).unwrap(),
+            file_identity
+        );
+        drop(holder);
+        let guard = match request.try_acquire().unwrap() {
+            RootedFileLockAttempt::Acquired(guard) => guard,
+            RootedFileLockAttempt::Contended(_) => panic!("holder released the lock"),
+        };
+        assert_eq!(
+            opened_file_identity(guard._file.as_ref().unwrap()).unwrap(),
+            file_identity
+        );
+        guard.validate_current().unwrap();
+        drop(guard);
+        assert!(try_lock_exclusive(root.path(), relative, 0o700, 0o600).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_pinned_lock_rejects_replaced_leaf_after_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("lease.lock");
+        let pin = root_identity(root.path()).unwrap();
+        let holder =
+            lock_exclusive_pinned(root.path(), relative, 0o700, 0o600, Some(&pin)).unwrap();
+        let request =
+            prepare_lock_exclusive_pinned(root.path(), relative, 0o700, 0o600, Some(&pin)).unwrap();
+        std::fs::rename(root.path().join(relative), root.path().join("old.lock")).unwrap();
+        std::fs::write(root.path().join(relative), b"replacement").unwrap();
+        drop(holder);
+        assert!(matches!(
+            request.try_acquire(),
+            Err(FsError::OutsideWorkspace(_))
+        ));
+        assert!(try_lock_exclusive(root.path(), Path::new("old.lock"), 0o700, 0o600).is_ok());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -24,6 +25,8 @@ use telemetry::tengu::tool::{
     FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED, READ_STARTED,
     SESSION_FILE_READ,
 };
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -58,6 +61,53 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 pub const MAX_OUTPUT_TOKENS_ENV: &str = "LINGXI_FILE_READ_MAX_OUTPUT_TOKENS";
 
 const STREAMING_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+// Retain the permit inside each blocking job, including after its caller is
+// dropped, so cancelled reads cannot bypass the bound while they finish a
+// blocking syscall or codec operation.
+const MAX_BLOCKING_READ_JOBS: usize = 4;
+static BLOCKING_READ_JOBS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::new(MAX_BLOCKING_READ_JOBS)));
+
+fn check_worker_cancelled(cancel: &CancellationToken) -> Result<(), ToolError> {
+    if cancel.is_cancelled() {
+        Err(ToolError::Aborted)
+    } else {
+        Ok(())
+    }
+}
+
+/// Run owned file/codec work without occupying an async runtime worker. Each
+/// job gets a child token cancelled when this future is dropped; synchronous
+/// loops check it between chunks. An in-progress OS syscall or codec call
+/// remains uninterruptible, and keeps its concurrency permit until it returns.
+pub(crate) async fn run_read_job<T, F>(cancel: &CancellationToken, work: F) -> Result<T, ToolError>
+where
+    T: Send + 'static,
+    F: FnOnce(&CancellationToken) -> Result<T, ToolError> + Send + 'static,
+{
+    check_worker_cancelled(cancel)?;
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ToolError::Aborted),
+        permit = BLOCKING_READ_JOBS.clone().acquire_owned() =>
+            permit.map_err(|error| ToolError::Io(error.to_string().into()))?,
+    };
+    let child = cancel.child_token();
+    let _cancel_on_drop = child.clone().drop_guard();
+    let job = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        check_worker_cancelled(&child)?;
+        let result = work(&child);
+        check_worker_cancelled(&child)?;
+        result
+    });
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ToolError::Aborted),
+        result = job => result.map_err(|error| ToolError::Io(error.to_string().into()))?,
+    }
+}
 
 const ALLOW_LARGE_HINT: &str = " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file.";
 const CONTEXT_ROOM_HINT: &str = " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room).";
@@ -577,13 +627,14 @@ impl NativeTextDecoder {
     }
 }
 
-async fn read_text_range_streaming<R: Read>(
+fn read_text_range_streaming<R: Read>(
     mut reader: R,
     _canon: &Path,
     offset: u64,
     limit: u64,
     _ext: Option<&str>,
     max_selected_bytes: u64,
+    cancel: &CancellationToken,
 ) -> Result<StreamedTextRange, ToolError> {
     let offset = offset.max(1);
     let end_line = offset.saturating_add(limit);
@@ -596,9 +647,11 @@ async fn read_text_range_streaming<R: Read>(
     let mut decoder = NativeTextDecoder::default();
     let mut buf = vec![0u8; STREAMING_READ_CHUNK_BYTES];
     loop {
+        check_worker_cancelled(cancel)?;
         let n = reader
             .read(&mut buf)
             .map_err(|error| ToolError::Io(error.to_string().into()))?;
+        check_worker_cancelled(cancel)?;
         let chunk = &buf[..n];
         prefix.extend_from_slice(
             &chunk[..chunk
@@ -681,6 +734,7 @@ pub(crate) fn build_pages_payload(
     canon: &std::path::Path,
     original_size: u64,
     page_jpegs: Vec<Vec<u8>>,
+    cancel: &CancellationToken,
 ) -> Result<
     (
         Vec<lingxi_core::types::ImageSource>,
@@ -692,7 +746,12 @@ pub(crate) fn build_pages_payload(
     let count = page_jpegs.len();
     let mut sources = Vec::with_capacity(count);
     for jpeg in page_jpegs {
-        let processed = crate::image_read::process_image(jpeg)?;
+        if cancel.is_cancelled() {
+            // The supervising read job turns cancellation into ToolError::Aborted.
+            return Err("aborted".to_string());
+        }
+        let processed =
+            crate::image_read::process_image_with_cancellation(jpeg, || cancel.is_cancelled())?;
         sources.push(lingxi_core::types::ImageSource::Base64 {
             media_type: processed.media_type,
             data: processed.base64,
@@ -1346,6 +1405,7 @@ fn read_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
+    cancel: &CancellationToken,
 ) -> Result<
     lingxi_core::host::rooted_fs::RootedFileSnapshot,
     lingxi_core::host::rooted_fs::RootedFsError,
@@ -1355,7 +1415,13 @@ fn read_rooted_snapshot(
             lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::read_file_after_permission_cancellable(
+        &root,
+        &relative,
+        requested,
+        approved,
+        || cancel.is_cancelled(),
+    )
 }
 
 fn open_rooted_file(
@@ -1369,6 +1435,69 @@ fn open_rooted_file(
         ));
     };
     lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+}
+
+struct LoadedRead {
+    snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot,
+    stream_source: Option<std::fs::File>,
+}
+
+fn load_rooted_read(
+    requested: &Path,
+    approved: &Path,
+    trusted_dirs: &[PathBuf],
+    try_stream: bool,
+    sniff_extensionless_image: bool,
+    cancel: &CancellationToken,
+) -> Result<LoadedRead, lingxi_core::host::rooted_fs::RootedFsError> {
+    // This stat is only a hint. Size/mtime and all consumed bytes still come
+    // from the one opened, rooted no-follow descriptor below.
+    if try_stream
+        && std::fs::metadata(approved).is_ok_and(|metadata| metadata.len() > MAX_FILE_READ_SIZE)
+    {
+        if let Ok(file) = open_rooted_file(requested, approved, trusted_dirs) {
+            if let Ok(metadata) = file.metadata() {
+                let extensionless_image = {
+                    #[cfg(feature = "image-read")]
+                    {
+                        if sniff_extensionless_image {
+                            use std::io::{Seek, SeekFrom};
+                            let mut held = &file;
+                            let mut header = [0; 16];
+                            let image = held.read(&mut header).ok().is_some_and(|length| {
+                                crate::image_read::sniff_image_media_type(&header[..length])
+                                    .is_some()
+                            });
+                            let _ = held.seek(SeekFrom::Start(0));
+                            image
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(feature = "image-read"))]
+                    {
+                        let _ = sniff_extensionless_image;
+                        false
+                    }
+                };
+                if metadata.len() > MAX_FILE_READ_SIZE && !extensionless_image {
+                    return Ok(LoadedRead {
+                        snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot {
+                            bytes: Vec::new(),
+                            size: metadata.len(),
+                            modified: metadata.modified().ok(),
+                            mode: None,
+                        },
+                        stream_source: Some(file),
+                    });
+                }
+            }
+        }
+    }
+    read_rooted_snapshot(requested, approved, trusted_dirs, cancel).map(|snapshot| LoadedRead {
+        snapshot,
+        stream_source: None,
+    })
 }
 
 fn check_read_cancelled(ctx: &ToolUseContext) -> Result<(), ToolError> {
@@ -1420,60 +1549,91 @@ impl FileReadTool {
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_file_path".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(READ_STARTED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(READ_STARTED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "_PROTO_file_path".to_string(),
+                    AnalyticsValue::String(
+                        PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                            .into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_completed(&self, invocation_id: &str, bytes_read: u64, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "bytes_read".to_string(),
-            AnalyticsValue::Int(bytes_read as i64),
-        );
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(READ_COMPLETED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(READ_COMPLETED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "bytes_read".to_string(),
+                    AnalyticsValue::Int(bytes_read as i64),
+                );
+                md.insert(
+                    "duration_ms".to_string(),
+                    AnalyticsValue::Int(duration_ms as i64),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_failed(&self, invocation_id: &str, failure_kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(failure_kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(READ_FAILED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(READ_FAILED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "failure_kind".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(failure_kind.to_string()).into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     /// Attribution for an existing read-state entry. Seeded context is tested
     /// first, followed by prior Read and mutation provenance. Every invocation
     /// still performs fresh I/O.
     async fn emit_file_read_reread(&self, prior_op: &'static str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "priorOp".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(prior_op.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(FILE_READ_REREAD, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(FILE_READ_REREAD, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "priorOp".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(prior_op.to_string()).into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     /// `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
@@ -1494,46 +1654,51 @@ impl FileReadTool {
         offset: u64,
         limit: Option<u64>,
     ) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "totalLines".to_string(),
-            AnalyticsValue::Int(total_lines as i64),
-        );
-        md.insert(
-            "readLines".to_string(),
-            AnalyticsValue::Int(read_lines as i64),
-        );
-        md.insert(
-            "totalBytes".to_string(),
-            AnalyticsValue::Int(total_bytes as i64),
-        );
-        md.insert(
-            "readBytes".to_string(),
-            AnalyticsValue::Int(read_bytes as i64),
-        );
-        md.insert("offset".to_string(), AnalyticsValue::Int(offset as i64));
-        if let Some(l) = limit {
-            md.insert("limit".to_string(), AnalyticsValue::Int(l as i64));
-        }
-        if let Some(ext) = get_file_extension_for_analytics(path) {
-            md.insert(
-                "ext".to_string(),
-                AnalyticsValue::String(Verified::assert_safe(ext).into_inner()),
-            );
-        }
-        // messageID: TS spreads `...(messageId !== undefined && { messageID })`.
-        // No assistant-message id is reachable from the Rust tool context, so the
-        // key is faithfully omitted (the TS-undefined branch).
-        let session_type = detect_session_file_type(path);
-        md.insert(
-            "is_session_memory".to_string(),
-            AnalyticsValue::Bool(session_type == Some("session_memory")),
-        );
-        md.insert(
-            "is_session_transcript".to_string(),
-            AnalyticsValue::Bool(session_type == Some("session_transcript")),
-        );
-        self.ctx.bus.log_event(SESSION_FILE_READ, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(SESSION_FILE_READ, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "totalLines".to_string(),
+                    AnalyticsValue::Int(total_lines as i64),
+                );
+                md.insert(
+                    "readLines".to_string(),
+                    AnalyticsValue::Int(read_lines as i64),
+                );
+                md.insert(
+                    "totalBytes".to_string(),
+                    AnalyticsValue::Int(total_bytes as i64),
+                );
+                md.insert(
+                    "readBytes".to_string(),
+                    AnalyticsValue::Int(read_bytes as i64),
+                );
+                md.insert("offset".to_string(), AnalyticsValue::Int(offset as i64));
+                if let Some(l) = limit {
+                    md.insert("limit".to_string(), AnalyticsValue::Int(l as i64));
+                }
+                if let Some(ext) = get_file_extension_for_analytics(path) {
+                    md.insert(
+                        "ext".to_string(),
+                        AnalyticsValue::String(Verified::assert_safe(ext).into_inner()),
+                    );
+                }
+                // messageID: TS spreads `...(messageId !== undefined && { messageID })`.
+                // No assistant-message id is reachable from the Rust tool context, so the
+                // key is faithfully omitted (the TS-undefined branch).
+                let session_type = detect_session_file_type(path);
+                md.insert(
+                    "is_session_memory".to_string(),
+                    AnalyticsValue::Bool(session_type == Some("session_memory")),
+                );
+                md.insert(
+                    "is_session_transcript".to_string(),
+                    AnalyticsValue::Bool(session_type == Some("session_transcript")),
+                );
+                md
+            })
+            .await;
     }
 
     /// `tengu_file_read_limits_override` (`FileReadTool.ts:512-515`) — fires only
@@ -1550,16 +1715,21 @@ impl FileReadTool {
             // Unreachable in the port — `fileReadingLimits` is always `None`.
             return;
         };
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "hasMaxTokens".to_string(),
-            AnalyticsValue::Bool(has_max_tokens),
-        );
-        md.insert(
-            "hasMaxSizeBytes".to_string(),
-            AnalyticsValue::Bool(has_max_size_bytes),
-        );
-        self.ctx.bus.log_event(FILE_READ_LIMITS_OVERRIDE, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(FILE_READ_LIMITS_OVERRIDE, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "hasMaxTokens".to_string(),
+                    AnalyticsValue::Bool(has_max_tokens),
+                );
+                md.insert(
+                    "hasMaxSizeBytes".to_string(),
+                    AnalyticsValue::Bool(has_max_size_bytes),
+                );
+                md
+            })
+            .await;
     }
 
     /// Build + return the friendly file-not-found error — the ENOENT arm of
@@ -1593,6 +1763,7 @@ impl FileReadTool {
         invocation_id: &str,
         requested_path: &std::path::Path,
         err: &std::io::Error,
+        cancel: &CancellationToken,
     ) -> Result<ToolCallResult, ToolError> {
         // Faithful NotFound gate: only ENOENT gets the cwd-note message (TS
         // rethrows every other errno). Structurally every caller is already on
@@ -1605,9 +1776,12 @@ impl FileReadTool {
         // `getCwd()` analog: the LIVE cwd (`Ct()`), realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
         let live_cwd = self.cwd_now();
-        Err(ToolError::Io(
-            file_not_found_message(requested_path, &live_cwd).into(),
-        ))
+        let requested_path = requested_path.to_path_buf();
+        let message = run_read_job(cancel, move |_| {
+            Ok(file_not_found_message(&requested_path, &live_cwd))
+        })
+        .await?;
+        Err(ToolError::Io(message.into()))
     }
 
     /// Process an image file and return it as multimodal content. The pixels
@@ -1624,6 +1798,7 @@ impl FileReadTool {
         bytes: Vec<u8>,
         original_size: u64,
         started: Instant,
+        cancel: &CancellationToken,
     ) -> Result<ToolCallResult, ToolError> {
         // FT-09: `q_l`'s two pre-decode guards (cc-238.js @294617599), which run
         // BEFORE any decode/resize. Without them LingXi surfaced the `image`
@@ -1643,11 +1818,17 @@ impl FileReadTool {
             ));
         }
 
-        let processed = match crate::image_read::process_image(bytes) {
+        let processed = match run_read_job(cancel, move |cancel| {
+            crate::image_read::process_image_with_cancellation(bytes, || cancel.is_cancelled())
+                .map_err(|error| ToolError::Io(error.into()))
+        })
+        .await
+        {
             Ok(p) => p,
+            Err(ToolError::Aborted) => return Err(ToolError::Aborted),
             Err(e) => {
                 self.emit_failed(invocation_id, "image_process").await;
-                return Err(ToolError::Io(e.into()));
+                return Err(e);
             }
         };
 
@@ -1720,29 +1901,46 @@ impl FileReadTool {
         &self,
         invocation_id: &str,
         canon: &std::path::Path,
+        bytes: Vec<u8>,
         original_size: u64,
         first: u32,
         last: u32,
         started: Instant,
+        cancel: &CancellationToken,
     ) -> Result<ToolCallResult, ToolError> {
-        let page_jpegs =
-            match crate::pdf_render::render_pdf_pages(canon, original_size, first, last).await {
-                Ok(p) => p,
-                Err(e) => {
-                    self.emit_failed(invocation_id, e.telemetry_code()).await;
-                    return Err(ToolError::Io(
-                        e.message(&canon.display().to_string()).into(),
-                    ));
-                }
-            };
-        let (sources, data, model_content) =
-            match build_pages_payload(canon, original_size, page_jpegs) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.emit_failed(invocation_id, "pdf_page_encode").await;
-                    return Err(ToolError::Io(e.into()));
-                }
-            };
+        let rendered = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ToolError::Aborted),
+            rendered = crate::pdf_render::render_pdf_pages(bytes, original_size, first, last) => rendered,
+        };
+        let page_jpegs = match rendered {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_failed(invocation_id, e.telemetry_code()).await;
+                return Err(ToolError::Io(
+                    e.message(&canon.display().to_string()).into(),
+                ));
+            }
+        };
+        let payload = run_read_job(cancel, {
+            let canon = canon.to_path_buf();
+            move |cancel| {
+                Ok(build_pages_payload(
+                    &canon,
+                    original_size,
+                    page_jpegs,
+                    cancel,
+                ))
+            }
+        })
+        .await?;
+        let (sources, data, model_content) = match payload {
+            Ok(v) => v,
+            Err(e) => {
+                self.emit_failed(invocation_id, "pdf_page_encode").await;
+                return Err(ToolError::Io(e.into()));
+            }
+        };
         let msg = lingxi_core::types::ConversationMessage::user_with_images(
             lingxi_core::types::MessageId::new(),
             String::new(),
@@ -1784,6 +1982,7 @@ impl FileReadTool {
         pages: Option<String>,
         model: &str,
         started: Instant,
+        cancel: &CancellationToken,
     ) -> Result<ToolCallResult, ToolError> {
         use crate::pdf_read::{
             is_pdf_supported, parse_pdf_page_range, pdf_page_count,
@@ -1853,10 +2052,12 @@ impl FileReadTool {
                     .read_pdf_pages_result(
                         invocation_id,
                         canon,
+                        bytes,
                         original_size,
                         first,
                         last,
                         started,
+                        cancel,
                     )
                     .await;
             }
@@ -1877,7 +2078,12 @@ impl FileReadTool {
         // No `pages` ⇒ inline read. A parseable page count > 10 is too many to
         // read inline (TS: pdfinfo page-count gate; `None` skips the gate,
         // mirroring pdfinfo returning null).
-        if let Some(count) = pdf_page_count(&bytes) {
+        let (bytes, page_count) = run_read_job(cancel, move |_| {
+            let page_count = pdf_page_count(&bytes);
+            Ok((bytes, page_count))
+        })
+        .await?;
+        if let Some(count) = page_count {
             if count > PDF_AT_MENTION_INLINE_THRESHOLD {
                 self.emit_failed(invocation_id, "pdf_too_many_pages").await;
                 return Err(ToolError::Io(format!(
@@ -1908,7 +2114,10 @@ impl FileReadTool {
             ));
         }
 
-        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let data = run_read_job(cancel, move |_| {
+            Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+        })
+        .await?;
         let source = lingxi_core::types::DocumentSource::Base64 {
             media_type: "application/pdf".to_string(),
             // clone so the base64 also rides in the result `data.file.base64`.
@@ -2079,6 +2288,11 @@ impl Tool for FileReadTool {
         let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
         check_read_cancelled(&ctx)?;
+        let read_cancel = ctx
+            .cancel
+            .as_ref()
+            .map_or_else(CancellationToken::new, CancellationToken::child_token);
+        let _cancel_read_on_drop = read_cancel.clone().drop_guard();
         // Native defaults offset to one before dispatch and state recording.
         // An absent limit reads to EOF; notebook dispatch resets both values.
         let input_offset = crate::input_u64(&input, "offset");
@@ -2170,7 +2384,13 @@ impl Tool for FileReadTool {
             trusted_dirs.push(root);
         }
 
-        let mut canon = match canonicalize_and_validate(&path, &trusted_dirs) {
+        let canonical = run_read_job(&read_cancel, {
+            let path = path.clone();
+            let trusted_dirs = trusted_dirs.clone();
+            move |_| Ok(canonicalize_and_validate(&path, &trusted_dirs))
+        })
+        .await?;
+        let mut canon = match canonical {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -2185,128 +2405,127 @@ impl Tool for FileReadTool {
         // reopening the canonical pathname would reintroduce a parent/leaf
         // symlink retarget window.
         //
-        // TL-1: a ranged Read of a >256KB file must not `read_to_end` the
-        // whole body. Hint from a metadata stat; on success we keep the
-        // no-follow handle and stream lines. Anything else falls through to
-        // the existing snapshot path.
-        let skip_full_load = input_limit.is_some()
+        // A ranged read retains the rooted descriptor and scans off-runtime;
+        // all other reads load a fresh same-handle snapshot in the worker.
+        let try_stream = input_limit.is_some()
             && !is_image_path(Path::new(file_path))
             && !is_pdf_path(Path::new(file_path))
-            && !is_notebook
-            && std::fs::metadata(&canon)
-                .map(|metadata| metadata.len() > MAX_FILE_READ_SIZE)
-                .unwrap_or(false);
-        let mut stream_source: Option<std::fs::File> = None;
-        let snapshot = 'load: {
-            if skip_full_load {
-                if let Ok(file) = open_rooted_file(&path, &canon, &trusted_dirs) {
-                    if let Ok(metadata) = file.metadata() {
-                        let extensionless_image = {
-                            #[cfg(feature = "image-read")]
-                            {
-                                use std::io::{Seek, SeekFrom};
-                                let mut held = &file;
-                                let mut header = [0; 16];
-                                let image = Path::new(file_path)
-                                    .extension()
-                                    .is_none_or(|ext| ext.is_empty())
-                                    && held.read(&mut header).ok().is_some_and(|length| {
-                                        crate::image_read::sniff_image_media_type(&header[..length])
-                                            .is_some()
-                                    });
-                                let _ = held.seek(SeekFrom::Start(0));
-                                image
-                            }
-                            #[cfg(not(feature = "image-read"))]
-                            {
-                                false
-                            }
-                        };
-                        if metadata.len() > MAX_FILE_READ_SIZE && !extensionless_image {
-                            let size = metadata.len();
-                            let modified = metadata.modified().ok();
-                            stream_source = Some(file);
-                            break 'load lingxi_core::host::rooted_fs::RootedFileSnapshot {
-                                bytes: Vec::new(),
-                                size,
-                                modified,
-                                mode: None,
-                            };
-                        }
-                    }
-                }
+            && !is_notebook;
+        let sniff_extensionless_image = Path::new(file_path)
+            .extension()
+            .is_none_or(|ext| ext.is_empty());
+        let loaded = run_read_job(&read_cancel, {
+            let path = path.clone();
+            let canon = canon.clone();
+            let trusted_dirs = trusted_dirs.clone();
+            move |cancel| {
+                Ok(load_rooted_read(
+                    &path,
+                    &canon,
+                    &trusted_dirs,
+                    try_stream,
+                    sniff_extensionless_image,
+                    cancel,
+                ))
             }
-            match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
-                Ok(snapshot) => snapshot,
-                Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
-                    lingxi_core::host::FsError::NotFound(_),
-                )) => {
-                    // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
-                    // tries the macOS-screenshot AM/PM space variant (regular space ⇄
-                    // thin space, U+202F), then reports the friendly message if that
-                    // variant is also absent.
-                    if let Some(alt) = get_alternate_screenshot_path(&requested_path) {
-                        if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
-                            match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
-                                Ok(snapshot) => {
-                                    canon = alt_canon;
-                                    snapshot
-                                }
-                                Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
-                                    lingxi_core::host::FsError::NotFound(_),
-                                )) => {
-                                    let not_found =
-                                        std::io::Error::from(std::io::ErrorKind::NotFound);
-                                    return self
-                                        .file_not_found(&invocation_id, &requested_path, &not_found)
-                                        .await;
-                                }
-                                Err(error) => {
-                                    self.emit_failed(&invocation_id, "io_metadata").await;
-                                    return Err(ToolError::Io(error.to_string().into()));
-                                }
+        })
+        .await?;
+        let mut stream_source = None;
+        let snapshot = match loaded {
+            Ok(loaded) => {
+                stream_source = loaded.stream_source;
+                loaded.snapshot
+            }
+            Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                lingxi_core::host::FsError::NotFound(_),
+            )) => {
+                // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
+                // tries the macOS-screenshot AM/PM space variant (regular space ⇄
+                // thin space, U+202F), then reports the friendly message if that
+                // variant is also absent.
+                if let Some(alt) = get_alternate_screenshot_path(&requested_path) {
+                    let alternate = run_read_job(&read_cancel, {
+                        let trusted_dirs = trusted_dirs.clone();
+                        move |cancel| {
+                            Ok(canonicalize_and_validate(&alt, &trusted_dirs).ok().map(
+                                |alt_canon| {
+                                    let snapshot = read_rooted_snapshot(
+                                        &alt,
+                                        &alt_canon,
+                                        &trusted_dirs,
+                                        cancel,
+                                    );
+                                    (alt_canon, snapshot)
+                                },
+                            ))
+                        }
+                    })
+                    .await?;
+                    if let Some((alt_canon, snapshot)) = alternate {
+                        match snapshot {
+                            Ok(snapshot) => {
+                                canon = alt_canon;
+                                snapshot
                             }
-                        } else {
-                            let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
-                            return self
-                                .file_not_found(&invocation_id, &requested_path, &not_found)
-                                .await;
+                            Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                                lingxi_core::host::FsError::NotFound(_),
+                            )) => {
+                                let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                                return self
+                                    .file_not_found(
+                                        &invocation_id,
+                                        &requested_path,
+                                        &not_found,
+                                        &read_cancel,
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                self.emit_failed(&invocation_id, "io_metadata").await;
+                                return Err(ToolError::Io(error.to_string().into()));
+                            }
                         }
                     } else {
                         let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                         return self
-                            .file_not_found(&invocation_id, &requested_path, &not_found)
+                            .file_not_found(
+                                &invocation_id,
+                                &requested_path,
+                                &not_found,
+                                &read_cancel,
+                            )
                             .await;
                     }
-                }
-                Err(lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged)
-                | Err(
-                    lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
-                ) => {
-                    self.emit_failed(&invocation_id, "symlink_resolution_changed")
+                } else {
+                    let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                    return self
+                        .file_not_found(&invocation_id, &requested_path, &not_found, &read_cancel)
                         .await;
-                    return Err(ToolError::InvalidInput(
-                        symlink_resolution_changed_message(file_path).into(),
-                    ));
-                }
-                Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile) if is_notebook => {
-                    self.emit_failed(&invocation_id, "notebook_not_regular_file")
-                        .await;
-                    return Err(ToolError::Io(
-                        crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE
-                            .to_string()
-                            .into(),
-                    ));
-                }
-                Err(error) => {
-                    self.emit_failed(&invocation_id, "io_metadata").await;
-                    return Err(ToolError::Io(error.to_string().into()));
                 }
             }
+            Err(lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged)
+            | Err(lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
+                self.emit_failed(&invocation_id, "symlink_resolution_changed")
+                    .await;
+                return Err(ToolError::InvalidInput(
+                    symlink_resolution_changed_message(file_path).into(),
+                ));
+            }
+            Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile) if is_notebook => {
+                self.emit_failed(&invocation_id, "notebook_not_regular_file")
+                    .await;
+                return Err(ToolError::Io(
+                    crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE
+                        .to_string()
+                        .into(),
+                ));
+            }
+            Err(error) => {
+                self.emit_failed(&invocation_id, "io_metadata").await;
+                return Err(ToolError::Io(error.to_string().into()));
+            }
         };
-        // Rooted filesystem operations are synchronous in this implementation.
-        // Observe cancellation immediately after they return, before parsing or
-        // writing the result into shared Read state.
+        // Observe cancellation before parsing or publishing shared Read state.
         check_read_cancelled(&ctx)?;
         let size = snapshot.size;
         // Floor-truncated mtime in ms, matching TS `Math.floor(mtimeMs)` for
@@ -2320,7 +2539,7 @@ impl Tool for FileReadTool {
         // 2.1.322 always performs the read; existing state is retained only
         // for operation attribution. Legacy file_unchanged rows remain readable.
         if let Some(entry) =
-            tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+            tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
         {
             self.emit_file_read_reread(if entry.seeded_from_context {
                 "seeded"
@@ -2433,28 +2652,39 @@ impl Tool for FileReadTool {
             && input_limit.is_some()
             && size > MAX_FILE_READ_SIZE
         {
-            let streamed = match if let Some(file) = stream_source.take() {
-                read_text_range_streaming(
-                    file,
-                    &canon,
-                    offset,
-                    input_limit.expect("checked is_some"),
-                    ext.as_deref(),
-                    max_selected_bytes,
-                )
-                .await
-            } else {
-                read_text_range_streaming(
-                    snapshot.bytes.as_slice(),
-                    &canon,
-                    offset,
-                    input_limit.expect("checked is_some"),
-                    ext.as_deref(),
-                    max_selected_bytes,
-                )
-                .await
-            } {
+            let streamed = match run_read_job(&read_cancel, {
+                let source = stream_source.take();
+                let bytes = snapshot.bytes;
+                let canon = canon.clone();
+                let ext = ext.clone();
+                move |cancel| {
+                    if let Some(file) = source {
+                        read_text_range_streaming(
+                            file,
+                            &canon,
+                            offset,
+                            input_limit.expect("checked is_some"),
+                            ext.as_deref(),
+                            max_selected_bytes,
+                            cancel,
+                        )
+                    } else {
+                        read_text_range_streaming(
+                            bytes.as_slice(),
+                            &canon,
+                            offset,
+                            input_limit.expect("checked is_some"),
+                            ext.as_deref(),
+                            max_selected_bytes,
+                            cancel,
+                        )
+                    }
+                }
+            })
+            .await
+            {
                 Ok(result) => result,
+                Err(ToolError::Aborted) => return Err(ToolError::Aborted),
                 Err(e) => {
                     self.emit_failed(&invocation_id, "streaming_range_read")
                         .await;
@@ -2554,7 +2784,7 @@ impl Tool for FileReadTool {
         #[cfg(feature = "image-read")]
         if is_image {
             let result = self
-                .read_image_result(&invocation_id, &canon, bytes, size, started)
+                .read_image_result(&invocation_id, &canon, bytes, size, started, &read_cancel)
                 .await;
             check_read_cancelled(&ctx)?;
             if result.is_ok() {
@@ -2575,14 +2805,12 @@ impl Tool for FileReadTool {
                     pages,
                     &ctx.options.main_loop_model,
                     started,
+                    &read_cancel,
                 )
                 .await;
             check_read_cancelled(&ctx)?;
             return result;
         }
-
-        let not_text = crate::file_meta::classify_not_text(&bytes);
-        let content = crate::file_meta::decode_native_text(&bytes);
 
         // Notebook (`.ipynb`) structured-cell read (`FileReadTool.ts:822-863`).
         // A notebook is parsed into an ARRAY of structured cells — NOT the
@@ -2604,8 +2832,6 @@ impl Tool for FileReadTool {
                     return Err(ToolError::Io(e.into()));
                 }
             };
-            let model_content = crate::notebook_read::render_cells_model_text(&cells);
-
             // Serialized cells JSON — TS's `cellsJson = jsonStringify(cells)`
             // (`FileReadTool.ts:824`). One serialization, reused for the byte cap,
             // the token gate, and the registry entry (matches TS's single
@@ -2653,6 +2879,9 @@ impl Tool for FileReadTool {
                 return Err(ToolError::Io(msg.into()));
             }
 
+            // Rejected notebooks never need their model-facing text rendered.
+            let model_content = crate::notebook_read::render_cells_model_text(&cells);
+
             let duration_ms = started.elapsed().as_millis() as u64;
             self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
                 .await;
@@ -2693,6 +2922,8 @@ impl Tool for FileReadTool {
             });
         }
 
+        let not_text = crate::file_meta::classify_not_text(&bytes);
+        let content = crate::file_meta::decode_native_text(&bytes);
         let selected = select_text_range(&content, offset, limit);
         let total_lines = selected.total_lines;
         let mut slice = selected.content;
@@ -3175,6 +3406,114 @@ mod tests {
         )
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_read_job_keeps_the_runtime_heartbeat_running() {
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (heartbeat, observed) = std::sync::mpsc::channel();
+        let job = tokio::spawn(async move {
+            run_read_job(&CancellationToken::new(), move |_| {
+                let _ = started.send(());
+                observed
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .map_err(|error| ToolError::Internal(error.to_string()))?;
+                Ok("read finished")
+            })
+            .await
+        });
+        ready.await.expect("blocking job starts");
+        tokio::task::yield_now().await;
+        heartbeat.send(()).unwrap();
+        assert_eq!(job.await.unwrap().unwrap(), "read finished");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_read_job_cancels_streaming_before_the_next_chunk() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct GatedReader {
+            started: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            reads: Arc<AtomicUsize>,
+        }
+        impl Read for GatedReader {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let reads = self.reads.fetch_add(1, Ordering::SeqCst);
+                if let Some(started) = self.started.take() {
+                    let _ = started.send(());
+                    self.release
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .map_err(std::io::Error::other)?;
+                }
+                if reads >= 2 {
+                    return Ok(0);
+                }
+                output.fill(b'x');
+                Ok(output.len())
+            }
+        }
+
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (finished, stopped) = tokio::sync::oneshot::channel();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = GatedReader {
+            started: Some(started),
+            release: gate,
+            reads: reads.clone(),
+        };
+        let job = tokio::spawn(async move {
+            run_read_job(&CancellationToken::new(), move |cancel| {
+                let result = read_text_range_streaming(
+                    reader,
+                    Path::new("gated.txt"),
+                    2,
+                    1,
+                    None,
+                    64,
+                    cancel,
+                );
+                let _ = finished.send(matches!(result, Err(ToolError::Aborted)));
+                result
+            })
+            .await
+        });
+        ready.await.expect("first chunk is being read");
+        job.abort();
+        assert!(matches!(job.await, Err(error) if error.is_cancelled()));
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), stopped)
+                .await
+                .expect("cancelled scanner returns")
+                .unwrap(),
+            "the scanner observes the dropped caller's cancellation token"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offloaded_stream_preserves_utf16_bytes_and_total_lines() {
+        let text = "\u{feff}α\r\nβ\nx\nlast";
+        let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let result = run_read_job(&CancellationToken::new(), move |cancel| {
+            read_text_range_streaming(
+                std::io::Cursor::new(bytes),
+                Path::new("utf16.txt"),
+                2,
+                2,
+                Some("txt"),
+                64,
+                cancel,
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.content.as_bytes(), "β\nx".as_bytes());
+        assert_eq!(result.read_lines, 2);
+        assert_eq!(result.total_lines, 4);
+        assert!(result.not_text.is_none());
+    }
+
     #[test]
     fn max_size_byte_locked() {
         assert_eq!(MAX_FILE_READ_SIZE, 262_144);
@@ -3242,8 +3581,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ranged_streaming_read_keeps_only_selected_lines() {
+    #[test]
+    fn ranged_streaming_read_keeps_only_selected_lines() {
         let mut body = String::new();
         for i in 1..=5_000 {
             body.push_str(&format!("line-{i}\n"));
@@ -3255,8 +3594,8 @@ mod tests {
             2,
             None,
             100_000,
+            &CancellationToken::new(),
         )
-        .await
         .expect("stream");
         assert!(result.content.contains("line-1"), "got {}", result.content);
         assert!(result.read_lines <= 2);
@@ -3268,14 +3607,20 @@ mod tests {
         assert!(result.total_lines >= 5_000);
     }
 
-    #[tokio::test]
-    async fn streaming_empty_lines_enforce_selection_byte_budget() {
+    #[test]
+    fn streaming_empty_lines_enforce_selection_byte_budget() {
         for content in ["\n\n\n", "\r\n\r\n\r\n"] {
-            let error =
-                read_text_range_streaming(content.as_bytes(), Path::new("text.txt"), 1, 4, None, 2)
-                    .await
-                    .err()
-                    .expect("three separators exceed two selected bytes");
+            let error = read_text_range_streaming(
+                content.as_bytes(),
+                Path::new("text.txt"),
+                1,
+                4,
+                None,
+                2,
+                &CancellationToken::new(),
+            )
+            .err()
+            .expect("three separators exceed two selected bytes");
             assert!(error
                 .model_facing_message()
                 .string_at("")
@@ -3284,19 +3629,32 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn streaming_range_charges_normalized_crlf_bytes_at_the_cap() {
+    #[test]
+    fn streaming_range_charges_normalized_crlf_bytes_at_the_cap() {
         for content in ["a\r\n", "a\r"] {
-            let result =
-                read_text_range_streaming(content.as_bytes(), Path::new("text.txt"), 1, 1, None, 1)
-                    .await
-                    .expect("one normalized byte fits exactly");
+            let result = read_text_range_streaming(
+                content.as_bytes(),
+                Path::new("text.txt"),
+                1,
+                1,
+                None,
+                1,
+                &CancellationToken::new(),
+            )
+            .expect("one normalized byte fits exactly");
             assert_eq!(result.content, "a");
         }
         assert!(
-            read_text_range_streaming("a\r\r\n".as_bytes(), Path::new("text.txt"), 1, 1, None, 1,)
-                .await
-                .is_err(),
+            read_text_range_streaming(
+                "a\r\r\n".as_bytes(),
+                Path::new("text.txt"),
+                1,
+                1,
+                None,
+                1,
+                &CancellationToken::new()
+            )
+            .is_err(),
             "the earlier CR remains content and must be charged"
         );
     }
@@ -5200,8 +5558,8 @@ mod tests {
         assert_eq!(crate::test_data(&result.data)["type"], "text");
     }
 
-    #[tokio::test]
-    async fn native_322_streamed_ranges_match_buffered_range_fixtures() {
+    #[test]
+    fn native_322_streamed_ranges_match_buffered_range_fixtures() {
         struct ChunkReader<'a> {
             data: &'a [u8],
             chunk: usize,
@@ -5237,8 +5595,8 @@ mod tests {
                         input["limit"].as_u64().unwrap_or(u64::MAX),
                         Some("txt"),
                         DEFAULT_MAX_OUTPUT_TOKENS,
+                        &CancellationToken::new(),
                     )
-                    .await
                     .unwrap();
                     assert_eq!(
                         selected.content,
@@ -6198,8 +6556,13 @@ mod tests {
         }
 
         let pages = vec![jpeg(50, 50), jpeg(40, 60)];
-        let (sources, data, model_content) =
-            build_pages_payload(std::path::Path::new("/docs/report.pdf"), 4096, pages).unwrap();
+        let (sources, data, model_content) = build_pages_payload(
+            std::path::Path::new("/docs/report.pdf"),
+            4096,
+            pages,
+            &CancellationToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(sources.len(), 2, "one ImageSource per rendered page");
         for s in &sources {

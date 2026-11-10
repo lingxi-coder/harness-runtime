@@ -1,9 +1,222 @@
-//! Binary detection, BOM stripping, UTF-8 decoding.
-//!
-//! Used by every M4 file-touching tool. Pure functional; no I/O.
+//! Shared search guards, bounded result collection and cooperative stop
+//! controls, alongside binary detection, BOM stripping and UTF-8 decoding.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::Instant;
+use tokio_util::sync::CancellationToken;
+
+/// Keep the first `limit` values in the comparator's stable sorted order.
+/// Encounter order breaks ties exactly as a stable sort would. A missing
+/// limit retains every value, for explicitly unlimited search requests.
+pub(crate) struct StableTopK<T> {
+    values: BinaryHeap<RankedSearchValue<T>>,
+    unlimited: Vec<RankedSearchValue<T>>,
+    limit: Option<usize>,
+    compare: fn(&T, &T) -> Ordering,
+    total: usize,
+}
+
+struct RankedSearchValue<T> {
+    value: T,
+    encounter: usize,
+    compare: fn(&T, &T) -> Ordering,
+}
+
+impl<T> PartialEq for RankedSearchValue<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl<T> Eq for RankedSearchValue<T> {}
+
+impl<T> PartialOrd for RankedSearchValue<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for RankedSearchValue<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.compare)(&self.value, &other.value).then_with(|| self.encounter.cmp(&other.encounter))
+    }
+}
+
+impl<T> StableTopK<T> {
+    pub(crate) fn new(limit: Option<usize>, compare: fn(&T, &T) -> Ordering) -> Self {
+        Self {
+            values: BinaryHeap::new(),
+            unlimited: Vec::new(),
+            limit,
+            compare,
+            total: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, value: T) {
+        let value = RankedSearchValue {
+            value,
+            encounter: self.total,
+            compare: self.compare,
+        };
+        self.total += 1;
+        match self.limit {
+            None => self.unlimited.push(value),
+            Some(limit) if self.values.len() < limit => self.values.push(value),
+            Some(_) => {
+                if let Some(mut worst) = self.values.peek_mut() {
+                    if value < *worst {
+                        *worst = value;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
+
+    pub(crate) fn into_sorted(self) -> Vec<T> {
+        let values = if self.limit.is_some() {
+            self.values.into_sorted_vec()
+        } else {
+            let mut values = self.unlimited;
+            values.sort_unstable();
+            values
+        };
+        values.into_iter().map(|value| value.value).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_len(&self) -> usize {
+        self.values.len() + self.unlimited.len()
+    }
+
+    #[cfg(test)]
+    fn retained_capacity(&self) -> usize {
+        self.values.capacity() + self.unlimited.capacity()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchStop {
+    Cancelled,
+    TimedOut,
+}
+
+/// Shared by the blocking walker, reader and sink. Dropping the owning async
+/// call signals the same stop path as explicit context cancellation.
+#[derive(Clone)]
+pub(crate) struct SearchControl {
+    deadline: Instant,
+    cancel: Option<CancellationToken>,
+    owner_dropped: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_stop: Option<Arc<dyn Fn() -> Option<SearchStop> + Send + Sync>>,
+}
+
+pub(crate) struct SearchOwner(Arc<AtomicBool>);
+
+impl Drop for SearchOwner {
+    fn drop(&mut self) {
+        self.0.store(true, AtomicOrdering::Release);
+    }
+}
+
+impl SearchControl {
+    pub(crate) fn new(deadline: Instant, cancel: Option<CancellationToken>) -> (Self, SearchOwner) {
+        let owner_dropped = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                deadline,
+                cancel,
+                owner_dropped: owner_dropped.clone(),
+                #[cfg(test)]
+                test_stop: None,
+            },
+            SearchOwner(owner_dropped),
+        )
+    }
+
+    pub(crate) fn check_cancellation(&self) -> Result<(), SearchStop> {
+        if self.owner_dropped.load(AtomicOrdering::Acquire)
+            || self
+                .cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(SearchStop::Cancelled);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check(&self) -> Result<(), SearchStop> {
+        self.check_cancellation()?;
+        #[cfg(test)]
+        if let Some(reason) = self.test_stop.as_ref().and_then(|probe| probe()) {
+            return Err(reason);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(SearchStop::TimedOut);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_io(&self) -> io::Result<()> {
+        self.check().map_err(|reason| {
+            // Interrupted is retried by read_to_end and decoders, so use a
+            // terminal reader error and inspect the shared stop reason instead.
+            io::Error::other(match reason {
+                SearchStop::Cancelled => "search cancelled",
+                SearchStop::TimedOut => "search timed out",
+            })
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_stop(
+        mut self,
+        probe: impl Fn() -> Option<SearchStop> + Send + Sync + 'static,
+    ) -> Self {
+        self.test_stop = Some(Arc::new(probe));
+        self
+    }
+}
+
+/// Bound even read_to_end's growing requests to one check per 64 KiB. A
+/// blocked OS read itself cannot be interrupted by this cooperative adapter.
+pub(crate) struct SearchReader<'a, R> {
+    pub(crate) inner: &'a mut R,
+    pub(crate) control: &'a SearchControl,
+}
+
+impl<R: Read> Read for SearchReader<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.control.check_io()?;
+        let length = output.len().min(64 * 1024);
+        let read = self.inner.read(&mut output[..length])?;
+        self.control.check_io()?;
+        Ok(read)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchWalkError {
+    Resolution(SearchResolutionError),
+    Cancelled,
+}
+
+impl From<SearchResolutionError> for SearchWalkError {
+    fn from(error: SearchResolutionError) -> Self {
+        Self::Resolution(error)
+    }
+}
 
 pub(crate) struct ReadDenyPolicy {
     snapshot: Arc<dyn lingxi_core::host::permission_gate::ReadPathPolicySnapshot>,
@@ -13,28 +226,34 @@ pub(crate) struct ReadDenyPolicy {
 
 /// Keep exact Read checks alongside coarse glob exclusions. Both the walk's
 /// canonical path and the caller's lexical spelling must pass the snapshot.
-pub(crate) fn search_read_deny_policy(
+pub(crate) fn prepare_search_read_policy(
     ctx: &tool_api::BuiltinToolContext,
     requested_root: &Path,
     approved_root: &Path,
-) -> Option<ReadDenyPolicy> {
-    let snapshot = match ctx.permission_gate.as_ref() {
-        Some(gate) if gate.read_deny_exclude_globs(approved_root).is_some() => {
-            gate.read_path_policy_snapshot()
-        }
-        _ => permission::read_deny_globs::read_deny_search_snapshot(
-            ctx.permission_policy.clone(),
-            Some(approved_root),
-        ),
-    };
-    snapshot
+) -> (Vec<String>, Option<ReadDenyPolicy>) {
+    let (exclude_globs, snapshot) = ctx
+        .permission_gate
+        .as_ref()
+        .and_then(|gate| gate.prepare_read_search_policy(approved_root))
+        .map(|prepared| (prepared.exclude_globs, prepared.path_policy))
+        .unwrap_or_else(|| {
+            (
+                ctx.read_deny_exclude_globs.clone(),
+                permission::read_deny_globs::read_deny_search_snapshot(
+                    ctx.permission_policy.clone(),
+                    Some(approved_root),
+                ),
+            )
+        });
+    let policy = snapshot
         .facts()
         .read_deny_rules_active
         .then_some(ReadDenyPolicy {
             snapshot,
             requested_root: requested_root.into(),
             approved_root: approved_root.into(),
-        })
+        });
+    (exclude_globs, policy)
 }
 
 pub(crate) fn search_path_is_read_denied(policy: &Option<ReadDenyPolicy>, path: &Path) -> bool {
@@ -338,6 +557,144 @@ pub fn decode_utf8_strict(bytes: &[u8]) -> Result<String, std::str::Utf8Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_optimizer_top_k_matches_stable_sort_and_bounds_retention() {
+        use std::sync::atomic::AtomicUsize;
+        static COMPARISONS: AtomicUsize = AtomicUsize::new(0);
+        fn compare(a: &(usize, usize), b: &(usize, usize)) -> Ordering {
+            COMPARISONS.fetch_add(1, AtomicOrdering::Relaxed);
+            a.0.cmp(&b.0)
+        }
+        let count = 50_000;
+        let mut top = StableTopK::new(Some(100), compare);
+        let mut reference = Vec::new();
+        let mut peak_capacity = 0;
+        for encounter in 0..count {
+            let value = ((count - encounter) / 7, encounter);
+            reference.push(value);
+            top.push(value);
+            assert!(top.retained_len() <= 100);
+            peak_capacity = peak_capacity.max(top.retained_capacity());
+        }
+        assert_eq!(top.total(), count);
+        let comparisons = COMPARISONS.load(AtomicOrdering::Relaxed);
+        assert!(comparisons < count * 30, "bounded heap comparison budget");
+        reference.sort_by_key(|value| value.0);
+        reference.truncate(100);
+        assert_eq!(top.into_sorted(), reference);
+        println!("search_top_k_probe: candidates={count} retained=100 capacity={peak_capacity} comparisons={comparisons}");
+    }
+
+    #[test]
+    fn search_optimizer_top_k_unlimited_and_zero() {
+        let mut all = StableTopK::new(None, usize::cmp);
+        let mut zero = StableTopK::new(Some(0), usize::cmp);
+        for value in [4, 1, 4, 2] {
+            all.push(value);
+            zero.push(value);
+        }
+        assert_eq!(all.into_sorted(), vec![1, 2, 4, 4]);
+        assert_eq!(zero.total(), 4);
+        assert!(zero.into_sorted().is_empty());
+    }
+
+    #[test]
+    fn search_optimizer_owner_drop_and_context_cancel_are_terminal() {
+        let token = CancellationToken::new();
+        let (control, owner) = SearchControl::new(
+            Instant::now() + std::time::Duration::from_secs(60),
+            Some(token.clone()),
+        );
+        assert_eq!(control.check(), Ok(()));
+        token.cancel();
+        assert_eq!(control.check(), Err(SearchStop::Cancelled));
+        drop(owner);
+        let (control, owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
+        drop(owner);
+        assert_eq!(control.check(), Err(SearchStop::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn search_optimizer_dropping_async_owner_stops_detached_blocking_work() {
+        let (control, owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let call = tokio::spawn(async move {
+            let _owner = owner;
+            tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).unwrap();
+                released_rx.recv().unwrap();
+                result_tx.send(control.check()).unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        entered_rx.await.unwrap();
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        released_tx.send(()).unwrap();
+        assert_eq!(result_rx.await.unwrap(), Err(SearchStop::Cancelled));
+    }
+
+    #[test]
+    fn search_optimizer_reader_checks_each_bounded_chunk_and_after_io() {
+        struct ProbeReader {
+            token: CancellationToken,
+            calls: usize,
+        }
+        impl Read for ProbeReader {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                self.calls += 1;
+                assert!(output.len() <= 64 * 1024);
+                output.fill(b'a');
+                self.token.cancel();
+                Ok(output.len())
+            }
+        }
+        let token = CancellationToken::new();
+        let (control, _owner) = SearchControl::new(
+            Instant::now() + std::time::Duration::from_secs(60),
+            Some(token.clone()),
+        );
+        let mut input = ProbeReader { token, calls: 0 };
+        let error = SearchReader {
+            inner: &mut input,
+            control: &control,
+        }
+        .read(&mut vec![0; 1024 * 1024])
+        .unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(input.calls, 1);
+        assert_eq!(control.check(), Err(SearchStop::Cancelled));
+    }
+
+    #[test]
+    fn search_optimizer_reader_deadline_stops_read_to_end_without_retrying() {
+        use std::sync::atomic::AtomicUsize;
+        let checks = Arc::new(AtomicUsize::new(0));
+        let (control, _owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
+        let control = control.with_test_stop(move || {
+            (checks.fetch_add(1, AtomicOrdering::Relaxed) >= 3).then_some(SearchStop::TimedOut)
+        });
+        let mut input = io::repeat(b'a');
+        let mut output = Vec::new();
+        let error = SearchReader {
+            inner: &mut input,
+            control: &control,
+        }
+        .read_to_end(&mut output)
+        .unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(control.check(), Err(SearchStop::TimedOut));
+        assert!(output.len() <= 64 * 1024);
+        let (expired, _owner) = SearchControl::new(Instant::now(), None);
+        assert_eq!(expired.check(), Err(SearchStop::TimedOut));
+    }
 
     #[test]
     fn nul_scan_window_is_decimal_8kb() {

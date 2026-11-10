@@ -354,6 +354,130 @@ mod tests {
                 );
             }
         }
+        stale_recovery_preserves_match_representation_and_native_error_order().await;
+    }
+
+    async fn stale_recovery_preserves_match_representation_and_native_error_order() {
+        // Called by the existing recovery test so only one test switches the
+        // global probe. Keep native error ordering and replacement bytes on
+        // the reachable recovery branch when the match result is reused.
+        set_kq_answer(true);
+        for (name, initial, current, old, replacement, replace_all, expected) in [
+            (
+                "curly.txt",
+                "say “world”\n",
+                "say “world”\nformatter\n",
+                "\"world\"",
+                "\"Rust\"",
+                false,
+                Ok("say “Rust”\nformatter\n"),
+            ),
+            (
+                "escape.txt",
+                "json: \\u00e9\n",
+                "json: \\u00e9\nformatter\n",
+                "é",
+                "à",
+                false,
+                Ok("json: \\u00e0\nformatter\n"),
+            ),
+            (
+                "overlap.txt",
+                "aaa",
+                "aaaa churn",
+                "aaa",
+                "X",
+                false,
+                Ok("Xa churn"),
+            ),
+            (
+                "ambiguous.txt",
+                "dup\n",
+                "dup dup\n",
+                "dup",
+                "R",
+                false,
+                Err(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            ),
+            (
+                "replace-all.txt",
+                "dup\n",
+                "dup dup\n",
+                "dup",
+                "R",
+                true,
+                Ok("R R\n"),
+            ),
+            (
+                "missing.txt",
+                "before\n",
+                "after\n",
+                "missing",
+                "R",
+                false,
+                Err(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            ),
+            (
+                "notebook.ipynb",
+                "world\n",
+                "world churn\n",
+                "world",
+                "Rust",
+                false,
+                Err("File is a Jupyter Notebook. Use the NotebookEdit to edit this file."),
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join(name);
+            std::fs::write(&target, initial).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            std::fs::write(&target, current).unwrap();
+            let future = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            filetime::set_file_mtime(&target, filetime::FileTime::from_system_time(future))
+                .unwrap();
+            let outcome = FileEditTool::new(ctx)
+                .call(
+                    crate::generated_result(&json!({
+                        "file_path": target.to_str().unwrap(),
+                        "old_string": old,
+                        "new_string": replacement,
+                        "replace_all": replace_all,
+                    })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await;
+            match expected {
+                Ok(expected) => {
+                    let result = outcome.unwrap_or_else(|error| panic!("{name}: {error}"));
+                    assert_eq!(
+                        std::fs::read_to_string(&target).unwrap(),
+                        expected,
+                        "{name}"
+                    );
+                    assert_eq!(
+                        crate::test_data(&result.data)["staleRecovered"],
+                        true,
+                        "{name}"
+                    );
+                    assert!(
+                        crate::test_model_text(result.model_content.as_ref())
+                            .unwrap()
+                            .ends_with(STALE_RECOVERED_NOTE),
+                        "{name}"
+                    );
+                }
+                Err(expected) => {
+                    let error = outcome.unwrap_err();
+                    assert!(
+                        matches!(error, ToolError::InvalidInput(message) if message.string_at("") == Some(expected)),
+                        "{name}"
+                    );
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), current, "{name}");
+                }
+            }
+        }
     }
 
     #[test]

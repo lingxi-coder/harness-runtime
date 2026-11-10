@@ -25,12 +25,9 @@
 //! - A wall-clock walk budget honors `LINGXI_GLOB_TIMEOUT_SECONDS`
 //!   (default 20s, 60s on WSL); a timeout with zero results is surfaced as an
 //!   error (`utils/ripgrep.ts:130-133,444-454`), partial results are returned.
-//! - File-read ignore-patterns (`GrepTool.ts:411-427`) are WIRED: the active
-//!   `Read`-`deny` permission rules are resolved to `--glob` excludes at engine
-//!   boot by `permission::read_deny_exclude_globs` (1:1 port of
-//!   `F4e(U4e(toolPermissionContext), cwd)`), threaded in via
-//!   `BuiltinToolContext::read_deny_exclude_globs`, and applied here as negated
-//!   `ignore`-crate overrides with the reference prefixing (rooted `/P` → `!P`;
+//! - Active `Read`-deny excludes and exact path checks use one prepared policy
+//!   snapshot per search. Static contexts retain their boot-time fallback.
+//!   Negated overrides retain the reference prefixing (rooted `/P` → `!P`;
 //!   relative `P` → `!**/P`). Empty (no `Read`-deny rule) ⇒ VCS excludes only.
 
 use crate::Utf16JsonProjection;
@@ -52,7 +49,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use tool_api::context::ToolUseContext;
 use tool_api::native_output::{
-    parse_object, string_array, OutputField, OutputFieldType, UnknownOutputKeys,
+    parse_object, validate_string_array, OutputField, OutputFieldType, UnknownOutputKeys,
 };
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -65,9 +62,10 @@ use tool_api::util::path_validation::{
 use tool_api::BuiltinToolContext;
 
 use crate::shared::{
-    open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
-    search_path_is_read_denied, search_read_deny_policy, ReadDenyPolicy, SearchResolutionError,
-    SearchResolutionSnapshot,
+    open_rooted_search_file, prepare_search_read_policy, run_search_candidate_hook,
+    run_search_preparation_hook, search_path_is_read_denied, ReadDenyPolicy, SearchControl,
+    SearchReader, SearchResolutionError, SearchResolutionSnapshot, SearchStop, SearchWalkError,
+    StableTopK,
 };
 
 /// Tool name byte-lock.
@@ -138,6 +136,7 @@ const GREP_PROMPT_SHORT_REWRITE: &str =
 /// `applyHeadLimit` (`GrepTool.ts:110-128`). `limit==Some(0)` → unlimited
 /// escape hatch; otherwise slice `[offset, offset+limit)` and report the
 /// applied limit only when truncation actually occurred.
+#[cfg(test)]
 fn apply_head_limit<T>(
     items: Vec<T>,
     limit: Option<usize>,
@@ -154,6 +153,99 @@ fn apply_head_limit<T>(
     // model knows there may be more results and can paginate with offset.
     let was_truncated = len.saturating_sub(offset) > effective;
     (sliced, if was_truncated { Some(effective) } else { None })
+}
+
+/// Pagination applies to formatted output rows, including context separators
+/// and binary notices. Count every row while retaining only the requested page.
+#[derive(Clone, Copy)]
+struct SearchPagination {
+    offset: usize,
+    limit: Option<usize>,
+}
+
+impl SearchPagination {
+    fn new(limit: Option<usize>, offset: usize) -> Self {
+        Self {
+            offset,
+            limit: match limit {
+                Some(0) => None,
+                other => Some(other.unwrap_or(DEFAULT_HEAD_LIMIT)),
+            },
+        }
+    }
+
+    fn prefix_limit(self) -> Option<usize> {
+        // Overflow is a practically unlimited prefix, not a wrapped small
+        // page. Do not preallocate based on the caller's offset or limit.
+        self.limit.and_then(|limit| self.offset.checked_add(limit))
+    }
+
+    fn applied_limit(self, total: usize) -> Option<usize> {
+        self.limit
+            .filter(|&limit| total.saturating_sub(self.offset) > limit)
+    }
+
+    fn select<T>(self, values: Vec<T>) -> Vec<T> {
+        values
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit.unwrap_or(usize::MAX))
+            .collect()
+    }
+}
+
+struct SearchPage<T> {
+    values: Vec<T>,
+    total: usize,
+    pagination: SearchPagination,
+}
+
+impl<T> SearchPage<T> {
+    fn new(pagination: SearchPagination) -> Self {
+        Self {
+            values: Vec::new(),
+            total: 0,
+            pagination,
+        }
+    }
+
+    #[cfg(test)]
+    fn push(&mut self, value: T) {
+        self.push_with(|| value);
+    }
+
+    fn push_with(&mut self, value: impl FnOnce() -> T) {
+        let index = self.total;
+        self.total += 1;
+        if index >= self.pagination.offset
+            && self
+                .pagination
+                .limit
+                .is_none_or(|limit| self.values.len() < limit)
+        {
+            self.values.push(value());
+        }
+    }
+}
+
+fn compare_file_matches(
+    a: &(PathBuf, SystemTime),
+    b: &(PathBuf, SystemTime),
+) -> std::cmp::Ordering {
+    compare_file_matches_for_mode(a, b, cfg!(test))
+}
+
+fn compare_file_matches_for_mode(
+    a: &(PathBuf, SystemTime),
+    b: &(PathBuf, SystemTime),
+    test_mode: bool,
+) -> std::cmp::Ordering {
+    if test_mode {
+        locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy())
+    } else {
+        b.1.cmp(&a.1)
+            .then_with(|| locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy()))
+    }
 }
 
 /// Approximate JS `String.prototype.localeCompare(b)` under the default
@@ -197,35 +289,50 @@ fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Native JSON submatch offsets are byte offsets, while output line numbers
 /// advance at LF bytes before each match (the native `elr` helper).
-fn only_matching_spans_with_line_numbers(
+fn emit_only_matching_spans(
     matcher: &RegexMatcher,
     text: &str,
     first_line: u64,
-) -> Vec<(u64, String)> {
+    control: &SearchControl,
+    timed_out: bool,
+    mut emit: impl FnMut(u64, &str) -> Result<(), SearchStop>,
+) -> Result<usize, SearchStop> {
     let bytes = text.as_bytes();
-    let mut output = Vec::new();
     let mut at = 0;
+    let mut previous_start = 0;
+    let mut line_offset = 0;
+    let check = || {
+        if timed_out {
+            // Project records delivered before the reader/sink timed out.
+            control.check_cancellation()
+        } else {
+            control.check()
+        }
+    };
     while at <= bytes.len() {
+        check()?;
         let Ok(Some(matched)) = matcher.find_at(bytes, at) else {
             break;
         };
-        let offset = bytes[..matched.start()]
+        line_offset += bytes[previous_start..matched.start()]
             .iter()
             .filter(|&&byte| byte == b'\n')
             .count() as u64;
+        previous_start = matched.start();
         if let Ok(part) = std::str::from_utf8(&bytes[matched.start()..matched.end()]) {
-            output.extend(
-                part.split('\n')
-                    .enumerate()
-                    .map(|(index, line)| (first_line + offset + index as u64, line.to_string())),
-            );
+            for (index, line) in part.split('\n').enumerate() {
+                check()?;
+                emit(first_line + line_offset + index as u64, line)?;
+            }
         }
         at = matched.end();
         if matched.is_empty() {
             at += 1;
         }
     }
-    output
+    // The monotone prefix cursor also makes the newline accounting linear,
+    // even when a long record contains many `-o` submatches.
+    Ok(previous_start)
 }
 
 /// `formatLimitInfo` (`GrepTool.ts:134-142`). `appliedLimit` is only set when
@@ -619,17 +726,20 @@ struct GrepSink {
     /// Stop after the first match (`files_with_matches`, mirrors `rg -l`).
     first_match_only: bool,
     binary_offset: Option<u64>,
+    control: SearchControl,
 }
 
 impl Sink for GrepSink {
     type Error = std::io::Error;
 
     fn finish(&mut self, _searcher: &Searcher, finish: &SinkFinish) -> Result<(), Self::Error> {
+        self.control.check_io()?;
         self.binary_offset = finish.binary_byte_offset();
         Ok(())
     }
 
     fn matched(&mut self, _s: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        self.control.check_io()?;
         // Always count first — counting is never limited (TS / `rg` have no
         // per-file cap; count mode must report the true total).
         self.match_count += 1;
@@ -653,6 +763,7 @@ impl Sink for GrepSink {
     }
 
     fn context(&mut self, _s: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, Self::Error> {
+        self.control.check_io()?;
         // Context lines also respect the records valve (they share the buffer).
         if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
             self.records
@@ -808,7 +919,8 @@ struct GrepWalkArgs {
     types_filter: Option<ignore::types::Types>,
     matcher: RegexMatcher,
     cwd_for_rel: PathBuf,
-    deadline: Instant,
+    control: SearchControl,
+    pagination: SearchPagination,
     content_mode: bool,
     files_mode: bool,
     count_mode: bool,
@@ -821,14 +933,14 @@ struct GrepWalkArgs {
 }
 
 struct GrepWalkResult {
-    content_lines: Vec<String>,
-    count_lines: Vec<String>,
-    files_matched: Vec<(PathBuf, SystemTime)>,
+    content_lines: SearchPage<String>,
+    count_lines: SearchPage<String>,
+    files_matched: StableTopK<(PathBuf, SystemTime)>,
     total_matches: u64,
     timed_out: bool,
 }
 
-fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError> {
+fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchWalkError> {
     let GrepWalkArgs {
         canon_base,
         search_resolution,
@@ -837,7 +949,8 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
         types_filter,
         matcher,
         cwd_for_rel,
-        deadline,
+        control,
+        pagination,
         content_mode,
         files_mode,
         count_mode,
@@ -857,19 +970,23 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
         wb.types(t);
     }
 
-    let mut content_lines: Vec<String> = Vec::new();
-    let mut count_lines: Vec<String> = Vec::new();
-    let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
+    let mut content_lines = SearchPage::new(pagination);
+    let mut count_lines = SearchPage::new(pagination);
+    let mut files_matched = StableTopK::new(pagination.prefix_limit(), compare_file_matches);
     let mut total_matches: u64 = 0;
     let mut timed_out = false;
     let single_file = canon_base.is_file();
     let mut previous_line: Option<(PathBuf, u64)> = None;
 
-    for entry in wb.build() {
+    'walk: for entry in wb.build() {
         search_resolution.verify()?;
-        if Instant::now() >= deadline {
-            timed_out = true;
-            break;
+        match control.check() {
+            Ok(()) => {}
+            Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+            Err(SearchStop::TimedOut) => {
+                timed_out = true;
+                break;
+            }
         }
         let entry = match entry {
             Ok(e) => e,
@@ -918,12 +1035,23 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
             record_lines: content_mode,
             first_match_only: files_mode,
             binary_offset: None,
+            control: control.clone(),
         };
-        if searcher
-            .search_reader(&matcher, &mut file, &mut sink)
-            .is_err()
-        {
-            return Err(SearchResolutionError::SearchRootChanged);
+        let searched = searcher.search_reader(
+            &matcher,
+            SearchReader {
+                inner: &mut file,
+                control: &control,
+            },
+            &mut sink,
+        );
+        match control.check() {
+            Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+            Err(SearchStop::TimedOut) => timed_out = true,
+            Ok(()) if searched.is_err() => {
+                return Err(SearchResolutionError::SearchRootChanged.into());
+            }
+            Ok(()) => {}
         }
 
         total_matches += sink.match_count as u64;
@@ -940,47 +1068,65 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
                         previous_path != path || first_line > line.saturating_add(1)
                     })
                 {
-                    content_lines.push("--".to_string());
+                    content_lines.push_with(|| "--".to_string());
                 }
                 let mut last_line = first_line;
-                let pieces = if only_matching && !*is_context {
-                    only_matching_spans_with_line_numbers(&matcher, text, first_line)
-                } else {
-                    text.split('\n')
-                        .enumerate()
-                        .map(|(index, line)| (first_line + index as u64, line.to_string()))
-                        .collect()
-                };
-                for (line_number, line) in pieces {
-                    let line = line.strip_suffix('\r').unwrap_or(&line).to_string();
-                    let line = apply_max_columns(line, *is_context);
-                    let separator = if *is_context { '-' } else { ':' };
-                    let numbered = if show_line_numbers {
-                        format!("{line_number}{separator}{line}")
-                    } else {
-                        line
-                    };
-                    content_lines.push(if single_file {
-                        numbered
-                    } else {
-                        format!("{rel}{separator}{numbered}")
+                let mut emit = |line_number, line: &str| -> Result<(), SearchStop> {
+                    content_lines.push_with(|| {
+                        let line = line.strip_suffix('\r').unwrap_or(line).to_string();
+                        let line = apply_max_columns(line, *is_context);
+                        let separator = if *is_context { '-' } else { ':' };
+                        let numbered = if show_line_numbers {
+                            format!("{line_number}{separator}{line}")
+                        } else {
+                            line
+                        };
+                        if single_file {
+                            numbered
+                        } else {
+                            format!("{rel}{separator}{numbered}")
+                        }
                     });
                     last_line = line_number;
+                    Ok(())
+                };
+                let rendered = if only_matching && !*is_context {
+                    emit_only_matching_spans(
+                        &matcher, text, first_line, &control, timed_out, &mut emit,
+                    )
+                    .map(|_| ())
+                } else {
+                    text.split('\n').enumerate().try_for_each(|(index, line)| {
+                        control.check_cancellation()?;
+                        emit(first_line + index as u64, line)
+                    })
+                };
+                match rendered {
+                    Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+                    Err(SearchStop::TimedOut) => {
+                        timed_out = true;
+                        break 'walk;
+                    }
+                    Ok(()) => {}
                 }
                 previous_line = Some((path.to_path_buf(), last_line));
             }
             if let Some(offset) = sink.binary_offset.filter(|_| !sink.records.is_empty()) {
-                let message =
-                    format!("binary file matches (found \"\\0\" byte around offset {offset})");
-                content_lines.push(if single_file {
-                    message
-                } else {
-                    format!("{rel}:{message}")
+                content_lines.push_with(|| {
+                    let message =
+                        format!("binary file matches (found \"\\0\" byte around offset {offset})");
+                    if single_file {
+                        message
+                    } else {
+                        format!("{rel}:{message}")
+                    }
                 });
             }
         } else if count_mode {
-            let rel = to_relative_path(path, &cwd_for_rel);
-            count_lines.push(format!("{rel}:{}", sink.match_count));
+            count_lines.push_with(|| {
+                let rel = to_relative_path(path, &cwd_for_rel);
+                format!("{rel}:{}", sink.match_count)
+            });
         } else {
             // files_with_matches: defer relativize until after sort.
             let mtime = file
@@ -990,9 +1136,17 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             files_matched.push((path.to_path_buf(), mtime));
         }
+        if timed_out {
+            break;
+        }
     }
 
     search_resolution.verify()?;
+    match control.check() {
+        Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+        Err(SearchStop::TimedOut) => timed_out = true,
+        Ok(()) => {}
+    }
     Ok(GrepWalkResult {
         content_lines,
         count_lines,
@@ -1002,7 +1156,11 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
     })
 }
 
-fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolError {
+fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
+    let error = match error {
+        SearchWalkError::Cancelled => return ToolError::Aborted,
+        SearchWalkError::Resolution(error) => error,
+    };
     let reason = match error {
         SearchResolutionError::SearchRootChanged => {
             "its symlink resolution changed after permission was checked"
@@ -1104,7 +1262,7 @@ impl Tool for GrepTool {
             ],
             UnknownOutputKeys::Strip,
         )?;
-        string_array(output, "/filenames", TOOL_NAME, "filenames")?;
+        validate_string_array(output, "/filenames", TOOL_NAME, "filenames")?;
         if parsed.get_property("mode").is_some()
             && !matches!(
                 parsed.string_at("/mode"),
@@ -1362,8 +1520,8 @@ impl Tool for GrepTool {
         // the reference does: a rooted
         // (`/`-anchored) entry → `!P`; a bare relative entry → `!**/P` (match at
         // any depth). In `OverrideBuilder`, a `!`-prefixed pattern is an ignore.
-        let deny_globs = self.ctx.effective_read_deny_exclude_globs(&canon_base);
-        let read_deny_policy = search_read_deny_policy(&self.ctx, &base, &canon_base);
+        let (deny_globs, read_deny_policy) =
+            prepare_search_read_policy(&self.ctx, &base, &canon_base);
         let search_resolution = SearchResolutionSnapshot::capture(&base, &canon_base, &deny_globs);
         for p in &deny_globs {
             let neg = if p.starts_with('/') {
@@ -1447,12 +1605,15 @@ impl Tool for GrepTool {
         // --- Walk + search (sync CPU/IO; run off the async runtime) ---
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
-        // The in-process equivalent of `rg`'s execFile timeout is a deadline
-        // checked each walk step (the walk is synchronous CPU/IO work — no tokio
-        // timer / extra dep needed). `Platform::as_str()` returns `getPlatform()`
-        // spelling ("wsl") — compared by value so this file needs no `sandbox` dep.
+        // The blocking engine checks its deadline and cancellation between
+        // entries, reader chunks and sink matches. OS reads and one in-flight
+        // regex operation remain cooperative boundaries. `Platform::as_str()`
+        // returns the native `getPlatform()` spelling ("wsl").
         let is_wsl = self.ctx.platform.as_str() == "wsl";
         let deadline = started + ripgrep_timeout(is_wsl);
+        let (control, _search_owner) = SearchControl::new(deadline, _ctx.cancel.clone());
+        let call_control = control.clone();
+        let pagination = SearchPagination::new(head_limit, offset);
         let cwd_for_rel_in_worker = cwd_for_rel.clone();
         let search_path = base.clone();
         let search_path_for_hook = base.clone();
@@ -1460,7 +1621,7 @@ impl Tool for GrepTool {
         let GrepWalkResult {
             content_lines,
             count_lines,
-            mut files_matched,
+            files_matched,
             total_matches,
             timed_out,
         } = lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
@@ -1477,7 +1638,8 @@ impl Tool for GrepTool {
                 types_filter,
                 matcher,
                 cwd_for_rel: cwd_for_rel_in_worker,
-                deadline,
+                control,
+                pagination,
                 content_mode,
                 files_mode,
                 count_mode,
@@ -1492,12 +1654,14 @@ impl Tool for GrepTool {
         .await
         .map_err(|e| ToolError::Io(e.to_string().into()))?
         .map_err(|error| search_resolution_error(&search_path, error))?;
+        call_control
+            .check_cancellation()
+            .map_err(|_| ToolError::Aborted)?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete rather than
         // assuming "no matches"); a timeout WITH partial results returns them.
-        let had_results =
-            total_matches > 0 || !files_matched.is_empty() || !content_lines.is_empty();
+        let had_results = total_matches > 0 || files_matched.total() > 0 || content_lines.total > 0;
         if timed_out && !had_results {
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()));
         }
@@ -1517,8 +1681,9 @@ impl Tool for GrepTool {
             // bare "No matches found" — matching `mapToolResultToToolResultBlockParam`'s
             // content branch `m = n || (c && (a ?? 0) > 0 ? "No entries at this offset"
             // : "No matches found")` (c=appliedOffset, a=totalLines).
-            let total_lines = content_lines.len();
-            let (limited, applied_limit) = apply_head_limit(content_lines, head_limit, offset);
+            let total_lines = content_lines.total;
+            let applied_limit = pagination.applied_limit(total_lines);
+            let limited = content_lines.values;
             let num_lines = limited.len();
             let content_str = limited.join("\n");
             let limit_info = format_limit_info(applied_limit, offset);
@@ -1551,8 +1716,9 @@ impl Tool for GrepTool {
             }
             mc_channel = Some(model);
         } else if count_mode {
-            let total_file_count = u64::try_from(count_lines.len()).unwrap_or(u64::MAX);
-            let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
+            let total_file_count = u64::try_from(count_lines.total).unwrap_or(u64::MAX);
+            let applied_limit = pagination.applied_limit(count_lines.total);
+            let limited = count_lines.values;
             let total = total_matches;
             let limit_info = format_limit_info(applied_limit, offset);
             // ST-09: `g = n || (m>0 ? "No entries at this offset" : "No matches
@@ -1608,22 +1774,15 @@ impl Tool for GrepTool {
             // @200995124: `.sort((P,L)=>{let D=L[1]-P[1];if(D===0)return
             // P[0].localeCompare(L[0]);return D})`), NOT Rust byte Ord — see
             // [`locale_compare`].
-            files_matched.sort_by(|a, b| {
-                if cfg!(test) {
-                    locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy())
-                } else {
-                    match b.1.cmp(&a.1) {
-                        std::cmp::Ordering::Equal => {
-                            locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy())
-                        }
-                        other => other,
-                    }
-                }
-            });
-            let sorted: Vec<PathBuf> = files_matched.into_iter().map(|(p, _)| p).collect();
+            let total_files = files_matched.total();
+            let sorted: Vec<PathBuf> = files_matched
+                .into_sorted()
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect();
             // ST-09: `totalFiles: A.length` — the match count BEFORE pagination.
-            let total_files = sorted.len();
-            let (limited, applied_limit) = apply_head_limit(sorted, head_limit, offset);
+            let applied_limit = pagination.applied_limit(total_files);
+            let limited = pagination.select(sorted);
             let relpaths: Vec<String> = limited
                 .iter()
                 .map(|p| to_relative_path(p, &cwd_for_rel))
@@ -1677,6 +1836,9 @@ impl Tool for GrepTool {
         if timed_out {
             data.insert("timedOut".to_string(), json!(true));
         }
+        call_control
+            .check_cancellation()
+            .map_err(|_| ToolError::Aborted)?;
         Ok(ToolCallResult {
             data: crate::generated_result(&Value::Object(data)),
             model_content: mc_channel.map(|body| {
@@ -1699,6 +1861,282 @@ impl Tool for GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn optimizer_walk_args(
+        path: &Path,
+        control: SearchControl,
+        pagination: SearchPagination,
+    ) -> GrepWalkArgs {
+        let canon_base = std::fs::canonicalize(path).unwrap();
+        GrepWalkArgs {
+            search_resolution: SearchResolutionSnapshot::capture(&canon_base, &canon_base, &[]),
+            read_deny_policy: None,
+            overrides: OverrideBuilder::new(&canon_base).build().unwrap(),
+            types_filter: None,
+            matcher: RegexMatcherBuilder::new().build("needle").unwrap(),
+            cwd_for_rel: canon_base.clone(),
+            canon_base,
+            control,
+            pagination,
+            content_mode: true,
+            files_mode: false,
+            count_mode: false,
+            only_matching: false,
+            show_line_numbers: true,
+            multiline: false,
+            ctx_before: None,
+            ctx_after: None,
+            context_breaks: false,
+        }
+    }
+
+    #[test]
+    fn search_optimizer_pages_match_full_pagination_and_bound_retention() {
+        for limit in [None, Some(0), Some(1), Some(17), Some(usize::MAX)] {
+            for offset in [0, 3, 100, usize::MAX] {
+                let pagination = SearchPagination::new(limit, offset);
+                let mut page = SearchPage::new(pagination);
+                let full: Vec<_> = (0..10_000).collect();
+                for value in &full {
+                    page.push(*value);
+                    assert!(page.values.len() <= pagination.limit.unwrap_or(usize::MAX));
+                }
+                let (expected, applied) = apply_head_limit(full, limit, offset);
+                assert_eq!(page.total, 10_000);
+                assert_eq!(page.values, expected);
+                assert_eq!(pagination.applied_limit(page.total), applied);
+            }
+        }
+        assert_eq!(
+            SearchPagination::new(Some(usize::MAX), 1).prefix_limit(),
+            None
+        );
+        println!("search_page_probe: rows=10000 bounded_retention=17 totals_preserved=true");
+    }
+
+    #[test]
+    fn search_optimizer_file_heap_preserves_mtime_locale_and_encounter_ties() {
+        fn production(a: &(PathBuf, SystemTime), b: &(PathBuf, SystemTime)) -> std::cmp::Ordering {
+            compare_file_matches_for_mode(a, b, false)
+        }
+        type FileMatchComparator =
+            fn(&(PathBuf, SystemTime), &(PathBuf, SystemTime)) -> std::cmp::Ordering;
+        let comparators: [FileMatchComparator; 2] = [production, compare_file_matches];
+        for compare in comparators {
+            let values: Vec<_> = (0..1000)
+                .map(|index| {
+                    let name = ["a", "A", "B", "same", "same"][index % 5];
+                    (
+                        PathBuf::from(name),
+                        SystemTime::UNIX_EPOCH + Duration::from_secs((index % 7) as u64),
+                    )
+                })
+                .collect();
+            let mut full = values.clone();
+            full.sort_by(compare);
+            for (limit, offset) in [
+                (None, 0),
+                (Some(0), 2),
+                (Some(17), 9),
+                (Some(1), 999),
+                (Some(3), usize::MAX),
+            ] {
+                let pagination = SearchPagination::new(limit, offset);
+                let mut top = StableTopK::new(pagination.prefix_limit(), compare);
+                for value in &values {
+                    top.push(value.clone());
+                }
+                assert_eq!(top.total(), values.len());
+                if let Some(cap) = pagination.prefix_limit() {
+                    assert!(top.retained_len() <= cap);
+                }
+                let selected = pagination.select(top.into_sorted());
+                assert_eq!(selected, apply_head_limit(full.clone(), limit, offset).0);
+            }
+        }
+    }
+
+    #[test]
+    fn search_optimizer_only_matches_use_linear_prefix_accounting() {
+        let (control, _owner) = SearchControl::new(Instant::now() + Duration::from_secs(60), None);
+        let matcher = RegexMatcherBuilder::new().build("a").unwrap();
+        let text = "a\na a\n".repeat(5000);
+        let mut actual = Vec::new();
+        let scanned =
+            emit_only_matching_spans(&matcher, &text, 3, &control, false, |line, text| {
+                actual.push((line, text.to_string()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(actual.len(), 15_000);
+        assert_eq!(
+            &actual[..3],
+            &[
+                (3, "a".to_string()),
+                (4, "a".to_string()),
+                (4, "a".to_string())
+            ]
+        );
+        assert_eq!(actual.last().unwrap().0, 10_002);
+        assert!(scanned <= text.len());
+        println!(
+            "search_only_matches_probe: matches={} input_bytes={} prefix_bytes={scanned}",
+            actual.len(),
+            text.len()
+        );
+        let matcher = RegexMatcherBuilder::new()
+            .multi_line(true)
+            .build("a\\na|a")
+            .unwrap();
+        let mut lines = Vec::new();
+        emit_only_matching_spans(&matcher, "a\na a", 10, &control, false, |line, text| {
+            lines.push((line, text.to_string()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                (10, "a".to_string()),
+                (11, "a".to_string()),
+                (11, "a".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn search_optimizer_deadline_inside_file_preserves_partial_rows_and_counts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("many.txt");
+        std::fs::write(&path, "needle\n".repeat(1000)).unwrap();
+        let (control, _owner) = SearchControl::new(Instant::now() + Duration::from_secs(60), None);
+        let checks = AtomicUsize::new(0);
+        let control = control.with_test_stop(move || {
+            (checks.fetch_add(1, Ordering::Relaxed) >= 20).then_some(SearchStop::TimedOut)
+        });
+        let result = grep_walk(optimizer_walk_args(
+            &path,
+            control,
+            SearchPagination::new(Some(3), 1),
+        ))
+        .unwrap();
+        assert!(result.timed_out);
+        assert!(result.total_matches > 0 && result.total_matches < 1000);
+        assert_eq!(result.content_lines.total as u64, result.total_matches);
+        assert_eq!(result.content_lines.values.len(), 3);
+        assert_eq!(result.content_lines.values[0], "2:needle");
+    }
+
+    #[test]
+    fn search_optimizer_deadline_interrupts_no_match_multiline_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("no-match.txt");
+        std::fs::write(&path, vec![b'x'; 1024 * 1024]).unwrap();
+        let (control, _owner) = SearchControl::new(Instant::now() + Duration::from_secs(60), None);
+        let checks = AtomicUsize::new(0);
+        let control = control.with_test_stop(move || {
+            (checks.fetch_add(1, Ordering::Relaxed) >= 8).then_some(SearchStop::TimedOut)
+        });
+        let mut args = optimizer_walk_args(&path, control, SearchPagination::new(None, 0));
+        args.multiline = true;
+        args.matcher = RegexMatcherBuilder::new()
+            .multi_line(true)
+            .build("needle\\nneedle")
+            .unwrap();
+        let result = grep_walk(args).unwrap();
+        assert!(result.timed_out);
+        assert_eq!(result.total_matches, 0);
+        assert!(result.content_lines.values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_optimizer_cancellation_during_candidate_open_is_aborted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("cancel.txt");
+        std::fs::write(&path, "needle\n").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut call_ctx = fresh_ctx();
+        call_ctx.cancel = Some(token.clone());
+        crate::shared::install_search_candidate_hook(
+            &std::fs::canonicalize(&path).unwrap(),
+            move || token.cancel(),
+        );
+        let result = GrepTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"pattern":"needle", "path":path})),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn search_optimizer_context_and_binary_pages_match_unlimited_rows() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pages.txt");
+        std::fs::write(
+            &path,
+            "before\nneedle needle\nafter\ngap\ngap\nneedle\nlast\n",
+        )
+        .unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        for only_matching in [false, true] {
+            let full = tool.call(crate::generated_result(&json!({"pattern":"needle", "path":path, "output_mode":"content", "-C":1, "-o":only_matching, "head_limit":0})), fresh_ctx(), fresh_tx()).await.unwrap();
+            let full_content = full.data.string_at("/content").unwrap();
+            let rows: Vec<_> = full_content.split('\n').collect();
+            for offset in [0, 1, 3, 6, 100] {
+                let page = tool.call(crate::generated_result(&json!({"pattern":"needle", "path":path, "output_mode":"content", "-C":1, "-o":only_matching, "head_limit":2,"offset":offset})), fresh_ctx(), fresh_tx()).await.unwrap();
+                assert_eq!(
+                    page.data.string_at("/content").unwrap(),
+                    rows.iter()
+                        .skip(offset)
+                        .take(2)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                assert_eq!(
+                    page.data.number_at("/totalLines"),
+                    full.data.number_at("/totalLines")
+                );
+            }
+        }
+        // Explicit files convert NUL to LF; directory searches retain rg's
+        // binary notice after matches emitted before a later binary byte.
+        let binary = tmp.path().join("binary.txt");
+        let mut bytes = b"needle\n".to_vec();
+        bytes.extend(vec![b'x'; 80_000]);
+        bytes.extend_from_slice(b"\0needle\n");
+        std::fs::write(&binary, bytes).unwrap();
+        for path in [binary.as_path(), tmp.path()] {
+            let full = tool.call(crate::generated_result(&json!({"pattern":"needle", "path":path, "output_mode":"content", "head_limit":0})), fresh_ctx(), fresh_tx()).await.unwrap();
+            let rows: Vec<_> = full
+                .data
+                .string_at("/content")
+                .unwrap()
+                .split('\n')
+                .collect();
+            let page = tool.call(crate::generated_result(&json!({"pattern":"needle", "path":path, "output_mode":"content", "head_limit":1,"offset":1})), fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_eq!(
+                page.data.string_at("/content").unwrap(),
+                rows.iter()
+                    .skip(1)
+                    .take(1)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            assert_eq!(
+                page.data.number_at("/totalLines"),
+                full.data.number_at("/totalLines")
+            );
+        }
+    }
 
     fn native_322_fixture() -> Value {
         serde_json::from_str(include_str!(concat!(

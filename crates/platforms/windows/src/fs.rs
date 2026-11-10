@@ -98,6 +98,42 @@ async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, F
     lingxi_core::host::file_content_from_prefix_bytes(path, buf, n, max_bytes)
 }
 
+async fn acquire_rooted_lock(
+    root: &Path,
+    relative: &Path,
+    expected: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+) -> Result<Box<dyn FlockGuard>, FsError> {
+    use lingxi_core::host::rooted_fs::{self, RootedFileLockAttempt};
+    let root = root.to_owned();
+    let relative = relative.to_owned();
+    let mut request = tokio::task::spawn_blocking(move || {
+        rooted_fs::prepare_lock_exclusive_pinned(
+            &root,
+            &relative,
+            rooted_fs::PRIVATE_DIR_MODE,
+            rooted_fs::PRIVATE_FILE_MODE,
+            expected.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| FsError::Io(error.to_string()))??;
+    loop {
+        // Move the complete capability through the worker. If this future is
+        // cancelled during an attempt, its discarded result drops the pending
+        // handle or the acquired RAII guard and releases the lock.
+        match tokio::task::spawn_blocking(move || request.try_acquire())
+            .await
+            .map_err(|error| FsError::Io(error.to_string()))??
+        {
+            RootedFileLockAttempt::Acquired(guard) => return Ok(Box::new(guard)),
+            RootedFileLockAttempt::Contended(pending) => request = pending,
+        }
+        // Contention has no deadline and never reopens the lock pathname.
+        // Timer waiting keeps both the async runtime and blocking pool free.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[async_trait]
 impl FileSystem for WindowsFileSystem {
     async fn ensure_directory_rooted_identity_pinned(
@@ -505,16 +541,10 @@ impl FileSystem for WindowsFileSystem {
         relative: &Path,
         expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<Box<dyn FlockGuard>, FsError> {
-        let expected =
-            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
-        lingxi_core::host::rooted_fs::lock_exclusive_pinned(
-            root,
-            relative,
-            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
-            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
-            Some(expected),
-        )
-        .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
+        let expected = expected
+            .copied()
+            .ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        acquire_rooted_lock(root, relative, Some(expected)).await
     }
 
     async fn flock_exclusive_rooted(
@@ -522,13 +552,7 @@ impl FileSystem for WindowsFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<Box<dyn FlockGuard>, FsError> {
-        lingxi_core::host::rooted_fs::lock_exclusive(
-            root,
-            relative,
-            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
-            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
-        )
-        .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
+        acquire_rooted_lock(root, relative, None).await
     }
 
     async fn delete_file_rooted_no_follow(
@@ -651,5 +675,118 @@ struct WindowsFlockGuard {
 impl FlockGuard for WindowsFlockGuard {
     fn path(&self) -> &str {
         &self.path
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn rooted_lock_contention_yields_to_the_holder_release_timer() {
+        use lingxi_core::host::FileSystem;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
+        let relative = std::path::Path::new("timer.lock");
+        let fs = std::sync::Arc::new(super::WindowsFileSystem::new(root.clone()));
+        let pin = fs.root_identity_no_follow(&root).await.unwrap();
+        for pinned in [false, true] {
+            let holder = fs.flock_exclusive_rooted(&root, relative).await.unwrap();
+            let contender_fs = fs.clone();
+            let contender_root = root.clone();
+            let contender = tokio::spawn(async move {
+                if pinned {
+                    contender_fs
+                        .flock_exclusive_rooted_pinned(&contender_root, relative, pin.as_ref())
+                        .await
+                } else {
+                    contender_fs
+                        .flock_exclusive_rooted(&contender_root, relative)
+                        .await
+                }
+            });
+            let release = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                drop(holder);
+            });
+            let guard = tokio::time::timeout(std::time::Duration::from_secs(5), contender)
+                .await
+                .expect("the holder timer must run on a current-thread runtime")
+                .unwrap()
+                .unwrap();
+            release.await.unwrap();
+            guard.validate_current().unwrap();
+            drop(guard);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_rooted_lock_owner_releases_its_guard() {
+        use lingxi_core::host::FileSystem;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
+        let relative = std::path::Path::new("cancel.lock");
+        let fs = std::sync::Arc::new(super::WindowsFileSystem::new(root.clone()));
+        let pin = fs.root_identity_no_follow(&root).await.unwrap();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let owner_fs = fs.clone();
+        let owner_root = root.clone();
+        let owner = tokio::spawn(async move {
+            let _guard = owner_fs
+                .flock_exclusive_rooted_pinned(&owner_root, relative, pin.as_ref())
+                .await
+                .unwrap();
+            acquired_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        acquired_rx.await.unwrap();
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        let guard = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fs.flock_exclusive_rooted(&root, relative),
+        )
+        .await
+        .expect("cancelled owner releases its advisory lock")
+        .unwrap();
+        drop(guard);
+    }
+
+    #[test]
+    fn cancelling_contended_rooted_lock_keeps_the_only_blocking_worker_free() {
+        use lingxi_core::host::FileSystem;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().to_owned();
+                let relative = std::path::Path::new("pending.lock");
+                let fs = std::sync::Arc::new(super::WindowsFileSystem::new(root.clone()));
+                let holder = fs.flock_exclusive_rooted(&root, relative).await.unwrap();
+                let contender_fs = fs.clone();
+                let contender_root = root.clone();
+                let contender = tokio::spawn(async move {
+                    contender_fs
+                        .flock_exclusive_rooted(&contender_root, relative)
+                        .await
+                });
+                // Give the contender an opportunity to attempt the held lock.
+                // This is scheduling coordination, not a duration assertion.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                contender.abort();
+                assert!(matches!(contender.await, Err(error) if error.is_cancelled()));
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::task::spawn_blocking(|| ()),
+                )
+                .await
+                .expect("contention must not occupy the blocking worker")
+                .unwrap();
+                drop(holder);
+                let guard = fs.flock_exclusive_rooted(&root, relative).await.unwrap();
+                drop(guard);
+            });
     }
 }

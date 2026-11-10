@@ -1,0 +1,205 @@
+use super::*;
+use crate::filesystem::FsRoots;
+use core_permission::{ReadPathPolicyMatch, ReadSearchPolicyPreparation};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Transport;
+
+#[async_trait]
+impl PermissionGate for Transport {
+    async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
+        PermissionDecision::Allow
+    }
+}
+
+struct LegacyGate {
+    available: bool,
+    projection_calls: AtomicUsize,
+    snapshot_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl PermissionGate for LegacyGate {
+    async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
+        PermissionDecision::Allow
+    }
+
+    fn read_deny_exclude_globs(&self, cwd: &Path) -> Option<Vec<String>> {
+        assert_eq!(cwd, Path::new("/legacy"));
+        self.projection_calls.fetch_add(1, Ordering::SeqCst);
+        self.available.then(|| vec!["/protected/**".to_owned()])
+    }
+
+    fn read_path_policy_snapshot(&self) -> Arc<dyn core_permission::ReadPathPolicySnapshot> {
+        self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+        Arc::new(core_permission::NoPolicyReadPathSnapshot)
+    }
+}
+
+#[test]
+fn legacy_search_preparation_preserves_availability_and_single_projection() {
+    for available in [false, true] {
+        let gate = LegacyGate {
+            available,
+            projection_calls: AtomicUsize::new(0),
+            snapshot_calls: AtomicUsize::new(0),
+        };
+        let dyn_gate: &dyn PermissionGate = &gate;
+        let prepared = dyn_gate.prepare_read_search_policy(Path::new("/legacy"));
+        assert_eq!(prepared.is_some(), available);
+        if let Some(ReadSearchPolicyPreparation {
+            exclude_globs,
+            path_policy,
+        }) = prepared
+        {
+            assert_eq!(exclude_globs, ["/protected/**"]);
+            assert_eq!(
+                path_policy.facts(),
+                core_permission::ReadPathPolicyFacts::default()
+            );
+        }
+        assert_eq!(gate.projection_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gate.snapshot_calls.load(Ordering::SeqCst),
+            usize::from(available)
+        );
+    }
+    assert!(Transport
+        .prepare_read_search_policy(Path::new("/legacy"))
+        .is_none());
+}
+
+fn policy() -> Arc<PermissionPolicy> {
+    Arc::new(
+        PermissionPolicy::from_rules_confined(
+            PermissionMode::Default,
+            [PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Read".into(),
+                    rule_content: Some("/protected/**".into()),
+                    original_rule: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Session,
+            }],
+            false,
+        )
+        .with_roots(FsRoots {
+            cwd: "/first".into(),
+            home: None,
+            lingxi_home: "/__lingxi_read_search_home__".into(),
+        }),
+    )
+}
+
+#[test]
+fn search_preparation_uses_one_live_cwd_and_retains_its_policy() {
+    let cwd_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&cwd_calls);
+    let gate = PolicyPermissionGate::new(policy(), Arc::new(Transport)).with_cwd_provider(
+        Arc::new(move || {
+            if observed_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                "/first".into()
+            } else {
+                "/second".into()
+            }
+        }),
+    );
+    let first = gate
+        .prepare_read_search_policy(Path::new("/first"))
+        .unwrap();
+    assert_eq!(cwd_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(first.exclude_globs, ["/protected/**"]);
+    assert_eq!(
+        first
+            .path_policy
+            .denied_search_path(Path::new("/first/protected/file")),
+        ReadPathPolicyMatch::Match
+    );
+    assert_eq!(
+        first
+            .path_policy
+            .denied_search_path(Path::new("/second/protected/file")),
+        ReadPathPolicyMatch::NoMatch
+    );
+
+    gate.apply_permission_update_from_fixture(&serde_json::json!({
+        "type": "addRules",
+        "rules": [{"toolName": "Read", "ruleContent": "later"}],
+        "behavior": "deny",
+        "destination": "session"
+    }));
+    let second = gate
+        .prepare_read_search_policy(Path::new("/second"))
+        .unwrap();
+    assert_eq!(cwd_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(second.exclude_globs, ["later", "/protected/**"]);
+    assert_eq!(
+        second
+            .path_policy
+            .denied_search_path(Path::new("/second/protected/file")),
+        ReadPathPolicyMatch::Match
+    );
+    assert_eq!(
+        second
+            .path_policy
+            .denied_search_path(Path::new("/second/later")),
+        ReadPathPolicyMatch::Match
+    );
+    assert_eq!(
+        first
+            .path_policy
+            .denied_search_path(Path::new("/first/later")),
+        ReadPathPolicyMatch::NoMatch,
+        "subsequent updates must not mutate a search already being walked"
+    );
+    assert_eq!(
+        cwd_calls.load(Ordering::SeqCst),
+        2,
+        "exact checks use captured cwd"
+    );
+}
+
+struct GuestTranslator;
+
+impl crate::ModelPathTranslator for GuestTranslator {
+    fn translate(&self, model_path: &str, write: bool) -> crate::ModelPathOutcome {
+        assert!(!write);
+        match model_path {
+            "/guest" => crate::ModelPathOutcome::Host("/first".to_owned()),
+            "/guest/fenced" => crate::ModelPathOutcome::Fenced,
+            _ => crate::ModelPathOutcome::NotGuest,
+        }
+    }
+}
+
+#[test]
+fn search_preparation_preserves_guest_translation_and_fenced_unavailability() {
+    let cwd_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&cwd_calls);
+    let gate = PolicyPermissionGate::new(policy(), Arc::new(Transport))
+        .with_path_translator(Arc::new(GuestTranslator))
+        .with_cwd_provider(Arc::new(move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            "/first".into()
+        }));
+    let host = gate
+        .prepare_read_search_policy(Path::new("/first"))
+        .unwrap();
+    let guest = gate
+        .prepare_read_search_policy(Path::new("/guest"))
+        .unwrap();
+    assert_eq!(guest.exclude_globs, host.exclude_globs);
+    assert_eq!(
+        guest
+            .path_policy
+            .denied_search_path(Path::new("/first/protected/file")),
+        ReadPathPolicyMatch::Match
+    );
+    assert_eq!(cwd_calls.load(Ordering::SeqCst), 2);
+    assert!(gate
+        .prepare_read_search_policy(Path::new("/guest/fenced"))
+        .is_none());
+    assert_eq!(cwd_calls.load(Ordering::SeqCst), 2);
+}

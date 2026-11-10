@@ -27,7 +27,7 @@
 
 use crate::filesystem::{pattern_with_root, prepare_permission_pattern, FsRoots};
 use crate::policy::PermissionPolicy;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use lingxi_core::host::permission_gate::{
     ReadPathPolicyCheck, ReadPathPolicyFacts, ReadPathPolicyMatch, ReadPathPolicySnapshot,
 };
@@ -150,7 +150,7 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
 
     // ── U4e: group read-deny relativePatterns by resolved root ──────────────
     // Native preserves source and root insertion order.
-    let mut by_root: IndexMap<Option<PathBuf>, Vec<String>> = IndexMap::new();
+    let mut by_root: IndexMap<Option<PathBuf>, IndexSet<String>> = IndexMap::new();
     let mut sources = policy.deny_rules.iter().collect::<Vec<_>>();
     sources.sort_by_key(|(source, _)| std::cmp::Reverse(source.priority()));
     for (&source, rules) in sources {
@@ -179,14 +179,10 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
                 .map(|root| policy.historical_permission_patterns(root, &rel_pattern))
                 .unwrap_or_default();
             let bucket = by_root.entry(root).or_default();
-            if !bucket.contains(&rel_pattern) {
-                bucket.push(rel_pattern);
-            }
+            bucket.insert(rel_pattern);
             for twin in twins {
                 let bucket = by_root.entry(Some(PathBuf::from("/"))).or_default();
-                if !bucket.contains(&twin) {
-                    bucket.push(twin);
-                }
+                bucket.insert(twin);
             }
         }
     }
@@ -194,7 +190,7 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
     // ── F4e: flatten the grouped patterns into cwd-relative exclude globs ────
     // `n = new Set(byRoot.get(null) ?? [])` — the unrooted patterns pass
     // through verbatim. Then each rooted pattern is rebased onto cwd.
-    let mut out: Vec<String> = Vec::new();
+    let mut out: IndexSet<String> = IndexSet::new();
     // Native's search wrapper Kgr/C4 applies LJt to both the lexical and
     // canonical search roots. This includes /var -> /private/var on macOS;
     // a physical deny twin must not vanish when the search uses that alias.
@@ -206,17 +202,13 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
     }
     if let Some(unrooted) = by_root.get(&None) {
         for p in unrooted {
-            if !out.contains(p) {
-                out.push(p.clone());
-            }
+            out.insert(p.clone());
             // Multi-component unrooted patterns are also rebased against the
             // session cwd when a search starts below it (Native LJt).
             if p.trim_end_matches('/').contains('/') {
                 for search_root in &search_roots {
                     for glob in relativize_for_cwd(&roots.cwd, p, search_root) {
-                        if !out.contains(&glob) {
-                            out.push(glob);
-                        }
+                        out.insert(glob);
                     }
                 }
             }
@@ -229,14 +221,12 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
         for pattern in patterns {
             for search_root in &search_roots {
                 for glob in relativize_for_cwd(root, pattern, search_root) {
-                    if !out.contains(&glob) {
-                        out.push(glob);
-                    }
+                    out.insert(glob);
                 }
             }
         }
     }
-    out
+    out.into_iter().collect()
 }
 
 /// `H_m({patternRoot, pattern, rootPath})` — rebase `pattern` (relative to
@@ -299,7 +289,7 @@ fn residual_patterns(pattern: &str, components: &[&str]) -> Vec<String> {
     let suffix = if pattern.ends_with('/') { "/" } else { "" };
     let mut stack = vec![(0usize, 0usize)];
     let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let mut out = IndexSet::new();
     while let Some((rest, at)) = stack.pop() {
         if !seen.insert((rest, at)) {
             continue;
@@ -310,15 +300,11 @@ fn residual_patterns(pattern: &str, components: &[&str]) -> Vec<String> {
             } else {
                 format!("{}{suffix}", parts[rest..].join("/"))
             };
-            if !out.contains(&value) {
-                out.push(value);
-            }
+            out.insert(value);
             continue;
         }
         let Some(part) = parts.get(rest) else {
-            if !out.iter().any(|pattern| pattern == "**") {
-                out.push("**".into());
-            }
+            out.insert("**".to_owned());
             continue;
         };
         if *part == "**" {
@@ -337,7 +323,7 @@ fn residual_patterns(pattern: &str, components: &[&str]) -> Vec<String> {
             stack.push((rest + 1, at + 1));
         }
     }
-    out
+    out.into_iter().collect()
 }
 
 /// `AHo(e) = posix.join("/", e)` — prepend `/` and normalize the join.
@@ -461,6 +447,108 @@ mod tests {
     fn policy_with(rules: Vec<PermissionRule>, cwd: &str) -> PermissionPolicy {
         PermissionPolicy::from_rules(crate::mode::PermissionMode::Default, rules)
             .with_roots(roots(cwd))
+    }
+
+    #[test]
+    fn duplicate_projection_preserves_source_priority_and_first_seen_order() {
+        let user = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
+        let policy = policy_with(
+            vec![
+                read_deny("session", PermissionRuleSource::Session),
+                read_deny("duplicate", PermissionRuleSource::Session),
+                read_deny("command-z", PermissionRuleSource::Command),
+                read_deny("duplicate", PermissionRuleSource::Command),
+                read_deny("command-a", PermissionRuleSource::Command),
+                read_deny("user", user),
+                read_deny("duplicate", user),
+                read_deny("user", user),
+            ],
+            "/__lingxi_read_projection_order__",
+        );
+        assert_eq!(
+            read_deny_exclude_globs(&policy, Path::new("/__lingxi_read_projection_order__")),
+            ["user", "duplicate", "command-z", "command-a", "session"]
+        );
+    }
+
+    #[test]
+    fn residual_suffix_order_matches_vector_dedup_reference() {
+        // Keep the previous vector-dedup walk as a pure differential oracle:
+        // different globstar routes can reach the same suffix in one walk.
+        fn previous_residual_patterns(pattern: &str, components: &[&str]) -> Vec<String> {
+            let parts = pattern
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect::<Vec<_>>();
+            let suffix = if pattern.ends_with('/') { "/" } else { "" };
+            let mut stack = vec![(0usize, 0usize)];
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            while let Some((rest, at)) = stack.pop() {
+                if !seen.insert((rest, at)) {
+                    continue;
+                }
+                if at == components.len() {
+                    let value = if rest == parts.len() {
+                        "**".to_owned()
+                    } else {
+                        format!("{}{suffix}", parts[rest..].join("/"))
+                    };
+                    if !out.contains(&value) {
+                        out.push(value);
+                    }
+                    continue;
+                }
+                let Some(part) = parts.get(rest) else {
+                    if !out.iter().any(|pattern| pattern == "**") {
+                        out.push("**".into());
+                    }
+                    continue;
+                };
+                if *part == "**" {
+                    stack.push((rest, at + 1));
+                    stack.push((rest + 1, at));
+                    continue;
+                }
+                let part = if part.starts_with(['!', '#']) {
+                    format!("\\{part}")
+                } else {
+                    (*part).to_owned()
+                };
+                let trimmed = part.trim_end_matches(' ');
+                let part = format!("{}{}", trimmed, "\\ ".repeat(part.len() - trimmed.len()));
+                if crate::filesystem::native_ignore_matches_component(&part, components[at]) {
+                    stack.push((rest + 1, at + 1));
+                }
+            }
+            out
+        }
+
+        let component_sets: &[&[&str]] = &[
+            &[],
+            &["a"],
+            &["a", "a"],
+            &["a", "b"],
+            &["A", "B", "a"],
+            &["x", "a", "secret"],
+        ];
+        for pattern in [
+            "**/**/secret/**",
+            "a/**/**/b",
+            "**/a/**/a/**",
+            "a/*/**",
+            "**",
+            "**/",
+            "[a-b]/**/**/s",
+        ] {
+            for components in component_sets {
+                assert_eq!(
+                    residual_patterns(pattern, components),
+                    previous_residual_patterns(pattern, components),
+                    "{pattern:?}, {components:?}"
+                );
+            }
+        }
     }
 
     #[test]

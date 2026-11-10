@@ -4,7 +4,7 @@
 
 use crate::Utf16JsonProjection;
 use tool_api::native_output::{
-    array_values, invalid, parse_object, string_array, OutputField, OutputFieldType,
+    array_values, invalid, parse_object, validate_string_array, OutputField, OutputFieldType,
     UnknownOutputKeys,
 };
 use tool_api::tool_trait::ToolError;
@@ -93,24 +93,30 @@ pub(crate) fn parse(
         "NotebookEdit" => NOTEBOOK_FIELDS,
         _ => return Err(invalid(tool, "native output contract is not mapped")),
     };
-    let mut prepared = output.clone();
+    let mut prepared = None;
     // These metadata enums use optional().catch(undefined) natively. Invalid
     // metadata disappears rather than making an otherwise valid result fail.
     for (name, values) in [
         ("stagedWording", STAGED_WORDING),
         ("syncedSkillNext", SYNCED_SKILL_NEXT),
     ] {
-        if prepared.contains_property(name)
-            && !prepared
+        if output.contains_property(name)
+            && !output
                 .string_at(&format!("/{name}"))
                 .is_some_and(|value| values.contains(&value))
         {
             prepared
+                .get_or_insert_with(|| output.clone())
                 .remove_field(name)
                 .map_err(|_| invalid(tool, "invalid result metadata"))?;
         }
     }
-    let mut parsed = parse_object(&prepared, tool, fields, UnknownOutputKeys::Strip)?;
+    let mut parsed = parse_object(
+        prepared.as_ref().unwrap_or(output),
+        tool,
+        fields,
+        UnknownOutputKeys::Strip,
+    )?;
     if tool == "NotebookEdit" {
         require_enum(&parsed, "/cell_type", &["code", "markdown"], tool)?;
         return Ok(parsed);
@@ -121,7 +127,7 @@ pub(crate) fn parse(
     let mut patches = Vec::new();
     for patch in array_values(&parsed, "/structuredPatch", tool, "structuredPatch")? {
         let patch = parse_object(&patch, tool, PATCH_FIELDS, UnknownOutputKeys::Strip)?;
-        string_array(&patch, "/lines", tool, "lines")?;
+        validate_string_array(&patch, "/lines", tool, "lines")?;
         patches.push(patch);
     }
     parsed

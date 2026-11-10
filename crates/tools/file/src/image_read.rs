@@ -5,7 +5,8 @@
 //! forbidden tool-to-tool dependency edge.
 
 pub use tool_api::util::image_budget::{
-    process_image, process_image_with_base64_budget, ProcessedImage, IMAGE_MAX_DIM,
+    process_image, process_image_with_base64_budget, process_image_with_cancellation,
+    ProcessedImage, IMAGE_MAX_DIM,
 };
 
 /// Image extensions claude-code routes to the image path (FileReadTool.ts:188).

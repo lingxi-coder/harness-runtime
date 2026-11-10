@@ -2119,6 +2119,20 @@ impl PolicyPermissionGate {
         }
     }
 
+    /// Search bases use the same guest-to-host coordinates as authorization.
+    /// A fenced guest region must withhold the live exclusion list, rather
+    /// than return an empty list that would permit unrestricted enumeration.
+    fn read_search_base(&self, cwd: &std::path::Path) -> Option<PathBuf> {
+        match self.path_translator.as_ref() {
+            None => Some(cwd.to_path_buf()),
+            Some(translator) => match translator.translate(&cwd.to_string_lossy(), false) {
+                crate::ModelPathOutcome::Host(host) => Some(PathBuf::from(host)),
+                crate::ModelPathOutcome::NotGuest => Some(cwd.to_path_buf()),
+                crate::ModelPathOutcome::Fenced => None,
+            },
+        }
+    }
+
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
     /// [`PermissionDecision`] the orchestrator consumes: `Allow`/`Deny` pass
     /// through (the deny reason rendered), and an `Ask` either AUTO-ALLOWS a
@@ -3258,15 +3272,20 @@ impl PermissionGate for PolicyPermissionGate {
         // indistinguishable from "this policy has no read-deny rules", so the
         // walk proceeds straight through a denied directory. Returning `None`
         // withholds the exclusion list instead of asserting an empty one.
-        let base = match self.path_translator.as_ref() {
-            None => cwd.to_path_buf(),
-            Some(translator) => match translator.translate(&cwd.to_string_lossy(), false) {
-                crate::ModelPathOutcome::Host(host) => std::path::PathBuf::from(host),
-                crate::ModelPathOutcome::NotGuest => cwd.to_path_buf(),
-                crate::ModelPathOutcome::Fenced => return None,
-            },
-        };
+        let base = self.read_search_base(cwd)?;
         Some(crate::read_deny_exclude_globs(&self.live_policy(), &base))
+    }
+
+    fn prepare_read_search_policy(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Option<core_permission::ReadSearchPolicyPreparation> {
+        let base = self.read_search_base(cwd)?;
+        let policy = Arc::new(self.live_policy());
+        Some(core_permission::ReadSearchPolicyPreparation {
+            exclude_globs: crate::read_deny_exclude_globs(&policy, &base),
+            path_policy: crate::read_deny_globs::read_deny_search_snapshot(policy, None),
+        })
     }
 
     fn read_path_policy_snapshot(
@@ -4792,6 +4811,8 @@ mod policy_gate_test;
 #[cfg(test)]
 #[path = "sdk_direct_control_test.rs"]
 mod sdk_direct_control_test;
+#[path = "read_search_policy_test.rs"]
+mod read_search_policy_test;
 
 // PLAN-DIVERGENCE-01: separate inline module (kept out of the concurrently
 // edited policy_gate_test.rs) proving that the LingXi-only `AllowByDefault`

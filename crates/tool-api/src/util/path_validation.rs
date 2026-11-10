@@ -136,18 +136,21 @@ fn canonicalize_with_fallback(path: &Path) -> Result<PathBuf, PathValidationErro
 /// and the (PII-safe) tool name. Callers fire this right after a
 /// [`canonicalize_and_validate`] failure.
 pub async fn emit_blocked_event(bus: &AnalyticsBus, tool_name: &str, path: &Path) {
-    let mut metadata: LogEventMetadata = HashMap::new();
-    metadata.insert(
-        "tool_name".to_string(),
-        AnalyticsValue::String(Verified::assert_safe(tool_name.to_string()).into_inner()),
-    );
-    metadata.insert(
-        "_PROTO_path".to_string(),
-        AnalyticsValue::String(
-            PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-        ),
-    );
-    bus.log_event(PATH_BLOCKED_EVENT, metadata).await;
+    bus.log_event_lazy(PATH_BLOCKED_EVENT, || {
+        let mut metadata: LogEventMetadata = HashMap::new();
+        metadata.insert(
+            "tool_name".to_string(),
+            AnalyticsValue::String(Verified::assert_safe(tool_name.to_string()).into_inner()),
+        );
+        metadata.insert(
+            "_PROTO_path".to_string(),
+            AnalyticsValue::String(
+                PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
+            ),
+        );
+        metadata
+    })
+    .await;
 }
 
 #[cfg(test)]

@@ -61,6 +61,16 @@ impl AnalyticsBus {
     /// inherits the suppression, matching CC where `F$e()` silences all
     /// `tengu_*` telemetry egress.
     pub async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
+        self.log_event_lazy(name, || metadata).await;
+    }
+
+    /// Build metadata only when the existing privacy and killswitch gates admit
+    /// an event. Disabled events still clear the pre-attach queue, so enabling
+    /// telemetry later cannot replay data accumulated while it was disabled.
+    pub async fn log_event_lazy<F>(&self, name: &str, build: F)
+    where
+        F: FnOnce() -> LogEventMetadata + Send,
+    {
         if self.killswitch.is_active() {
             self.pending.lock().await.clear();
             return;
@@ -69,6 +79,7 @@ impl AnalyticsBus {
             self.pending.lock().await.clear();
             return;
         }
+        let metadata = build();
         mirror_analytics_event(name, &metadata);
         if let Some(sink) = self.sink.read().await.as_ref().cloned() {
             sink.log_event(name, metadata).await;
@@ -184,6 +195,61 @@ mod tests {
         ] {
             std::env::remove_var(v);
         }
+    }
+
+    #[tokio::test]
+    async fn lazy_metadata_is_skipped_and_pending_cleared_when_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        clear();
+        for killswitch in [false, true] {
+            let bus = AnalyticsBus::new();
+            bus.log_event("buffered", LogEventMetadata::default()).await;
+            assert_eq!(bus.pending.lock().await.len(), 1);
+            if killswitch {
+                bus.killswitch().activate();
+            } else {
+                std::env::set_var("DO_NOT_TRACK", "1");
+            }
+            bus.log_event_lazy("disabled", || panic!("disabled metadata must not be built"))
+                .await;
+            assert!(bus.pending.lock().await.is_empty());
+            clear();
+            let sink = Arc::new(InMemorySink::new());
+            bus.attach_sink(sink.clone()).await;
+            assert!(sink.events().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_metadata_builds_once_and_preserves_fifo_delivery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        clear();
+        let bus = AnalyticsBus::new();
+        let builds = AtomicUsize::new(0);
+        for name in ["first", "second"] {
+            bus.log_event_lazy(name, || {
+                builds.fetch_add(1, Ordering::Relaxed);
+                LogEventMetadata::default()
+            })
+            .await;
+        }
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        bus.log_event_lazy("third", || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            LogEventMetadata::default()
+        })
+        .await;
+        assert_eq!(builds.load(Ordering::Relaxed), 3);
+        let events = sink.events().await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
     }
 
     #[tokio::test]

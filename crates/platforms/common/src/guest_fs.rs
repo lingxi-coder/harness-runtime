@@ -121,6 +121,11 @@ impl FileSystem for GuestPathFileSystem {
         self.inner.read_file(&path, offset, limit).await
     }
 
+    async fn read_file_prefix(&self, path: &str, max_bytes: usize) -> Result<FileContent, FsError> {
+        let path = self.resolve(path, false)?;
+        self.inner.read_file_prefix(&path, max_bytes).await
+    }
+
     async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
         let path = self.resolve(path, true)?;
         self.inner.write_file(&path, content).await
@@ -646,6 +651,23 @@ mod tests {
                 truncated: false,
             })
         }
+        async fn read_file_prefix(
+            &self,
+            path: &str,
+            max_bytes: usize,
+        ) -> Result<FileContent, FsError> {
+            use tokio::io::AsyncReadExt;
+            self.record("prefix", path);
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            let mut bytes = vec![0; max_bytes];
+            let length = file
+                .read(&mut bytes)
+                .await
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            lingxi_core::host::file_content_from_prefix_bytes(path, bytes, length, max_bytes)
+        }
         async fn write_file(&self, path: &str, _content: &str) -> Result<(), FsError> {
             self.record("write", path);
             Ok(())
@@ -715,6 +737,63 @@ mod tests {
         let inner = Arc::new(RecordingFs::default());
         let fs = GuestPathFileSystem::new(inner.clone(), Arc::new(MountsOnlyRuntime { mounts }));
         (inner, fs)
+    }
+
+    #[tokio::test]
+    async fn guest_prefix_reads_preserve_bounded_backend_contract_and_fencing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let mut mount = workspace_mount();
+        mount.host_path = directory.path().to_owned();
+        mount.read_only = true;
+        let (inner, fs) = fs_with(vec![mount]);
+        let guest_path = "/home/lingxi/lingxi/abc/session.jsonl";
+
+        // An invalid byte beyond the prefix must not make a catalog read scan
+        // or validate the rest of the transcript.
+        std::fs::write(&path, b"one\ntwo\n\xff").unwrap();
+        let prefix = fs.read_file_prefix(guest_path, 4).await.unwrap();
+        assert_eq!(prefix.content, "one\n");
+        assert_eq!(prefix.total_lines, 1);
+        assert!(prefix.truncated);
+        assert_eq!(inner.last(), ("prefix".into(), path.display().to_string()));
+        assert!(matches!(
+            fs.read_file_prefix(guest_path, 9).await,
+            Err(FsError::BinaryFile(resolved)) if resolved == path.display().to_string(),
+        ));
+
+        std::fs::write(&path, b"one\ntwo\n").unwrap();
+        let exact = fs.read_file_prefix(guest_path, 8).await.unwrap();
+        assert_eq!(exact.content, "one\ntwo\n");
+        assert_eq!(exact.total_lines, 2);
+        assert!(exact.truncated);
+        let complete = fs.read_file_prefix(guest_path, 9).await.unwrap();
+        assert_eq!(complete.content, exact.content);
+        assert_eq!(complete.total_lines, 2);
+        assert!(!complete.truncated);
+        let empty = fs.read_file_prefix(guest_path, 0).await.unwrap();
+        assert!(empty.content.is_empty());
+        assert_eq!(empty.total_lines, 0);
+        assert!(empty.truncated);
+
+        std::fs::write(&path, "a\n🙂\n").unwrap();
+        let split_utf8 = fs.read_file_prefix(guest_path, 4).await.unwrap();
+        assert_eq!(split_utf8.content, "a\n");
+        assert_eq!(split_utf8.total_lines, 1);
+        assert!(split_utf8.truncated);
+
+        let calls = inner.calls.lock().unwrap().len();
+        for denied in [
+            "/root/unmounted",
+            "/tmp/scratch",
+            "/home/lingxi/lingxi/abc/../abc/f",
+        ] {
+            assert!(matches!(
+                fs.read_file_prefix(denied, 4).await,
+                Err(FsError::PermissionDenied(_)),
+            ));
+        }
+        assert_eq!(inner.calls.lock().unwrap().len(), calls);
     }
 
     #[tokio::test]

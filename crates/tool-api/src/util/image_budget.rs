@@ -60,7 +60,16 @@ fn encode_jpeg(img: &DynamicImage, quality: u8) -> Option<Vec<u8>> {
 /// # Errors
 /// Empty input, or the bytes can't be decoded as a supported image.
 pub fn process_image(bytes: Vec<u8>) -> Result<ProcessedImage, String> {
-    process_image_with_raw_budget(bytes, IMAGE_TARGET_RAW_SIZE)
+    process_image_with_raw_budget(bytes, IMAGE_TARGET_RAW_SIZE, || false)
+}
+
+/// The ordinary image pipeline with cancellation checks between codec stages.
+/// An individual decode, resize or encode cannot be interrupted once started.
+pub fn process_image_with_cancellation(
+    bytes: Vec<u8>,
+    should_cancel: impl FnMut() -> bool,
+) -> Result<ProcessedImage, String> {
+    process_image_with_raw_budget(bytes, IMAGE_TARGET_RAW_SIZE, should_cancel)
 }
 
 /// Decode and resize/re-encode an image so its standard-base64 representation
@@ -73,13 +82,22 @@ pub fn process_image_with_base64_budget(
     if target_raw_size == 0 {
         return Err("image base64 budget is too small".to_string());
     }
-    process_image_with_raw_budget(bytes, target_raw_size)
+    process_image_with_raw_budget(bytes, target_raw_size, || false)
 }
 
 fn process_image_with_raw_budget(
     bytes: Vec<u8>,
     target_raw_size: usize,
+    mut should_cancel: impl FnMut() -> bool,
 ) -> Result<ProcessedImage, String> {
+    let mut check_cancelled = || {
+        if should_cancel() {
+            Err("image processing aborted".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    check_cancelled()?;
     if bytes.is_empty() {
         return Err("Image file is empty (0 bytes)".to_string());
     }
@@ -132,12 +150,14 @@ fn process_image_with_raw_budget(
         let dimensions = img.dimensions();
         (img, dimensions, 1)
     };
+    check_cancelled()?;
 
     if orientation == 1
         && bytes.len() <= target_raw_size
         && w <= IMAGE_MAX_DIM
         && h <= IMAGE_MAX_DIM
     {
+        drop(img);
         return Ok(ProcessedImage {
             base64: b64(&bytes),
             media_type,
@@ -146,18 +166,24 @@ fn process_image_with_raw_budget(
         });
     }
 
+    // No later branch can reuse the compressed source. Release it before the
+    // resized raster and JPEG encoder buffers are allocated.
+    drop(bytes);
     let working = if img.width() > IMAGE_MAX_DIM || img.height() > IMAGE_MAX_DIM {
-        img.resize(
+        let resized = img.resize(
             IMAGE_MAX_DIM,
             IMAGE_MAX_DIM,
             image::imageops::FilterType::Triangle,
-        )
+        );
+        drop(img);
+        resized
     } else {
         img
     };
     let (dw, dh) = working.dimensions();
 
     for &q in &JPEG_QUALITY_LADDER {
+        check_cancelled()?;
         if let Some(enc) = encode_jpeg(&working, q) {
             if enc.len() <= target_raw_size {
                 return Ok(ProcessedImage {
@@ -176,12 +202,14 @@ fn process_image_with_raw_budget(
         .min(SECONDARY_SHRINK_DIMENSION)
         .max(1);
     loop {
+        check_cancelled()?;
         let small = working.resize(
             shrink_max_dimension,
             shrink_max_dimension,
             image::imageops::FilterType::Triangle,
         );
         let (sdw, sdh) = small.dimensions();
+        check_cancelled()?;
         let enc = encode_jpeg(&small, 20).ok_or_else(|| "jpeg encode failed".to_string())?;
         if enc.len() <= target_raw_size {
             return Ok(ProcessedImage {
@@ -234,6 +262,24 @@ mod tests {
         assert!(dw <= IMAGE_MAX_DIM && dh <= IMAGE_MAX_DIM);
         assert_eq!(dw, 2000);
         assert_eq!(p.media_type, "image/jpeg");
+    }
+
+    #[test]
+    fn resized_png_retains_exact_jpeg_encoding() {
+        let processed = process_image(png_bytes(3000, 1)).unwrap();
+        let expected = encode_jpeg(
+            &DynamicImage::ImageRgb8(RgbImage::new(IMAGE_MAX_DIM, 1)),
+            80,
+        )
+        .unwrap();
+        assert_eq!(processed.media_type, "image/jpeg");
+        assert_eq!(processed.resized, Some((3000, 1, 2000, 1)));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(processed.base64)
+                .unwrap(),
+            expected,
+        );
     }
 
     #[test]

@@ -87,7 +87,8 @@ fn parse_object_fields(
         return Ok(input.clone());
     }
     let mut retained = Vec::with_capacity(fields.len());
-    let mut passthrough = input.clone();
+    let mut passthrough =
+        matches!(unknown_keys, UnknownOutputKeys::Passthrough).then(|| input.clone());
     for field in fields {
         let value = root.get_property(field.name);
         if value.is_none() && !field.required {
@@ -111,8 +112,9 @@ fn parse_object_fields(
             continue;
         }
         let key = field.name.encode_utf16().collect::<Vec<_>>();
-        let value = input
-            .subprojection_property_units(&key)
+        let value = value
+            .expect("validated output property")
+            .to_projection()
             .expect("validated output property");
         let value = match field.kind {
             OutputFieldType::ObjectShape(nested) => parse_object_fields(
@@ -125,14 +127,14 @@ fn parse_object_fields(
             )?,
             _ => value,
         };
-        if matches!(unknown_keys, UnknownOutputKeys::Passthrough) {
+        if let Some(passthrough) = passthrough.as_mut() {
             passthrough
                 .set_field(field.name, value.clone())
                 .map_err(|_| invalid(tool_name, "could not construct parsed output"))?;
         }
         retained.push((key, value));
     }
-    if matches!(unknown_keys, UnknownOutputKeys::Passthrough) {
+    if let Some(passthrough) = passthrough {
         return Ok(passthrough);
     }
     // Zod constructs known properties in schema order, independently of the
@@ -168,30 +170,59 @@ pub fn string_array(
     tool_name: &str,
     field: &str,
 ) -> Result<Vec<Utf16JsonProjection>, ToolError> {
+    let capacity = input
+        .at_pointer(pointer)
+        .and_then(JsonValueView::array_len)
+        .unwrap_or_default();
+    let mut values = Vec::with_capacity(capacity);
+    visit_string_array(input, pointer, |item| {
+        values
+            .push(item.to_projection().map_err(|_| {
+                invalid(tool_name, &format!("output field `{field}` is malformed"))
+            })?);
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+/// Validate an array of strings without constructing owned item projections.
+///
+/// This reports the same ordered output-validation issues as [`string_array`].
+/// Use it when the caller only needs validation and retains the original array.
+pub fn validate_string_array(
+    input: &Utf16JsonProjection,
+    pointer: &str,
+    _tool_name: &str,
+    _field: &str,
+) -> Result<(), ToolError> {
+    visit_string_array(input, pointer, |_| Ok(()))
+}
+
+fn visit_string_array<'a>(
+    input: &'a Utf16JsonProjection,
+    pointer: &str,
+    mut visit: impl FnMut(JsonValueView<'a>) -> Result<(), ToolError>,
+) -> Result<(), ToolError> {
     let value = input.at_pointer(pointer);
     let path = pointer_path(pointer);
-    let Some(array) = value.and_then(JsonValueView::array_len) else {
+    let Some(array) = value.filter(|value| value.array_len().is_some()) else {
         return Err(issue_error(vec![type_issue("array", value, path)]));
     };
-    let mut values = Vec::with_capacity(array);
     let mut issues = Vec::new();
-    for index in 0..array {
-        let item_pointer = format!("{pointer}/{index}");
-        let item = input
-            .at_pointer(&item_pointer)
-            .expect("validated output array");
+    for index in 0..array.array_len().expect("validated output array") {
+        let item = array
+            .get_index(index)
+            .expect("validated output array index");
         if item.as_str().is_none() {
             let mut item_path = path.clone();
             item_path.push(Utf16JsonProjection::parse(&index.to_string()).expect("array index"));
             issues.push(type_issue("string", Some(item), item_path));
         } else {
-            values.push(input.subprojection(&item_pointer).map_err(|_| {
-                invalid(tool_name, &format!("output field `{field}` is malformed"))
-            })?);
+            visit(item)?;
         }
     }
     if issues.is_empty() {
-        Ok(values)
+        Ok(())
     } else {
         Err(issue_error(issues))
     }
@@ -209,18 +240,19 @@ pub fn array_values(
 ) -> Result<Vec<Utf16JsonProjection>, ToolError> {
     let array = input
         .at_pointer(pointer)
-        .and_then(JsonValueView::array_len)
+        .filter(|array| array.array_len().is_some())
         .ok_or_else(|| {
             invalid(
                 tool_name,
                 &format!("output field `{field}` must be an array"),
             )
         })?;
-    (0..array)
+    (0..array.array_len().expect("validated output array"))
         .map(|index| {
-            let item_pointer = format!("{pointer}/{index}");
-            input
-                .subprojection(&item_pointer)
+            array
+                .get_index(index)
+                .expect("validated output array index")
+                .to_projection()
                 .map_err(|_| invalid(tool_name, &format!("output field `{field}` is malformed")))
         })
         .collect()
@@ -299,6 +331,10 @@ fn matches_type(value: JsonValueView<'_>, kind: OutputFieldType) -> bool {
         OutputFieldType::False => value.as_bool() == Some(false),
     }
 }
+
+#[cfg(test)]
+#[path = "native_output_optimization_tests.rs"]
+mod optimization_tests;
 
 #[cfg(test)]
 mod tests {
@@ -400,9 +436,13 @@ mod tests {
     #[test]
     fn native_293_array_item_issue_bytes() {
         let case = "glob-filenames-item-wrong-type";
-        let error =
-            string_array(&returned_result(case), "/filenames", "Glob", "filenames").unwrap_err();
-        assert_native_issue_body(case, error);
+        let input = returned_result(case);
+        for error in [
+            string_array(&input, "/filenames", "Glob", "filenames").unwrap_err(),
+            validate_string_array(&input, "/filenames", "Glob", "filenames").unwrap_err(),
+        ] {
+            assert_native_issue_body(case, error);
+        }
     }
 
     #[test]

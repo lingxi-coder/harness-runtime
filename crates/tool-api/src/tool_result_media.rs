@@ -137,13 +137,14 @@ pub fn read_media_content_blocks(
         let cells = file.get_property("cells")?;
         let cell_count = cells.array_len()?;
         let mut blocks: Vec<Utf16JsonProjection> = Vec::new();
+        let mut pending_text = None;
         for index in 0..cell_count {
             let cell = cells.get_index(index)?;
             let cell_type = cell.get_property("cellType")?.code_units()?;
             let cell_id = cell.get_property("cell_id")?.code_units()?;
             let source = cell.get_property("source")?.code_units()?;
             let mut text_units = Vec::new();
-            if cell_type != "code".encode_utf16().collect::<Vec<_>>() {
+            if !cell_type.iter().copied().eq("code".encode_utf16()) {
                 append_ascii(&mut text_units, "<cell_type>");
                 text_units.extend_from_slice(cell_type);
                 append_ascii(&mut text_units, "</cell_type>");
@@ -151,7 +152,7 @@ pub fn read_media_content_blocks(
                 .get_property("language")
                 .and_then(JsonValueView::code_units)
             {
-                if language != "python".encode_utf16().collect::<Vec<_>>() {
+                if !language.iter().copied().eq("python".encode_utf16()) {
                     append_ascii(&mut text_units, "<language>");
                     text_units.extend_from_slice(language);
                     append_ascii(&mut text_units, "</language>");
@@ -166,7 +167,7 @@ pub fn read_media_content_blocks(
             append_ascii(&mut cell_text, "</cell id=\"");
             cell_text.extend_from_slice(cell_id);
             append_ascii(&mut cell_text, "\">");
-            append_read_text_block(&mut blocks, cell_text);
+            append_read_text_block(&mut pending_text, cell_text);
 
             if let Some(outputs) = cell.get_property("outputs") {
                 if let Some(output_count) = outputs.array_len() {
@@ -179,12 +180,13 @@ pub fn read_media_content_blocks(
                             if !text.is_empty() {
                                 let mut line = vec![u16::from(b'\n')];
                                 line.extend_from_slice(text);
-                                append_read_text_block(&mut blocks, line);
+                                append_read_text_block(&mut pending_text, line);
                             }
                         }
                         if let Some(image) = output.get_property("image") {
                             let base64 = image.get_property("image_data")?.code_units()?;
                             let media_type = image.get_property("media_type")?.code_units()?;
+                            flush_read_text_block(&mut blocks, &mut pending_text);
                             blocks.push(media_block(
                                 "image",
                                 source_text_projection_units(base64),
@@ -195,6 +197,7 @@ pub fn read_media_content_blocks(
                 }
             }
         }
+        flush_read_text_block(&mut blocks, &mut pending_text);
         return Some(blocks);
     }
     if kind == kind_pdf {
@@ -262,20 +265,21 @@ fn append_ascii(output: &mut Vec<u16>, text: &str) {
     output.extend(text.encode_utf16());
 }
 
-fn append_read_text_block(blocks: &mut Vec<Utf16JsonProjection>, text: Vec<u16>) {
-    if let Some(last) = blocks.last_mut() {
-        if let Some(previous) = last
-            .get_property("text")
-            .and_then(JsonValueView::code_units)
-        {
-            let mut merged = previous.to_vec();
-            merged.push(u16::from(b'\n'));
-            merged.extend(text);
-            *last = text_block(source_text_projection_units(&merged));
-            return;
-        }
+fn append_read_text_block(pending: &mut Option<Vec<u16>>, text: Vec<u16>) {
+    if let Some(previous) = pending.as_mut() {
+        previous.push(u16::from(b'\n'));
+        previous.extend(text);
+    } else {
+        *pending = Some(text);
     }
-    blocks.push(text_block(source_text_projection_units(&text)));
+}
+
+fn flush_read_text_block(blocks: &mut Vec<Utf16JsonProjection>, pending: &mut Option<Vec<u16>>) {
+    // `Some(empty)` still represents an emitted text block. Its following
+    // append must retain the separating newline just like any other block.
+    if let Some(text) = pending.take() {
+        blocks.push(text_block(source_text_projection_units(&text)));
+    }
 }
 
 fn source_object(fields: Vec<(&str, Utf16JsonProjection)>) -> Utf16JsonProjection {
@@ -403,6 +407,10 @@ pub fn ephemeral_summary(data: &Utf16JsonProjection) -> Option<Utf16JsonProjecti
     summary.code_units()?;
     data.subprojection("/summary").ok()
 }
+
+#[cfg(test)]
+#[path = "tool_result_media_optimization_tests.rs"]
+mod optimization_tests;
 
 #[cfg(test)]
 mod tests {

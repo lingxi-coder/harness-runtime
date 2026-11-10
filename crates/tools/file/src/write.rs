@@ -113,6 +113,7 @@ fn write_resolution_error(
     error: lingxi_core::host::rooted_fs::RootedFsError,
 ) -> ToolError {
     match error {
+        lingxi_core::host::rooted_fs::RootedFsError::Cancelled => ToolError::Aborted,
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         ).into()),
@@ -150,61 +151,85 @@ impl FileWriteTool {
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_file_path".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(WRITE_STARTED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(WRITE_STARTED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "_PROTO_file_path".to_string(),
+                    AnalyticsValue::String(
+                        PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                            .into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_completed(&self, invocation_id: &str, bytes_written: u64, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "bytes_written".to_string(),
-            AnalyticsValue::Int(bytes_written as i64),
-        );
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(WRITE_COMPLETED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(WRITE_COMPLETED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "bytes_written".to_string(),
+                    AnalyticsValue::Int(bytes_written as i64),
+                );
+                md.insert(
+                    "duration_ms".to_string(),
+                    AnalyticsValue::Int(duration_ms as i64),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_failed(&self, invocation_id: &str, kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(WRITE_FAILED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(WRITE_FAILED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "failure_kind".to_string(),
+                    AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
+                );
+                md
+            })
+            .await;
     }
 
     /// Emit `tengu_subagent_md_report_blocked` with the attempted content's
     /// UTF-8 byte length (claude-code `Buffer.byteLength(t)`).
     async fn emit_subagent_md_report_blocked(&self, content: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "contentBytes".to_string(),
-            AnalyticsValue::Int(i64::try_from(content.len()).unwrap_or(i64::MAX)),
-        );
         self.ctx
             .bus
-            .log_event(telemetry::tengu::tool::SUBAGENT_MD_REPORT_BLOCKED, md)
+            .log_event_lazy(telemetry::tengu::tool::SUBAGENT_MD_REPORT_BLOCKED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "contentBytes".to_string(),
+                    AnalyticsValue::Int(i64::try_from(content.len()).unwrap_or(i64::MAX)),
+                );
+                md
+            })
             .await;
     }
 }
@@ -469,7 +494,7 @@ impl Tool for FileWriteTool {
         if file_exists {
             // Native Write refuses a truncated context even when its mtime is
             // unchanged. Model waivers apply only when no entry exists.
-            if tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+            if tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
                 .is_some_and(|entry| entry.is_partial_view)
             {
                 self.emit_failed(&invocation_id, "partial_read").await;

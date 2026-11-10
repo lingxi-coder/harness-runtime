@@ -1,11 +1,11 @@
 //! `NotebookEditTool` — replace / insert / delete a cell in a Jupyter `.ipynb`.
 //!
-//! `.ipynb` is JSON with `cells: [{ id, source, ... }, ...]`. We round-trip
-//! through `serde_json::Value` so `preserve_order` (workspace feature) keeps
-//! key ordering byte-stable.
+//! `.ipynb` is JSON with `cells: [{ id, source, ... }, ...]`. Borrowed flat JSON
+//! views retain exact UTF-16 strings and key order while editing one cell.
 
 use crate::Utf16JsonProjection;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -51,48 +51,70 @@ impl NotebookEditTool {
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_notebook_path".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(NOTEBOOK_STARTED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(NOTEBOOK_STARTED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "_PROTO_notebook_path".to_string(),
+                    AnalyticsValue::String(
+                        PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                            .into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_completed(&self, invocation_id: &str, cells_edited: u32, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "cells_edited".to_string(),
-            AnalyticsValue::Int(cells_edited as i64),
-        );
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(NOTEBOOK_COMPLETED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(NOTEBOOK_COMPLETED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "cells_edited".to_string(),
+                    AnalyticsValue::Int(cells_edited as i64),
+                );
+                md.insert(
+                    "duration_ms".to_string(),
+                    AnalyticsValue::Int(duration_ms as i64),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_failed(&self, invocation_id: &str, kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(NOTEBOOK_FAILED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(NOTEBOOK_FAILED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "failure_kind".to_string(),
+                    AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
+                );
+                md
+            })
+            .await;
     }
 }
 
@@ -154,19 +176,43 @@ fn notebook_error(message: impl Into<String>) -> ToolError {
     ToolError::InvalidInput(message.into().into())
 }
 
-fn joined_cell_source(cell: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
-    if cell.string_units("/source").is_some() {
-        return cell
-            .subprojection("/source")
+fn validate_cell_source(cell: JsonValueView<'_>) -> Result<(), ToolError> {
+    let source = cell
+        .get_property("source")
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    if source.code_units().is_some() {
+        return Ok(());
+    }
+    let count = source
+        .array_len()
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    for index in 0..count {
+        source
+            .get_index(index)
+            .and_then(JsonValueView::code_units)
+            .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    }
+    Ok(())
+}
+
+fn joined_cell_source(cell: JsonValueView<'_>) -> Result<Utf16JsonProjection, ToolError> {
+    let source = cell
+        .get_property("source")
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    if source.code_units().is_some() {
+        return source
+            .to_projection()
             .map_err(|_| notebook_error(INVALID_NOTEBOOK));
     }
-    let count = cell
-        .array_len("/source")
+    let count = source
+        .array_len()
         .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
     let mut units = Vec::new();
     for index in 0..count {
-        units.extend(
-            cell.string_units(&format!("/source/{index}"))
+        units.extend_from_slice(
+            source
+                .get_index(index)
+                .and_then(JsonValueView::code_units)
                 .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?,
         );
     }
@@ -182,21 +228,23 @@ fn mutate_notebook(
     cell_type: Option<&str>,
     insert_id: impl FnOnce() -> String,
 ) -> Result<NotebookMutation, ToolError> {
-    let count = notebook
-        .array_len("/cells")
+    let cells = notebook
+        .at_pointer("/cells")
         .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
-    let mut cells = (0..count)
-        .map(|index| {
-            let cell = notebook
-                .subprojection(&format!("/cells/{index}"))
-                .map_err(|_| notebook_error(INVALID_NOTEBOOK))?;
-            if cell.object_entries().is_none() {
-                return Err(notebook_error(INVALID_NOTEBOOK));
-            }
-            joined_cell_source(&cell)?;
-            Ok(cell)
-        })
-        .collect::<Result<Vec<_>, ToolError>>()?;
+    let count = cells
+        .array_len()
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    // Validate every cell before resolving the requested id, as Native does.
+    // Borrowing here avoids compacting a notebook-sized arena per cell.
+    for index in 0..count {
+        let cell = cells
+            .get_index(index)
+            .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+        if cell.object_entries().is_none() {
+            return Err(notebook_error(INVALID_NOTEBOOK));
+        }
+        validate_cell_source(cell)?;
+    }
     let cell_id = cell_id.filter(|id| !id.is_empty());
     let index = match cell_id {
         None if edit_mode == EDIT_MODE_INSERT => 0,
@@ -206,9 +254,13 @@ fn mutate_notebook(
             ))
         }
         Some(id) => {
-            let found = cells
-                .iter()
-                .position(|cell| cell.string_at("/id") == Some(id));
+            let found = (0..count).find(|index| {
+                cells
+                    .get_index(*index)
+                    .and_then(|cell| cell.get_property("id"))
+                    .and_then(JsonValueView::as_str)
+                    == Some(id)
+            });
             let index = if let Some(index) = found {
                 index
             } else if let Some(index) = parse_cell_id(id) {
@@ -227,14 +279,14 @@ fn mutate_notebook(
         }
     };
     let new_source = input
-        .subprojection("/new_source")
-        .ok()
-        .filter(|source| source.string_units("").is_some())
+        .at_pointer("/new_source")
+        .filter(|source| source.code_units().is_some())
+        .and_then(|source| source.to_projection().ok())
         .unwrap_or_else(|| "".into());
     let language = notebook
-        .subprojection("/metadata/language_info/name")
-        .ok()
-        .filter(|name| !name.at_pointer("").is_some_and(|value| value.is_null()))
+        .at_pointer("/metadata/language_info/name")
+        .filter(|name| !name.is_null())
+        .and_then(|name| name.to_projection().ok())
         .unwrap_or_else(|| "python".into());
     let supports_ids = notebook.number_at("/nbformat").is_some_and(|format| {
         format > 4.0
@@ -248,8 +300,13 @@ fn mutate_notebook(
     } else {
         cell_id.map(str::to_owned)
     };
-    let old_source = match edit_mode {
-        EDIT_MODE_DELETE => Some(joined_cell_source(&cells.remove(index))?),
+    let (old_source, changed_cell) = match edit_mode {
+        EDIT_MODE_DELETE => (
+            Some(joined_cell_source(
+                cells.get_index(index).expect("validated notebook cell"),
+            )?),
+            None,
+        ),
         EDIT_MODE_INSERT => {
             let kind = cell_type.unwrap_or("code");
             let mut fields = vec![("cell_type".into(), kind.into())];
@@ -269,16 +326,20 @@ fn mutate_notebook(
                     ("outputs".into(), crate::generated_result(&json!([]))),
                 ]);
             }
-            cells.insert(
-                index,
-                Utf16JsonProjection::object(fields)
-                    .map_err(|error| notebook_error(error.to_string()))?,
-            );
-            None
+            (
+                None,
+                Some(
+                    Utf16JsonProjection::object(fields)
+                        .map_err(|error| notebook_error(error.to_string()))?,
+                ),
+            )
         }
         _ => {
-            let cell = &mut cells[index];
+            let cell = cells.get_index(index).expect("validated notebook cell");
             let old_source = joined_cell_source(cell)?;
+            let mut cell = cell
+                .to_projection()
+                .map_err(|error| notebook_error(error.to_string()))?;
             if cell.string_at("/cell_type") == Some("code") {
                 cell.set_field("execution_count", crate::generated_result(&Value::Null))
                     .map_err(|error| notebook_error(error.to_string()))?;
@@ -291,14 +352,44 @@ fn mutate_notebook(
                 cell.set_field("cell_type", kind.into())
                     .map_err(|error| notebook_error(error.to_string()))?;
             }
-            Some(old_source)
+            (Some(old_source), Some(cell))
         }
     };
+    let mut builder = Utf16JsonBuilder::new();
+    let mut items = Vec::with_capacity(count + usize::from(edit_mode == EDIT_MODE_INSERT));
+    for cell_index in 0..=count {
+        if cell_index == index {
+            if let Some(cell) = changed_cell.as_ref() {
+                items.push(
+                    builder
+                        .import_projection(cell)
+                        .map_err(|error| notebook_error(error.to_string()))?,
+                );
+            }
+            if edit_mode != EDIT_MODE_INSERT {
+                continue;
+            }
+        }
+        if cell_index < count {
+            items.push(
+                builder
+                    .import_view(
+                        cells
+                            .get_index(cell_index)
+                            .expect("validated notebook cell"),
+                    )
+                    .map_err(|error| notebook_error(error.to_string()))?,
+            );
+        }
+    }
+    let cells_root = builder
+        .push_array(items)
+        .map_err(|error| notebook_error(error.to_string()))?;
+    let updated_cells = builder
+        .finish(cells_root)
+        .map_err(|error| notebook_error(error.to_string()))?;
     notebook
-        .set_field(
-            "cells",
-            Utf16JsonProjection::array(cells).map_err(|error| notebook_error(error.to_string()))?,
-        )
+        .set_field("cells", updated_cells)
         .map_err(|error| notebook_error(error.to_string()))?;
     let display_id = result_id.as_deref().unwrap_or("undefined");
     let prefix = match edit_mode {
@@ -309,7 +400,12 @@ fn mutate_notebook(
     };
     let mut units: Vec<u16> = prefix.encode_utf16().collect();
     if edit_mode != EDIT_MODE_DELETE {
-        units.extend(new_source.string_units("").unwrap_or_default());
+        units.extend_from_slice(
+            new_source
+                .at_pointer("")
+                .and_then(JsonValueView::code_units)
+                .unwrap_or_default(),
+        );
     }
     let model_content = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
         .map_err(|error| notebook_error(error.to_string()))?;
@@ -509,8 +605,9 @@ Usage:\n\
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         // NotebookEdit's guard has no full-content equality fallback. Even a
         // byte-identical file with an advanced mtime must be read again.
-        let entry = tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
-            .ok_or_else(|| ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()))?;
+        let entry =
+            tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
+                .ok_or_else(|| ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()))?;
         if current_mtime_ms > entry.mtime_ms {
             return Err(ToolError::InvalidInput(
                 crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
@@ -648,6 +745,10 @@ Usage:\n\
         })
     }
 }
+
+#[cfg(test)]
+#[path = "notebook_edit_optimization_tests.rs"]
+mod optimization_tests;
 
 #[cfg(test)]
 mod tests {

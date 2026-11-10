@@ -81,17 +81,21 @@ pub fn find_actual_string(file: &str, search: &str) -> Option<String> {
     // char indices in the normalized file align 1:1 with the original file's
     // char indices. Find the search by char index in the normalized file, then
     // slice the original file's chars by the same window.
-    let normalized_file_chars: Vec<char> = normalized_file.chars().collect();
-    let normalized_search_chars: Vec<char> = normalized_search.chars().collect();
-    if let Some(search_char_index) = char_index_of(&normalized_file_chars, &normalized_search_chars)
-    {
+    if let Some(search_byte_index) = normalized_file.find(&normalized_search) {
+        let search_char_index = normalized_file[..search_byte_index].chars().count();
         // TS: fileContent.substring(searchIndex, searchIndex + searchString.length).
         // We use the ORIGINAL search's char length (JS `.length` is UTF-16 units;
         // see module divergence note — BMP-faithful).
         let window_len = search.chars().count();
-        let original_chars: Vec<char> = file.chars().collect();
-        let end = (search_char_index + window_len).min(original_chars.len());
-        return Some(original_chars[search_char_index..end].iter().collect());
+        let start = file
+            .char_indices()
+            .nth(search_char_index)
+            .map_or(file.len(), |(index, _)| index);
+        let end = file[start..]
+            .char_indices()
+            .nth(window_len)
+            .map_or(file.len(), |(index, _)| start + index);
+        return Some(file[start..end].to_string());
     }
 
     // (3) Escape-swap fallback (`vIe` step 3 / `Tlo` + `flo`): if `search`
@@ -346,19 +350,6 @@ fn try_match_at(file_chars: &[char], start: usize, pattern: &[PatternUnit]) -> O
     Some(pos)
 }
 
-/// Index of the first occurrence of `needle` within `haystack` (char slices),
-/// or `None`. Mirrors JS `String.prototype.indexOf` over normalized content.
-fn char_index_of(haystack: &[char], needle: &[char]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > haystack.len() {
-        return None;
-    }
-    (0..=haystack.len() - needle.len())
-        .find(|&start| haystack[start..start + needle.len()] == *needle)
-}
-
 /// When `old_string` matched via quote normalization (curly quotes in file,
 /// straight quotes from model), apply the same curly quote style to `new_string`
 /// so the edit preserves the file's typography. Port of `preserveQuoteStyle`
@@ -589,6 +580,18 @@ mod tests {
             actual,
             format!("{LEFT_SINGLE_CURLY_QUOTE}b{RIGHT_SINGLE_CURLY_QUOTE}")
         );
+    }
+
+    #[test]
+    fn curly_recovery_preserves_character_windows_after_unicode_prefixes() {
+        for (file, search, expected) in [
+            ("pré😀 say “hello” now", "\"hello\"", "“hello”"),
+            ("前 ‘名字’ suffix", "'名字'", "‘名字’"),
+            ("“prefix” 😀 say “世界”", "\"世界\"", "“世界”"),
+            ("😀 “😀” suffix", "\"😀\"", "“😀”"),
+        ] {
+            assert_eq!(find_actual_string(file, search).as_deref(), Some(expected));
+        }
     }
 
     #[test]

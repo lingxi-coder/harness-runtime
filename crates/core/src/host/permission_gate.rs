@@ -677,6 +677,14 @@ pub trait ReadPathPolicySnapshot: Send + Sync {
     }
 }
 
+/// Read-policy inputs captured for one search invocation. `None` from the
+/// preparation method retains the caller's construction-time fallback.
+#[derive(Clone)]
+pub struct ReadSearchPolicyPreparation {
+    pub exclude_globs: Vec<String>,
+    pub path_policy: std::sync::Arc<dyn ReadPathPolicySnapshot>,
+}
+
 /// Explicit inactive facts for a permission transport with no policy layer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoPolicyReadPathSnapshot;
@@ -1264,6 +1272,18 @@ pub trait PermissionGate: Send + Sync {
     /// explicit inactive view, not an inferred permission decision.
     fn read_path_policy_snapshot(&self) -> std::sync::Arc<dyn ReadPathPolicySnapshot> {
         std::sync::Arc::new(NoPolicyReadPathSnapshot)
+    }
+
+    /// Prepare coarse exclusions and exact Read checks for one search. Gates
+    /// with mutable policy state should override this to derive both from one
+    /// policy/cwd snapshot. The default preserves existing gates' availability
+    /// and fallback behavior without requiring them to implement a new method.
+    fn prepare_read_search_policy(&self, cwd: &Path) -> Option<ReadSearchPolicyPreparation> {
+        self.read_deny_exclude_globs(cwd)
+            .map(|exclude_globs| ReadSearchPolicyPreparation {
+                exclude_globs,
+                path_policy: self.read_path_policy_snapshot(),
+            })
     }
 
     /// Like [`Self::check`], but carrying the identity of the SUBAGENT/teammate

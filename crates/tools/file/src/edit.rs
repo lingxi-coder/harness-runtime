@@ -186,21 +186,39 @@ pub const STALE_RECOVERED_NOTE: &str = " (note: the file had been modified on di
 /// a failing test could not say which question was answered wrongly.
 #[must_use]
 pub fn stale_edit_applies(content: &str, old_string: &str, replace_all: bool) -> bool {
+    find_stale_edit_match(content, old_string, replace_all).is_some()
+}
+
+struct ResolvedEditMatch {
+    actual_old: String,
+    // A unique stale-recovery match has already been counted. Replace-all
+    // defers counting until after the existing encoding/notebook checks.
+    count: Option<usize>,
+}
+
+fn find_stale_edit_match(
+    content: &str,
+    old_string: &str,
+    replace_all: bool,
+) -> Option<ResolvedEditMatch> {
     if old_string.is_empty() {
-        return false; // ZVi: "" → no_match
+        return None; // ZVi: "" → no_match
     }
-    let Some(actual) = crate::quotes::find_actual_string(content, old_string) else {
-        return false; // ZVi: !Ytt → no_match
-    };
-    if !replace_all {
+    let actual_old = crate::quotes::find_actual_string(content, old_string)?;
+    let count = if replace_all {
+        None
+    } else {
         // ZVi: a second occurrence ⇒ ambiguous.
-        if let Some(first) = content.find(actual.as_str()) {
-            if content[first + actual.len()..].contains(actual.as_str()) {
-                return false;
+        if let Some(first) = content.find(actual_old.as_str()) {
+            if content[first + actual_old.len()..].contains(actual_old.as_str()) {
+                return None;
             }
+            Some(1)
+        } else {
+            Some(0)
         }
-    }
-    true // "applies"
+    };
+    Some(ResolvedEditMatch { actual_old, count })
 }
 
 /// Normalize claude-code's accepted Edit input aliases to the canonical keys
@@ -256,6 +274,7 @@ fn edit_resolution_error(
     error: lingxi_core::host::rooted_fs::RootedFsError,
 ) -> ToolError {
     match error {
+        lingxi_core::host::rooted_fs::RootedFsError::Cancelled => ToolError::Aborted,
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         ).into()),
@@ -293,48 +312,70 @@ impl FileEditTool {
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_file_path".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(EDIT_STARTED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(EDIT_STARTED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "_PROTO_file_path".to_string(),
+                    AnalyticsValue::String(
+                        PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                            .into_inner(),
+                    ),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_completed(&self, invocation_id: &str, replacements: u32, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "replacements".to_string(),
-            AnalyticsValue::Int(replacements as i64),
-        );
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(EDIT_COMPLETED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(EDIT_COMPLETED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "replacements".to_string(),
+                    AnalyticsValue::Int(replacements as i64),
+                );
+                md.insert(
+                    "duration_ms".to_string(),
+                    AnalyticsValue::Int(duration_ms as i64),
+                );
+                md
+            })
+            .await;
     }
 
     async fn emit_failed(&self, invocation_id: &str, kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(EDIT_FAILED, md).await;
+        self.ctx
+            .bus
+            .log_event_lazy(EDIT_FAILED, || {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert(
+                    "invocation_id".to_string(),
+                    AnalyticsValue::String(
+                        Verified::assert_safe(invocation_id.to_string()).into_inner(),
+                    ),
+                );
+                md.insert(
+                    "failure_kind".to_string(),
+                    AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
+                );
+                md
+            })
+            .await;
     }
 
     /// Build a `+`/`-`/` ` diff preview, capped at `PATCH_PREVIEW_LINE_LIMIT`
@@ -702,7 +743,7 @@ impl Tool for FileEditTool {
         // stale-recovery lets a stale-but-cleanly-applying edit proceed.
         let mut stale_recovered = false;
         let prior_partial_view = existing.is_some()
-            && tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+            && tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
                 .is_some_and(|entry| entry.is_partial_view);
         let (before, after, replacements): (String, String, u32) = match existing {
             // File does not exist.
@@ -736,8 +777,11 @@ impl Tool for FileEditTool {
                     crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon);
                 if !waived
                     && !old_string.is_empty()
-                    && tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
-                        .is_some_and(|entry| entry.is_partial_view)
+                    && tool_api::read_file_state::get_metadata(
+                        &self.ctx.read_file_state,
+                        &requested_path,
+                    )
+                    .is_some_and(|entry| entry.is_partial_view)
                 {
                     return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
                 }
@@ -749,6 +793,7 @@ impl Tool for FileEditTool {
                 // `result:true`). `guard_raw_content` is the current on-disk
                 // content decoded the same way `Read` records it, for the
                 // full-read content-equality fallback.
+                let mut recovered_match = None;
                 if let Err(e) = if old_string.is_empty() {
                     Ok(())
                 } else {
@@ -786,13 +831,17 @@ impl Tool for FileEditTool {
                     // on a file the model was never allowed to see, i.e. a write
                     // landing on unseen content. An un-wired host answers
                     // `false` and simply keeps the stale error.
-                    if is_stale_error
+                    let applicable_match = if is_stale_error
                         && lingxi_core::host::read_auto_allow::read_auto_allowed(
                             &canon.to_string_lossy(),
-                        )
-                        && stale_edit_applies(&before, old_string, replace_all)
-                    {
+                        ) {
+                        find_stale_edit_match(&before, old_string, replace_all)
+                    } else {
+                        None
+                    };
+                    if let Some(actual) = applicable_match {
                         stale_recovered = true;
+                        recovered_match = Some(actual);
                     } else {
                         self.emit_failed(&invocation_id, "stale_read").await;
                         return Err(e);
@@ -844,14 +893,19 @@ impl Tool for FileEditTool {
                     // `before` does NOT contain `old_string`) yields `count == 0`
                     // and routes to the not-found branch, exactly as the binary's
                     // `if(!f){…errorCode 8…}` does.
-                    let actual_old = crate::quotes::find_actual_string(&before, old_string)
-                        .unwrap_or_else(|| old_string.to_string());
+                    let ResolvedEditMatch { actual_old, count } =
+                        recovered_match.unwrap_or_else(|| ResolvedEditMatch {
+                            actual_old: crate::quotes::find_actual_string(&before, old_string)
+                                .unwrap_or_else(|| old_string.to_string()),
+                            count: None,
+                        });
                     let actual_new = crate::quotes::preserve_escape_style(
                         old_string,
                         &actual_old,
                         &crate::quotes::preserve_quote_style(old_string, &actual_old, new_string),
                     );
-                    let count = before.matches(actual_old.as_str()).count();
+                    let count =
+                        count.unwrap_or_else(|| before.matches(actual_old.as_str()).count());
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
                         // Byte-locked string-to-replace-not-found message

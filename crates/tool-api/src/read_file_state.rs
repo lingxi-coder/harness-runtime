@@ -118,6 +118,37 @@ pub struct ReadFileEntry {
     pub is_partial_view: bool,
 }
 
+/// Scalar read-state fields for callers that do not inspect the cached content.
+/// Fetching these fields preserves the same LRU promotion as a full entry read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadFileMetadata {
+    /// Recorded floor-truncated modification time in milliseconds.
+    pub mtime_ms: i64,
+    /// The read's optional line offset.
+    pub offset: Option<u64>,
+    /// The read's optional line limit.
+    pub limit: Option<u64>,
+    /// Whether the entry came from a Read invocation.
+    pub from_read: bool,
+    /// Whether the entry was seeded from model context.
+    pub seeded_from_context: bool,
+    /// Whether the recorded content differs from a complete disk view.
+    pub is_partial_view: bool,
+}
+
+impl From<&ReadFileEntry> for ReadFileMetadata {
+    fn from(entry: &ReadFileEntry) -> Self {
+        Self {
+            mtime_ms: entry.mtime_ms,
+            offset: entry.offset,
+            limit: entry.limit,
+            from_read: entry.from_read,
+            seeded_from_context: entry.seeded_from_context,
+            is_partial_view: entry.is_partial_view,
+        }
+    }
+}
+
 /// One LRU slot: the entry plus its recency stamp and cached byte size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
@@ -201,6 +232,16 @@ impl ReadFileStateLru {
         self.clock = next;
         node.last_used = next;
         Some(node.entry.clone())
+    }
+
+    /// Fetch scalar metadata and promote `path` exactly as [`Self::get`] does,
+    /// without cloning its cached file content or source routes.
+    pub fn get_metadata(&mut self, path: &Path) -> Option<ReadFileMetadata> {
+        let next = self.clock + 1;
+        let node = self.map.get_mut(path)?;
+        self.clock = next;
+        node.last_used = next;
+        Some(ReadFileMetadata::from(&node.entry))
     }
 
     /// Fetch a clone of the entry for `path` WITHOUT promoting it to
@@ -327,44 +368,46 @@ impl ReadFileStateLru {
         // per-spelling Map entries, this cache folds aliases into one key, so a
         // generic update cannot prove an earlier route was removed. Append a
         // newly observed spelling once, preserving first-observed order.
-        let previous = self.map.get(&path);
-        let mut requested_path_groups = previous
-            .map(|old| old.requested_path_groups.clone())
-            .unwrap_or_default();
         let new_requested_paths = if new_requested_paths.is_empty() && in_model_context {
             vec![path.clone()]
         } else {
             new_requested_paths
         };
-        // A non-model seed may share this canonical slot with an earlier
-        // model-visible alias. Preserve that visibility: Native keeps the
-        // alias in a separate Map entry, so this folded slot cannot let the
-        // seed erase the still-live changed-file candidate.
-        let in_model_context = in_model_context || previous.is_some_and(|old| old.in_model_context);
         let mut route = Vec::new();
         for requested_path in new_requested_paths {
             if !route.contains(&requested_path) {
                 route.push(requested_path);
             }
         }
-        if !route.is_empty() && !requested_path_groups.contains(&route) {
-            requested_path_groups.push(route);
-        }
         let size = (entry.content.len() as u64).max(1);
         self.clock += 1;
         let last_used = self.clock;
-        if let Some(old) = self.map.insert(
-            path,
-            Node {
-                entry,
-                requested_path_groups,
-                in_model_context,
-                last_used,
-                size,
-            },
-        ) {
-            // Overwrite: drop the replaced entry's bytes before adding the new.
-            self.total_bytes = self.total_bytes.saturating_sub(old.size);
+        match self.map.entry(path) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let node = slot.get_mut();
+                if !route.is_empty() && !node.requested_path_groups.contains(&route) {
+                    node.requested_path_groups.push(route);
+                }
+                // A non-model seed cannot erase an earlier model-visible route.
+                node.in_model_context |= in_model_context;
+                self.total_bytes = self.total_bytes.saturating_sub(node.size);
+                node.entry = entry;
+                node.last_used = last_used;
+                node.size = size;
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Node {
+                    entry,
+                    requested_path_groups: if route.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![route]
+                    },
+                    in_model_context,
+                    last_used,
+                    size,
+                });
+            }
         }
         self.total_bytes += size;
         self.evict();
@@ -743,6 +786,15 @@ pub fn get(map: &ReadFileStateMap, path: &Path) -> Option<ReadFileEntry> {
         .and_then(|mut guard| guard.get(path))
 }
 
+/// Fetch scalar metadata, promoting the entry with the same missing-path and
+/// poisoned-mutex behavior as [`get`], without cloning its content.
+#[must_use]
+pub fn get_metadata(map: &ReadFileStateMap, path: &Path) -> Option<ReadFileMetadata> {
+    map.lock()
+        .ok()
+        .and_then(|mut guard| guard.get_metadata(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,6 +899,135 @@ mod tests {
     fn get_missing_is_none() {
         let map = new_read_file_state_map();
         assert_eq!(get(&map, Path::new("/nope")), None);
+    }
+
+    #[test]
+    fn metadata_get_matches_full_get_promotion_without_changing_the_entry() {
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let c = PathBuf::from("/c");
+        let mut value = entry("recorded content");
+        value.mtime_ms = 42;
+        value.offset = Some(3);
+        value.limit = Some(9);
+        value.from_read = false;
+        value.seeded_from_context = true;
+        value.is_partial_view = true;
+        let expected_metadata = ReadFileMetadata::from(&value);
+        let mut state = ReadFileStateLru::with_limits(2, u64::MAX);
+        state.set_with_requested_aliases(a.clone(), value, false, vec![PathBuf::from("/guest/a")]);
+        state.set(b.clone(), entry("b"));
+        let mut full_get_state = state.clone();
+
+        let missing_state = state.clone();
+        assert_eq!(state.get_metadata(Path::new("/missing")), None);
+        assert_eq!(
+            state, missing_state,
+            "a miss must not advance the LRU clock"
+        );
+        assert_eq!(state.get_metadata(&a), Some(expected_metadata));
+        assert_eq!(
+            full_get_state.get(&a).as_ref().map(ReadFileMetadata::from),
+            Some(expected_metadata)
+        );
+        assert_eq!(
+            state, full_get_state,
+            "metadata touches only get's recency fields"
+        );
+        state.set(c.clone(), entry("c"));
+        assert!(!state.contains(&b));
+        assert_eq!(state.keys(), vec![c, a]);
+    }
+
+    #[test]
+    fn metadata_map_get_keeps_full_get_poison_behavior() {
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/a");
+        set(&map, path.clone(), entry("a"));
+        let poison_map = Arc::clone(&map);
+        assert!(std::thread::spawn(move || {
+            let _guard = poison_map.lock().unwrap();
+            panic!("poison the read-state mutex");
+        })
+        .join()
+        .is_err());
+        assert_eq!(get_metadata(&map, &path), None);
+        assert_eq!(get(&map, &path), None);
+    }
+
+    #[test]
+    fn alias_refresh_reuses_existing_routes_and_preserves_eviction_accounting() {
+        let path = PathBuf::from("/host/a");
+        let model = PathBuf::from("/guest/a");
+        let other = PathBuf::from("/host/b");
+        let mut state = ReadFileStateLru::with_limits(2, 10);
+        state.set_with_requested_aliases(
+            path.clone(),
+            entry("aaaa"),
+            true,
+            vec![model.clone(), path.clone(), model.clone()],
+        );
+        state.set(other.clone(), entry("bbbbb"));
+        let (groups_storage, route_storage, model_storage) = {
+            let node = state.map.get(&path).unwrap();
+            (
+                node.requested_path_groups.as_ptr(),
+                node.requested_path_groups[0].as_ptr(),
+                node.requested_path_groups[0][0]
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .as_ptr(),
+            )
+        };
+
+        state.set_with_requested_aliases(path.clone(), entry("aaaaaaaa"), false, Vec::new());
+        assert!(
+            !state.contains(&other),
+            "updated content must still drive byte eviction"
+        );
+        assert_eq!(state.total_bytes(), 8);
+        state.set_with_requested_aliases(
+            path.clone(),
+            entry("x"),
+            true,
+            vec![model.clone(), path.clone(), model.clone()],
+        );
+        let node = state.map.get(&path).unwrap();
+        assert_eq!(node.requested_path_groups, vec![vec![model, path.clone()]]);
+        assert_eq!(node.requested_path_groups.as_ptr(), groups_storage);
+        assert_eq!(node.requested_path_groups[0].as_ptr(), route_storage);
+        assert_eq!(
+            node.requested_path_groups[0][0]
+                .as_os_str()
+                .as_encoded_bytes()
+                .as_ptr(),
+            model_storage
+        );
+        assert!(state.model_context_keys().contains(&path));
+        assert_eq!(state.total_bytes(), 1);
+        assert_eq!(state.keys(), vec![path]);
+    }
+
+    #[test]
+    #[ignore = "manual metadata/full-content lookup comparison; no timing threshold"]
+    fn metadata_lookup_copy_probe() {
+        const LOOKUPS: usize = 512;
+        const CONTENT_BYTES: usize = 4 * 1024 * 1024;
+        let path = PathBuf::from("/large");
+        let mut state = ReadFileStateLru::with_limits(1, u64::MAX);
+        state.set(path.clone(), entry(&"x".repeat(CONTENT_BYTES)));
+        let started = std::time::Instant::now();
+        for _ in 0..LOOKUPS {
+            std::hint::black_box(state.get_metadata(std::hint::black_box(&path)));
+        }
+        let metadata_ns = started.elapsed().as_nanos();
+        let started = std::time::Instant::now();
+        for _ in 0..LOOKUPS {
+            std::hint::black_box(state.get(std::hint::black_box(&path)));
+        }
+        let full_content_ns = started.elapsed().as_nanos();
+        eprintln!("metadata_lookup_copy_probe lookups={LOOKUPS} content_bytes={CONTENT_BYTES} metadata_ns={metadata_ns} full_content_ns={full_content_ns} content_copy_bytes_avoided={}", LOOKUPS * CONTENT_BYTES);
+        assert_eq!(state.total_bytes(), CONTENT_BYTES as u64);
     }
 
     #[test]

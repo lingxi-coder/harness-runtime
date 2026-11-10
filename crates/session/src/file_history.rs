@@ -32,7 +32,8 @@ const MAX_SNAPSHOTS: usize = 100;
 
 /// One file's backup at a given version. `backup_file_name = None` marks "the
 /// file did not exist in this version" (so rewinding deletes it).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), derive(Clone))]
 pub struct FileHistoryBackup {
     /// The `<hash>@v<n>` backup file name, or `None` if the file was absent.
     pub backup_file_name: Option<String>,
@@ -41,6 +42,24 @@ pub struct FileHistoryBackup {
     /// The original existing parent (or nearest existing ancestor) and its
     /// physical identity at the time the file was first tracked.
     pub source: FileHistorySource,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    // Count owned backup copies mechanically, without wall-clock assertions.
+    static BACKUP_CLONE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl Clone for FileHistoryBackup {
+    fn clone(&self) -> Self {
+        BACKUP_CLONE_COUNT.with(|count| count.set(count.get() + 1));
+        Self {
+            backup_file_name: self.backup_file_name.clone(),
+            version: self.version,
+            source: self.source.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -172,6 +191,48 @@ pub struct FileHistorySnapshot {
 struct State {
     snapshots: Vec<FileHistorySnapshot>,
     tracked_files: HashSet<String>,
+}
+
+impl State {
+    /// Resolve exactly one owned backup per tracked file while the caller holds
+    /// the state lock. The returned plan never borrows mutable history across
+    /// filesystem I/O and preserves the tracked set's existing iteration order.
+    fn restore_plan(&self, message_id: Uuid) -> Option<Vec<(String, FileHistoryBackup)>> {
+        let target = self
+            .snapshots
+            .iter()
+            .rev()
+            .find(|snapshot| snapshot.message_id == message_id)?;
+        let mut missing: HashSet<&str> = self
+            .tracked_files
+            .iter()
+            .filter(|path| !target.tracked_file_backups.contains_key(*path))
+            .map(String::as_str)
+            .collect();
+        let mut first_versions = HashMap::new();
+        for snapshot in &self.snapshots {
+            if missing.is_empty() {
+                break;
+            }
+            for (path, backup) in &snapshot.tracked_file_backups {
+                if backup.version == 1 && missing.remove(path.as_str()) {
+                    first_versions.insert(path.as_str(), backup);
+                }
+            }
+        }
+        Some(
+            self.tracked_files
+                .iter()
+                .filter_map(|path| {
+                    target
+                        .tracked_file_backups
+                        .get(path)
+                        .or_else(|| first_versions.get(path.as_str()).copied())
+                        .map(|backup| (path.clone(), backup.clone()))
+                })
+                .collect(),
+        )
+    }
 }
 
 /// A serialized `file-history-snapshot` side-map line (persisted to the session
@@ -497,36 +558,16 @@ impl FileHistory {
         mut verify_source: impl FnMut() -> Result<(), String>,
     ) -> Result<RewindOutcome, String> {
         verify_source()?;
-        let (target, tracked, snapshots) = {
-            let st = self.state.lock().expect("file-history lock");
-            let target = st
-                .snapshots
-                .iter()
-                .rev()
-                .find(|s| s.message_id == message_id)
-                .cloned();
-            (
-                target,
-                st.tracked_files.iter().cloned().collect::<Vec<_>>(),
-                st.snapshots.clone(),
-            )
-        };
-        let Some(target) = target else {
-            return Err("The selected snapshot was not found".to_string());
-        };
+        let plan = self
+            .state
+            .lock()
+            .expect("file-history lock")
+            .restore_plan(message_id)
+            .ok_or_else(|| "The selected snapshot was not found".to_string())?;
 
         let mut outcome = RewindOutcome::default();
-        for tracking_path in tracked {
+        for (tracking_path, backup) in plan {
             let file_path = PathBuf::from(&tracking_path);
-            // Resolve the backup for this file at the target version, falling
-            // back to its first-version backup when untracked at the target.
-            let backup = match target.tracked_file_backups.get(&tracking_path) {
-                Some(b) => Some(b.clone()),
-                None => Self::first_version_backup(&snapshots, &tracking_path),
-            };
-            let Some(backup) = backup else {
-                continue; // unresolved → leave the file untouched
-            };
             verify_source().map_err(|error| {
                 format!("rewind source changed; workspace may be partially restored: {error}")
             })?;
@@ -616,32 +657,16 @@ impl FileHistory {
     /// per-row `has_code_changes` flag — early-exits, never diffs).
     #[must_use]
     pub async fn has_any_changes(&self, message_id: Uuid) -> bool {
-        let (target, tracked, snapshots) = {
-            let st = self.state.lock().expect("file-history lock");
-            let target = st
-                .snapshots
-                .iter()
-                .rev()
-                .find(|s| s.message_id == message_id)
-                .cloned();
-            (
-                target,
-                st.tracked_files.iter().cloned().collect::<Vec<_>>(),
-                st.snapshots.clone(),
-            )
-        };
-        let Some(target) = target else {
+        let plan = self
+            .state
+            .lock()
+            .expect("file-history lock")
+            .restore_plan(message_id);
+        let Some(plan) = plan else {
             return false;
         };
-        for tracking_path in tracked {
+        for (tracking_path, backup) in plan {
             let file_path = PathBuf::from(&tracking_path);
-            let backup = match target.tracked_file_backups.get(&tracking_path) {
-                Some(b) => Some(b.clone()),
-                None => Self::first_version_backup(&snapshots, &tracking_path),
-            };
-            let Some(backup) = backup else {
-                continue;
-            };
             if !backup.source.has_original_parent(&file_path) {
                 return true;
             }
@@ -662,23 +687,6 @@ impl FileHistory {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
-
-    /// The first-version (`v1`) backup name for `tracking_path` across all
-    /// snapshots (used when the target snapshot predates the file's tracking).
-    /// The result includes the original physical parent authority.
-    fn first_version_backup(
-        snapshots: &[FileHistorySnapshot],
-        tracking_path: &str,
-    ) -> Option<FileHistoryBackup> {
-        for snap in snapshots {
-            if let Some(b) = snap.tracked_file_backups.get(tracking_path) {
-                if b.version == 1 {
-                    return Some(b.clone());
-                }
-            }
-        }
-        None
-    }
 
     fn orphaned_backup_names(
         removed: &[FileHistorySnapshot],
@@ -1105,6 +1113,193 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         (home.canonicalize().unwrap(), cwd.canonicalize().unwrap())
+    }
+
+    #[test]
+    fn restore_plan_keeps_latest_target_first_v1_authority_and_tracked_order() {
+        let (_home, cwd) = scratch("plan-semantics");
+        let source = FileHistorySource::capture(&cwd.join("target")).unwrap();
+        let names = ["target", "fallback", "delete", "unresolved"]
+            .map(|name| cwd.join(name).display().to_string());
+        let backup = |name: Option<&str>, version| FileHistoryBackup {
+            backup_file_name: name.map(str::to_owned),
+            version,
+            source: source.clone(),
+        };
+        let message_id = Uuid::new_v4();
+        let mut state = State {
+            tracked_files: names.iter().cloned().collect(),
+            snapshots: vec![
+                FileHistorySnapshot {
+                    message_id: Uuid::new_v4(),
+                    tracked_file_backups: BTreeMap::from([
+                        (names[1].clone(), backup(Some("first@v1"), 1)),
+                        (names[2].clone(), backup(None, 1)),
+                    ]),
+                },
+                FileHistorySnapshot {
+                    message_id,
+                    tracked_file_backups: BTreeMap::from([(
+                        names[0].clone(),
+                        backup(Some("old-target@v2"), 2),
+                    )]),
+                },
+                FileHistorySnapshot {
+                    message_id,
+                    tracked_file_backups: BTreeMap::from([(
+                        names[0].clone(),
+                        backup(Some("latest-target@v3"), 3),
+                    )]),
+                },
+                FileHistorySnapshot {
+                    message_id: Uuid::new_v4(),
+                    tracked_file_backups: BTreeMap::from([(
+                        names[1].clone(),
+                        backup(Some("later@v1"), 1),
+                    )]),
+                },
+            ],
+        };
+        let order: Vec<_> = state
+            .tracked_files
+            .iter()
+            .filter(|path| *path != &names[3])
+            .cloned()
+            .collect();
+        BACKUP_CLONE_COUNT.with(|count| count.set(0));
+        let plan = state.restore_plan(message_id).unwrap();
+        assert_eq!(BACKUP_CLONE_COUNT.with(std::cell::Cell::get), 3);
+        assert_eq!(
+            plan.iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            order
+        );
+        let selected: BTreeMap<_, _> = plan.into_iter().collect();
+        assert_eq!(
+            selected[&names[0]].backup_file_name.as_deref(),
+            Some("latest-target@v3")
+        );
+        assert_eq!(
+            selected[&names[1]].backup_file_name.as_deref(),
+            Some("first@v1")
+        );
+        assert_eq!(selected[&names[1]].source, source);
+        assert_eq!(selected[&names[2]].backup_file_name, None);
+        assert!(!selected.contains_key(&names[3]));
+        state.snapshots.clear();
+        assert_eq!(
+            selected[&names[0]].version, 3,
+            "the plan owns a coherent selection"
+        );
+    }
+
+    #[test]
+    fn restore_plan_backup_copies_scale_with_files_instead_of_snapshot_count() {
+        let (_home, cwd) = scratch("plan-scaling");
+        let source = FileHistorySource::capture(&cwd.join("tracked")).unwrap();
+        let paths: Vec<_> = (0..32)
+            .map(|i| cwd.join(format!("file-{i}")).display().to_string())
+            .collect();
+        for snapshot_count in [2, 100, 1_000] {
+            let message_id = Uuid::new_v4();
+            let snapshots = (0..snapshot_count)
+                .map(|index| FileHistorySnapshot {
+                    message_id: if index + 1 == snapshot_count {
+                        message_id
+                    } else {
+                        Uuid::new_v4()
+                    },
+                    tracked_file_backups: paths
+                        .iter()
+                        .enumerate()
+                        // Half the files require a first-version fallback at the target.
+                        .filter(|(i, _)| index + 1 != snapshot_count || i % 2 == 0)
+                        .map(|(_, path)| {
+                            (
+                                path.clone(),
+                                FileHistoryBackup {
+                                    backup_file_name: Some(format!("backup@v{}", index + 1)),
+                                    version: index + 1,
+                                    source: source.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+                .collect();
+            let state = State {
+                snapshots,
+                tracked_files: paths.iter().cloned().collect(),
+            };
+            BACKUP_CLONE_COUNT.with(|count| count.set(0));
+            let plan = state.restore_plan(message_id).unwrap();
+            assert_eq!(plan.len(), paths.len());
+            assert_eq!(BACKUP_CLONE_COUNT.with(std::cell::Cell::get), paths.len());
+            BACKUP_CLONE_COUNT.with(|count| count.set(0));
+            assert!(state.restore_plan(Uuid::new_v4()).is_none());
+            assert_eq!(BACKUP_CLONE_COUNT.with(std::cell::Cell::get), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn rewind_plan_uses_v1_fallback_without_holding_history_lock_during_io() {
+        let (home, cwd) = scratch("plan-rewind");
+        let existing = cwd.join("existing.txt");
+        let created = cwd.join("created.txt");
+        std::fs::write(&existing, "original").unwrap();
+        let history = FileHistory::new(home, "plan-rewind".into());
+        let target = Uuid::new_v4();
+        history.make_snapshot(target).await;
+        history.make_snapshot(Uuid::new_v4()).await;
+        history.track_edit(existing.to_str().unwrap()).await;
+        history.track_edit(created.to_str().unwrap()).await;
+        std::fs::write(&existing, "changed").unwrap();
+        std::fs::write(&created, "new").unwrap();
+        assert!(history.has_any_changes(target).await);
+        let outcome = history
+            .rewind_files_guarded(target, || {
+                let _state = history
+                    .state
+                    .try_lock()
+                    .expect("plan lock is released before filesystem work");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.changed.len(), 2);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+        assert!(!created.exists());
+        assert!(!history.has_any_changes(target).await);
+    }
+
+    #[test]
+    fn restored_history_retains_snapshots_beyond_live_pruning_limit() {
+        let (home, cwd) = scratch("plan-resume-retention");
+        let path = cwd.join("tracked").display().to_string();
+        let source = FileHistorySource::capture(Path::new(&path)).unwrap();
+        let first = Uuid::new_v4();
+        let history = FileHistory::new(home, "plan-resume-retention".into());
+        history
+            .restore_from_records(
+                (0..MAX_SNAPSHOTS + 10)
+                    .map(|index| SnapshotRecord {
+                        message_id: if index == 0 { first } else { Uuid::new_v4() },
+                        tracked_file_backups: BTreeMap::from([(
+                            path.clone(),
+                            FileHistoryBackup {
+                                backup_file_name: None,
+                                version: u32::try_from(index + 1).unwrap(),
+                                source: source.clone(),
+                            },
+                        )]),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let state = history.state.lock().unwrap();
+        assert_eq!(state.snapshots.len(), MAX_SNAPSHOTS + 10);
+        assert_eq!(state.restore_plan(first).unwrap()[0].1.version, 1);
     }
 
     #[tokio::test]
