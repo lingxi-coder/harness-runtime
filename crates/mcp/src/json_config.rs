@@ -23,6 +23,40 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+/// Apply the SDK control channel's separately sanitized settings (`lEt`,
+/// native 2.1.322 byte 261123435). Call only while admitting a newly registered
+/// SDK server; ordinary `--mcp-config` deliberately strips these fields.
+pub fn apply_sdk_mcp_settings(
+    config: &mut McpServerConfig,
+    settings: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) {
+    if !matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+        return;
+    }
+    config.metadata.sdk_connector_id =
+        settings.subprojection("/connectorId").ok().filter(|value| {
+            value
+                .string_units("")
+                .is_some_and(|units| !units.is_empty())
+        });
+    config.metadata.sdk_auto_mode_verdict_tools = settings
+        .subprojection("/autoModeVerdictTools")
+        .ok()
+        .filter(|value| {
+            value.array_len("").is_some_and(|count| {
+                count <= 64
+                    && (0..count).all(|index| {
+                        value
+                            .string_units(&format!("/{index}"))
+                            .is_some_and(|units| units.len() <= 128)
+                    })
+            })
+        });
+    config.metadata.sdk_disable_auto_background = settings
+        .get_property("disableAutoBackground")
+        .is_some_and(|value| value.as_bool() == Some(true));
+}
+
 /// Expand `${VAR}` / `${VAR:-default}` references in one string against the
 /// process environment, appending any missing-variable names to `missing`.
 /// 1:1 with the inner `expandString` of claude-code `expandEnvVars`
@@ -95,6 +129,10 @@ struct McpJsonEntry {
     /// — it is NOT forced to equal the entry's map key.
     #[serde(default)]
     name: Option<String>,
+    /// Unlike connector/verdict declarations, the native SDK schema also
+    /// admits this setting from ordinary --mcp-config. Invalid values unset it.
+    #[serde(default, rename = "disableAutoBackground")]
+    disable_auto_background: Option<serde_json::Value>,
     /// "http" | "sse" — only honoured when `url` is set.
     #[serde(default, rename = "type")]
     transport_type: Option<String>,
@@ -125,7 +163,7 @@ struct McpJsonEntry {
     /// E.number().int().positive()`. A present-but-invalid value (non-integer,
     /// non-positive, wrong type) fails the entry's `safeParse` → the entry is
     /// skipped (mirrored here: a non-`u64` value fails `serde` decode →
-    /// [`build_servers_from_map`] logs + skips the entry).
+    /// [`build_servers_from_source_map`] logs + skips the entry).
     #[serde(default, deserialize_with = "de_positive_timeout")]
     timeout: Option<u64>,
     /// sse/http-only alias for `timeout`. claude-code schema:
@@ -360,7 +398,7 @@ fn as_positive_int_ms(v: Option<&serde_json::Value>) -> Option<u64> {
 /// schema `timeout: E.number().int().positive().optional()` (NO `.catch`): an
 /// absent field is `None`; a present positive integer is `Some(n)`; a present
 /// non-positive `0` — a valid `u64` that `.positive()` rejects — fails the
-/// deserialize so [`build_servers_from_map`] logs + SKIPS the whole entry
+/// deserialize so [`build_servers_from_source_map`] logs + SKIPS the whole entry
 /// (matching CC's `safeParse` failure). Negatives, fractional, and non-numeric
 /// values are already rejected by the `u64` decode itself.
 fn de_positive_timeout<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -621,21 +659,16 @@ pub fn parse_mcp_json_string(
     // parsed` precedence before committing to the entry shape. Genuinely
     // invalid JSON still fails here (the `Json` error path), matching the JS
     // `try { jsonParse(content) }` outer guard.
-    let parsed: serde_json::Value = serde_json::from_str(raw)?;
+    let parsed = parse_source_config(raw)?;
 
     // `parsed.mcpServers || parsed`: prefer an `mcpServers` object when present,
     // otherwise treat the whole top-level object as the server map. A
     // non-object top-level (array/string/number/bool/null) yields no servers,
     // matching JS where `Object.entries` over a non-record produces nothing
     // usable.
-    let server_map = match parsed.get("mcpServers") {
-        Some(v) => v,
-        None => &parsed,
-    };
-    let serde_json::Value::Object(entries) = server_map else {
-        return Ok(Vec::new());
-    };
-    Ok(build_servers_from_map(entries, scope, false))
+    let root = parsed.at_pointer("").expect("parsed config root");
+    let server_map = root.get_property("mcpServers").unwrap_or(root);
+    Ok(build_servers_from_source_map(server_map, scope, false))
 }
 
 /// Parse a PLUGIN `.mcp.json` payload (or a plugin manifest's inline
@@ -654,15 +687,10 @@ pub fn parse_plugin_mcp_json_string(
     raw: &str,
     scope: ConfigScope,
 ) -> Result<Vec<McpServerConfig>, McpJsonError> {
-    let parsed: serde_json::Value = serde_json::from_str(raw)?;
-    let server_map = match parsed.get("mcpServers") {
-        Some(v) => v,
-        None => &parsed,
-    };
-    let serde_json::Value::Object(entries) = server_map else {
-        return Ok(Vec::new());
-    };
-    Ok(build_servers_from_map(entries, scope, true))
+    let parsed = parse_source_config(raw)?;
+    let root = parsed.at_pointer("").expect("parsed config root");
+    let server_map = root.get_property("mcpServers").unwrap_or(root);
+    Ok(build_servers_from_source_map(server_map, scope, true))
 }
 
 /// Parse MCP servers from a GLOBAL CONFIG file (`~/.lingxi.json`): reads ONLY the
@@ -678,30 +706,90 @@ pub fn parse_global_config_mcp_servers(
     raw: &str,
     scope: ConfigScope,
 ) -> Result<Vec<McpServerConfig>, McpJsonError> {
-    let parsed: serde_json::Value = serde_json::from_str(raw)?;
-    let Some(serde_json::Value::Object(entries)) = parsed.get("mcpServers") else {
+    let parsed = parse_source_config(raw)?;
+    let Some(entries) = parsed.get_property("mcpServers") else {
         return Ok(Vec::new());
     };
-    Ok(build_servers_from_map(entries, scope, false))
+    Ok(build_servers_from_source_map(entries, scope, false))
+}
+
+fn parse_source_config(
+    raw: &str,
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, McpJsonError> {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).map_err(|error| {
+        // Keep the existing serde syntax diagnostic for genuinely malformed
+        // JSON. Isolated UTF-16 units are valid JS JSON and use the flat path.
+        let diagnostic = serde_json::from_str::<serde_json::Value>(raw)
+            .err()
+            .unwrap_or_else(|| {
+                serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error.to_string(),
+                ))
+            });
+        McpJsonError::Json(diagnostic)
+    })
 }
 
 /// Build validated `McpServerConfig`s from a `{ name: entry }` server map.
 /// Shared by [`parse_mcp_json_string`] (bare-map fallback) and
 /// [`parse_global_config_mcp_servers`] (mcpServers-only). Invalid entries are
 /// logged + skipped (keeping valid siblings); the result is sorted by name.
-fn build_servers_from_map(
-    entries: &serde_json::Map<String, serde_json::Value>,
+fn build_servers_from_source_map(
+    source: lingxi_core::types::utf16_json::JsonValueView<'_>,
     scope: ConfigScope,
     ide_transports_allowed: bool,
 ) -> Vec<McpServerConfig> {
     let mut out = Vec::new();
-    for (name, raw_entry) in entries {
-        if let Some(cfg) = build_entry(name, raw_entry, scope, ide_transports_allowed) {
+    for entry in source.object_entries().unwrap_or_default() {
+        let Ok(raw_entry) = entry
+            .value
+            .to_projection()
+            .and_then(|value| value.to_json_string())
+        else {
+            continue;
+        };
+        let Ok(raw_entry) = serde_json::from_str::<serde_json::Value>(&raw_entry) else {
+            continue;
+        };
+        if let Some(cfg) = build_server_from_utf16_entry(
+            entry.code_units,
+            &raw_entry,
+            scope,
+            ide_transports_allowed,
+        ) {
             out.push(cfg);
         }
     }
+    crate::finalize_mcp_server_names(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Build a host record from an exact authored server-name key. The body keeps
+/// the existing transport schema and expansion rules; the key is never
+/// decoded through a lossy serde object map.
+pub fn build_server_from_json_entry_utf16(
+    name: &[u16],
+    entry: &serde_json::Value,
+    scope: ConfigScope,
+) -> Option<McpServerConfig> {
+    build_server_from_utf16_entry(name, entry, scope, false)
+}
+
+fn build_server_from_utf16_entry(
+    name: &[u16],
+    entry: &serde_json::Value,
+    scope: ConfigScope,
+    ide_transports_allowed: bool,
+) -> Option<McpServerConfig> {
+    let name = crate::McpServerName::from_utf16(name.to_vec());
+    let mut config = build_entry(name.as_str(), entry, scope, ide_transports_allowed)?;
+    if !name.is_scalar() {
+        config.metadata.authored_name = Some(name);
+        crate::finalize_mcp_server_names(std::slice::from_mut(&mut config));
+    }
+    Some(config)
 }
 
 /// The REMOTE transport `type` values the on-disk CONFIG layer recognizes.
@@ -812,7 +900,7 @@ pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
 }
 
 /// Build ONE validated [`McpServerConfig`] from a raw `{ name: entry }` map
-/// entry (the loop body of [`build_servers_from_map`], extracted). `None` when
+/// entry (the loop body of [`build_servers_from_source_map`], extracted). `None` when
 /// the entry is invalid — logged + skipped (TS `safeParse` failure →
 /// `logForDebugging` + `continue`), keeping valid siblings.
 ///
@@ -1242,6 +1330,8 @@ fn build_entry(
             config_error,
             metadata: McpServerMetadata {
                 bare_elicitation_capability,
+                sdk_disable_auto_background: ty == Some("sdk")
+                    && entry.disable_auto_background == Some(serde_json::Value::Bool(true)),
                 // Keep the existing logical key bytes for ordinary config
                 // transports.  Only labels that the enum projection loses
                 // need an explicit transport discriminator.
@@ -1268,7 +1358,7 @@ pub fn load_mcp_json_with_precedence(
     project_path: &Path,
     global_path: &Path,
 ) -> Vec<McpServerConfig> {
-    let mut by_name: HashMap<String, McpServerConfig> = HashMap::new();
+    let mut by_name: HashMap<Vec<u16>, McpServerConfig> = HashMap::new();
 
     // User-global first (lower precedence). The global path is the `~/.lingxi.json`
     // global config, so read ONLY its `mcpServers` key (no bare-map fallback).
@@ -1279,7 +1369,7 @@ pub fn load_mcp_json_with_precedence(
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
-                    by_name.insert(c.name.clone(), c);
+                    by_name.insert(c.authored_name_units(), c);
                 }
             }
             Err(e) => tracing::warn!(
@@ -1304,7 +1394,7 @@ pub fn load_mcp_json_with_precedence(
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
-                    by_name.insert(c.name.clone(), c);
+                    by_name.insert(c.authored_name_units(), c);
                 }
             }
             Err(e) => tracing::warn!(
@@ -1316,6 +1406,7 @@ pub fn load_mcp_json_with_precedence(
     }
 
     let mut out: Vec<McpServerConfig> = by_name.into_values().collect();
+    crate::finalize_mcp_server_names(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
@@ -1336,15 +1427,15 @@ pub fn parse_local_config_mcp_servers(
     project_key: &str,
     scope: ConfigScope,
 ) -> Result<Vec<McpServerConfig>, McpJsonError> {
-    let parsed: serde_json::Value = serde_json::from_str(raw)?;
-    let Some(serde_json::Value::Object(entries)) = parsed
-        .get("projects")
-        .and_then(|p| p.get(project_key))
-        .and_then(|proj| proj.get("mcpServers"))
+    let parsed = parse_source_config(raw)?;
+    let Some(entries) = parsed
+        .get_property("projects")
+        .and_then(|p| p.get_property(project_key))
+        .and_then(|proj| proj.get_property("mcpServers"))
     else {
         return Ok(Vec::new());
     };
-    Ok(build_servers_from_map(entries, scope, false))
+    Ok(build_servers_from_source_map(entries, scope, false))
 }
 
 /// Load + merge MCP servers across all THREE claude-code config scopes, with
@@ -1365,7 +1456,7 @@ pub fn load_mcp_servers(
     global_config_path: &Path,
     cwd: &Path,
 ) -> Vec<McpServerConfig> {
-    let mut by_name: HashMap<String, McpServerConfig> = HashMap::new();
+    let mut by_name: HashMap<Vec<u16>, McpServerConfig> = HashMap::new();
     let global_raw = std::fs::read_to_string(global_config_path).ok();
 
     // USER (lowest precedence): global config top-level `mcpServers`.
@@ -1376,7 +1467,7 @@ pub fn load_mcp_servers(
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
-                    by_name.insert(c.name.clone(), c);
+                    by_name.insert(c.authored_name_units(), c);
                 }
             }
             Err(e) => tracing::warn!(
@@ -1415,9 +1506,9 @@ pub fn load_mcp_servers(
                     );
                     if project_blocked {
                         c.disabled = true;
-                        by_name.entry(c.name.clone()).or_insert(c);
+                        by_name.entry(c.authored_name_units()).or_insert(c);
                     } else {
-                        by_name.insert(c.name.clone(), c);
+                        by_name.insert(c.authored_name_units(), c);
                     }
                 }
             }
@@ -1439,7 +1530,7 @@ pub fn load_mcp_servers(
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
-                    by_name.insert(c.name.clone(), c);
+                    by_name.insert(c.authored_name_units(), c);
                 }
             }
             Err(e) => tracing::warn!(
@@ -1451,6 +1542,7 @@ pub fn load_mcp_servers(
     }
 
     let mut out: Vec<McpServerConfig> = by_name.into_values().collect();
+    crate::finalize_mcp_server_names(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }

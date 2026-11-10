@@ -136,6 +136,7 @@ impl BridgeMock {
                 full_name: format!("mcp____{t}"),
                 server_name: String::new(),
                 tool_name: (*t).to_string(),
+                wire_tool_name: None,
                 description: format!("{t} tool").into(),
                 input_schema: source_json(&serde_json::json!({"type": "object"})),
                 output_schema: None,
@@ -244,6 +245,7 @@ impl BridgeMock {
                 full_name: format!("mcp____{name}"),
                 server_name: String::new(),
                 tool_name: (*name).to_string(),
+                wire_tool_name: None,
                 description: format!("{name} tool").into(),
                 input_schema: source_json(&schema),
                 output_schema: None,
@@ -545,6 +547,7 @@ impl McpTransport for DirectInProcessMock {
         Ok(vec![McpToolDto {
             server_name: String::new(),
             tool_name: "list".into(),
+            wire_tool_name: None,
             description: "list demo items".into(),
             input_schema: source_json(&serde_json::json!({"type":"object"})),
             output_schema: None,
@@ -639,6 +642,42 @@ fn sdk_initialize_config(deny: bool) -> McpServerConfig {
         }),
         ConfigScope::Dynamic,
     ).unwrap()
+}
+
+#[tokio::test]
+async fn sdk_control_pending_tools_update_does_not_wait_for_initialize_or_replace_identity() {
+    let transport = Arc::new(BridgeMock::new(&["write"]));
+    transport.block_connect.store(true, Ordering::SeqCst);
+    let registry = McpRegistry::new(transport.clone());
+    let mut first = sdk_initialize_config(false);
+    first.timeout_ms = Some(1234);
+    registry
+        .seed_sdk_control_pending(first.clone())
+        .await
+        .unwrap();
+    let mut connect = Box::pin(registry.connect_seeded_sdk_control(first.clone()));
+    assert!(futures_util::poll!(connect.as_mut()).is_pending());
+    let mut replacement = sdk_initialize_config(true);
+    replacement.timeout_ms = Some(9999);
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.replace_sdk_control_tools(&replacement),
+    )
+    .await
+    .expect("tool declarations must update while initialize is held");
+    transport.connect_release.notify_one();
+    connect.await.unwrap();
+    let current = registry.get_config_by_key(&first.name).await.unwrap();
+    assert_eq!(current.timeout_ms, Some(1234));
+    assert_eq!(current.tools, replacement.tools);
+    registry.retire_control_server(&current).await.unwrap();
+    let calls = transport.connect_calls.load(Ordering::SeqCst);
+    registry.connect_seeded_sdk_control(first).await.unwrap();
+    assert_eq!(
+        transport.connect_calls.load(Ordering::SeqCst),
+        calls,
+        "a removed post-reply task must not resurrect its old SDK entry"
+    );
 }
 
 #[tokio::test]
@@ -2175,6 +2214,7 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
         vec![McpToolDto {
             server_name: "srv".into(),
             tool_name: "cached_tool".into(),
+            wire_tool_name: None,
             description: "cached tool".into(),
             input_schema: source_json(&serde_json::json!({"type": "object"})),
             output_schema: None,
@@ -3294,6 +3334,7 @@ async fn registry_exports_schema_drop_records_from_the_discovery_decision() {
         full_name: "mcp____badSchema".into(),
         server_name: String::new(),
         tool_name: "badSchema".into(),
+        wire_tool_name: None,
         description: "unsupported schema".into(),
         input_schema: source_json(&serde_json::json!({"anyOf": "not-an-array"})),
         output_schema: None,
@@ -3761,6 +3802,7 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
             tools: vec![McpToolDto {
                 server_name: "srv".into(),
                 tool_name: "old".into(),
+                wire_tool_name: None,
                 description: "old".into(),
                 input_schema: source_json(&serde_json::json!({"type":"object"})),
                 output_schema: None,
@@ -5811,6 +5853,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
         let tool = |name: &str| McpToolDto {
             server_name: cfg.name.clone(),
             tool_name: name.into(),
+            wire_tool_name: None,
             description: name.into(),
             input_schema: source_json(&serde_json::json!({"type": "object"})),
             output_schema: None,
@@ -6850,6 +6893,7 @@ fn seed_entry(store: &crate::discovery_cache::DiscoveryCacheStore, cache_key: &s
         vec![McpToolDto {
             server_name: "srv".into(),
             tool_name: "alpha".into(),
+            wire_tool_name: None,
             description: "alpha tool".into(),
             input_schema: source_json(&serde_json::json!({"type": "object"})),
             output_schema: None,
@@ -7898,6 +7942,7 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
             tools: vec![McpToolDto {
                 server_name: "srv".into(),
                 tool_name: "replacement".into(),
+                wire_tool_name: None,
                 description: "replacement".into(),
                 input_schema: source_json(&serde_json::json!({"type":"object"})),
                 output_schema: None,
@@ -7932,6 +7977,7 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
         vec![McpToolDto {
             server_name: "srv".into(),
             tool_name: "replacement".into(),
+            wire_tool_name: None,
             description: "replacement".into(),
             input_schema: source_json(&serde_json::json!({"type":"object"})),
             output_schema: None,
@@ -8206,6 +8252,7 @@ async fn catalog_refresh_snapshot_excludes_agent_scoped_entries() {
             tools: vec![McpToolDto {
                 server_name: "srv".into(),
                 tool_name: "scoped".into(),
+                wire_tool_name: None,
                 description: "scoped".into(),
                 input_schema: source_json(&serde_json::json!({"type":"object"})),
                 output_schema: None,
@@ -8446,6 +8493,7 @@ async fn background_revalidation_cas_rejects_a_reconfigured_cached_state() {
             tools: vec![McpToolDto {
                 server_name: "srv".into(),
                 tool_name: "old".into(),
+                wire_tool_name: None,
                 description: "old tool".into(),
                 input_schema: source_json(&serde_json::json!({"type":"object"})),
                 output_schema: None,
@@ -10293,6 +10341,8 @@ fn tools_listed_payload_counts_off_the_final_list() {
     let tools = vec![
         McpToolDto {
             tool_name: "a".into(),
+
+            wire_tool_name: None,
             full_name: "mcp__srv__a".into(),
             server_name: "srv".into(),
             description: String::new().into(),
@@ -10307,6 +10357,8 @@ fn tools_listed_payload_counts_off_the_final_list() {
         },
         McpToolDto {
             tool_name: "b".into(),
+
+            wire_tool_name: None,
             full_name: "mcp__srv__b".into(),
             server_name: "srv".into(),
             description: String::new().into(),
@@ -10321,6 +10373,8 @@ fn tools_listed_payload_counts_off_the_final_list() {
         },
         McpToolDto {
             tool_name: "c".into(),
+
+            wire_tool_name: None,
             full_name: "mcp__srv__c".into(),
             server_name: "srv".into(),
             description: String::new().into(),
@@ -11035,7 +11089,7 @@ impl lingxi_core::host::HttpTransport for GatedXaaHttp {
             return Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.into(),
+                body: r#"{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/authorize","response_types_supported":["code"],"token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.into(),
                 body_bytes: Vec::new(),
             });
         }
@@ -11192,7 +11246,7 @@ async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
             } else if req.url.contains("oauth-authorization-server") {
                 (
                     200,
-                    r#"{"issuer":"https://other.example.com/root","token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    r#"{"issuer":"https://other.example.com/root","authorization_endpoint":"https://other.example.com/authorize","response_types_supported":["code"],"token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
                 )
             } else {
                 (404, String::new())
@@ -11310,7 +11364,7 @@ async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
             } else if req.url.contains("oauth-authorization-server") {
                 (
                     200,
-                    r#"{"issuer":"https://as.example.com/root","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    r#"{"issuer":"https://as.example.com/root","authorization_endpoint":"https://as.example.com/authorize","response_types_supported":["code"],"token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
                 )
             } else if req.url.contains("idp.example.com/token") {
                 (
@@ -11775,5 +11829,67 @@ async fn full_review_common_admission_is_rechecked_for_atomic_replace_and_lazy_d
     assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
     assert!(
         matches!(registry.connections.read().await.get("live"), Some(McpConnectionState::Connected { connection_id: current, .. }) if *current == connection_id)
+    );
+}
+
+#[tokio::test]
+async fn later_scalar_private_handle_name_keeps_both_servers_and_public_lookup_identity() {
+    let mock = Arc::new(BridgeMock::new(&["echo"]));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock as Arc<dyn RawConnectionProvider>,
+    );
+    let first = crate::parse_mcp_json_string(
+        r#"{"mcpServers":{"\ud800":{"command":"first"}}}"#,
+        ConfigScope::Dynamic,
+    )
+    .unwrap()
+    .remove(0);
+    let old_handle = first.name.clone();
+    registry.connect(first.clone()).await.unwrap();
+    let mut body = serde_json::Map::new();
+    body.insert(old_handle.clone(), serde_json::json!({"command":"second"}));
+    let mut second = crate::parse_mcp_json_string(
+        &serde_json::json!({"mcpServers":body}).to_string(),
+        ConfigScope::Dynamic,
+    )
+    .unwrap();
+    registry.finalize_authored_server_names(&mut second).await;
+    let second = second.remove(0);
+    assert_ne!(second.name, old_handle);
+    assert_eq!(second.storage_name(), old_handle);
+    registry.connect(second.clone()).await.unwrap();
+    assert_eq!(registry.connections.read().await.len(), 2);
+    assert_eq!(
+        registry
+            .get_config(&old_handle)
+            .await
+            .unwrap()
+            .authored_name_units(),
+        old_handle.encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        registry
+            .get_config_by_key(&old_handle)
+            .await
+            .unwrap()
+            .authored_name_units(),
+        vec![0xd800]
+    );
+    let public_client = registry.get_client(&old_handle).await.unwrap();
+    let private_client = registry.get_client_by_key(&old_handle).await.unwrap();
+    assert!(!Arc::ptr_eq(&public_client, &private_client));
+    assert_eq!(public_client.server_name(), old_handle);
+    assert_eq!(private_client.server_name(), "\u{fffd}");
+    assert!(Arc::ptr_eq(
+        &registry
+            .ensure_connected_client_by_key(&old_handle)
+            .await
+            .unwrap(),
+        &private_client
+    ));
+    assert_eq!(
+        crate::oauth::server_key(second.storage_name(), &second.spec),
+        crate::oauth::server_key(&old_handle, &second.spec)
     );
 }

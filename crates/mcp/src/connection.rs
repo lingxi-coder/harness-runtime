@@ -19,10 +19,42 @@ use std::time::SystemTime;
 /// persists an LLM provider credential, profile, or account identifier.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerMetadata {
+    /// Exact authored config key when it cannot be represented by a Rust
+    /// scalar string. The ordinary config schema cannot inject this sidecar.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::server_name::optional_name_units_serde"
+    )]
+    pub authored_name: Option<crate::McpServerName>,
     /// Explicit host-owned provenance (for example a registered mod's plugin
     /// ownership). The ordinary MCP JSON schema does not accept this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_source: Option<String>,
+    /// SDK-owned connector identity from initialize/mcp_set_servers. Ordinary
+    /// MCP config files cannot populate this trusted settings sidecar.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub sdk_connector_id: Option<Utf16JsonProjection>,
+    /// Exact validated SDK list; missing and an explicitly empty list differ.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub sdk_auto_mode_verdict_tools: Option<Utf16JsonProjection>,
+    /// SDK `disableAutoBackground`, retained only when it is strictly true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sdk_disable_auto_background: bool,
+    /// The actual host relayed this config. This is not a model/config-file
+    /// assertion and excludes SDK trust independently of the server name.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub relayed: bool,
     /// Current per-server initialize capability choice. Only the ordinary
     /// stdio/SSE/HTTP/WS config schemas declare this optional boolean.
     #[serde(
@@ -253,6 +285,72 @@ pub const INVALID_URL_ERROR: &str =
     "'url' is not a valid URL. Update the server's config and reconnect.";
 
 impl McpServerConfig {
+    /// Exact configured server identity, before registry handles/FQN mapping.
+    #[must_use]
+    pub fn authored_name(&self) -> crate::McpServerName {
+        self.metadata
+            .authored_name
+            .clone()
+            .unwrap_or_else(|| self.name.clone().into())
+    }
+    /// Exact authored JavaScript string units for control-channel lookup.
+    #[must_use]
+    pub fn authored_name_units(&self) -> Vec<u16> {
+        self.authored_name().utf16_units().to_vec()
+    }
+    /// A scalar authored name remains the credential/cache identity when a
+    /// private live-registry handle avoids another server's handle.
+    pub fn storage_name(&self) -> &str {
+        self.metadata
+            .authored_name
+            .as_ref()
+            .map(crate::McpServerName::storage_identity)
+            .unwrap_or(&self.name)
+    }
+    /// Native SHA telemetry consumes UTF-8, replacing an isolated unit with
+    /// U+FFFD exactly as Node's UTF-8 encoder does. It never hashes a private
+    /// handle or the separately encoded credential identity.
+    pub fn telemetry_name(&self) -> &str {
+        self.metadata
+            .authored_name
+            .as_ref()
+            .map(crate::McpServerName::as_str)
+            .unwrap_or(&self.name)
+    }
+    /// Whether credential keys use the isolated raw UTF-16 namespace family.
+    pub fn has_raw_credential_name(&self) -> bool {
+        self.metadata
+            .authored_name
+            .as_ref()
+            .is_some_and(|name| !name.is_scalar())
+    }
+    /// Stable exact name within the scalar/raw credential namespace.
+    pub fn credential_identity(&self) -> (bool, String) {
+        (
+            self.has_raw_credential_name(),
+            self.storage_name().to_owned(),
+        )
+    }
+    /// Native server-name equality without display replacement collisions.
+    #[must_use]
+    pub fn name_matches_utf16(&self, name: &[u16]) -> bool {
+        self.authored_name().utf16_units() == name
+    }
+    /// Native model-visible server token, independent of private handles.
+    #[must_use]
+    pub fn normalized_name_for_mcp(&self) -> String {
+        self.authored_name().normalized()
+    }
+    /// Namespace the authored name without deriving UTF-16 identity from a
+    /// private registry handle (for example a trusted plugin prefix).
+    pub fn prepend_authored_name(&mut self, prefix: &str) {
+        let mut units: Vec<u16> = prefix.encode_utf16().collect();
+        units.extend_from_slice(self.authored_name().utf16_units());
+        let name = crate::McpServerName::from_utf16(units);
+        self.name = name.as_str().to_owned();
+        self.metadata.authored_name = (!name.is_scalar()).then_some(name);
+        crate::finalize_mcp_server_names(std::slice::from_mut(self));
+    }
     /// claude `zar` (@231408681) — is this server *unconfigured* (nothing to
     /// dial) rather than *misconfigured*? True when no [`Self::config_error`]
     /// was recorded and the transport carries a blank `url`. `Nxe` then skips

@@ -13,6 +13,8 @@ pub mod queued_commands;
 pub mod remote_ui;
 pub mod resume_truncation;
 mod run;
+mod sdk_mcp_call;
+mod sdk_mcp_server_controls;
 mod sdk_mcp_transport;
 mod sdk_prompt_suggestions;
 pub mod session;
@@ -29,6 +31,9 @@ pub use config::{
 pub use host::HeadlessHostServices;
 pub use io::HeadlessIo;
 use lingxi_core::host::OutputStream;
+pub use sdk_mcp_call::{
+    LocalMcpStagedFileStore, McpStagedFile, McpStagedFileError, McpStagedFileStore,
+};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 

@@ -15,13 +15,9 @@
 //! injected [`HttpTransport`] (no `reqwest`); validation is hand-written serde
 //! (no `zod`).
 //!
-//! **Residual (the IdP-login surface, NOT ported — see `oauth.rs` module
-//! docs):** `getXaaIdpSettings`/`acquireIdpIdToken` (the OIDC browser pop),
-//! `discoverOidc`, the keychain `id_token` cache, the `xaaRefresh` silent path,
-//! the AS `client_secret` config seam, and analytics. The exchange engine here
-//! is driven with a supplied `id_token` + AS `client_secret` (the
-//! conformance-style path), which is what `performMCPXaaAuth` calls once those
-//! inputs are gathered.
+//! The IdP-login/config/cache surface lives in [`crate::xaa_idp`]. MCP
+//! token auth uses the native basic/post methods; generic account-library
+//! client-assertion/JWT authentication is outside this MCP protocol path.
 //!
 //! The doc comments here lean on dense OAuth/OIDC vocabulary (IdP, OIDC,
 //! ID-JAG, the RFC token-type URNs); backticking every term hurts readability,
@@ -31,9 +27,14 @@
 
 use base64::Engine;
 use lingxi_core::host::HttpTransport;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(test)]
+#[path = "xaa/native_322_tests.rs"]
+mod native_322_tests;
 
 /// XAA request deadline (xaa.ts `XAA_REQUEST_TIMEOUT_MS = 30000`).
 const XAA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,22 +62,31 @@ pub enum XaaError {
     /// Carries `should_clear_id_token` (xaa.ts `XaaTokenExchangeError`): on a
     /// 4xx / structurally-invalid body the cached `id_token` is bad and should
     /// be dropped; on a 5xx / transient non-JSON it may still be valid.
-    #[error("XAA: token exchange failed: {message}")]
+    #[error("{}", message.string_at("").unwrap_or_default())]
     TokenExchange {
         /// Human-readable, token-redacted error detail.
-        message: String,
+        message: Utf16JsonProjection,
         /// Whether the caller should drop the cached `id_token`.
         should_clear_id_token: bool,
     },
     /// The AS jwt-bearer (ID-JAG → access_token) leg failed.
-    #[error("XAA: jwt-bearer grant failed: {0}")]
-    JwtBearer(String),
+    #[error("{}", .0.string_at("").unwrap_or_default())]
+    JwtBearer(Utf16JsonProjection),
     /// No advertised authorization server supports the jwt-bearer grant.
     #[error("XAA: no authorization server supports jwt-bearer. Tried: {0}")]
     NoAuthServer(String),
 }
 
 impl XaaError {
+    /// Preserve native UTF16 diagnostic units across the MCP error boundary.
+    #[must_use]
+    pub fn source_diagnostic(&self) -> Utf16JsonProjection {
+        match self {
+            Self::TokenExchange { message, .. } | Self::JwtBearer(message) => message.clone(),
+            _ => self.to_string().into(),
+        }
+    }
+
     /// Whether the cached IdP `id_token` should be dropped in response to this
     /// failure (xaa.ts `XaaTokenExchangeError.shouldClearIdToken`, 267-273).
     ///
@@ -98,7 +108,7 @@ impl XaaError {
 
 impl From<XaaError> for lingxi_core::host::McpError {
     fn from(e: XaaError) -> Self {
-        lingxi_core::host::McpError::OAuth(e.to_string().into())
+        lingxi_core::host::McpError::OAuth(e.source_diagnostic())
     }
 }
 
@@ -113,7 +123,7 @@ pub enum AuthMethod {
 }
 
 // ---------------------------------------------------------------------------
-// Token redaction (xaa.ts:86-97). Hand-rolled to avoid a regex dep.
+// Token redaction (xaa.ts:86-97), including ECMAScript whitespace.
 // ---------------------------------------------------------------------------
 
 /// Redact token-bearing values from a (possibly raw) error body before logging,
@@ -122,53 +132,15 @@ pub enum AuthMethod {
 /// must not leak into debug logs.
 #[must_use]
 pub fn redact_tokens(raw: &str) -> String {
-    const KEYS: &[&str] = &[
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "assertion",
-        "subject_token",
-        "client_secret",
-    ];
-    let mut out = raw.to_string();
-    for key in KEYS {
-        let needle = format!("\"{key}\"");
-        let replacement = format!("\"{key}\":\"[REDACTED]\"");
-        // Replace every `"key"<ws>:<ws>"<value>"` → `"key":"[REDACTED]"`.
-        // Re-scan from `search_from` after each replacement so repeats are
-        // caught and the loop always makes forward progress.
-        let mut search_from = 0usize;
-        while let Some(rel) = out[search_from..].find(&needle) {
-            let kpos = search_from + rel;
-            let after = kpos + needle.len();
-            let bytes = out.as_bytes();
-            // Skip whitespace, expect `:`, skip whitespace, expect `"`.
-            let mut i = after;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i >= bytes.len() || bytes[i] != b':' {
-                search_from = after;
-                continue;
-            }
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i >= bytes.len() || bytes[i] != b'"' {
-                search_from = after;
-                continue;
-            }
-            let val_start = i; // opening quote
-            let Some(rel_end) = out[val_start + 1..].find('"') else {
-                break;
-            };
-            let val_end = val_start + 1 + rel_end + 1; // past closing quote
-            out.replace_range(kpos..val_end, &replacement);
-            search_from = kpos + replacement.len();
-        }
-    }
-    out
+    static TOKEN_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = TOKEN_PATTERN.get_or_init(|| regex::Regex::new(
+        r#""(access_token|refresh_token|id_token|assertion|subject_token|client_secret)"[\t\n\r\x0B\x0C \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]*:[\t\n\r\x0B\x0C \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]*"[^"]*""#
+    ).expect("native token redaction regex"));
+    pattern
+        .replace_all(raw, |captures: &regex::Captures<'_>| {
+            format!("\"{}\":\"[REDACTED]\"", &captures[1])
+        })
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -190,50 +162,101 @@ fn normalize_url(url: &str) -> String {
 // HTTP helpers over the injected transport.
 // ---------------------------------------------------------------------------
 
-/// GET a `.well-known` document and parse it as JSON.
-async fn get_json<T: serde::de::DeserializeOwned>(
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+async fn get_document(
     http: &Arc<dyn HttpTransport>,
     url: &str,
-) -> Result<T, String> {
-    let req = HttpRequest {
+    accept: bool,
+) -> Result<lingxi_core::types::HttpResponse, String> {
+    let mut headers = vec![("MCP-Protocol-Version".into(), MCP_PROTOCOL_VERSION.into())];
+    if accept {
+        headers.push(("Accept".into(), "application/json".into()));
+    }
+    http.request(HttpRequest {
         method: HttpMethod::Get,
-        url: url.to_string(),
-        headers: vec![("accept".into(), "application/json".into())],
+        url: url.to_owned(),
+        headers,
         body: None,
         body_bytes: None,
         timeout: Some(XAA_REQUEST_TIMEOUT),
-    };
-    let resp = http
-        .request(req)
-        .await
-        .map_err(|e| format!("transport: {e}"))?;
-    if !(200..300).contains(&resp.status) {
-        return Err(format!("HTTP {} fetching {url}", resp.status));
-    }
-    serde_json::from_str(&resp.body).map_err(|e| format!("decode {url}: {e}"))
+    })
+    .await
+    .map_err(|error| format!("transport: {error}"))
 }
 
-/// Insert the well-known segment after the host (RFC 8414 §3 / RFC 9728).
-fn well_known(base: &str, suffix: &str) -> String {
-    match base.split_once("://") {
-        Some((scheme, rest)) => {
-            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-            let path = path.trim_end_matches('/');
-            if path.is_empty() {
-                format!("{scheme}://{host}/.well-known/{suffix}")
-            } else {
-                format!("{scheme}://{host}/.well-known/{suffix}/{path}")
-            }
-        }
-        None => format!("{base}/.well-known/{suffix}"),
+fn well_known(base: &str, suffix: &str) -> Result<String, String> {
+    let mut url = url::Url::parse(base).map_err(|error| error.to_string())?;
+    let path = url
+        .path()
+        .strip_suffix('/')
+        .unwrap_or(url.path())
+        .to_owned();
+    url.set_path(&format!("/.well-known/{suffix}{path}"));
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+fn metadata_candidates(base: &str) -> Result<Vec<(String, bool)>, String> {
+    let url = url::Url::parse(base).map_err(|error| error.to_string())?;
+    let origin = url.origin().ascii_serialization();
+    let path = url.path().strip_suffix('/').unwrap_or(url.path());
+    let mut candidates = vec![
+        (
+            format!("{origin}/.well-known/oauth-authorization-server{path}"),
+            false,
+        ),
+        (
+            format!("{origin}/.well-known/openid-configuration{path}"),
+            true,
+        ),
+    ];
+    if !path.is_empty() {
+        candidates.push((
+            format!("{origin}{path}/.well-known/openid-configuration"),
+            true,
+        ));
     }
+    Ok(candidates)
 }
 
 fn form_encode(form: &[(&str, &str)]) -> String {
-    form.iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form.iter().copied())
+        .finish()
+}
+
+fn encode_uri_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn sliced_error(prefix: &str, raw: &str) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(redact_tokens(raw).encode_utf16().take(200));
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("native diagnostic units")
+}
+
+fn diagnostic_with_units(prefix: &str, value: &[u16]) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend_from_slice(value);
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("native diagnostic units")
+}
+
+fn json_stringify(raw: &str) -> String {
+    Utf16JsonProjection::parse(raw)
+        .and_then(|value| value.to_json_string())
+        .unwrap_or_else(|_| raw.to_owned())
 }
 
 // ─── Layer 2: Discovery ─────────────────────────────────────────────────────
@@ -263,6 +286,18 @@ pub struct AuthorizationServerMetadata {
     pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
+fn projection_strings(value: &Utf16JsonProjection, key: &str) -> Option<Vec<String>> {
+    Some(
+        value
+            .get_property(key)?
+            .array_entries()?
+            .1
+            .into_iter()
+            .map(|(_, value)| value.as_str().expect("validated string array").to_owned())
+            .collect(),
+    )
+}
+
 /// RFC 9728 PRM discovery + §3.3 resource-mismatch validation (xaa.ts:135-165).
 ///
 /// # Errors
@@ -272,8 +307,39 @@ pub async fn discover_protected_resource(
     http: &Arc<dyn HttpTransport>,
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, XaaError> {
-    let url = well_known(server_url, "oauth-protected-resource");
-    let prm: ProtectedResourceMetadata = get_json(http, &url).await.map_err(XaaError::Prm)?;
+    let url = well_known(server_url, "oauth-protected-resource").map_err(XaaError::Prm)?;
+    let mut response = get_document(http, &url, false)
+        .await
+        .map_err(XaaError::Prm)?;
+    let server = url::Url::parse(server_url).map_err(|error| XaaError::Prm(error.to_string()))?;
+    if server.path() != "/" && ((400..500).contains(&response.status) || response.status == 502) {
+        response = get_document(
+            http,
+            server
+                .join("/.well-known/oauth-protected-resource")
+                .map_err(|error| XaaError::Prm(error.to_string()))?
+                .as_str(),
+            false,
+        )
+        .await
+        .map_err(XaaError::Prm)?;
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(XaaError::Prm(format!(
+            "HTTP {} fetching {url}",
+            response.status
+        )));
+    }
+    let validated = crate::oauth::schemas::validate_prm(&response.body).map_err(XaaError::Prm)?;
+    let value = validated.projection();
+    let prm = ProtectedResourceMetadata {
+        resource: value
+            .string_at("/resource")
+            .expect("validated resource")
+            .to_owned(),
+        authorization_servers: projection_strings(value, "authorization_servers")
+            .unwrap_or_default(),
+    };
     if prm.resource.is_empty() || prm.authorization_servers.is_empty() {
         return Err(XaaError::Prm(
             "PRM missing resource or authorization_servers".into(),
@@ -298,10 +364,54 @@ pub async fn discover_authorization_server(
     http: &Arc<dyn HttpTransport>,
     as_url: &str,
 ) -> Result<AuthorizationServerMetadata, XaaError> {
-    let url = well_known(as_url, "oauth-authorization-server");
-    let meta: AuthorizationServerMetadata = get_json(http, &url)
-        .await
-        .map_err(|_| XaaError::AsMetadata(format!("no valid metadata at {as_url}")))?;
+    Ok(discover_authorization_server_source(http, as_url).await?.0)
+}
+
+async fn discover_authorization_server_source(
+    http: &Arc<dyn HttpTransport>,
+    as_url: &str,
+) -> Result<(AuthorizationServerMetadata, Utf16JsonProjection), XaaError> {
+    let mut metadata = None;
+    for (candidate, oidc) in metadata_candidates(as_url).map_err(XaaError::AsMetadata)? {
+        let response = get_document(http, &candidate, true)
+            .await
+            .map_err(XaaError::AsMetadata)?;
+        if !(200..300).contains(&response.status) {
+            if (400..500).contains(&response.status) || response.status == 502 {
+                continue;
+            }
+            return Err(XaaError::AsMetadata(format!(
+                "HTTP {} fetching {candidate}",
+                response.status
+            )));
+        }
+        let validated = crate::oauth::schemas::validate_authorization(&response.body, oidc)
+            .map_err(XaaError::AsMetadata)?;
+        let value = validated.projection();
+        metadata = Some((
+            AuthorizationServerMetadata {
+                issuer: value
+                    .string_at("/issuer")
+                    .expect("validated issuer")
+                    .to_owned(),
+                token_endpoint: value
+                    .string_at("/token_endpoint")
+                    .expect("validated endpoint")
+                    .to_owned(),
+                grant_types_supported: projection_strings(value, "grant_types_supported"),
+                token_endpoint_auth_methods_supported: projection_strings(
+                    value,
+                    "token_endpoint_auth_methods_supported",
+                ),
+            },
+            value
+                .subprojection("/issuer")
+                .map_err(|error| XaaError::AsMetadata(error.to_string()))?,
+        ));
+        break;
+    }
+    let (meta, issuer_source) =
+        metadata.ok_or_else(|| XaaError::AsMetadata(format!("no valid metadata at {as_url}")))?;
     if meta.issuer.is_empty() || meta.token_endpoint.is_empty() {
         return Err(XaaError::AsMetadata(format!(
             "no valid metadata at {as_url}"
@@ -325,32 +435,34 @@ pub async fn discover_authorization_server(
             meta.token_endpoint
         )));
     }
-    Ok(meta)
+    Ok((meta, issuer_source))
 }
 
 // ─── Layer 2: Exchange ──────────────────────────────────────────────────────
 
 /// Result of the IdP token exchange: the ID-JAG plus optional metadata.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JwtAuthGrantResult {
     /// The ID-JAG (Identity Assertion Authorization Grant) JWT.
     pub jwt_auth_grant: String,
     /// Server-reported lifetime in seconds, if any.
-    pub expires_in: Option<u64>,
+    pub expires_in: Option<f64>,
     /// Granted scope, if any.
     pub scope: Option<String>,
+    /// Native validated ID-JAG response retaining exact UTF16 token units.
+    pub source: Utf16JsonProjection,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TokenExchangeResponse {
-    #[serde(default)]
-    access_token: Option<String>,
-    #[serde(default)]
-    issued_token_type: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    scope: Option<String>,
+impl std::fmt::Debug for JwtAuthGrantResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JwtAuthGrantResult")
+            .field("jwt_auth_grant", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Inputs for the IdP token-exchange leg.
@@ -367,7 +479,7 @@ pub struct JwtAuthGrantRequest<'a> {
     pub client_id: &'a str,
     /// Optional IdP client secret (`client_secret_post` when present).
     pub client_secret: Option<&'a str>,
-    /// Optional requested scope.
+    /// Compatibility field; the current native XAA grant omits scope.
     pub scope: Option<&'a str>,
 }
 
@@ -393,11 +505,8 @@ pub async fn request_jwt_authorization_grant(
         ("subject_token_type", ID_TOKEN_TYPE),
         ("client_id", req.client_id),
     ];
-    if let Some(secret) = req.client_secret {
+    if let Some(secret) = req.client_secret.filter(|secret| !secret.is_empty()) {
         form.push(("client_secret", secret));
-    }
-    if let Some(scope) = req.scope {
-        form.push(("scope", scope));
     }
 
     let http_req = HttpRequest {
@@ -415,73 +524,109 @@ pub async fn request_jwt_authorization_grant(
         .request(http_req)
         .await
         .map_err(|e| XaaError::TokenExchange {
-            message: format!("transport: {e}"),
+            message: format!("XAA: token exchange failed: transport: {e}").into(),
             // Network/transport failure (captive portal etc.) — keep id_token.
             should_clear_id_token: false,
         })?;
 
     if !(200..300).contains(&resp.status) {
-        let body = redact_tokens(&resp.body);
-        // Truncate to <=200 bytes on a UTF-8 char boundary (JS `.slice(0,200)`
-        // is panic-free; a raw byte slice would panic mid-codepoint).
-        let cut = (0..=body.len().min(200))
-            .rev()
-            .find(|&i| body.is_char_boundary(i))
-            .unwrap_or(0);
-        let body = &body[..cut];
         // 4xx → id_token rejected, clear; 5xx → IdP outage, keep (xaa.ts:267-273).
         let should_clear = resp.status < 500;
         return Err(XaaError::TokenExchange {
-            message: format!("HTTP {}: {body}", resp.status),
+            message: sliced_error(
+                &format!("XAA: token exchange failed: HTTP {}: ", resp.status),
+                &resp.body,
+            ),
             should_clear_id_token: should_clear,
         });
     }
 
-    let parsed: TokenExchangeResponse =
-        serde_json::from_str(&resp.body).map_err(|_| XaaError::TokenExchange {
-            // 200 but structurally invalid — protocol violation, clear.
-            message: format!(
-                "token exchange response did not match expected shape: {}",
-                redact_tokens(&resp.body)
-            ),
-            should_clear_id_token: true,
-        })?;
-
-    let Some(access_token) = parsed.access_token else {
+    if Utf16JsonProjection::parse(&resp.body).is_err() {
         return Err(XaaError::TokenExchange {
-            message: "token exchange response missing access_token".into(),
+            message: format!(
+                "XAA: token exchange returned non-JSON (captive portal?) at {}",
+                req.token_endpoint
+            )
+            .into(),
+            should_clear_id_token: false,
+        });
+    }
+    let validated = crate::oauth::schemas::validate_xaa_exchange(&resp.body).map_err(|_| {
+        XaaError::TokenExchange {
+            message: format!(
+                "XAA: token exchange response did not match expected shape: {}",
+                redact_tokens(&json_stringify(&resp.body))
+            )
+            .into(),
+            should_clear_id_token: true,
+        }
+    })?;
+    let parsed = validated.projection();
+    let Some(access_token) = parsed
+        .string_at("/access_token")
+        .filter(|token| !token.is_empty())
+    else {
+        return Err(XaaError::TokenExchange {
+            message: format!(
+                "XAA: token exchange response missing access_token: {}",
+                redact_tokens(&validated.json().unwrap_or_default())
+            )
+            .into(),
             should_clear_id_token: true,
         });
     };
-    if parsed.issued_token_type.as_deref() != Some(ID_JAG_TOKEN_TYPE) {
+    if parsed.string_at("/issued_token_type") != Some(ID_JAG_TOKEN_TYPE) {
+        let kind = parsed
+            .string_units("/issued_token_type")
+            .unwrap_or_else(|| "undefined".encode_utf16().collect());
         return Err(XaaError::TokenExchange {
-            message: format!(
-                "token exchange returned unexpected issued_token_type: {:?}",
-                parsed.issued_token_type
+            message: diagnostic_with_units(
+                "XAA: token exchange returned unexpected issued_token_type: ",
+                &kind,
             ),
             should_clear_id_token: true,
         });
     }
     Ok(JwtAuthGrantResult {
-        jwt_auth_grant: access_token,
-        expires_in: parsed.expires_in,
-        scope: parsed.scope,
+        jwt_auth_grant: access_token.to_owned(),
+        expires_in: parsed.number_at("/expires_in"),
+        scope: parsed.string_at("/scope").map(str::to_owned),
+        source: validated.into_projection(),
     })
 }
 
 /// The XAA access-token result (jwt-bearer grant output).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaaTokenResult {
     /// The MCP access token.
     pub access_token: String,
     /// Token type (defaults to `Bearer` when the AS omits it).
     pub token_type: String,
     /// Lifetime in seconds, if any.
-    pub expires_in: Option<u64>,
+    pub expires_in: Option<f64>,
     /// Granted scope, if any.
     pub scope: Option<String>,
     /// Refresh token, if the AS issued one.
     pub refresh_token: Option<String>,
+    /// Native validated token response, retaining exact UTF16 secret units for storage.
+    pub source: Utf16JsonProjection,
+}
+
+impl std::fmt::Debug for XaaTokenResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("XaaTokenResult")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The full XAA result: the token set plus the AS issuer URL that must be
@@ -493,19 +638,8 @@ pub struct XaaResult {
     pub tokens: XaaTokenResult,
     /// AS issuer discovered via PRM (persist for later refresh/revoke).
     pub authorization_server_url: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct JwtBearerResponse {
-    access_token: String,
-    #[serde(default)]
-    token_type: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    scope: Option<String>,
-    #[serde(default)]
-    refresh_token: Option<String>,
+    /// Exact native issuer text for the saved registration binding.
+    pub authorization_server_source: Utf16JsonProjection,
 }
 
 /// Inputs for the AS jwt-bearer leg.
@@ -520,7 +654,7 @@ pub struct JwtBearerRequest<'a> {
     pub client_secret: &'a str,
     /// Client-auth method (defaults to `Basic` per SEP-990 conformance).
     pub auth_method: AuthMethod,
-    /// Optional requested scope.
+    /// Compatibility field; the current native XAA grant omits scope.
     pub scope: Option<&'a str>,
 }
 
@@ -533,13 +667,23 @@ pub async fn exchange_jwt_auth_grant(
     http: &Arc<dyn HttpTransport>,
     req: &JwtBearerRequest<'_>,
 ) -> Result<XaaTokenResult, XaaError> {
+    exchange_jwt_auth_grant_with_source(http, req, None).await
+}
+
+/// Source-aware AS client secret: basic preserves encodeURIComponent's
+/// rejection of unpaired units; post uses the native URLSearchParams USV view.
+pub async fn exchange_jwt_auth_grant_with_source(
+    http: &Arc<dyn HttpTransport>,
+    req: &JwtBearerRequest<'_>,
+    client_secret_source: Option<&Utf16JsonProjection>,
+) -> Result<XaaTokenResult, XaaError> {
+    let source_units = client_secret_source.and_then(|source| source.string_units(""));
+    let source_secret = source_units.as_deref().map(String::from_utf16_lossy);
+    let client_secret = source_secret.as_deref().unwrap_or(req.client_secret);
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", JWT_BEARER_GRANT),
         ("assertion", req.assertion),
     ];
-    if let Some(scope) = req.scope {
-        form.push(("scope", scope));
-    }
 
     let mut headers: Vec<(String, String)> = vec![(
         "content-type".into(),
@@ -547,10 +691,16 @@ pub async fn exchange_jwt_auth_grant(
     )];
     match req.auth_method {
         AuthMethod::ClientSecretBasic => {
+            let secret = match source_units.as_deref() {
+                Some(units) => String::from_utf16(units).map_err(|_| {
+                    XaaError::JwtBearer("String contained an illegal UTF-16 sequence.".into())
+                })?,
+                None => req.client_secret.to_owned(),
+            };
             let basic = format!(
                 "{}:{}",
-                urlencoding::encode(req.client_id),
-                urlencoding::encode(req.client_secret)
+                encode_uri_component(req.client_id),
+                encode_uri_component(&secret)
             );
             headers.push((
                 "authorization".into(),
@@ -562,7 +712,7 @@ pub async fn exchange_jwt_auth_grant(
         }
         AuthMethod::ClientSecretPost => {
             form.push(("client_id", req.client_id));
-            form.push(("client_secret", req.client_secret));
+            form.push(("client_secret", client_secret));
         }
     }
 
@@ -574,37 +724,47 @@ pub async fn exchange_jwt_auth_grant(
         body_bytes: None,
         timeout: Some(XAA_REQUEST_TIMEOUT),
     };
-    let resp = http
-        .request(http_req)
-        .await
-        .map_err(|e| XaaError::JwtBearer(format!("transport: {e}")))?;
-    if !(200..300).contains(&resp.status) {
-        let body = redact_tokens(&resp.body);
-        // Truncate to <=200 bytes on a UTF-8 char boundary (JS `.slice(0,200)`
-        // is panic-free; a raw byte slice would panic mid-codepoint).
-        let cut = (0..=body.len().min(200))
-            .rev()
-            .find(|&i| body.is_char_boundary(i))
-            .unwrap_or(0);
-        let body = &body[..cut];
-        return Err(XaaError::JwtBearer(format!("HTTP {}: {body}", resp.status)));
-    }
-    let parsed: JwtBearerResponse = serde_json::from_str(&resp.body).map_err(|_| {
-        XaaError::JwtBearer(format!(
-            "response did not match expected shape: {}",
-            redact_tokens(&resp.body)
-        ))
+    let resp = http.request(http_req).await.map_err(|e| {
+        XaaError::JwtBearer(format!("XAA: jwt-bearer grant failed: transport: {e}").into())
     })?;
-    if parsed.access_token.is_empty() {
-        return Err(XaaError::JwtBearer("response missing access_token".into()));
+    if !(200..300).contains(&resp.status) {
+        return Err(XaaError::JwtBearer(sliced_error(
+            &format!("XAA: jwt-bearer grant failed: HTTP {}: ", resp.status),
+            &resp.body,
+        )));
     }
+    if Utf16JsonProjection::parse(&resp.body).is_err() {
+        return Err(XaaError::JwtBearer(
+            format!(
+                "XAA: jwt-bearer grant returned non-JSON (captive portal?) at {}",
+                req.token_endpoint
+            )
+            .into(),
+        ));
+    }
+    let validated = crate::oauth::schemas::validate_xaa_tokens(&resp.body).map_err(|_| {
+        XaaError::JwtBearer(
+            format!(
+                "XAA: jwt-bearer response did not match expected shape: {}",
+                redact_tokens(&json_stringify(&resp.body))
+            )
+            .into(),
+        )
+    })?;
+    let parsed = validated.projection();
     Ok(XaaTokenResult {
-        access_token: parsed.access_token,
-        // Many ASes omit token_type since Bearer is the only value (RFC 6750).
-        token_type: parsed.token_type.unwrap_or_else(|| "Bearer".into()),
-        expires_in: parsed.expires_in,
-        scope: parsed.scope,
-        refresh_token: parsed.refresh_token,
+        access_token: parsed
+            .string_at("/access_token")
+            .expect("validated token string")
+            .to_owned(),
+        token_type: parsed
+            .string_at("/token_type")
+            .expect("validated/defaulted token type")
+            .to_owned(),
+        expires_in: parsed.number_at("/expires_in"),
+        scope: parsed.string_at("/scope").map(str::to_owned),
+        refresh_token: parsed.string_at("/refresh_token").map(str::to_owned),
+        source: validated.into_projection(),
     })
 }
 
@@ -642,19 +802,53 @@ pub async fn perform_cross_app_access(
     server_url: &str,
     config: &XaaConfig<'_>,
 ) -> Result<XaaResult, XaaError> {
+    perform_cross_app_access_with_issuer(http, server_url, config, None).await
+}
+
+/// XAA access bound to the AS used for the saved client registration. A PRM
+/// issuer change cannot send the saved confidential client secret to a new AS.
+pub async fn perform_cross_app_access_with_issuer(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    config: &XaaConfig<'_>,
+    pinned_issuer: Option<&str>,
+) -> Result<XaaResult, XaaError> {
+    perform_cross_app_access_with_source(http, server_url, config, pinned_issuer, None).await
+}
+
+/// XAA with exact saved client-secret text supplied independently of the
+/// provider-neutral compatibility String configuration.
+pub async fn perform_cross_app_access_with_source(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    config: &XaaConfig<'_>,
+    pinned_issuer: Option<&str>,
+    client_secret_source: Option<&Utf16JsonProjection>,
+) -> Result<XaaResult, XaaError> {
     let prm = discover_protected_resource(http, server_url).await?;
 
     // Try each advertised AS in order.
-    let mut as_meta: Option<AuthorizationServerMetadata> = None;
+    let mut as_meta: Option<(AuthorizationServerMetadata, Utf16JsonProjection)> = None;
     let mut as_errors: Vec<String> = Vec::new();
-    for as_url in &prm.authorization_servers {
-        let candidate = match discover_authorization_server(http, as_url).await {
-            Ok(c) => c,
-            Err(e) => {
-                as_errors.push(format!("{as_url}: {e}"));
-                continue;
-            }
-        };
+    let candidates = prm
+        .authorization_servers
+        .iter()
+        .filter(|issuer| {
+            pinned_issuer.is_none_or(|pinned| normalize_url(issuer) == normalize_url(pinned))
+        })
+        .collect::<Vec<_>>();
+    if pinned_issuer.is_some() && candidates.is_empty() {
+        return Err(XaaError::AsMetadata(format!("authorization server changed: signed in with {}, server now names [{}]. Remove this MCP server and add it again with its client secret.", pinned_issuer.unwrap_or_default(), prm.authorization_servers.join(", "))));
+    }
+    for as_url in candidates {
+        let (candidate, issuer_source) =
+            match discover_authorization_server_source(http, as_url).await {
+                Ok(c) => c,
+                Err(e) => {
+                    as_errors.push(format!("{as_url}: {e}"));
+                    continue;
+                }
+            };
         if let Some(grants) = &candidate.grant_types_supported {
             if !grants.iter().any(|g| g == JWT_BEARER_GRANT) {
                 as_errors.push(format!(
@@ -664,10 +858,10 @@ pub async fn perform_cross_app_access(
                 continue;
             }
         }
-        as_meta = Some(candidate);
+        as_meta = Some((candidate, issuer_source));
         break;
     }
-    let Some(as_meta) = as_meta else {
+    let Some((as_meta, issuer_source)) = as_meta else {
         return Err(XaaError::NoAuthServer(as_errors.join("; ")));
     };
 
@@ -698,7 +892,7 @@ pub async fn perform_cross_app_access(
     .await?;
 
     // AS jwt-bearer: ID-JAG → access_token.
-    let tokens = exchange_jwt_auth_grant(
+    let tokens = exchange_jwt_auth_grant_with_source(
         http,
         &JwtBearerRequest {
             token_endpoint: &as_meta.token_endpoint,
@@ -708,12 +902,14 @@ pub async fn perform_cross_app_access(
             auth_method,
             scope: None,
         },
+        client_secret_source,
     )
     .await?;
 
     Ok(XaaResult {
         tokens,
         authorization_server_url: as_meta.issuer,
+        authorization_server_source: issuer_source,
     })
 }
 

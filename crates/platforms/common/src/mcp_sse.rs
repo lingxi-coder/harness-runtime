@@ -24,7 +24,6 @@
 //!   resolves its connect promise from inside the listener, and refuses to
 //!   send before then (`NotConnected`).
 
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
@@ -36,6 +35,23 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+#[derive(Default)]
+struct LegacyRequestTracking(crate::mcp_http::HttpRequestCancellation);
+impl jsonrpc::router::PerRequestCancellation for LegacyRequestTracking {
+    fn prepare(&self, id: &jsonrpc::Id) -> lingxi_core::host::mcp_result::CancellationToken {
+        jsonrpc::router::PerRequestCancellation::prepare(&self.0, id)
+    }
+    fn discard(&self, id: &jsonrpc::Id) {
+        jsonrpc::router::PerRequestCancellation::discard(&self.0, id);
+    }
+    fn close(&self) {
+        jsonrpc::router::PerRequestCancellation::close(&self.0);
+    }
+    fn aborts_request_stream(&self) -> bool {
+        false
+    }
+}
+
 /// Time allowed to receive response headers. The SSE body itself stays open.
 const MCP_SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -45,10 +61,10 @@ const MCP_SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 pub const IDE_AUTH_HEADER: &str = "X-LingXi-Ide-Authorization";
 
 /// `User-Agent` value emitted by this client.
-/// Matches claude-code's `getMCPUserAgent()` shape: `claude-code/<version>`.
+/// Retains LingXi product identity with the native MCP CLI shape.
 #[must_use]
 pub fn user_agent() -> String {
-    format!("claude-code/{}", env!("CARGO_PKG_VERSION"))
+    crate::mcp_http::user_agent()
 }
 
 /// How the POST url for outbound frames is determined.
@@ -180,12 +196,14 @@ where
                 }
                 other => SseConnectError::Transport(other.to_string()),
             })?;
-    let required = if accept_value == "text/event-stream" {
-        &["text/event-stream"][..]
-    } else {
-        &["application/json", "text/event-stream"][..]
-    };
-    crate::mcp_http::extend_accept(&mut h, required);
+    // EventSource replaces configured Accept. The legacy POST fetch wrapper
+    // supplies the default only when the caller did not configure Accept.
+    if accept_value == "text/event-stream" || !h.contains_key(reqwest::header::ACCEPT) {
+        h.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static(accept_value),
+        );
+    }
     Ok(h)
 }
 
@@ -286,9 +304,6 @@ where
         return Err(SseConnectError::InvalidContentType);
     }
 
-    let byte_stream = response.bytes_stream();
-    let mut event_stream = byte_stream.eventsource();
-
     // Channels: `inbound_tx` ships parsed JSON-RPC `Message`s from the SSE
     // reader task to the Connection. `outbound_rx` receives outbound
     // `Message`s the Connection wants to POST.
@@ -306,182 +321,279 @@ where
         tokio::sync::oneshot::channel::<Result<String, SseConnectError>>();
     let mut endpoint_tx = Some(endpoint_tx);
     let stream_url = url.to_string();
-
-    // SSE reader task: parse `data:` JSON frames and forward as Message.
+    let current_endpoint = Arc::new(Mutex::new(match endpoint_mode {
+        SseEndpointMode::SameUrl => Some(url.to_owned()),
+        _ => None,
+    }));
+    let active = Arc::new(Mutex::new(std::collections::HashMap::<
+        jsonrpc::Id,
+        (
+            JsonRpcMessage,
+            lingxi_core::host::mcp_result::CancellationToken,
+        ),
+    >::new()));
+    let tracking = Arc::new(LegacyRequestTracking::default());
+    let writer_tracking = tracking.clone();
+    let stopped = lingxi_core::host::mcp_result::CancellationToken::new();
+    let reader_stopped = stopped.clone();
+    let reader_endpoint = current_endpoint.clone();
+    let reader_active = active.clone();
+    let reader_client = client.clone();
+    let reader_auth = auth_token.map(str::to_owned);
+    let extra: lingxi_core::host::McpHeaders = extra_headers
+        .into_iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let reader_extra = extra.clone();
     let reader_inbound_tx = inbound_tx.clone();
     tokio::spawn(async move {
-        loop {
-            let item = tokio::select! {
-                biased;
-                _ = reader_inbound_tx.closed() => break,
-                item = event_stream.next() => item,
-            };
-            let Some(item) = item else {
-                break;
-            };
-            match item {
-                Ok(event) => {
-                    // A NAMED `endpoint` event is the legacy handshake, not a
-                    // JSON-RPC frame: upstream resolves its data against the
-                    // stream url and requires the same origin, rejecting the
-                    // connect otherwise. Handled before the default-event path
-                    // below so it is never parsed as a message.
-                    if event.event == "endpoint" {
-                        if let Some(tx) = endpoint_tx.take() {
-                            let _ = tx.send(resolve_endpoint(&stream_url, &event.data));
+        let mut response = Some(response);
+        let mut last_event_id = None::<String>;
+        let mut delay = Duration::from_secs(3);
+        'reader: loop {
+            if let Some(response) = response.take() {
+                let streaming = response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(crate::mcp_http::body_budget::is_event_stream);
+                let mut budget = crate::mcp_http::body_budget::Budget::new(
+                    crate::mcp_http::body_budget::MESSAGE_BYTES,
+                    if streaming && response.status().as_u16() == 200 {
+                        None
+                    } else {
+                        Some(crate::mcp_http::body_budget::MESSAGE_BYTES)
+                    },
+                );
+                let mut bytes = response.bytes_stream();
+                let mut decoder = crate::mcp_http::sse_codec::Decoder::default();
+                loop {
+                    let item = tokio::select! { biased; _=reader_inbound_tx.closed()=>break 'reader, _=reader_stopped.cancelled()=>break 'reader, item=bytes.next()=>item };
+                    let Some(item) = item else {
+                        break;
+                    };
+                    let chunk = match item {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            tracing::warn!(%error,"mcp sse: stream disconnected");
+                            break;
                         }
-                        continue;
+                    };
+                    if let Err(error) = budget.push(&chunk) {
+                        for (request, _) in reader_active
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .values()
+                        {
+                            if let Some(message) = crate::mcp_http::native_frame_error(
+                                request,
+                                "syntax",
+                                &error.diagnostic(),
+                            ) {
+                                let _ = reader_inbound_tx.send(message);
+                            }
+                        }
+                        break 'reader;
                     }
-                    // claude-code's SDK uses default-event SSE (no `event:` name)
-                    // with the `data:` field carrying the JSON-RPC frame. Skip
-                    // keep-alive comments / empty data lines.
-                    if event.data.is_empty() || !crate::mcp_http::is_message_event(&event.event) {
-                        continue;
-                    }
-                    match mcp::decode_native_mcp_frame(event.data.as_bytes()) {
-                        Ok(msg) => {
-                            if let Some(request) = reader_initialize_request
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .as_ref()
-                            {
-                                crate::mcp_http::observe_protocol_response(
-                                    request,
-                                    &msg,
-                                    &mut reader_protocol_version
+                    for item in decoder.push(&chunk) {
+                        let event = match item {
+                            crate::mcp_http::sse_codec::Item::Retry(ms) => {
+                                delay = Duration::from_millis(ms);
+                                continue;
+                            }
+                            crate::mcp_http::sse_codec::Item::Event(event) => event,
+                        };
+                        if let Some(id) = &event.id {
+                            last_event_id = (!id.is_empty()).then(|| id.clone());
+                        }
+                        if event.event == "endpoint" {
+                            match resolve_endpoint(&stream_url, &event.data) {
+                                Ok(endpoint) => {
+                                    *reader_endpoint
                                         .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                );
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        Some(endpoint.clone());
+                                    if let Some(tx) = endpoint_tx.take() {
+                                        let _ = tx.send(Ok(endpoint));
+                                    }
+                                }
+                                Err(error) => {
+                                    if let Some(tx) = endpoint_tx.take() {
+                                        let _ = tx.send(Err(error));
+                                    }
+                                    break 'reader;
+                                }
                             }
-                            if reader_inbound_tx.send(msg).is_err() {
-                                // Connection dropped; stop reading.
-                                break;
+                            continue;
+                        }
+                        if event.data.is_empty() || !crate::mcp_http::is_message_event(&event.event)
+                        {
+                            continue;
+                        }
+                        match mcp::decode_native_mcp_frame(event.data.as_bytes()) {
+                            Ok(message) => {
+                                if let Some(request) = reader_initialize_request
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref()
+                                {
+                                    crate::mcp_http::observe_protocol_response(
+                                        request,
+                                        &message,
+                                        &mut reader_protocol_version
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                    );
+                                }
+                                if let JsonRpcMessage::Response(response) = &message {
+                                    if let Some(id) = &response.id {
+                                        if let Some((_, completion)) = reader_active
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .remove(id)
+                                        {
+                                            completion.cancel();
+                                        }
+                                    }
+                                }
+                                if reader_inbound_tx.send(message).is_err() {
+                                    break 'reader;
+                                }
+                            }
+                            Err(error) => {
+                                let syntax =
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                                        &event.data,
+                                    )
+                                    .is_err();
+                                tracing::warn!(%error,syntax,"mcp sse: invalid message");
+                                if syntax {
+                                    for (request, _) in reader_active
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .values()
+                                    {
+                                        if let Some(message) = crate::mcp_http::native_frame_error(
+                                            request,
+                                            "syntax",
+                                            &crate::mcp_http::frame_diagnostic(&error),
+                                        ) {
+                                            let _ = reader_inbound_tx.send(message);
+                                        }
+                                    }
+                                    break 'reader;
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                data = %event.data,
-                                "mcp sse: malformed JSON frame, skipping"
-                            );
-                        }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "mcp sse: stream error, terminating reader");
-                    if let Some(tx) = endpoint_tx.take() {
-                        let _ = tx.send(Err(SseConnectError::Endpoint(format!(
-                            "stream ended before an endpoint event: {e}"
-                        ))));
-                    }
-                    break;
                 }
             }
+            tokio::select! { biased; _=reader_inbound_tx.closed()=>break, _=reader_stopped.cancelled()=>break, _=tokio::time::sleep(delay)=>{} }
+            let version = reader_protocol_version
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let mut headers = match build_headers::<lingxi_core::host::McpHeaders>(
+                reader_auth.as_deref(),
+                &reader_extra,
+                "text/event-stream",
+                version.as_deref(),
+            ) {
+                Ok(headers) => headers,
+                Err(_) => break,
+            };
+            // EventSource replaces configured Accept and owns the replay cursor.
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            if let Some(cursor) = &last_event_id {
+                if let Ok(value) = HeaderValue::from_str(cursor) {
+                    headers.insert("last-event-id", value);
+                }
+            }
+            let fetch = reader_client.get(&stream_url).headers(headers).send();
+            let next = tokio::select! { biased; _=reader_inbound_tx.closed()=>break, _=reader_stopped.cancelled()=>break, response=fetch=>response };
+            match next {
+                Ok(next) if next.status().is_success() => {
+                    if !next
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.starts_with("text/event-stream"))
+                    {
+                        break;
+                    }
+                    response = Some(next);
+                }
+                Ok(next) if matches!(next.status().as_u16(), 400 | 401 | 403 | 404 | 410) => break,
+                _ => {}
+            }
         }
-        // The stream closed cleanly without ever naming an endpoint. Report it
-        // rather than leaving a connect awaiting a sender that has been
-        // dropped.
+        reader_stopped.cancel();
         if let Some(tx) = endpoint_tx.take() {
             let _ = tx.send(Err(SseConnectError::Endpoint(
-                "stream closed before an endpoint event".to_string(),
+                "stream closed before an endpoint event".into(),
             )));
         }
     });
 
-    // POST writer task: drain outbound frames and POST each as one JSON-RPC
-    // body. Reuses the same `reqwest::Client` so the underlying connection
-    // pool serves both GET and POST.
-    // `SameUrl` is the IDE contract; `EndpointEvent` waits for the server to
-    // name the url, which is what makes this a legacy HTTP+SSE client rather
-    // than a transport that posts into the stream url and hopes.
-    let post_url = match endpoint_mode {
-        SseEndpointMode::SameUrl => url.to_string(),
-        SseEndpointMode::EndpointEvent | SseEndpointMode::LegacyRescue { .. } => {
-            endpoint_rx.await.map_err(|_| {
-                SseConnectError::Endpoint("reader stopped before an endpoint event".to_string())
-            })??
-        }
-    };
-    let post_auth = auth_token.map(str::to_string);
-    let post_extra = extra_headers.clone();
-    let post_client = client.clone();
+    if !matches!(endpoint_mode, SseEndpointMode::SameUrl) {
+        endpoint_rx.await.map_err(|_| {
+            SseConnectError::Endpoint("reader stopped before an endpoint event".into())
+        })??;
+    }
+    let post_auth = auth_token.map(str::to_owned);
     tokio::spawn(async move {
-        while let Some(frame) = outbound_rx.recv().await {
-            // Native's legacy POST wrapper requires both response media types;
-            // its EventSource GET advertises only text/event-stream.
-            let version = protocol_version
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let mut headers = match build_headers(
-                post_auth.as_deref(),
-                &post_extra,
-                "application/json, text/event-stream",
-                version.as_deref(),
-            ) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(error = %e, "mcp sse: failed to build POST headers");
-                    break;
-                }
-            };
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            let frame_value = serde_json::to_value(&frame).unwrap_or_default();
-            if frame_value["method"] == "initialize" {
-                *initialize_request
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frame_value);
-            }
-
-            let response = tokio::time::timeout(
-                MCP_SSE_HEADER_TIMEOUT,
-                post_client
-                    .post(&post_url)
-                    .headers(headers)
-                    .json(&frame)
-                    .send(),
-            )
-            .await;
-            match response {
-                Err(_) => {
-                    tracing::warn!("mcp sse: POST timed out");
-                    if let Some(error) = transport_error_message(&frame, "MCP SSE POST timed out") {
-                        if inbound_tx.send(error).is_err() {
-                            break;
-                        }
+        let mut posts = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _=inbound_tx.closed()=>break,
+                _=stopped.cancelled()=>break,
+                settled=posts.join_next(),if !posts.is_empty()=>{if let Some(Err(error))=settled{tracing::warn!(%error,"mcp sse: POST task failed");}},
+                frame=outbound_rx.recv()=>{
+                    let Some(frame)=frame else{break;};
+                    let request_cleanup=writer_tracking.0.take(&frame);
+                    let watcher_active=active.clone();let watcher_stopped=stopped.clone();
+                    if let JsonRpcMessage::Request(request)=&frame {
+                        let id=request.id.clone();let completion=lingxi_core::host::mcp_result::CancellationToken::new();
+                        active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.clone(),(frame.clone(),completion.clone()));
+                        tokio::spawn(async move {tokio::select! {biased; _=completion.cancelled()=>{}, _=watcher_stopped.cancelled()=>{}, _=request_cleanup.cancelled()=>{watcher_active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);}}});
                     }
-                    // The writer is the only outbound path. Stop it so the host
-                    // observes a closed sink and redials instead of queueing
-                    // forever behind one stalled POST.
-                    break;
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "mcp sse: POST failed");
-                    if let Some(message) = transport_error_message(&frame, &error.to_string()) {
-                        if inbound_tx.send(message).is_err() {
-                            break;
+                    let client=client.clone();let post_auth=post_auth.clone();let extra=extra.clone();let current_endpoint=current_endpoint.clone();let protocol_version=protocol_version.clone();let initialize_request=initialize_request.clone();let inbound_tx=inbound_tx.clone();let active=active.clone();
+                    posts.spawn(async move {
+                        let version=protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                        let mut headers=match build_headers::<lingxi_core::host::McpHeaders>(post_auth.as_deref(),&extra,"application/json, text/event-stream",version.as_deref()){Ok(headers)=>headers,Err(_)=>return};
+                        headers.insert(CONTENT_TYPE,HeaderValue::from_static("application/json"));
+                        let value=serde_json::to_value(&frame).unwrap_or_default();
+                        if value["method"]=="initialize"{*initialize_request.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=Some(value);}
+                        let endpoint=current_endpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                        let Some(endpoint)=endpoint else{return;};
+                        let response=tokio::time::timeout(MCP_SSE_HEADER_TIMEOUT,client.post(endpoint).headers(headers).json(&frame).send()).await;
+                        let error=match response {
+                            Err(_)=>transport_error_message(&frame,"MCP SSE POST timed out"),
+                            Ok(Err(error))=>transport_error_message(&frame,&error.to_string()),
+                            Ok(Ok(response))=>{
+                                let status=response.status().as_u16();
+                                let authenticate=response.headers().get(reqwest::header::WWW_AUTHENTICATE).and_then(|value|value.to_str().ok()).map(str::to_owned);
+                                if status==202 || ((200..300).contains(&status)&&!matches!(&frame,JsonRpcMessage::Request(_))){return;}
+                                let body=crate::mcp_http::read_native_body(response).await.map(|body|String::from_utf8_lossy(&body).into_owned()).unwrap_or_else(|_|"null".to_owned());
+                                if !(200..300).contains(&status){http_error_message(&frame,status,authenticate.as_deref(),&body)}else{None}
+                            }
+                        };
+                        if let Some(error)=error{
+                            if let JsonRpcMessage::Request(request)=&frame {if let Some((_,completion))=active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&request.id){completion.cancel();}}
+                            let _=inbound_tx.send(error);
                         }
-                    }
-                    break;
+                    });
                 }
-                Ok(Ok(response)) if !response.status().is_success() => {
-                    let status = response.status().as_u16();
-                    let www_authenticate = response
-                        .headers()
-                        .get(reqwest::header::WWW_AUTHENTICATE)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    if let Some(error) =
-                        http_error_message(&frame, status, www_authenticate.as_deref())
-                    {
-                        if inbound_tx.send(error).is_err() {
-                            break;
-                        }
-                    }
-                }
-                Ok(Ok(_)) => {}
             }
         }
+        stopped.cancel();
+        jsonrpc::router::PerRequestCancellation::close(writer_tracking.as_ref());
+        posts.abort_all();
+        while posts.join_next().await.is_some() {}
     });
 
     // Adapt the inbound mpsc into Stream<Item = Message>.
@@ -497,11 +609,14 @@ where
         Ok::<_, ConnectionError>(tx)
     });
 
-    Ok(Connection::from_message_streams(
+    let connection = Connection::from_message_streams_with_initial_request_id(
         Box::pin(inbound),
         Box::pin(outbound),
         Some("Method not found".into()),
-    ))
+        0,
+    );
+    connection.set_per_request_cancellation(tracking);
+    Ok(connection)
 }
 
 fn transport_error_message(request: &JsonRpcMessage, message: &str) -> Option<JsonRpcMessage> {
@@ -522,6 +637,7 @@ fn http_error_message(
     request: &JsonRpcMessage,
     status: u16,
     www_authenticate: Option<&str>,
+    body: &str,
 ) -> Option<JsonRpcMessage> {
     let request = serde_json::to_value(request).ok()?;
     let id = request.get("id")?.clone();
@@ -530,13 +646,12 @@ fn http_error_message(
         "id": id,
         "error": {
             "code": -32001,
-            "message": format!(
-                "MCP_HTTP_STATUS={status};WWW_AUTHENTICATE={}",
-                www_authenticate.unwrap_or_default()
-            ),
+            "message": format!("Error POSTing to endpoint (HTTP {status}): {body}"),
             "data": {
                 "httpStatus": status,
-                "wwwAuthenticate": www_authenticate
+                "wwwAuthenticate": www_authenticate, "body": body,
+                "nativeFailure":"transport",
+                "diagnostic":format!("Error POSTing to endpoint (HTTP {status}): {body}")
             }
         }
     }))

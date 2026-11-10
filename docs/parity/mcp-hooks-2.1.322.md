@@ -98,6 +98,9 @@ extracted helpers, not execution of the complete executable.
 
 ## Limits
 
+The [gap-closure follow-up](mcp-gap-closure-2.1.322.md) tracks the later fixes
+and verification for the remaining contracts listed below.
+
 Live SDK, HTTP/SSE, and auto-classifier `PermissionDenied` paths were not
 exercised in this first phase. The [transport/OAuth follow-up](mcp-transports-oauth-2.1.322.md)
 adds bounded SDK, HTTP/SSE, and OAuth verification. The five payload serializers

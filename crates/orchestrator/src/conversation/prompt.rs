@@ -770,6 +770,7 @@ impl ConversationOrchestrator {
         } = prepared;
         match definition {
             Some(definition) => {
+                let hook_personal_origin = agent::hooks_trust::personal_config_origin(&definition);
                 if !hooks_trusted {
                     agent::hooks_trust::report_untrusted_hooks(
                         &definition,
@@ -799,6 +800,12 @@ impl ConversationOrchestrator {
                 )
                 .await;
                 if hooks_trusted {
+                    self.hooks
+                        .set_personal_hook_origins(
+                            &definition.frontmatter_hooks,
+                            hook_personal_origin,
+                        )
+                        .await;
                     self.replace_main_thread_agent_hooks(&definition.frontmatter_hooks)
                         .await;
                 } else {

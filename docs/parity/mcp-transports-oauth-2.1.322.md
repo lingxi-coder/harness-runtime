@@ -186,6 +186,9 @@ controlled replay receipts and Rust gate logs in `work/`.
 
 ## Evidence limits
 
+The [gap-closure follow-up](mcp-gap-closure-2.1.322.md) records the later
+implementation and verification of these remaining contracts.
+
 These are finite transport/auth contracts. SDK classifier/admission fields
 `connectorId` and `autoModeVerdictTools`, the specialized `mcp_call` diagnostic,
 and global initialize-response ordering remain outside this pass. Internal

@@ -53,6 +53,11 @@ pub enum RouterError {
 /// Transport-owned request abort authority. Preparation happens before a
 /// request is enqueued, so even an expired queued POST carries its cancelled token.
 pub trait PerRequestCancellation: Send + Sync {
+    /// Some transports track request ownership without aborting their shared
+    /// stream. Such trackers retain peer cancellation notifications.
+    fn aborts_request_stream(&self) -> bool {
+        true
+    }
     /// Install the token for one newly assigned request id.
     fn prepare(&self, id: &Id) -> CancellationToken;
     /// Discard a token when enqueueing failed and no transport frame can arrive.
@@ -228,7 +233,8 @@ impl Router {
         self.request_cancellation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
+            .as_ref()
+            .is_some_and(|controller| controller.aborts_request_stream())
     }
 
     fn signal_unknown_response_id(&self, actual: Option<Id>) {

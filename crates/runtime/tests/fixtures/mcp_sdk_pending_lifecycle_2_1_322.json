@@ -1,0 +1,360 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "manifest": false,
+  "handshakesBeforeInitializeReply": [
+    "first",
+    "second"
+  ],
+  "cases": [
+    {
+      "name": "reconnect",
+      "request": {
+        "subtype": "mcp_reconnect",
+        "serverName": "first"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "SDK servers should be handled in print.ts"
+      }
+    },
+    {
+      "name": "reconnect-missing",
+      "request": {
+        "subtype": "mcp_reconnect",
+        "serverName": "missing"
+      },
+      "response": {
+        "subtype": "error",
+        "error": "Server not found: missing"
+      }
+    },
+    {
+      "name": "set-invalid",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": null
+      },
+      "response": {
+        "subtype": "error",
+        "error": "mcp_set_servers: servers must be an object of config objects"
+      }
+    },
+    {
+      "name": "set-sdk",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "third": {
+            "type": "sdk",
+            "name": "third",
+            "connectorId": "connector"
+          }
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [
+            "third"
+          ],
+          "removed": [
+            "first",
+            "second"
+          ],
+          "errors": {}
+        }
+      }
+    },
+    {
+      "name": "status-after-set",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "mcpServers": [
+            {
+              "name": "third",
+              "status": "pending",
+              "transport": "sdk",
+              "scope": "dynamic",
+              "source": "sdk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "set-invalid-sdk",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "bad": {
+            "type": "sdk"
+          }
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [
+            "bad"
+          ],
+          "removed": [
+            "third"
+          ],
+          "errors": {}
+        }
+      }
+    },
+    {
+      "name": "set-invalid-transport",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "bad": {
+            "type": "unknown"
+          }
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [
+            "bad"
+          ],
+          "removed": [
+            "bad"
+          ],
+          "errors": {
+            "bad": "Fe.includes is not a function. (In 'Fe.includes(\"timed out\")', 'Fe.includes' is undefined)"
+          }
+        }
+      }
+    },
+    {
+      "name": "set-invalid-stdio",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "bad": {
+            "type": "stdio",
+            "command": 7
+          }
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [
+            "bad"
+          ],
+          "removed": [],
+          "errors": {
+            "bad": "e.command?.includes is not a function. (In 'e.command?.includes(t)', 'e.command?.includes' is undefined)"
+          }
+        }
+      }
+    },
+    {
+      "name": "set-sdk-alias",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "third": {
+            "type": "sdk",
+            "name": "different"
+          }
+        }
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [
+            "third"
+          ],
+          "removed": [
+            "bad"
+          ],
+          "errors": {}
+        }
+      }
+    },
+    {
+      "name": "toggle-sdk",
+      "request": {
+        "subtype": "mcp_toggle",
+        "serverName": "third",
+        "enabled": false
+      },
+      "response": {
+        "subtype": "success"
+      }
+    },
+    {
+      "name": "toggle-sdk-on",
+      "request": {
+        "subtype": "mcp_toggle",
+        "serverName": "third",
+        "enabled": true
+      },
+      "response": {
+        "subtype": "success"
+      }
+    },
+    {
+      "name": "set-empty",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {}
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "added": [],
+          "removed": [
+            "third"
+          ],
+          "errors": {}
+        }
+      }
+    },
+    {
+      "name": "status-after-empty",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "mcpServers": []
+        }
+      }
+    }
+  ],
+  "sdkMessages": [
+    {
+      "server": "first",
+      "message": {
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "claude-code",
+            "title": "Claude Code",
+            "description": "Anthropic's agentic coding tool",
+            "websiteUrl": "https://claude.com/claude-code",
+            "version": "2.1.322"
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 0
+      }
+    },
+    {
+      "server": "second",
+      "message": {
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "claude-code",
+            "title": "Claude Code",
+            "description": "Anthropic's agentic coding tool",
+            "websiteUrl": "https://claude.com/claude-code",
+            "version": "2.1.322"
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 0
+      }
+    },
+    {
+      "server": "first",
+      "message": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "server": "second",
+      "message": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "server": "first",
+      "message": {
+        "method": "tools/list",
+        "jsonrpc": "2.0",
+        "id": 1
+      }
+    },
+    {
+      "server": "second",
+      "message": {
+        "method": "tools/list",
+        "jsonrpc": "2.0",
+        "id": 1
+      }
+    },
+    {
+      "server": "third",
+      "message": {
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "claude-code",
+            "title": "Claude Code",
+            "description": "Anthropic's agentic coding tool",
+            "websiteUrl": "https://claude.com/claude-code",
+            "version": "2.1.322"
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 0
+      }
+    },
+    {
+      "server": "third",
+      "message": {
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "claude-code",
+            "title": "Claude Code",
+            "description": "Anthropic's agentic coding tool",
+            "websiteUrl": "https://claude.com/claude-code",
+            "version": "2.1.322"
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 0
+      }
+    },
+    {
+      "server": "third",
+      "message": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "server": "third",
+      "message": {
+        "method": "tools/list",
+        "jsonrpc": "2.0",
+        "id": 1
+      }
+    }
+  ]
+}

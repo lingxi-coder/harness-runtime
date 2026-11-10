@@ -1,0 +1,390 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "name": "normalize",
+      "start": 260530248,
+      "end": 260530385,
+      "sha256": "2a939978d12b8f9007235f0b22462fde69be38a1ec2b1016ef30aeb03ece18c4"
+    },
+    {
+      "name": "provenance",
+      "start": 267958047,
+      "end": 267958290,
+      "sha256": "d3b7bbc12d30ab386e668cd8398fb1d4462b517cba2877330e71ada3165dd3b4"
+    }
+  ],
+  "catalogRanges": [
+    {
+      "name": "wellformed",
+      "start": 260462323,
+      "end": 260462884,
+      "sha256": "b185fd1e8a6849ece80201f3443addd5daa90bf0363928bfd4b23b87ff43110e"
+    },
+    {
+      "name": "catalog-normalization",
+      "start": 260471379,
+      "end": 260472218,
+      "sha256": "00177a3c16f1ac0dec1d8b71ba2ab6486105a18d7d870d2ff416208e9016c658"
+    },
+    {
+      "name": "catalog-sanitize",
+      "start": 260481569,
+      "end": 260482231,
+      "sha256": "604d81337edb1b5023b055444efdeffe02be5f4983692140581b8cd60fbdfd66"
+    }
+  ],
+  "scope": "Unchanged native helpers and actual JavaScript JSON.parse/Object.keys on source-keyed MCP records. Catalog-name cases execute native fg/NFKC/Lh/Ckt short-name paths; direct JSON serialization preserves caller string units.",
+  "cases": [
+    {
+      "rawConfig": "{\"mcpServers\":{\"\":{\"command\":\"fake\"}}}",
+      "nameUnits": [],
+      "normalized": "",
+      "expectedProvenanceJson": "{\"name\":\"\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"wire audit\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        119,
+        105,
+        114,
+        101,
+        32,
+        97,
+        117,
+        100,
+        105,
+        116
+      ],
+      "normalized": "wire_audit",
+      "expectedProvenanceJson": "{\"name\":\"wire audit\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"a😀b\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        97,
+        55357,
+        56832,
+        98
+      ],
+      "normalized": "a__b",
+      "expectedProvenanceJson": "{\"name\":\"a😀b\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"�\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        65533
+      ],
+      "normalized": "_",
+      "expectedProvenanceJson": "{\"name\":\"�\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"\\ud800\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        55296
+      ],
+      "normalized": "_",
+      "expectedProvenanceJson": "{\"name\":\"\\ud800\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"\\udfff\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        57343
+      ],
+      "normalized": "_",
+      "expectedProvenanceJson": "{\"name\":\"\\udfff\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"wire \\ud800\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        119,
+        105,
+        114,
+        101,
+        32,
+        55296
+      ],
+      "normalized": "wire__",
+      "expectedProvenanceJson": "{\"name\":\"wire \\ud800\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"wire \\udfff\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        119,
+        105,
+        114,
+        101,
+        32,
+        57343
+      ],
+      "normalized": "wire__",
+      "expectedProvenanceJson": "{\"name\":\"wire \\udfff\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"a\\ud800\\ud800b\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        97,
+        55296,
+        55296,
+        98
+      ],
+      "normalized": "a__b",
+      "expectedProvenanceJson": "{\"name\":\"a\\ud800\\ud800b\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"__lingxi_mcp_utf16_d800\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        95,
+        95,
+        108,
+        105,
+        110,
+        103,
+        120,
+        105,
+        95,
+        109,
+        99,
+        112,
+        95,
+        117,
+        116,
+        102,
+        49,
+        54,
+        95,
+        100,
+        56,
+        48,
+        48
+      ],
+      "normalized": "__lingxi_mcp_utf16_d800",
+      "expectedProvenanceJson": "{\"name\":\"__lingxi_mcp_utf16_d800\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"plugin:fixture:\\ud800\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        112,
+        108,
+        117,
+        103,
+        105,
+        110,
+        58,
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101,
+        58,
+        55296
+      ],
+      "normalized": "plugin_fixture__",
+      "expectedProvenanceJson": "{\"name\":\"plugin:fixture:\\ud800\",\"source\":\"dynamic\"}"
+    },
+    {
+      "rawConfig": "{\"mcpServers\":{\"claude.ai \\ud800\":{\"command\":\"fake\"}}}",
+      "nameUnits": [
+        99,
+        108,
+        97,
+        117,
+        100,
+        101,
+        46,
+        97,
+        105,
+        32,
+        55296
+      ],
+      "normalized": "claude_ai",
+      "expectedProvenanceJson": "{\"name\":\"claude.ai \\ud800\",\"source\":\"dynamic\"}"
+    }
+  ],
+  "toolCases": [
+    {
+      "nameUnits": [
+        101,
+        99,
+        104,
+        111,
+        32,
+        55296
+      ],
+      "sanitizedUnits": [
+        101,
+        99,
+        104,
+        111,
+        32
+      ],
+      "sanitized": "echo ",
+      "normalized": "echo_",
+      "expectedCallParamsJson": "{\"name\":\"echo \",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"echo \\ud800\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        101,
+        99,
+        104,
+        111,
+        32,
+        57343
+      ],
+      "sanitizedUnits": [
+        101,
+        99,
+        104,
+        111,
+        32
+      ],
+      "sanitized": "echo ",
+      "normalized": "echo_",
+      "expectedCallParamsJson": "{\"name\":\"echo \",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"echo \\udfff\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        97,
+        55296,
+        55296,
+        98
+      ],
+      "sanitizedUnits": [
+        97,
+        98
+      ],
+      "sanitized": "ab",
+      "normalized": "ab",
+      "expectedCallParamsJson": "{\"name\":\"ab\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"a\\ud800\\ud800b\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        101,
+        99,
+        104,
+        111,
+        32,
+        55357,
+        56832
+      ],
+      "sanitizedUnits": [
+        101,
+        99,
+        104,
+        111,
+        32,
+        55357,
+        56832
+      ],
+      "sanitized": "echo 😀",
+      "normalized": "echo___",
+      "expectedCallParamsJson": "{\"name\":\"echo 😀\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"echo 😀\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        65318,
+        65333,
+        65324,
+        65324
+      ],
+      "sanitizedUnits": [
+        70,
+        85,
+        76,
+        76
+      ],
+      "sanitized": "FULL",
+      "normalized": "FULL",
+      "expectedCallParamsJson": "{\"name\":\"FULL\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"ＦＵＬＬ\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        97,
+        8203,
+        98
+      ],
+      "sanitizedUnits": [
+        97,
+        98
+      ],
+      "sanitized": "ab",
+      "normalized": "ab",
+      "expectedCallParamsJson": "{\"name\":\"ab\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"a​b\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        97,
+        57344,
+        98
+      ],
+      "sanitizedUnits": [
+        97,
+        98
+      ],
+      "sanitized": "ab",
+      "normalized": "ab",
+      "expectedCallParamsJson": "{\"name\":\"ab\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"ab\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        111,
+        114,
+        100,
+        105,
+        110,
+        97,
+        114,
+        121
+      ],
+      "sanitizedUnits": [
+        111,
+        114,
+        100,
+        105,
+        110,
+        97,
+        114,
+        121
+      ],
+      "sanitized": "ordinary",
+      "normalized": "ordinary",
+      "expectedCallParamsJson": "{\"name\":\"ordinary\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"ordinary\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        65533
+      ],
+      "sanitizedUnits": [
+        65533
+      ],
+      "sanitized": "�",
+      "normalized": "_",
+      "expectedCallParamsJson": "{\"name\":\"�\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"�\",\"arguments\":{}}"
+    },
+    {
+      "nameUnits": [
+        101,
+        769
+      ],
+      "sanitizedUnits": [
+        233
+      ],
+      "sanitized": "é",
+      "normalized": "_",
+      "expectedCallParamsJson": "{\"name\":\"é\",\"arguments\":{}}",
+      "directCallParamsJson": "{\"name\":\"é\",\"arguments\":{}}"
+    }
+  ]
+}

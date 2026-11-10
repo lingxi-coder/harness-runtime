@@ -6,6 +6,7 @@ import {homedir} from 'node:os';
 import path from 'node:path';
 import {parse as parseLegacyUrl,fileURLToPath} from 'node:url';
 import vm from 'node:vm';
+import {loadNativeOAuthSchemas} from './mcp_oauth_322_schema_oracle.mjs';
 export const BASELINE_SHA256='a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450';
 export const SOURCE_RANGES=[
   {
@@ -145,10 +146,11 @@ const digest=value=>createHash('sha256').update(value).digest('hex');
 export function loadNative(binaryPath=path.join(homedir(),'.local/share/claude/versions/2.1.322')) {
  const binary=readFileSync(binaryPath);assert.equal(digest(binary),BASELINE_SHA256);
  const sources=Object.fromEntries(SOURCE_RANGES.map(range=>{const bytes=binary.subarray(range.start,range.end);assert.equal(digest(bytes),range.sha256);return[range.name,bytes.toString('utf8')];}));
+ const {schemas,ranges:schemaRanges}=loadNativeOAuthSchemas(binaryPath,binary);
  const context=vm.createContext({URL,URLSearchParams,Headers,Response,Request,Buffer,TextEncoder,btoa,atob,
    fetch,At:'2025-11-25',tc:false,wn:'code',$n:'S256',t:()=>{},le:()=>{},qg:()=>({record:()=>{}}),
    XTn:async()=>({code_verifier:'fixed-verifier-43',code_challenge:'fixed-challenge'}),
-   b9t:{parse:value=>value},Xr:{parse:value=>value},dPt:{parse:value=>value},S9t:{parse:value=>value},Zr:{parse:value=>value},
+   b9t:schemas.b9t,Xr:schemas.Xr,dPt:schemas.dPt,S9t:schemas.S9t,Zr:schemas.Zr,
    sc:async response=>Error('OAuth '+(response.status??'')+' '+(await response.text())),
    cPt:class extends Error{constructor(phase,expected,received){super(`issuer mismatch (${phase}): ${expected} != ${received}`)}},
    Sc:class extends Error{constructor(url){super('insecure token endpoint: '+url)}},
@@ -158,7 +160,7 @@ export function loadNative(binaryPath=path.join(homedir(),'.local/share/claude/v
  const native=vm.runInContext(names.map(name=>sources[name]).join('\n')+';({challenge:o8e,prm:CZr,asUrls:Qd,prmUrl:Yd,metadata:v9t,discovery:TZr,authorize:Ces,grant:kn,exchange:YSi,refresh:Tes,authMethod:Ud,authApply:Dd,endpoint:Hd,clientMetadata:Jd,scope:Gd,issuer:Pa,register:th})',context,{timeout:1000});
  const providerScope=vm.runInContext(sources.providerScope+';({offline:Lga,isMicrosoft:Hga})',vm.createContext({URL}),{timeout:1000});
  const redirect=vm.runInContext('({'+sources.providerRedirect+'return e.toString();}}).redirectToAuthorization',vm.createContext({URL,Lga:providerScope.offline,Hga:providerScope.isMicrosoft,le:()=>{},Wx:(_kind,value)=>value}),{timeout:1000});
- return {native,sources,context,redirect,providerScope};
+ return {native,sources,context,redirect,providerScope,schemaRanges,schemas};
 }
 export function nativeCallbackHandler(sources,options={}) {
  const observations=[];
@@ -176,7 +178,7 @@ export function nativeRevocation(sources, post) {
   Mt:axios,BTn:()=>false,ocr:()=>({}),le:()=>{},qg:()=>({record:()=>{}})}),{timeout:1000});
 }
 export async function generateFixture(binaryPath) {
- const {native,sources,redirect}=loadNative(binaryPath);
+ const {native,sources,redirect,schemaRanges}=loadNative(binaryPath);
  const pkceCases=[];
  for(const seed of [0,1,17,65,127,255]) {
   const bytes=Array.from({length:43},(_,index)=>(seed+index)%256);
@@ -207,7 +209,7 @@ export async function generateFixture(binaryPath) {
  }
  const fallbackEndpointCases=[];
  for(const base of ['http://localhost:31337/mcp','https://as.example/tenant/path?old=1#frag','https://AS.EXAMPLE:443/']) {
-  const requests=[];const fetchFn=async(url,init)=>{requests.push({url:String(url),body:String(init.body)});return new Response(init.body instanceof URLSearchParams?'{"access_token":"fake-access","token_type":"Bearer"}':'{"client_id":"fake-dcr-client"}',{status:200})};
+  const requests=[];const fetchFn=async(url,init)=>{requests.push({url:String(url),body:String(init.body)});return new Response(init.body instanceof URLSearchParams?'{"access_token":"fake-access","token_type":"Bearer"}':JSON.stringify({...JSON.parse(init.body),client_id:'fake-dcr-client'}),{status:200})};
   const {authorizationUrl}=await native.authorize(base,{clientInformation:{client_id:'fake-client'},redirectUrl:'http://localhost:31337/callback',state:'expected-state'});
   await native.register(base,{clientMetadata:{client_name:'LingXi (fake-server)',redirect_uris:['http://localhost:31337/callback']},fetchFn});
   await native.exchange(base,{clientInformation:{client_id:'fake-client'},authorizationCode:'fake-code',codeVerifier:'fixed-verifier-43',redirectUri:'http://localhost:31337/callback',fetchFn});
@@ -257,7 +259,7 @@ export async function generateFixture(binaryPath) {
  for(const redirect_uri of ['http://localhost:31337/callback','http://127.0.0.1:31337/callback','https://app.example/callback','lingxi://callback'])for(const scope of [undefined,'read write'])for(const initialScope of [undefined,'curated initial']) {
   const base={client_name:'LingXi (fake-server)',redirect_uris:[redirect_uri],grant_types:['authorization_code','refresh_token'],response_types:['code'],token_endpoint_auth_method:'none',...(initialScope!==undefined?{scope:initialScope}:{})};
   const metadata=native.clientMetadata({clientMetadata:base,redirectUrl:redirect_uri});const requests=[];
-  await native.register('https://as.example',{metadata:{registration_endpoint:'https://as.example/register'},clientMetadata:metadata,scope,fetchFn:async(url,init)=>{requests.push({url:String(url),headers:Object.fromEntries(new Headers(init.headers)),body:String(init.body)});return new Response('{"client_id":"fake-dcr-client"}',{status:201})}});
+  await native.register('https://as.example',{metadata:{registration_endpoint:'https://as.example/register'},clientMetadata:metadata,scope,fetchFn:async(url,init)=>{requests.push({url:String(url),headers:Object.fromEntries(new Headers(init.headers)),body:String(init.body)});return new Response(JSON.stringify({...JSON.parse(init.body),client_id:'fake-dcr-client'}),{status:201})}});
   registrationCases.push({redirect_uri,...(scope!==undefined?{scope}:{}),...(initialScope!==undefined?{initial_scope:initialScope}:{}),...requests[0]});
  }
  const revocationCases=[];
@@ -279,8 +281,8 @@ export async function generateFixture(binaryPath) {
   handler({url:requestUrl},{writeHead:value=>{status=value},end:value=>{body=JSON.parse(value)}});
   callbackCases.push({request_url:requestUrl,...(status!==undefined?{status}:{}),...(body!==undefined?{page:body}:{}),observations});
  }
- return {version:'2.1.322',native_sha256:BASELINE_SHA256,sourceByteRanges:SOURCE_RANGES,
-  scope:'MCP OAuth only. Unchanged native SDK/application helpers execute in isolated JS contexts with fake data and caller-supplied fetch. Schema parsers and error constructors are adapters; auth-failure presence is compared without host-specific btoa error prose. Schema validation and whole-CLI account login are not claimed. Branded client_name stays LingXi and provider-neutral DCR remains default; Anthropic-hosted CIMD is not adopted.',
+ return {version:'2.1.322',native_sha256:BASELINE_SHA256,sourceByteRanges:[...SOURCE_RANGES,...schemaRanges],
+  scope:'MCP OAuth only. Unchanged native SDK/application helpers execute in isolated JS contexts with fake data and caller-supplied fetch. OAuth schema definitions and all bundled Zod dependencies are unchanged native code. Error constructors are explicit adapters; auth-failure presence is compared without host-specific btoa error prose. Whole-CLI account login is not claimed. Branded client_name stays LingXi and provider-neutral DCR remains default; Anthropic-hosted CIMD is not adopted.',
   pkceCases,stateCase:{bytes:stateBytes,expected:state},challengeCases,discoveryUrlCases,discoveryOutcomeCases,fallbackEndpointCases,authorizeCases,scopeCases,authCases,grantCases,registrationCases,revocationCases,callbackCases};
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===path.resolve(process.argv[1])) {

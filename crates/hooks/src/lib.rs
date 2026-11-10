@@ -52,6 +52,7 @@ pub mod teammate_idle_firer;
 pub mod terminal_seq;
 pub mod user_config;
 pub mod watcher_rebinder;
+pub mod worktree_manager;
 
 pub use async_registry::AsyncHookRegistry;
 pub use attachment::{
@@ -108,3 +109,5 @@ pub use teammate_idle_firer::{
     OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer, TeammateIdleOutcome,
 };
 pub use watcher_rebinder::{OptionalWatcherRebinder, WatcherRebinder};
+
+pub use worktree_manager::{HookedWorktreeManager, WorktreeHookResult};

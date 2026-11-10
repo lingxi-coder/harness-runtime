@@ -215,7 +215,14 @@ impl AgentToolResolver {
                 .collect(),
             AgentToolPolicy::Except(names) => parent_tools
                 .iter()
-                .filter(|t| !names.contains(&t.name().to_string()))
+                .filter(|t| {
+                    !names.contains(&t.name().to_string())
+                        && !t.mcp_deny_aliases().iter().any(|alias| {
+                            names
+                                .iter()
+                                .any(|denied| permission::tool_wide_name_matches(denied, alias))
+                        })
+                })
                 .cloned()
                 .collect(),
         };
@@ -288,7 +295,14 @@ impl AgentToolResolver {
                 .iter()
                 .map(|spec| tool_name_from_spec(spec))
                 .collect();
-            tools.retain(|t| !def_disallowed.contains(t.name()));
+            tools.retain(|t| {
+                !def_disallowed.contains(t.name())
+                    && !t.mcp_deny_aliases().iter().any(|alias| {
+                        def_disallowed
+                            .iter()
+                            .any(|denied| permission::tool_wide_name_matches(denied, alias))
+                    })
+            });
         }
 
         // (4) Per-agent MCP tools always pass (claude returns true for
@@ -491,7 +505,9 @@ pub async fn resolve_subagent_tools_with_handback_and_policy(
         coordinator_mode,
     );
     resolved.retain(|tool| {
-        !permission::native_deny_context_matches_tool_name(deny_context, tool.name())
+        !std::iter::once(tool.name())
+            .chain(tool.mcp_deny_aliases().iter().map(String::as_str))
+            .any(|name| permission::native_deny_context_matches_tool_name(deny_context, name))
     });
     if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
         if !names.is_empty() && resolved.is_empty() {

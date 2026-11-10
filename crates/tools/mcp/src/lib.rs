@@ -35,8 +35,8 @@ pub use large_output::{
     process_mcp_result_source, process_mcp_result_with_exact_count_source, ExactCountOutcome,
 };
 pub use mcp_tool::{
-    build_registered_mcp_tools, configured_permission_ceiling, ListMcpResourcesTool, MCPTool,
-    McpAuthTool, ReadMcpResourceTool,
+    build_registered_mcp_tools, configured_permission_ceiling, native_mcp_error_detail,
+    ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool,
 };
 pub use read_mcp_resource_dir::ReadMcpResourceDirTool;
 pub use transform_result::transform_result_content_source;

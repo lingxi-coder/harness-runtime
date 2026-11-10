@@ -40,6 +40,18 @@
 use crate::definition::{AgentDefinition, AgentSource};
 use std::path::{Path, PathBuf};
 
+/// Origin fact from the definition loader, independent of folder trust.
+/// Plugin definitions require the owning plugin's install provenance; absent
+/// that fact the restricted worktree adapter holds their answer.
+#[must_use]
+pub fn personal_config_origin(definition: &AgentDefinition) -> Option<bool> {
+    match definition.source {
+        AgentSource::Settings(lingxi_core::types::SettingsScope::User) => Some(true),
+        AgentSource::Plugin => None,
+        _ => Some(false),
+    }
+}
+
 /// claude-code `psd` — the folder whose trust grant governs a definition loaded
 /// from `base_dir`.
 ///
@@ -441,5 +453,32 @@ mod tests {
         assert_eq!(HooksTrustSurface::MainThread.tag(), "mainThread");
         assert_eq!(HooksTrustSurface::Subagent.noun(), "agent");
         assert_eq!(HooksTrustSurface::MainThread.noun(), "main-thread agent");
+    }
+    #[test]
+    fn loader_personal_origin_is_independent_of_folder_trust() {
+        use lingxi_core::types::SettingsScope;
+        let user = def_at(
+            Path::new("/user/agents"),
+            AgentSource::Settings(SettingsScope::User),
+        );
+        assert_eq!(personal_config_origin(&user), Some(true));
+        for source in [
+            AgentSource::BuiltIn,
+            AgentSource::Flag,
+            AgentSource::AdditionalDirectory,
+            AgentSource::Settings(SettingsScope::Managed),
+            AgentSource::Settings(SettingsScope::Project),
+            AgentSource::Settings(SettingsScope::Local),
+        ] {
+            assert_eq!(
+                personal_config_origin(&def_at(Path::new("/project/agents"), source)),
+                Some(false),
+                "{source:?}"
+            );
+        }
+        assert_eq!(
+            personal_config_origin(&def_at(Path::new("/plugin/agents"), AgentSource::Plugin)),
+            None
+        );
     }
 }

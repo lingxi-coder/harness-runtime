@@ -1972,7 +1972,7 @@ impl PluginManager {
                     }
                 }
                 let mut scoped = cfg.clone();
-                scoped.name = scoped_name;
+                scoped.prepend_authored_name(&format!("plugin:{plugin_name}:"));
                 stamp_plugin_mcp_metadata(&mut scoped);
                 // Substitute `${user_config.KEY}` references (command / args
                 // / env, and remote url / headers) with the resolved values
@@ -2189,10 +2189,24 @@ impl PluginManager {
             plugin_data_dir.as_deref(),
             &self.project_dir,
         );
-        self.hook_registry
-            .write()
-            .await
-            .register_plugin_hooks(manifest.id, plugin_hooks);
+        let hook_personal_origin = if matches!(manifest.source, PluginSource::BuiltIn)
+            || self
+                .managed_plugin_names
+                .read()
+                .await
+                .contains(&manifest.name)
+        {
+            Some(false)
+        } else {
+            // The current manifest does not carry a trusted installation
+            // settings tier. Preserve that ambiguity instead of treating a
+            // user-installed plugin as organization-owned.
+            None
+        };
+        let mut hook_registry = self.hook_registry.write().await;
+        hook_registry.set_personal_hook_origins(&plugin_hooks, hook_personal_origin);
+        hook_registry.register_plugin_hooks(manifest.id, plugin_hooks);
+        drop(hook_registry);
 
         if let Some(host) = loaded_mod {
             self.hook_registry.write().await.set_mod_host(host);

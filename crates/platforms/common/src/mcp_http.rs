@@ -6,14 +6,12 @@
 //! - POST `Content-Type: application/json` body is a single JSON-RPC frame.
 //! - `Accept: application/json, text/event-stream` (the literal claude-code
 //!   `MCP_STREAMABLE_HTTP_ACCEPT` const from `client.ts:471`).
-//! - `User-Agent: claude-code/<CARGO_PKG_VERSION>` (matches `getMCPUserAgent()`
-//!   shape from `utils/http.ts:37-50`).
+//! - LingXi product/version `User-Agent`, with the native MCP CLI shape.
 //! - When `auth_token` is `Some`, POST carries
 //!   `X-LingXi-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
 //! - Response body is EITHER a single `application/json` frame OR a
 //!   `text/event-stream` body of zero-or-more frames; content-type selects.
 
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
@@ -35,132 +33,350 @@ impl Drop for HttpCleanupCompletion {
     }
 }
 
-async fn receive_notifications<H>(
+#[path = "mcp_http_body.rs"]
+pub(crate) mod body_budget;
+#[path = "mcp_sse_codec.rs"]
+pub(crate) mod sse_codec;
+
+#[derive(Debug)]
+pub(crate) struct BodyReadError {
+    pub diagnostic: String,
+    pub limit: Option<usize>,
+}
+
+pub(crate) async fn read_native_body(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, BodyReadError> {
+    let mut budget =
+        body_budget::Budget::new(body_budget::MESSAGE_BYTES, Some(body_budget::MESSAGE_BYTES));
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BodyReadError {
+            diagnostic: error.to_string(),
+            limit: None,
+        })?;
+        budget.push(&chunk).map_err(|error| BodyReadError {
+            diagnostic: error.diagnostic(),
+            limit: Some(error.limit),
+        })?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[derive(Clone)]
+struct HttpStreamContext {
     client: reqwest::Client,
     url: String,
     auth: Option<String>,
-    extra: H,
+    extra: lingxi_core::host::McpHeaders,
     session_id: Arc<Mutex<Option<String>>>,
     protocol_version: Arc<Mutex<Option<String>>>,
     inbound: mpsc::UnboundedSender<JsonRpcMessage>,
     fatal: mpsc::UnboundedSender<()>,
-    cancel: CancellationToken,
-    fetch_timeout: Option<std::time::Duration>,
-) where
-    H: Send + 'static,
-    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
-{
-    let mut last_event_id: Option<String> = None;
-    let mut retry_ms = 250u64;
-    loop {
-        let headers = {
-            let sid = session_id
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let version = protocol_version
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match build_common_headers(auth.as_deref(), &extra, sid.as_deref(), version.as_deref())
-            {
-                Ok(headers) => headers,
-                Err(_) => {
-                    let _ = fatal.send(());
-                    return;
-                }
-            }
+    retry_ms: Arc<Mutex<Option<u64>>>,
+    active: Arc<Mutex<HashMap<jsonrpc::Id, (JsonRpcMessage, CancellationToken)>>>,
+    abort: CancellationToken,
+}
+
+impl HttpStreamContext {
+    fn register(&self, frame: &JsonRpcMessage, cancellation: CancellationToken) {
+        let JsonRpcMessage::Request(request) = frame else {
+            return;
         };
-        let mut headers = headers;
-        extend_accept(&mut headers, &["text/event-stream"]);
-        if let Some(id) = &last_event_id {
-            if let Ok(value) = HeaderValue::from_str(id) {
-                headers.insert(HeaderName::from_static("last-event-id"), value);
+        let id = request.id.clone();
+        let completion = CancellationToken::new();
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), (frame.clone(), completion.clone()));
+        let active = self.active.clone();
+        let abort = self.abort.clone();
+        tokio::spawn(async move {
+            tokio::select! {biased; _=completion.cancelled()=>{}, _=abort.cancelled()=>{}, _=cancellation.cancelled()=>{active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);}}
+        });
+    }
+
+    fn forward(
+        &self,
+        message: JsonRpcMessage,
+    ) -> Result<(), mpsc::error::SendError<JsonRpcMessage>> {
+        if let JsonRpcMessage::Response(response) = &message {
+            if let Some(id) = &response.id {
+                if let Some((_, completion)) = self
+                    .active
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(id)
+                {
+                    completion.cancel();
+                }
             }
         }
-        let receive = async {
-            let response = match tokio::time::timeout(
-                fetch_timeout.unwrap_or(std::time::Duration::from_secs(60)),
-                client.get(&url).headers(headers).send(),
-            )
-            .await
-            {
-                Ok(Ok(response)) => response,
-                _ => return true,
-            };
-            // GET is optional in Streamable HTTP. A 405 does not replace the transport.
-            if response.status().as_u16() == 405 {
-                return false;
+        self.inbound.send(message)
+    }
+
+    fn syntax_failure(&self, diagnostic: &str) {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
+        for request in active {
+            let error = probe_compatibility_error(&request, "malformed discovery response")
+                .or_else(|| native_frame_error(&request, "syntax", diagnostic));
+            if let Some(error) = error {
+                let _ = self.forward(error);
             }
-            if matches!(response.status().as_u16(), 400 | 401 | 403 | 404) {
-                let _ = fatal.send(());
-                return false;
+        }
+        let _ = self.fatal.send(());
+    }
+    fn headers(&self, cursor: Option<&str>) -> Result<HeaderMap, HttpConnectError> {
+        let sid = self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let version = self
+            .protocol_version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut headers = build_common_headers(
+            self.auth.as_deref(),
+            &self.extra,
+            sid.as_deref(),
+            version.as_deref(),
+        )?;
+        extend_accept(&mut headers, &["text/event-stream"]);
+        if let Some(cursor) = cursor.filter(|value| !value.is_empty()) {
+            headers.insert(
+                HeaderName::from_static("last-event-id"),
+                HeaderValue::from_str(cursor)
+                    .map_err(|error| HttpConnectError::Transport(error.to_string()))?,
+            );
+        }
+        Ok(headers)
+    }
+
+    fn delay(&self, attempt: u32) -> std::time::Duration {
+        let configured = *self
+            .retry_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::time::Duration::from_millis(
+            configured.unwrap_or_else(|| {
+                (1_000.0_f64 * 1.5_f64.powi(attempt as i32)).min(30_000.0) as u64
+            }),
+        )
+    }
+}
+
+#[derive(Default)]
+struct HttpStreamEnd {
+    cursor: Option<String>,
+    answered: bool,
+    fatal: bool,
+}
+
+pub(crate) fn frame_diagnostic(error: &jsonrpc::CodecError) -> String {
+    match error {
+        jsonrpc::CodecError::MessageDecode(detail) => detail.clone(),
+        other => other.to_string(),
+    }
+}
+
+pub(crate) fn native_frame_error(
+    request: &JsonRpcMessage,
+    kind: &str,
+    diagnostic: &str,
+) -> Option<JsonRpcMessage> {
+    let request = serde_json::to_value(request).ok()?;
+    let id = request.get("id")?;
+    serde_json::from_value(serde_json::json!({
+        "jsonrpc":"2.0", "id":id,
+        "error":{"code":-32001,"message":diagnostic,"data":{"nativeFailure":kind,"diagnostic":diagnostic}}
+    })).ok()
+}
+
+async fn read_http_sse(
+    context: &HttpStreamContext,
+    response: reqwest::Response,
+    request: Option<&JsonRpcMessage>,
+    is_get: bool,
+) -> HttpStreamEnd {
+    let mut state = HttpStreamEnd::default();
+    let mut decoder = sse_codec::Decoder::default();
+    let streaming = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(body_budget::is_event_stream);
+    let subscription = request.is_some_and(|request| match request {
+        JsonRpcMessage::Request(request) => {
+            request.method == "subscriptions/listen"
+                && request.params.as_ref().is_some_and(|params| {
+                    params
+                        .as_json()
+                        .contains("io.modelcontextprotocol/protocolVersion")
+                })
+        }
+        _ => false,
+    });
+    let total = if streaming && response.status().as_u16() == 200 && (is_get || subscription) {
+        None
+    } else {
+        Some(if streaming {
+            body_budget::MESSAGE_BYTES * 4
+        } else {
+            body_budget::MESSAGE_BYTES
+        })
+    };
+    let mut budget = body_budget::Budget::new(body_budget::MESSAGE_BYTES, total);
+    let mut bytes = response.bytes_stream();
+    while let Some(chunk) = bytes.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                tracing::warn!(%error, "mcp http: SSE stream disconnected");
+                break;
             }
-            if !response.status().is_success() {
-                return true;
-            }
-            // Servers may not retain notifications while GET is disconnected.
-            // Reconcile after every attachment, including the initial list/GET race.
-            // This only invalidates catalogs; it never replays tool calls.
-            for method in [
-                "notifications/tools/list_changed",
-                "notifications/prompts/list_changed",
-                "notifications/resources/list_changed",
-            ] {
-                let frame = serde_json::json!({"jsonrpc":"2.0", "method":method, "params":{}});
-                if let Ok(message) = mcp::decode_native_mcp_frame(frame.to_string().as_bytes()) {
-                    if inbound.send(message).is_err() {
-                        return false;
-                    }
-                }
-            }
-            let mut events = response.bytes_stream().eventsource();
-            // A silent body never ends on its own, so the reconnect below
-            // would not run. Bound idle time; a later attach reconciles catalogs.
-            loop {
-                let next =
-                    match tokio::time::timeout(std::time::Duration::from_secs(90), events.next())
-                        .await
-                    {
-                        Ok(item) => item,
-                        Err(_) => break,
-                    };
-                let Some(event) = next else {
-                    break;
-                };
-                let Ok(event) = event else {
-                    break;
-                };
-                if event.id.len() <= 4096 {
-                    last_event_id = (!event.id.is_empty()).then_some(event.id);
-                }
-                if event.data.is_empty() || !is_message_event(&event.event) {
+        };
+        if let Err(error) = budget.push(&chunk) {
+            context.syntax_failure(&error.diagnostic());
+            state.fatal = true;
+            return state;
+        }
+        for item in decoder.push(&chunk) {
+            let event = match item {
+                sse_codec::Item::Retry(value) => {
+                    *context
+                        .retry_ms
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
                     continue;
                 }
-                if event.data.len() > 8 * 1024 * 1024 {
-                    let _ = fatal.send(());
-                    return false;
-                }
-                if let Ok(message) = mcp::decode_native_mcp_frame(event.data.as_bytes()) {
-                    if inbound.send(message).is_err() {
-                        return false;
+                sse_codec::Item::Event(event) => event,
+            };
+            if let Some(id) = event.id.filter(|id| !id.is_empty()) {
+                state.cursor = Some(id);
+            }
+            if event.data.is_empty() || !is_message_event(&event.event) {
+                continue;
+            }
+            match mcp::decode_native_mcp_frame(event.data.as_bytes()) {
+                Ok(message) => {
+                    if let Some(request) = request {
+                        observe_protocol_response(
+                            &serde_json::to_value(request).unwrap_or_default(),
+                            &message,
+                            &mut context
+                                .protocol_version
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        );
                     }
-                    retry_ms = 250;
+                    state.answered |= matches!(&message, JsonRpcMessage::Response(_));
+                    if context.forward(message).is_err() {
+                        state.fatal = true;
+                        return state;
+                    }
+                }
+                Err(error) => {
+                    // HTTP/SSE SyntaxError closes the whole native transport;
+                    // schema errors are reported but a subsequent event can be valid.
+                    let syntax = Utf16JsonProjection::parse(&event.data).is_err();
+                    tracing::warn!(%error, syntax, "mcp http: invalid SSE message");
+                    if syntax {
+                        context.syntax_failure(&frame_diagnostic(&error));
+                        state.fatal = true;
+                        return state;
+                    }
                 }
             }
-            true
-        };
-        let retry = tokio::select! { biased; _=cancel.cancelled()=>return, _=inbound.closed()=>return, retry=receive=>retry };
-        if !retry {
-            return;
         }
-        tokio::select! { biased; _=cancel.cancelled()=>return, _=inbound.closed()=>return, _=tokio::time::sleep(std::time::Duration::from_millis(retry_ms))=>{} }
-        retry_ms = (retry_ms * 2).min(30_000);
+    }
+    state
+}
+
+/// Continue only an established stream. A request-bearing POST must advertise
+/// an event id before GET replay is possible; notification GET streams can
+/// reconnect without one. A successful attachment resets the failed-attempt
+/// budget, while two failed GET attempts leave the POST transport usable.
+async fn continue_http_stream(
+    context: HttpStreamContext,
+    response: Option<reqwest::Response>,
+    request: Option<JsonRpcMessage>,
+) {
+    let mut cursor = None;
+    let mut reconnect = false;
+    let mut next_response = response.map(|response| (response, false));
+    loop {
+        if let Some((response, is_get)) = next_response.take() {
+            let ended = read_http_sse(&context, response, request.as_ref(), is_get).await;
+            if ended.fatal || ended.answered {
+                return;
+            }
+            if ended.cursor.is_some() {
+                cursor = ended.cursor;
+            }
+            if request.is_some() && cursor.is_none() {
+                // A closed, non-resumable stream does not fabricate an RPC
+                // response. Native leaves the SDK request's timer in charge.
+                return;
+            }
+            reconnect = true;
+        }
+        let mut attempt = 0;
+        loop {
+            if reconnect {
+                tokio::time::sleep(context.delay(attempt)).await;
+            }
+            let headers = match context.headers(cursor.as_deref()) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    tracing::warn!(%error, "mcp http: invalid replay headers");
+                    return;
+                }
+            };
+            let response = context
+                .client
+                .get(&context.url)
+                .headers(headers)
+                .send()
+                .await;
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    next_response = Some((response, true));
+                    break;
+                }
+                Ok(response) if response.status().as_u16() == 405 => return,
+                response => {
+                    tracing::warn!(?response, attempt, "mcp http: failed to open SSE stream");
+                    if !reconnect || attempt >= 1 {
+                        return;
+                    }
+                    attempt += 1;
+                }
+            }
+        }
+    }
+}
+
+async fn receive_notifications(context: HttpStreamContext, cancel: CancellationToken) {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {},
+        _ = context.inbound.closed() => {},
+        _ = continue_http_stream(context.clone(), None, None) => {},
     }
 }
 
 /// Only router-assigned ids can register a POST token. The writer takes each
 /// token exactly once; cancelled queued tokens prevent delayed network writes.
 #[derive(Default)]
-struct HttpRequestCancellation {
+pub(crate) struct HttpRequestCancellation {
     pending: Mutex<HashMap<jsonrpc::Id, CancellationToken>>,
 }
 impl jsonrpc::router::PerRequestCancellation for HttpRequestCancellation {
@@ -194,7 +410,7 @@ impl jsonrpc::router::PerRequestCancellation for HttpRequestCancellation {
     }
 }
 impl HttpRequestCancellation {
-    fn take(&self, frame: &JsonRpcMessage) -> CancellationToken {
+    pub(crate) fn take(&self, frame: &JsonRpcMessage) -> CancellationToken {
         match frame {
             JsonRpcMessage::Request(request) => self
                 .pending
@@ -215,11 +431,86 @@ impl HttpRequestCancellation {
 /// `MCP_STREAMABLE_HTTP_ACCEPT` const (`client.ts:471`) byte-for-byte.
 const STREAMABLE_HTTP_ACCEPT: &[&str] = &["application/json", "text/event-stream"];
 
-/// `User-Agent` value emitted by this client. Matches claude-code's
-/// `getMCPUserAgent()` shape: `claude-code/<version>`.
+/// Product identity follows LingXi while retaining the MCP CLI client shape.
 #[must_use]
 pub fn user_agent() -> String {
-    format!("claude-code/{}", env!("CARGO_PKG_VERSION"))
+    format!("lingxi/{} (sdk-cli)", env!("CARGO_PKG_VERSION"))
+}
+
+/// HTTP session lifetime is independent from a connection's stream lifetime.
+/// Closing a connection aborts readers; only explicit termination sends DELETE.
+#[derive(Clone)]
+pub struct HttpSessionControl {
+    client: reqwest::Client,
+    url: String,
+    auth: Option<String>,
+    extra: lingxi_core::host::McpHeaders,
+    session_id: Arc<Mutex<Option<String>>>,
+    protocol_version: Arc<Mutex<Option<String>>>,
+    closed: CancellationToken,
+    abort: CancellationToken,
+}
+
+impl HttpSessionControl {
+    /// Wait until all owned request and notification readers have stopped.
+    pub async fn closed(&self) {
+        self.closed.cancelled().await;
+    }
+
+    /// Whether connection close has completed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.is_cancelled()
+    }
+
+    /// Explicitly terminate the current server session without closing streams.
+    /// Successful responses and HTTP 405 clear the session; other failures retain
+    /// it so callers can inspect the error and retry, matching the native API.
+    pub async fn terminate_session(&self) -> Result<(), HttpConnectError> {
+        let session = self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(session) = session else {
+            return Ok(());
+        };
+        let version = self
+            .protocol_version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let headers = build_common_headers(
+            self.auth.as_deref(),
+            &self.extra,
+            Some(&session),
+            version.as_deref(),
+        )?;
+        let send = self.client.delete(&self.url).headers(headers).send();
+        let response = tokio::select! {
+            biased;
+            _ = self.abort.cancelled() => return Err(HttpConnectError::Transport("AbortError: The operation was aborted.".into())),
+            response = send => response.map_err(|error| HttpConnectError::Transport(error.to_string()))?,
+        };
+        let status = response.status();
+        let authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        tokio::select! { biased; _=self.abort.cancelled()=>{}, _=read_native_body(response)=>{} }
+        if !status.is_success() && status.as_u16() != 405 {
+            return Err(HttpConnectError::HttpResponse {
+                status: status.as_u16(),
+                www_authenticate: authenticate,
+            });
+        }
+        *self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        Ok(())
+    }
 }
 
 /// Errors specific to opening an MCP Streamable HTTP connection.
@@ -395,7 +686,10 @@ pub(crate) fn build_common_headers<H>(
 where
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
 {
-    let mut entries = vec![("User-Agent".to_owned(), user_agent())];
+    let mut entries = vec![
+        ("User-Agent".to_owned(), user_agent()),
+        ("Accept-Encoding".to_owned(), "identity".to_owned()),
+    ];
     if let Some(token) = auth_token {
         let _ = HeaderValue::try_from(token)
             .map_err(|e| HttpConnectError::InvalidAuth(e.to_string()))?;
@@ -518,13 +812,27 @@ where
         .map(|(connection, _)| connection)
 }
 
+/// Open an HTTP connection with explicit server-session termination authority.
+pub async fn connect_http_with_session<H>(
+    url: &str,
+    auth_token: Option<&str>,
+    extra_headers: &H,
+    fetch_timeout: Option<std::time::Duration>,
+) -> Result<(Connection, HttpSessionControl), HttpConnectError>
+where
+    H: Clone + Send + 'static,
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    connect_http_with_proxy_auth_helper(url, auth_token, extra_headers, fetch_timeout, None).await
+}
+
 pub(crate) async fn connect_http_with_proxy_auth_helper<H>(
     url: &str,
     auth_token: Option<&str>,
     extra_headers: &H,
     fetch_timeout: Option<std::time::Duration>,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
-) -> Result<(Connection, CancellationToken), HttpConnectError>
+) -> Result<(Connection, HttpSessionControl), HttpConnectError>
 where
     H: Clone + Send + 'static,
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
@@ -543,7 +851,10 @@ where
 
     let post_url = url.to_string();
     let post_auth = auth_token.map(str::to_string);
-    let post_extra = extra_headers.clone();
+    let post_extra: lingxi_core::host::McpHeaders = extra_headers
+        .into_iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     let post_fetch_timeout = fetch_timeout;
 
     // MCP Streamable HTTP session ID: captured from the `mcp-session-id`
@@ -557,16 +868,41 @@ where
     let writer_request_cancellation = request_cancellation.clone();
     let cleanup_done = CancellationToken::new();
     let writer_cleanup_done = cleanup_done.clone();
+    let connection_abort = CancellationToken::new();
+    let writer_abort = connection_abort.clone();
+    let protocol_version = Arc::new(Mutex::new(None::<String>));
+    let session_control = HttpSessionControl {
+        client: client.clone(),
+        url: post_url.clone(),
+        auth: post_auth.clone(),
+        extra: post_extra.clone(),
+        session_id: session_id.clone(),
+        protocol_version: protocol_version.clone(),
+        closed: cleanup_done,
+        abort: connection_abort,
+    };
     tokio::spawn(async move {
         let _completion = HttpCleanupCompletion(writer_cleanup_done);
         // A POST owns its response body independently: input-required retries
         // and ordinary calls can proceed while an earlier SSE stream stays open.
         // The connection owns and drains every reader on close.
-        let protocol_version = Arc::new(Mutex::new(None::<String>));
         let mut posts = tokio::task::JoinSet::new();
         let (initialized_tx, mut initialized_rx) = mpsc::unbounded_channel::<()>();
         let (stream_fault_tx, mut stream_fault_rx) = mpsc::unbounded_channel::<()>();
         let notification_cancel = CancellationToken::new();
+        let stream_context = HttpStreamContext {
+            client: client.clone(),
+            url: post_url.clone(),
+            auth: post_auth.clone(),
+            extra: post_extra.clone(),
+            session_id: writer_sid.clone(),
+            protocol_version: protocol_version.clone(),
+            inbound: inbound_tx.clone(),
+            fatal: stream_fault_tx.clone(),
+            retry_ms: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            abort: writer_abort.clone(),
+        };
         let mut notification_reader = None;
         loop {
             tokio::select! {
@@ -574,7 +910,7 @@ where
                 _=inbound_tx.closed()=>break,
                 _=stream_fault_rx.recv()=>break,
                 _=initialized_rx.recv(), if notification_reader.is_none()=>{
-                    notification_reader = Some(tokio::spawn(receive_notifications(client.clone(), post_url.clone(), post_auth.clone(), post_extra.clone(), writer_sid.clone(), protocol_version.clone(), inbound_tx.clone(), stream_fault_tx.clone(), notification_cancel.clone(), post_fetch_timeout)));
+                    notification_reader = Some(tokio::spawn(receive_notifications(stream_context.clone(), notification_cancel.clone())));
                 }
                 settled=posts.join_next(), if !posts.is_empty()=>{
                     if let Some(Err(error))=settled {tracing::warn!(%error,"mcp http: POST task failed");}
@@ -583,7 +919,8 @@ where
                     let Some(frame)=frame else {break;};
                     let request_abort=writer_request_cancellation.take(&frame);
                     if request_abort.is_cancelled() {continue;}
-                    let client=client.clone();let post_url=post_url.clone();let post_auth=post_auth.clone();let post_extra=post_extra.clone();let writer_sid=writer_sid.clone();let writer_protocol_version=protocol_version.clone();let inbound_tx=inbound_tx.clone();let initialized_tx=initialized_tx.clone();
+                    stream_context.register(&frame,request_abort.clone());
+                    let client=client.clone();let post_url=post_url.clone();let post_auth=post_auth.clone();let post_extra=post_extra.clone();let writer_sid=writer_sid.clone();let writer_protocol_version=protocol_version.clone();let initialized_tx=initialized_tx.clone();let stream_context=stream_context.clone();
                     posts.spawn(async move {
                         let process_frame=async move {
                     let frame_value = serde_json::to_value(&frame).unwrap_or_default();
@@ -591,7 +928,7 @@ where
                     let mut headers = {
                         let sid = writer_sid.lock().unwrap();
                         let version = writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        match build_headers(post_auth.as_deref(), &post_extra, sid.as_deref(), version.as_deref()) {
+                        match build_headers::<lingxi_core::host::McpHeaders>(post_auth.as_deref(), &post_extra, sid.as_deref(), version.as_deref()) {
                             Ok(h) => h,
                             Err(e) => {
                                 tracing::error!(error = %e, "mcp http: failed to build POST headers");
@@ -621,7 +958,7 @@ where
                                     &frame,
                                     "POST timed out awaiting response headers",
                                 ) {
-                                    let _ = inbound_tx.send(error);
+                                    let _ = stream_context.forward(error);
                                 }
                                 return;
                             }
@@ -633,7 +970,7 @@ where
                         Err(e) => {
                             tracing::warn!(error = %e, "mcp http: POST failed");
                             if let Some(error) = outbound_transport_error(&frame, &e.to_string()) {
-                                let _ = inbound_tx.send(error);
+                                let _ = stream_context.forward(error);
                             }
                             return;
                         }
@@ -669,23 +1006,28 @@ where
                         // rejection carrying a real JSON-RPC error is a protocol
                         // failure and must NOT be re-dialled, so the body is the
                         // evidence, not the status alone.
-                        let body = if is_probe || matches!(status, 400 | 404 | 405) {
-                            bounded_error_body(response, 4_096).await
-                        } else {
-                            String::new()
-                        };
+                        let body = read_native_body(response).await.map(|body|String::from_utf8_lossy(&body).into_owned()).unwrap_or_else(|_|"null".to_owned());
+                        // A modern HTTP 400 may carry the request's actual
+                        // JSON-RPC error, which remains a protocol response.
+                        if status==400 && frame_value.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion").and_then(serde_json::Value::as_str)==Some("2026-07-28") {
+                            if let Ok(JsonRpcMessage::Response(reply))=mcp::decode_native_mcp_frame(body.as_bytes()) {
+                                if reply.error.is_some() && reply.id.as_ref()==match &frame{JsonRpcMessage::Request(request)=>Some(&request.id),_=>None} {
+                                    let _=stream_context.forward(JsonRpcMessage::Response(reply));return;
+                                }
+                            }
+                        }
                         tracing::warn!(status, "mcp http: non-success response");
                         if let Some(error) =
                             http_error_message(&frame, status, www_authenticate.as_deref(), &body)
                         {
-                            if inbound_tx.send(error).is_err() {
+                            if stream_context.forward(error).is_err() {
                                 return;
                             }
                         }
                         return;
                     }
                     if response.status().as_u16() == 202 {
-                        let _ = response.bytes().await;
+                        // The native fetch wrapper cancels 202/notification bodies.
                         if frame_value["method"] == "notifications/initialized" {
                             let _ = initialized_tx.send(());
                         }
@@ -694,7 +1036,6 @@ where
                     // A notification/response POST has no request whose answer
                     // could be delivered. Native drains and ignores its body.
                     if !matches!(&frame, JsonRpcMessage::Request(_)) {
-                        let _ = response.bytes().await;
                         return;
                     }
 
@@ -706,66 +1047,11 @@ where
                     let content_type = content_type_header.as_deref().and_then(content_type_essence);
 
                     if content_type.as_deref() == Some("text/event-stream") {
-                        // Streaming body: parse with eventsource-stream.
-                        let mut events = response.bytes_stream().eventsource();
-                        let mut probe_answered = false;
-                        while let Some(item) = events.next().await {
-                            match item {
-                                Ok(ev) => {
-                                    if ev.data.is_empty() || !is_message_event(&ev.event) {
-                                        continue;
-                                    }
-                                    match mcp::decode_native_mcp_frame(ev.data.as_bytes()) {
-                                        Ok(msg) => {
-                                            observe_protocol_response(
-                                                &frame_value,
-                                                &msg,
-                                                &mut writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                                            );
-                                            let value =
-                                                serde_json::to_value(&msg).unwrap_or_default();
-                                            probe_answered |=
-                                                value.get("id") == frame_value.get("id");
-                                            if inbound_tx.send(msg).is_err() {
-                                                return;
-                                            }
-                                            if is_probe && probe_answered {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                data = %ev.data,
-                                                "mcp http: malformed SSE JSON frame, skipping"
-                                            );
-                                            if let Some(error) = probe_compatibility_error(
-                                                &frame,
-                                                "malformed discovery response",
-                                            ) {
-                                                let _ = inbound_tx.send(error);
-                                                probe_answered = true;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "mcp http: sse parse error");
-                                    break;
-                                }
-                            }
-                        }
-                        if !probe_answered {
-                            if let Some(error) =
-                                probe_compatibility_error(&frame, "discovery response stream ended")
-                            {
-                                let _ = inbound_tx.send(error);
-                            }
-                        }
+                        continue_http_stream(stream_context, Some(response), Some(frame.clone())).await;
                     } else if content_type.as_deref() == Some("application/json") {
                         // JSON may carry one message or an array. Native
                         // validates the whole array before forwarding entries.
-                        match response.bytes().await {
+                        match read_native_body(response).await {
                             Ok(body) => {
                                 // Fetch's Response.json() strips one leading
                                 // UTF-8 BOM before JSON.parse. Preserve that
@@ -782,35 +1068,38 @@ where
                                         &msg,
                                         &mut writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                                     );
-                                    let _ = inbound_tx.send(msg);
+                                    let _ = stream_context.forward(msg);
                                   }
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, "mcp http: response not valid MCP JSON-RPC");
-                                    if let Some(error) = probe_compatibility_error(
-                                        &frame,
-                                        "malformed discovery response",
-                                    ) {
-                                        let _ = inbound_tx.send(error);
+                                    let syntax = Utf16JsonProjection::parse(&String::from_utf8_lossy(body)).is_err();
+                                    if syntax { stream_context.syntax_failure(&frame_diagnostic(&e)); }
+                                    else {
+                                        let error = if is_probe { probe_compatibility_error(&frame, "malformed discovery response") }
+                                            else { native_frame_error(&frame, "schema", &frame_diagnostic(&e)) };
+                                        if let Some(error)=error {let _=stream_context.forward(error);}
                                     }
+
                                 }
                             }
                             },
                             Err(e) => {
-                                tracing::warn!(error = %e, "mcp http: failed to read JSON response body");
-                                if let Some(error) = probe_compatibility_error(
-                                    &frame,
-                                    "malformed discovery response",
-                                ) {
-                                    let _ = inbound_tx.send(error);
-                                }
+                                tracing::warn!(error = %e.diagnostic, "mcp http: failed to read JSON response body");
+                                let error = if is_probe { probe_compatibility_error(&frame, "malformed discovery response") }
+                                    else if let Some(limit)=e.limit {
+                                        let request=serde_json::to_value(&frame).unwrap_or_default();
+                                        serde_json::from_value(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32001,"message":e.diagnostic,"data":{"nativeFailure":"body-overflow","diagnostic":e.diagnostic,"limitBytes":limit}}})).ok()
+                                    } else { outbound_transport_error(&frame, &e.diagnostic) };
+                                if let Some(error) = error { let _ = stream_context.forward(error); }
+
                             }
                         }
                     } else if let Some(error) = outbound_transport_error(
                         &frame,
                         &format!("Unexpected content type: {}", content_type_header.as_deref().unwrap_or("null")),
                     ) {
-                        let _ = inbound_tx.send(error);
+                        let _ = stream_context.forward(error);
                     }
                         };
                         tokio::select! { biased; _=request_abort.cancelled()=>{}, _=process_frame=>{} }
@@ -818,6 +1107,7 @@ where
                 }
             }
         }
+        writer_abort.cancel();
         jsonrpc::router::PerRequestCancellation::close(writer_request_cancellation.as_ref());
         posts.abort_all();
         notification_cancel.cancel();
@@ -825,29 +1115,6 @@ where
             let _ = reader.await;
         }
         while posts.join_next().await.is_some() {}
-        let sid = writer_sid
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(sid) = sid {
-            let version = protocol_version
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Ok(headers) = build_common_headers(
-                post_auth.as_deref(),
-                &post_extra,
-                Some(&sid),
-                version.as_deref(),
-            ) {
-                // Explicit async disconnect waits for this bounded cleanup before a catalog process exits.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    client.delete(&post_url).headers(headers).send(),
-                )
-                .await;
-            }
-        }
     });
 
     // Adapt mpsc channels to the Stream/Sink shape `from_message_streams` wants.
@@ -861,13 +1128,14 @@ where
         Ok::<_, ConnectionError>(tx)
     });
 
-    let connection = Connection::from_message_streams(
+    let connection = Connection::from_message_streams_with_initial_request_id(
         Box::pin(inbound),
         Box::pin(outbound),
         Some("Method not found".into()),
+        0,
     );
     connection.set_per_request_cancellation(request_cancellation);
-    Ok((connection, cleanup_done))
+    Ok((connection, session_control))
 }
 
 fn apply_body_derived_headers(headers: &mut HeaderMap, request: &serde_json::Value) {
@@ -1037,30 +1305,13 @@ fn http_error_message(
             "data": {
                 "httpStatus": status,
                 "wwwAuthenticate": www_authenticate,
-                "body": body
+                "body": body,
+                "nativeFailure":"transport",
+                "diagnostic":format!("Error POSTing to endpoint: {body}")
             }
         }
     }))
     .ok()
-}
-
-async fn bounded_error_body(response: reqwest::Response, max_bytes: usize) -> String {
-    let mut bytes = Vec::with_capacity(max_bytes.min(1_024));
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else {
-            break;
-        };
-        let remaining = max_bytes.saturating_sub(bytes.len());
-        if remaining == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if bytes.len() == max_bytes {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[cfg(test)]
@@ -1104,6 +1355,7 @@ mod remote_322_oracle_tests {
             // Product/version user-agent adaptation is outside these source
             // helper cases; Native supplies it through the owning host wrapper.
             headers.remove("user-agent");
+            headers.remove("accept-encoding");
             let actual: serde_json::Map<String, serde_json::Value> = headers
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))
@@ -1122,6 +1374,7 @@ mod remote_322_oracle_tests {
         )
         .unwrap();
         headers.remove("user-agent");
+        headers.remove("accept-encoding");
         let actual: serde_json::Map<String, serde_json::Value> = headers
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))

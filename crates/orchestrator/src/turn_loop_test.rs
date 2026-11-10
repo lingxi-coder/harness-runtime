@@ -116,9 +116,23 @@ mod terminal_api_error_tests {
     use crate::turn_loop::terminal_api_error_text;
     use llm_runtime::HistoryStopDetails;
 
-    fn text(request_id: Option<&str>, message_id: Option<&str>, details: Option<&HistoryStopDetails>) -> String {
-        terminal_api_error_text("claude-opus-4-8", true, "refusal", request_id, details, message_id)
-            .unwrap().string_at("").unwrap().to_owned()
+    fn text(
+        request_id: Option<&str>,
+        message_id: Option<&str>,
+        details: Option<&HistoryStopDetails>,
+    ) -> String {
+        terminal_api_error_text(
+            "claude-opus-4-8",
+            true,
+            "refusal",
+            request_id,
+            details,
+            message_id,
+        )
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .to_owned()
     }
 
     #[test]
@@ -129,9 +143,14 @@ mod terminal_api_error_tests {
 
     #[test]
     fn refusal_appends_both_validated_ids_after_sanitized_details() {
-        let details = HistoryStopDetails::parse(r#"{"category":"[bio]`","explanation":"provider explanation"}"#).unwrap();
+        let details = HistoryStopDetails::parse(
+            r#"{"category":"[bio]`","explanation":"provider explanation"}"#,
+        )
+        .unwrap();
         let text = text(Some("req_319"), Some("msg_319"), Some(&details));
-        assert!(text.ends_with("\n\nDetails: `[bio]`\n\nRequest ID: req_319\n\nMessage ID: msg_319"));
+        assert!(
+            text.ends_with("\n\nDetails: `[bio]`\n\nRequest ID: req_319\n\nMessage ID: msg_319")
+        );
         assert!(!text.contains("provider explanation"));
     }
 
@@ -150,8 +169,15 @@ mod terminal_api_error_tests {
     #[test]
     fn non_refusal_terminals_have_no_identifier_suffix() {
         for reason in ["max_tokens", "model_context_window_exceeded"] {
-            let text = terminal_api_error_text("claude-opus-4-8", true, reason,
-                Some("req_ok"), None, Some("msg_ok")).unwrap();
+            let text = terminal_api_error_text(
+                "claude-opus-4-8",
+                true,
+                reason,
+                Some("req_ok"),
+                None,
+                Some("msg_ok"),
+            )
+            .unwrap();
             assert!(!text.string_at("").unwrap().contains("ID:"));
         }
     }
@@ -6261,8 +6287,8 @@ mod malformed_and_thinking_only_tests {
     use crate::turn_loop::{
         execute_one_turn_with_recovery_tracked, prior_assistant_used_structured_output,
         RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-        MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, STRUCTURED_OUTPUT_TOOL_NAME,
-        THINKING_ONLY_NUDGE,
+        MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+        STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
@@ -6380,10 +6406,18 @@ mod malformed_and_thinking_only_tests {
                 assert!(matches!(outcome, TurnStepOutcome::Continue(_)));
                 assert_eq!(state.malformed_tool_use_retry_count, retry_count + 1);
                 let h = history(&orch).await;
-                assert_eq!(last_user_text(&h).as_deref(), Some(MALFORMED_TOOL_USE_RETRY_NUDGE));
-                assert!(matches!(h.last(), Some(ConversationMessage::User {
-                    is_meta: true, turn_companion: Some(Some(true)), ..
-                })));
+                assert_eq!(
+                    last_user_text(&h).as_deref(),
+                    Some(MALFORMED_TOOL_USE_RETRY_NUDGE)
+                );
+                assert!(matches!(
+                    h.last(),
+                    Some(ConversationMessage::User {
+                        is_meta: true,
+                        turn_companion: Some(Some(true)),
+                        ..
+                    })
+                ));
             } else {
                 assert!(matches!(outcome, TurnStepOutcome::Ended { stop_reason, .. }
                     if stop_reason == case["expected"]["outcome"]["reason"].as_str().unwrap()));
@@ -6408,7 +6442,10 @@ mod malformed_and_thinking_only_tests {
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert_eq!(state.malformed_tool_use_retry_count, 1, "first retry counted");
+        assert_eq!(
+            state.malformed_tool_use_retry_count, 1,
+            "first retry counted"
+        );
         assert_eq!(
             state.max_output_tokens_recovery_count, 0,
             "recovery reset on retry transition"
@@ -6529,7 +6566,10 @@ mod malformed_and_thinking_only_tests {
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert_eq!(state.malformed_tool_use_retry_count, 0, "normal tools reset allowance");
+        assert_eq!(
+            state.malformed_tool_use_retry_count, 0,
+            "normal tools reset allowance"
+        );
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,

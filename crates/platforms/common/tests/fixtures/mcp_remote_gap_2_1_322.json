@@ -1,0 +1,383 @@
+{
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "name": "native-mcp-envelope-schemas",
+      "start": 304765107,
+      "end": 304767505,
+      "sha256": "4c6943c39c9f33e9e4544a275e5dbaac027406590a02ad4d6ea5b541ea5dd0fd"
+    },
+    {
+      "name": "native-mcp-envelope-parser-guards",
+      "start": 304843621,
+      "end": 304844753,
+      "sha256": "567ffae7172b1dfbab61b592cab886ce38535548c0dae91089162d2ffcde8cda"
+    },
+    {
+      "name": "native-eventsource-parser",
+      "start": 270301217,
+      "end": 270304026,
+      "sha256": "fcfe727635e0a560d40128d7cb59049b25ee7a153edb425750eb56e162dfac19"
+    },
+    {
+      "name": "native-http-body-budget",
+      "start": 305502346,
+      "end": 305503472,
+      "sha256": "f74a163edde8e2b05931518698851a7d31d043715fb9495b7ad6f97b19cd3d05"
+    },
+    {
+      "name": "native-mcp-message-byte-limit",
+      "start": 266155933,
+      "end": 266155944,
+      "sha256": "525f17428f665ea436e7b6054c91ce94cda599180bca0988dcec764a65bb1c2f"
+    },
+    {
+      "name": "native-http-body-wrapper",
+      "start": 305503472,
+      "end": 305505493,
+      "sha256": "55641d11fa96c938d3d0db9042b9be9a6a538edcd46bfa19a9f44c65c9366abd"
+    }
+  ],
+  "envelopeCases": [
+    {
+      "input": "null",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received null\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received null\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received null\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received null\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "[]",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received array\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received array\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received array\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received array\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "1",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received number\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received number\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received number\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received number\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received number\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received number\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received number\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received number\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "true",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received boolean\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received boolean\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received boolean\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received boolean\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received boolean\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received boolean\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received boolean\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received boolean\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "\"text\"",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received string\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received string\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received string\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected object, received string\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received string\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received string\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received string\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected object, received string\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"invalid\":\"frame\"}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"invalid\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"invalid\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"invalid\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"invalid\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"invalid\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"invalid\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"invalid\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"invalid\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"invalid\"],\"path\":[],\"message\":\"Unrecognized key: \\\"invalid\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"invalid\"],\"path\":[],\"message\":\"Unrecognized key: \\\"invalid\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"invalid\"],\"path\":[],\"message\":\"Unrecognized key: \\\"invalid\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"invalid\"],\"path\":[],\"message\":\"Unrecognized key: \\\"invalid\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":[]}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"result\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received array\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"1.0\",\"id\":7,\"result\":{}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_value\",\n          \"values\": [\n            \"2.0\"\n          ],\n          \"path\": [\n            \"jsonrpc\"\n          ],\n          \"message\": \"Invalid input: expected \\\"2.0\\\"\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"result\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"}],[{\"code\":\"invalid_value\",\"values\":[\"2.0\"],\"path\":[\"jsonrpc\"],\"message\":\"Invalid input: expected \\\"2.0\\\"\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received null\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received null\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received null\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received null\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received null\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received null\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received null\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received null\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"result\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received null\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received null\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received null\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received null\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":1.25,\"result\":{}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received number\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"int\",\n                \"format\": \"safeint\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected int, received number\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received number\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"int\",\n                \"format\": \"safeint\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected int, received number\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received number\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"int\",\n                \"format\": \"safeint\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected int, received number\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received number\"}],[{\"expected\":\"int\",\"format\":\"safeint\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected int, received number\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"result\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received number\"}],[{\"expected\":\"int\",\"format\":\"safeint\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected int, received number\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received number\"}],[{\"expected\":\"int\",\"format\":\"safeint\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected int, received number\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":9007199254740992,\"result\":{}}",
+      "error": "[\n  {\n    \"code\": \"too_big\",\n    \"maximum\": 9007199254740991,\n    \"note\": \"Integers must be within the safe integer range.\",\n    \"origin\": \"int\",\n    \"inclusive\": true,\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Too big: expected int to be <=9007199254740991\"\n  }\n]",
+      "issues": "[{\"code\":\"too_big\",\"maximum\":9007199254740991,\"note\":\"Integers must be within the safe integer range.\",\"origin\":\"int\",\"inclusive\":true,\"path\":[\"id\"],\"message\":\"Too big: expected int to be <=9007199254740991\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":1,\"params\":[]}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received number\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\"\n          ],\n          \"message\": \"Invalid input: expected object, received array\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received number\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\"\n          ],\n          \"message\": \"Invalid input: expected object, received array\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"id\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received number\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"params\"],\"message\":\"Invalid input: expected object, received array\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received number\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"params\"],\"message\":\"Invalid input: expected object, received array\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\"],\"path\":[],\"message\":\"Unrecognized key: \\\"id\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"_meta\":1}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\",\n            \"_meta\"\n          ],\n          \"message\": \"Invalid input: expected object, received number\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"result\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"result\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"result\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"result\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\",\"_meta\"],\"message\":\"Invalid input: expected object, received number\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"result\"],\"path\":[],\"message\":\"Unrecognized key: \\\"result\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{},\"extra\":true}",
+      "error": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"extra\\\"\"\n  }\n]",
+      "issues": "[{\"code\":\"unrecognized_keys\",\"keys\":[\"extra\"],\"path\":[],\"message\":\"Unrecognized key: \\\"extra\\\"\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{},\"\\ud800\":true}",
+      "error": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"\\ud800\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"\\ud800\\\"\"\n  }\n]",
+      "issues": "[{\"code\":\"unrecognized_keys\",\"keys\":[\"\\ud800\"],\"path\":[],\"message\":\"Unrecognized key: \\\"\\ud800\\\"\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{\"_meta\":null}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\",\n            \"_meta\"\n          ],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\",\n            \"_meta\"\n          ],\n          \"message\": \"Invalid input: expected object, received null\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"params\",\"_meta\"],\"message\":\"Invalid input: expected object, received null\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"params\",\"_meta\"],\"message\":\"Invalid input: expected object, received null\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{\"_meta\":{\"progressToken\":[]}}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received array\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received array\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"params\",\n            \"_meta\",\n            \"progressToken\"\n          ],\n          \"message\": \"Invalid input\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received array\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received array\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"params\",\n            \"_meta\",\n            \"progressToken\"\n          ],\n          \"message\": \"Invalid input\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received array\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received array\"}]],\"path\":[\"params\",\"_meta\",\"progressToken\"],\"message\":\"Invalid input\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received array\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received array\"}]],\"path\":[\"params\",\"_meta\",\"progressToken\"],\"message\":\"Invalid input\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/related-task\":{\"taskId\":1}}}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\",\n            \"_meta\",\n            \"io.modelcontextprotocol/related-task\",\n            \"taskId\"\n          ],\n          \"message\": \"Invalid input: expected string, received number\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"params\",\n            \"_meta\",\n            \"io.modelcontextprotocol/related-task\",\n            \"taskId\"\n          ],\n          \"message\": \"Invalid input: expected string, received number\"\n        }\n      ],\n      [\n        {\n          \"code\": \"invalid_union\",\n          \"errors\": [\n            [\n              {\n                \"expected\": \"string\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected string, received undefined\"\n              }\n            ],\n            [\n              {\n                \"expected\": \"number\",\n                \"code\": \"invalid_type\",\n                \"path\": [],\n                \"message\": \"Invalid input: expected number, received undefined\"\n              }\n            ]\n          ],\n          \"path\": [\n            \"id\"\n          ],\n          \"message\": \"Invalid input\"\n        },\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"method\",\n            \"params\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"params\",\"_meta\",\"io.modelcontextprotocol/related-task\",\"taskId\"],\"message\":\"Invalid input: expected string, received number\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"params\",\"_meta\",\"io.modelcontextprotocol/related-task\",\"taskId\"],\"message\":\"Invalid input: expected string, received number\"}],[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected string, received undefined\"}],[{\"expected\":\"number\",\"code\":\"invalid_type\",\"path\":[],\"message\":\"Invalid input: expected number, received undefined\"}]],\"path\":[\"id\"],\"message\":\"Invalid input\"},{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"error\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"method\",\"params\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"method\\\", \\\"params\\\"\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":1.25,\"message\":true}}",
+      "error": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"error\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"error\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"method\"\n          ],\n          \"message\": \"Invalid input: expected string, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"id\",\n            \"error\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized keys: \\\"id\\\", \\\"error\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"object\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"result\"\n          ],\n          \"message\": \"Invalid input: expected object, received undefined\"\n        },\n        {\n          \"code\": \"unrecognized_keys\",\n          \"keys\": [\n            \"error\"\n          ],\n          \"path\": [],\n          \"message\": \"Unrecognized key: \\\"error\\\"\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"int\",\n          \"format\": \"safeint\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\",\n            \"code\"\n          ],\n          \"message\": \"Invalid input: expected int, received number\"\n        },\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [\n            \"error\",\n            \"message\"\n          ],\n          \"message\": \"Invalid input: expected string, received boolean\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]",
+      "issues": "[{\"code\":\"invalid_union\",\"errors\":[[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"error\"],\"path\":[],\"message\":\"Unrecognized key: \\\"error\\\"\"}],[{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"method\"],\"message\":\"Invalid input: expected string, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"id\",\"error\"],\"path\":[],\"message\":\"Unrecognized keys: \\\"id\\\", \\\"error\\\"\"}],[{\"expected\":\"object\",\"code\":\"invalid_type\",\"path\":[\"result\"],\"message\":\"Invalid input: expected object, received undefined\"},{\"code\":\"unrecognized_keys\",\"keys\":[\"error\"],\"path\":[],\"message\":\"Unrecognized key: \\\"error\\\"\"}],[{\"expected\":\"int\",\"format\":\"safeint\",\"code\":\"invalid_type\",\"path\":[\"error\",\"code\"],\"message\":\"Invalid input: expected int, received number\"},{\"expected\":\"string\",\"code\":\"invalid_type\",\"path\":[\"error\",\"message\"],\"message\":\"Invalid input: expected string, received boolean\"}]],\"path\":[],\"message\":\"Invalid input\"}]"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":1,\"message\":\"ok\",\"data\":\"\\ud800\",\"extra\":true}}",
+      "output": "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":1,\"message\":\"ok\",\"data\":\"\\ud800\"}}"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"\\ud800\",\"_meta\":{\"serverInfo\":1}}}",
+      "output": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"_meta\":{\"serverInfo\":1},\"text\":\"\\ud800\"}}"
+    },
+    {
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\",\"params\":{\"_meta\":{\"progressToken\":7}}}",
+      "output": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\",\"params\":{\"_meta\":{\"progressToken\":7}}}"
+    }
+  ],
+  "sseCases": [
+    {
+      "chunks": [
+        "retry: 13\n\n"
+      ],
+      "items": [
+        {
+          "retry": 13
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "id: cursor\n\ndata: one\n\n"
+      ],
+      "items": [
+        {
+          "event": "",
+          "data": "one",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "data: one\n\nid:\ndata: two\n\n"
+      ],
+      "items": [
+        {
+          "event": "",
+          "data": "one",
+          "id": null
+        },
+        {
+          "event": "",
+          "data": "two",
+          "id": ""
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "id: first\nevent: other\ndata: a\r\n\r\n",
+        "data: b\n\n"
+      ],
+      "items": [
+        {
+          "event": "other",
+          "data": "a",
+          "id": "first"
+        },
+        {
+          "event": "",
+          "data": "b",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "retry: +2\nretry: -1\nretry: 7\n\ndata: ok\n\n"
+      ],
+      "items": [
+        {
+          "retry": 7
+        },
+        {
+          "event": "",
+          "data": "ok",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "data: café 😀\r",
+        "\n",
+        "data: Ω\r\n\r",
+        "\n"
+      ],
+      "items": [
+        {
+          "event": "",
+          "data": "café 😀\nΩ",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "data: unfinished"
+      ],
+      "items": []
+    },
+    {
+      "chunks": [
+        "id: one\nid: bad\u0000id\ndata: value\n\n"
+      ],
+      "items": [
+        {
+          "event": "",
+          "data": "value",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "data\n\n"
+      ],
+      "items": [
+        {
+          "event": "",
+          "data": "",
+          "id": null
+        }
+      ]
+    },
+    {
+      "chunks": [
+        "data: x\r"
+      ],
+      "items": []
+    }
+  ],
+  "bodyBudgetCases": [
+    {
+      "eventLimit": 16,
+      "totalLimit": 16,
+      "chunks": [
+        "1234567890123456"
+      ],
+      "error": null
+    },
+    {
+      "eventLimit": 16,
+      "totalLimit": 16,
+      "chunks": [
+        "1234567890123456",
+        "x"
+      ],
+      "error": "sent a response larger than 0MB (counted after decompression), so Claude Code stopped reading it."
+    },
+    {
+      "eventLimit": 8,
+      "totalLimit": 32,
+      "chunks": [
+        "123456789"
+      ],
+      "error": "sent more than 0MB in one event of an event stream (no blank line ended it), so Claude Code stopped reading it."
+    },
+    {
+      "eventLimit": 8,
+      "totalLimit": 32,
+      "chunks": [
+        "x: 123\n\n",
+        "x: 123\n\n"
+      ],
+      "error": null
+    },
+    {
+      "eventLimit": 8,
+      "totalLimit": 32,
+      "chunks": [
+        "x: 123\r",
+        "\n\r",
+        "\n",
+        "12345678"
+      ],
+      "error": "sent more than 0MB in one event of an event stream (no blank line ended it), so Claude Code stopped reading it."
+    },
+    {
+      "eventLimit": 16,
+      "totalLimit": null,
+      "chunks": [
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n"
+      ],
+      "error": null
+    },
+    {
+      "eventLimit": 16,
+      "totalLimit": 64,
+      "chunks": [
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n",
+        "data: x\n\n"
+      ],
+      "error": "sent a response larger than 0MB (counted after decompression), so Claude Code stopped reading it."
+    }
+  ],
+  "scope": "Exact shipped MCP envelope schemas with complete bundled Zod dependencies, source parser guards, eventsource-parser and body-budget transform. JSON.parse runs in Node for valid JSON inputs only; native Bun SyntaxError and 17MiB overflow lifecycle semantics are separately captured by actual native CLI loopback."
+}

@@ -1498,8 +1498,11 @@ fn validate_flag_agent_schema(name: &str, definition: &serde_json::Value) -> Res
 /// Strict `--agents <json>` parser. Claude Code 2.1.245 and earlier logged and
 /// ignored schema failures; 2.1.246 rejects them before runtime construction.
 /// The error payload is the line printed after `Invalid --agents configuration:`.
+#[path = "mcp_name_source.rs"]
+mod mcp_name_source;
+
 pub fn parse_agents_from_flag_json_checked(raw: &str) -> Result<Vec<AgentDefinition>, String> {
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+    let (value, mut exact_mcp_names) = mcp_name_source::flag_source(raw).map_err(|error| {
         let trimmed = raw.trim();
         let detail = if trimmed.starts_with('{') && !trimmed.ends_with('}') {
             "Expected '}'".to_string()
@@ -1521,8 +1524,11 @@ pub fn parse_agents_from_flag_json_checked(raw: &str) -> Result<Vec<AgentDefinit
     }
     let mut out = Vec::with_capacity(obj.len());
     for (name, definition) in obj {
-        let parsed = parse_agent_from_json(name, definition, AgentSource::Flag)
+        let mut parsed = parse_agent_from_json(name, definition, AgentSource::Flag)
             .ok_or_else(|| format!("{name}: Invalid input"))?;
+        if let Some(specs) = exact_mcp_names.remove(name) {
+            parsed.mcp_servers = specs;
+        }
         out.push(parsed);
     }
     Ok(out)

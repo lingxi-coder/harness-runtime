@@ -37,6 +37,26 @@ pub trait WorktreeManager: Send + Sync {
     /// idempotent so callers can safely retry on transient errors.
     async fn remove_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError>;
 
+    /// Whether this handle belongs to a WorktreeCreate hook rather than git.
+    /// Such folders are removed only by their WorktreeRemove owner.
+    fn is_hook_based(&self, handle: &WorktreeHandle) -> bool {
+        let _ = handle;
+        false
+    }
+
+    /// Validate that a hook-supplied folder is an isolation root. A non-git
+    /// checkout is allowed; a git root redirected to another folder is not.
+    async fn validate_hook_worktree(&self, path: &std::path::Path) -> Result<(), WorktreeError> {
+        let _ = path;
+        Ok(())
+    }
+
+    /// Restore hook ownership from the persisted session before cleanup.
+    /// Platform managers without a hook adapter need no additional state.
+    fn restore_hook_worktree(&self, handle: &WorktreeHandle) {
+        let _ = handle;
+    }
+
     /// Enumerate all worktrees currently managed.
     async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, WorktreeError>;
 
@@ -389,6 +409,9 @@ pub enum WorktreeError {
     /// Underlying git invocation failed with the embedded message.
     #[error("git error: {0}")]
     Git(String),
+    /// A worktree lifecycle hook failed or did not supply a usable folder.
+    #[error("{0}")]
+    Hook(String),
     /// Filesystem error (permissions, disk full, ...).
     #[error("io error: {0}")]
     Io(String),

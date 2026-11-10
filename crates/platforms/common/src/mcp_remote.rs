@@ -8,7 +8,6 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
-use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::host::mcp_result::{
     connection_error_diagnostic, drive_modern_request, result_error_diagnostic, JsonrpcMcpResultIo,
     McpInputRequiredOptions, McpResultError,
@@ -129,7 +128,8 @@ fn bounded_probe_timeout_ms(requested: Option<u64>) -> u64 {
 /// Shared remote HTTP/SSE MCP transport.
 #[derive(Default)]
 pub struct RemoteMcpTransport {
-    http_cleanup: Mutex<HashMap<lingxi_core::types::McpConnectionId, CancellationToken>>,
+    http_cleanup:
+        Mutex<HashMap<lingxi_core::types::McpConnectionId, crate::mcp_http::HttpSessionControl>>,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
     connections: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, Arc<Connection>>>>,
     negotiated: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, McpNegotiatedProtocol>>>,
@@ -195,6 +195,24 @@ impl RemoteMcpTransport {
         self.connections.lock().ok()?.get(&id).cloned()
     }
 
+    /// Explicitly terminate an HTTP server session. Ordinary disconnect only
+    /// closes owned streams, matching the separate native close/DELETE APIs.
+    pub async fn terminate_http_session(
+        &self,
+        id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), McpError> {
+        let control = self
+            .http_cleanup
+            .lock()
+            .map_err(|_| McpError::Internal("MCP session map poisoned".into()))?
+            .get(&id)
+            .cloned();
+        if let Some(control) = control {
+            control.terminate_session().await.map_err(McpError::from)?;
+        }
+        Ok(())
+    }
+
     fn negotiated_for(
         &self,
         id: lingxi_core::types::McpConnectionId,
@@ -231,7 +249,7 @@ impl RemoteMcpTransport {
     fn remove(&self, id: lingxi_core::types::McpConnectionId) {
         if let Ok(mut cleanup) = self.http_cleanup.lock() {
             // Preserve unfinished receipts when an async shutdown waiter is cancelled.
-            cleanup.retain(|_, completion| !completion.is_cancelled());
+            cleanup.retain(|_, completion| !completion.is_closed());
         }
         if let Ok(mut connections) = self.connections.lock() {
             if let Some(connection) = connections.remove(&id) {
@@ -737,7 +755,7 @@ impl McpTransport for RemoteMcpTransport {
                     .http_cleanup
                     .lock()
                     .map_err(|_| McpError::Internal("MCP cleanup map poisoned".into()))?;
-                receipts.retain(|_, completion| !completion.is_cancelled());
+                receipts.retain(|_, completion| !completion.is_closed());
                 receipts.insert(id, cleanup);
                 connection
             }
@@ -1123,7 +1141,7 @@ impl McpTransport for RemoteMcpTransport {
             .and_then(|cleanup| cleanup.get(&conn_id).cloned());
         self.remove(conn_id);
         if let Some(cleanup) = cleanup {
-            tokio::time::timeout(Duration::from_secs(5), cleanup.cancelled())
+            tokio::time::timeout(Duration::from_secs(5), cleanup.closed())
                 .await
                 .map_err(|_| McpError::Connection("MCP HTTP session cleanup timed out".into()))?;
             if let Ok(mut receipts) = self.http_cleanup.lock() {
@@ -2105,7 +2123,8 @@ struct ToolsListResult {
 
 #[derive(Deserialize)]
 struct RawTool {
-    name: String,
+    #[serde(deserialize_with = "deserialize_tool_name_source")]
+    name: Utf16JsonProjection,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2143,6 +2162,12 @@ struct RawTool {
 
 impl RawTool {
     fn into_dto(self) -> McpToolDto {
+        let units = self
+            .name
+            .string_units("")
+            .expect("decoded tool name is a string");
+        let name = String::from_utf16_lossy(&units);
+        let wire_tool_name = String::from_utf16(&units).is_err().then_some(self.name);
         let search_hint = self.meta.as_ref().and_then(|meta| {
             let view = meta.get_property("anthropic/searchHint")?;
             view.as_str()?;
@@ -2161,19 +2186,30 @@ impl RawTool {
             .unwrap_or(false);
         McpToolDto {
             server_name: String::new(),
-            tool_name: self.name.clone(),
+            tool_name: name.clone(),
+            wire_tool_name,
             description: self.description.unwrap_or_else(|| source_string("")),
             input_schema: self.input_schema,
             output_schema: self.output_schema,
             annotations: self.annotations,
             icons: self.icons,
             meta: self.meta,
-            full_name: format!("mcp____{}", self.name),
+            full_name: format!("mcp____{name}"),
             search_hint,
             always_load,
             requires_user_interaction,
         }
     }
+}
+
+fn deserialize_tool_name_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Utf16JsonProjection, D::Error> {
+    let name = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if name.string_units("").is_none() {
+        return Err(serde::de::Error::custom("MCP tool name must be a string"));
+    }
+    Ok(name)
 }
 
 #[derive(Deserialize)]

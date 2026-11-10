@@ -834,6 +834,7 @@ pub struct PolicyPermissionGate {
     /// Folded into the deny bucket at evaluation time instead, which keeps both
     /// producers and gives this one the lifetime it is supposed to have.
     command_input_denies: std::sync::RwLock<Vec<Utf16JsonProjection>>,
+    host_mcp_denied_tools: std::sync::RwLock<Vec<String>>,
 }
 
 /// Carry an established tool Ask through the prompt boundary. A transport
@@ -859,10 +860,41 @@ impl PolicyPermissionGate {
         input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
+        let direct_mcp = ctx.request_source
+            == Some(lingxi_core::host::permission_gate::PermissionRequestSource::DirectMcp);
+        if direct_mcp
+            && (ctx.mode_override.as_deref() == Some("plan")
+                || matches!(
+                    self.effective_mode_for_tool(name),
+                    PermissionMode::Plan | PermissionMode::DontAsk
+                ))
+        {
+            return PermissionOutcome::Deny {
+                reason: "nobody can be asked in this permission mode.".into(),
+            };
+        }
         // 2.1.263 Ge: only the actual prompt wait counts; policy/classifier
         // work happens before this boundary. Drop also covers cancellation.
         let _pause = ctx.pause_observer.as_ref().map(|observer| observer.begin());
-        self.inner.check_with_context(name, input, ctx).await
+        match self.inner.check_with_context(name, input, ctx).await {
+            PermissionOutcome::Allow {
+                updated_input,
+                decision_classification,
+                ..
+            } if direct_mcp => PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: Vec::new(),
+                decision_classification,
+            },
+            PermissionOutcome::AllowAuto { updated_input } if direct_mcp => {
+                PermissionOutcome::Allow {
+                    updated_input,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
+            }
+            outcome => outcome,
+        }
     }
 
     fn exact_string(value: JsonValueView<'_>) -> Option<String> {
@@ -1025,6 +1057,7 @@ impl PolicyPermissionGate {
             loop_classifier: Arc::new(std::sync::OnceLock::new()),
             path_translator: None,
             command_input_denies: std::sync::RwLock::new(Vec::new()),
+            host_mcp_denied_tools: std::sync::RwLock::new(Vec::new()),
             classifier_auto_mode_settings: std::sync::RwLock::new(None),
             classifier_auto_mode_settings_provider: None,
             classifier_host_capabilities: std::sync::RwLock::new(
@@ -1702,6 +1735,7 @@ impl PolicyPermissionGate {
             )
         };
         folded.frozen_command_denies = ctx.frozen_command_denies.clone();
+        folded.mcp_deny_aliases = ctx.mcp_deny_aliases.clone();
         folded
     }
 
@@ -1822,6 +1856,7 @@ impl PolicyPermissionGate {
             .clone();
         let mut allow_rules = live.allow_rules;
         let mut deny_rules = live.deny_rules;
+        self.fold_host_mcp_denied_tools(&mut deny_rules);
         let mut working_dirs = live.additional_working_dirs;
         Self::extend_command_rules(
             &mut allow_rules,
@@ -1858,6 +1893,7 @@ impl PolicyPermissionGate {
             .clone_with_live_state(allow_rules, deny_rules, live.ask_rules, working_dirs)
             .with_tool_aliases(live.tool_aliases)
             .expect("live toolAliases were validated before publication")
+            .with_mcp_deny_aliases(folded.mcp_deny_aliases.clone())
             .with_bash_command_clamps(folded.bash_command_clamps.clone());
         if let (Some(provider), Some(roots)) = (&self.cwd_provider, policy.roots.as_mut()) {
             roots.cwd = provider();
@@ -2042,6 +2078,7 @@ impl PolicyPermissionGate {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let mut deny_rules = live.deny_rules;
+        self.fold_host_mcp_denied_tools(&mut deny_rules);
         self.fold_command_input_denies(&mut deny_rules);
         let mut policy = self
             .policy
@@ -2057,6 +2094,29 @@ impl PolicyPermissionGate {
             roots.cwd = provider();
         }
         policy
+    }
+
+    fn fold_host_mcp_denied_tools(
+        &self,
+        rules: &mut HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+    ) {
+        let tools = self
+            .host_mcp_denied_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bucket = rules
+            .entry(PermissionRuleSource::McpServerPolicy)
+            .or_default();
+        for name in tools.iter() {
+            let rule = PermissionRule {
+                value: crate::rule::PermissionRuleValue::from_rule_string(name),
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::McpServerPolicy,
+            };
+            if !bucket.contains(&rule) {
+                bucket.push(rule);
+            }
+        }
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
@@ -4000,6 +4060,13 @@ impl PermissionGate for PolicyPermissionGate {
         self.live_policy().native_mcp_deny_context()
     }
 
+    fn replace_sdk_mcp_denied_tools(&self, tools: Vec<String>) {
+        *self
+            .host_mcp_denied_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+    }
+
     /// Replace the session's Native alias map without mutating the boot policy.
     /// Validate before taking the live-state write lock; snapshots then observe
     /// either the old or new exact projection together with the matching live
@@ -4721,6 +4788,10 @@ fn mod_check_rule(
 #[cfg(test)]
 #[path = "policy_gate_test.rs"]
 mod policy_gate_test;
+
+#[cfg(test)]
+#[path = "sdk_direct_control_test.rs"]
+mod sdk_direct_control_test;
 
 // PLAN-DIVERGENCE-01: separate inline module (kept out of the concurrently
 // edited policy_gate_test.rs) proving that the LingXi-only `AllowByDefault`

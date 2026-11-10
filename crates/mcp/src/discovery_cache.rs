@@ -431,11 +431,23 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
         };
         map.insert("agentSource".into(), value.into());
     }
+    if config.has_raw_credential_name() {
+        map.insert(
+            "\0mcpAuthoredNameUtf16".into(),
+            serde_json::Value::Array(
+                config
+                    .authored_name_units()
+                    .into_iter()
+                    .map(serde_json::Value::from)
+                    .collect(),
+            ),
+        );
+    }
     let canonical = canonicalize_logical_key_value(raw);
     let canonical_json = serde_json::to_string(&canonical)
         .expect("canonical discovery-cache key config is serializable");
     let hash = sha256_hex(canonical_json.as_bytes());
-    format!("{}-{}", config.name, &hash[..16])
+    format!("{}-{}", config.storage_name(), &hash[..16])
 }
 
 // ── config-independent constants (oracle `Pe`/`Me`/`Ae`/`xe`) ──────────────
@@ -1989,6 +2001,7 @@ mod tests {
             .map(|i| McpToolDto {
                 server_name: "srv".into(),
                 tool_name: format!("t{i}"),
+                wire_tool_name: None,
                 description: String::new().into(),
                 input_schema: Utf16JsonProjection::parse("{}").expect("empty schema is JSON"),
                 output_schema: None,

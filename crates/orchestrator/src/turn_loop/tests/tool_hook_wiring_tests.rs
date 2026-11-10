@@ -360,6 +360,7 @@ struct SeamTool {
     requires_ui: bool,
     seen: Arc<Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     seen_context: Option<Arc<Mutex<Vec<CapturedToolContext>>>>,
+    provenance: Option<mcp::McpServerProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,6 +401,11 @@ impl Tool for SeamTool {
         self.mcp
     }
     fn mcp_server_provenance(&self) -> Option<&mcp::McpServerProvenance> {
+        if self.mcp {
+            if let Some(server) = self.provenance.as_ref() {
+                return Some(server);
+            }
+        }
         static SERVER: std::sync::OnceLock<mcp::McpServerProvenance> = std::sync::OnceLock::new();
         self.mcp.then(|| {
             SERVER.get_or_init(|| mcp::McpServerProvenance {
@@ -599,120 +605,145 @@ async fn native_322_mcp_provenance_reaches_tool_and_permission_hooks() {
             }
         }
     }
-    for (mcp, ask) in [(false, false), (true, false), (false, true), (true, true)] {
-        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks_registry = hooks::HookRegistry::new();
-        hooks_registry.register(hooks::HookDefinition {
-            id: HookId::new(),
-            name: "capture-mcp-provenance".into(),
-            events: vec![
-                HookEventType::PreToolUse,
-                HookEventType::PermissionRequest,
-                HookEventType::PostToolUse,
-            ],
-            if_condition: None,
-            executor: hooks::HookExecutor::Builtin {
-                handler_id: "capture-mcp-provenance".into(),
-            },
-            source: hooks::HookSource::Session,
-            blocking: true,
-            timeout: None,
-            priority: 0,
-            once: false,
-            status_message: None,
-            async_rewake: false,
-            async_timeout: None,
-            rewake_message: None,
-            on_failure: None,
-        });
-        let mut executor = hooks::HookExecutorImpl::new(
-            Arc::new(tokio::sync::RwLock::new(hooks_registry)),
-            Arc::new(UnusedHookHttp),
-            Arc::new(UnusedHookRuntime),
-        );
-        executor.register_builtin(Arc::new(Capture(seen.clone())));
-        let tool_seen = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(SeamTool {
-            coerce: false,
-            ask,
-            mcp,
-            workflow_read_ask: false,
-            requires_ui: false,
-            seen: tool_seen.clone(),
-            seen_context: None,
-        }));
-        let api = Arc::new(MockApiClient::new(vec![]));
-        api.set_effort_command_snapshot(Some(lingxi_core::host::effort::EffortCommandSnapshot {
-            model: "claude-sonnet-4-6".into(),
-            settings_key: "claude-sonnet-4-6".into(),
-            session: Default::default(),
-            primary: None,
-            capabilities: lingxi_core::host::effort::EffortCapabilities {
-                supported: true,
-                max: true,
-                ..Default::default()
-            },
-            state: lingxi_core::host::effort::EffortState {
-                hook: Some(json!("max")),
-                settings_cap: Some("medium".into()),
-                ..Default::default()
-            },
-            user_settings_path: None,
-            save_default: false,
-            organization_start_effort: None,
-        }));
-        let orch = ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            api,
-            Arc::new(registry),
-            Arc::new(executor),
-            Arc::new(PromptSpyGate { rule_source: None }),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        );
-        dispatch_tool_uses_tracked(
-            &orch,
-            &[(
-                ToolUseId::new(),
-                "Seam".into(),
-                tool_api::tool_trait::generated_builtin_result(&json!({"timeout":1})),
+    for raw in [
+        r#"{"mcpServers":{"wire audit":{"command":"fake"}}}"#,
+        r#"{"mcpServers":{"wire \ud800":{"command":"fake"}}}"#,
+    ] {
+        let config = mcp::parse_mcp_json_string(raw, mcp::ConfigScope::Dynamic)
+            .unwrap()
+            .remove(0);
+        let provenance = mcp::McpServerProvenance::from_config(&config);
+        for (mcp, ask) in [(false, false), (true, false), (false, true), (true, true)] {
+            let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+            let mut hooks_registry = hooks::HookRegistry::new();
+            hooks_registry.register(hooks::HookDefinition {
+                id: HookId::new(),
+                name: "capture-mcp-provenance".into(),
+                events: vec![
+                    HookEventType::PreToolUse,
+                    HookEventType::PermissionRequest,
+                    HookEventType::PostToolUse,
+                ],
+                if_condition: None,
+                executor: hooks::HookExecutor::Builtin {
+                    handler_id: "capture-mcp-provenance".into(),
+                },
+                source: hooks::HookSource::Session,
+                blocking: true,
+                timeout: None,
+                priority: 0,
+                once: false,
+                status_message: None,
+                async_rewake: false,
+                async_timeout: None,
+                rewake_message: None,
+                on_failure: None,
+            });
+            let mut executor = hooks::HookExecutorImpl::new(
+                Arc::new(tokio::sync::RwLock::new(hooks_registry)),
+                Arc::new(UnusedHookHttp),
+                Arc::new(UnusedHookRuntime),
+            );
+            executor.register_builtin(Arc::new(Capture(seen.clone())));
+            let tool_seen = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = ToolRegistry::new();
+            registry.register_builtin(Arc::new(SeamTool {
+                coerce: false,
+                ask,
+                mcp,
+                workflow_read_ask: false,
+                requires_ui: false,
+                seen: tool_seen.clone(),
+                seen_context: None,
+                provenance: Some(provenance.clone()),
+            }));
+            let api = Arc::new(MockApiClient::new(vec![]));
+            api.set_effort_command_snapshot(Some(
+                lingxi_core::host::effort::EffortCommandSnapshot {
+                    model: "claude-sonnet-4-6".into(),
+                    settings_key: "claude-sonnet-4-6".into(),
+                    session: Default::default(),
+                    primary: None,
+                    capabilities: lingxi_core::host::effort::EffortCapabilities {
+                        supported: true,
+                        max: true,
+                        ..Default::default()
+                    },
+                    state: lingxi_core::host::effort::EffortState {
+                        hook: Some(json!("max")),
+                        settings_cap: Some("medium".into()),
+                        ..Default::default()
+                    },
+                    user_settings_path: None,
+                    save_default: false,
+                    organization_start_effort: None,
+                },
+            ));
+            let orch = ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                api,
+                Arc::new(registry),
+                Arc::new(executor),
+                Arc::new(PromptSpyGate { rule_source: None }),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            );
+            dispatch_tool_uses_tracked(
+                &orch,
+                &[(
+                    ToolUseId::new(),
+                    "Seam".into(),
+                    tool_api::tool_trait::generated_builtin_result(&json!({"timeout":1})),
+                    None,
+                )],
                 None,
-            )],
-            None,
-        )
-        .await
-        .unwrap();
-        // This test tool's ask is an explicit sandbox override. A hook cannot
-        // bypass that manual approval, but its PermissionRequest still receives
-        // the same metadata as the pre-hook and successful post-hook.
-        assert_eq!(tool_seen.lock().unwrap().len(), usize::from(!ask));
-        let captured = seen.lock().unwrap();
-        assert_eq!(
-            captured
-                .iter()
-                .map(|(event, _, _)| event.clone())
-                .collect::<Vec<_>>(),
-            if ask {
-                vec![HookEventType::PreToolUse, HookEventType::PermissionRequest]
-            } else {
-                vec![HookEventType::PreToolUse, HookEventType::PostToolUse]
+            )
+            .await
+            .unwrap();
+            // This test tool's ask is an explicit sandbox override. A hook cannot
+            // bypass that manual approval, but its PermissionRequest still receives
+            // the same metadata as the pre-hook and successful post-hook.
+            assert_eq!(tool_seen.lock().unwrap().len(), usize::from(!ask));
+            let captured = seen.lock().unwrap();
+            assert_eq!(
+                captured
+                    .iter()
+                    .map(|(event, _, _)| event.clone())
+                    .collect::<Vec<_>>(),
+                if ask {
+                    vec![HookEventType::PreToolUse, HookEventType::PermissionRequest]
+                } else {
+                    vec![HookEventType::PreToolUse, HookEventType::PostToolUse]
+                }
+            );
+            let expected = mcp.then(|| hooks::HookMcpServerProvenance {
+                name: hooks::response::ExactHookText::from_utf16(
+                    provenance.name.utf16_units().to_vec(),
+                ),
+                source: "dynamic".into(),
+            });
+            assert!(
+                captured
+                    .iter()
+                    .all(|(_, server, effort)| *server == expected
+                        && effort
+                            .as_ref()
+                            .is_some_and(|effort| effort.level == "medium")),
+                "{captured:?}"
+            );
+            for (_, server, _) in captured.iter() {
+                if let Some(server) = server {
+                    let raw = serde_json::to_string(server).unwrap();
+                    let decoded =
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&raw).unwrap();
+                    assert_eq!(
+                        decoded.string_units("/name").unwrap().as_slice(),
+                        provenance.name.utf16_units()
+                    );
+                }
             }
-        );
-        let expected = mcp.then(|| hooks::HookMcpServerProvenance {
-            name: "wire audit".into(),
-            source: "dynamic".into(),
-        });
-        assert!(
-            captured
-                .iter()
-                .all(|(_, server, effort)| *server == expected
-                    && effort
-                        .as_ref()
-                        .is_some_and(|effort| effort.level == "medium")),
-            "{captured:?}"
-        );
+        }
     }
 }
 
@@ -796,6 +827,7 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
         requires_ui: false,
         seen: Arc::new(Mutex::new(Vec::new())),
         seen_context: Some(seen_context.clone()),
+        provenance: None,
     }) as Arc<dyn Tool>);
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -872,6 +904,7 @@ async fn coerce_input_is_applied_before_schema_validation() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         None,
     )
@@ -902,6 +935,7 @@ async fn without_the_hook_the_alias_key_fails_the_schema() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         None,
     )
@@ -926,6 +960,7 @@ async fn tool_check_permissions_ask_escalates_a_non_rule_allow() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         None,
     )
@@ -952,6 +987,7 @@ async fn workflow_read_ask_permission_request_allow_rescues_with_rewrite() {
         requires_ui: false,
         seen: Arc::new(Mutex::new(Vec::new())),
         seen_context: None,
+        provenance: None,
     };
     let seen = tool.seen.clone();
     let mut registry = ToolRegistry::new();
@@ -1010,6 +1046,7 @@ async fn tool_check_permissions_allow_leaves_the_resolution_alone() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         None,
     )
@@ -1032,6 +1069,7 @@ async fn a_rule_allow_suppresses_the_tool_ask() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         Some("userSettings"),
     )
@@ -1054,6 +1092,7 @@ async fn mcp_tool_ask_overrides_explicit_allow_rule() {
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
             seen_context: None,
+            provenance: None,
         },
         Some("userSettings"),
     )

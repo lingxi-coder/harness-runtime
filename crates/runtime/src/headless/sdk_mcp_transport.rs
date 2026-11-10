@@ -4,8 +4,9 @@
 //! use the existing JSON-RPC connection/client/registry lifecycle; the only
 //! changed boundary is delivery of one JSON-RPC message as `mcp_message`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -21,12 +22,14 @@ use super::control_plane::StdioControlPlane;
 
 struct Endpoint {
     server: String,
+    authored_name: ::mcp::McpServerName,
     inbound: mpsc::UnboundedSender<jsonrpc::Message>,
     connection: OnceLock<Arc<jsonrpc::Connection>>,
     client: OnceLock<Arc<::mcp::McpClient>>,
     closed: CancellationToken,
     metadata: Mutex<Option<McpServerMetadataDto>>,
     manifest: Mutex<Option<Manifest>>,
+    handshake_admitted: AtomicBool,
 }
 
 struct Manifest {
@@ -42,6 +45,9 @@ pub struct SdkMcpTransport {
     cwd: PathBuf,
     endpoints: Mutex<HashMap<McpConnectionId, Arc<Endpoint>>>,
     manifests: Mutex<HashMap<String, Manifest>>,
+    authored_names: Mutex<HashMap<String, ::mcp::McpServerName>>,
+    retired_servers: Mutex<HashSet<String>>,
+    handshake_changed: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for SdkMcpTransport {
@@ -73,6 +79,9 @@ impl SdkMcpTransport {
             cwd,
             endpoints: Mutex::new(HashMap::new()),
             manifests: Mutex::new(HashMap::new()),
+            authored_names: Mutex::new(HashMap::new()),
+            retired_servers: Mutex::new(HashSet::new()),
+            handshake_changed: Arc::new(tokio::sync::Notify::new()),
         });
         plane.set_sdk_mcp_transport(Arc::downgrade(&transport));
         transport
@@ -86,14 +95,103 @@ impl SdkMcpTransport {
             .cloned()
     }
 
+    /// The host owns the private transport handle; the wire uses the exact
+    /// authored JavaScript server name, including isolated UTF-16 units.
+    pub fn configure_server_names(&self, configs: &[::mcp::McpServerConfig]) {
+        let mut names = self
+            .authored_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for config in configs {
+            if let McpTransportSpec::SdkControl { control_channel_id } = &config.spec {
+                names.insert(control_channel_id.clone(), config.authored_name());
+                self.retired_servers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(control_channel_id);
+            }
+        }
+    }
+
+    /// Retire SDK handshakes before awaiting registry lifecycle locks. A host
+    /// may replace a server whose initialize reply has never arrived.
+    pub fn retire_server_keys(&self, names: &[String]) {
+        let mut retired = self
+            .retired_servers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retired.extend(names.iter().cloned());
+        let endpoints = self
+            .endpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for endpoint in endpoints
+            .values()
+            .filter(|endpoint| names.contains(&endpoint.server))
+        {
+            endpoint.closed.cancel();
+            if let Some(connection) = endpoint.connection.get() {
+                connection.close();
+            }
+        }
+    }
+
+    pub fn admit_server_name_units(&self, units: &[u16]) {
+        let names = self
+            .authored_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut retired = self
+            .retired_servers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, name) in names.iter().filter(|(_, name)| name.utf16_units() == units) {
+            let _ = name;
+            retired.remove(key);
+        }
+    }
+
+    /// Native starts control-channel handshakes before publishing initialize
+    /// when no replay manifest was parked. Wait only for frame admission, not
+    /// for host replies, so the inbound control loop remains able to answer.
+    pub async fn wait_for_handshake_admission(&self, names: &[String]) {
+        loop {
+            let changed = self.handshake_changed.notified();
+            if names.iter().all(|name| {
+                self.endpoints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values()
+                    .any(|endpoint| {
+                        endpoint.server == *name
+                            && (endpoint.handshake_admitted.load(Ordering::Acquire)
+                                || endpoint.closed.is_cancelled())
+                    })
+            }) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     /// Deliver a server's own SDK JSON-RPC request/notification/response.
     pub fn deliver(&self, server: &str, message: &Utf16JsonProjection) -> Result<(), String> {
+        self.deliver_units(&server.encode_utf16().collect::<Vec<_>>(), message)
+    }
+
+    pub fn deliver_units(
+        &self,
+        server: &[u16],
+        message: &Utf16JsonProjection,
+    ) -> Result<(), String> {
         let endpoint = self
             .endpoints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .find(|endpoint| endpoint.server == server && !endpoint.closed.is_cancelled())
+            .find(|endpoint| {
+                endpoint.authored_name.utf16_units() == server && !endpoint.closed.is_cancelled()
+            })
             .cloned();
         let Some(endpoint) = endpoint else {
             // Native acknowledges late/unknown SDK server messages without
@@ -103,7 +201,7 @@ impl SdkMcpTransport {
         let message = match jsonrpc_message_from_projection(message) {
             Ok(message) => message,
             Err(error) => {
-                tracing::debug!(server, %error, "Ignoring invalid SDK MCP message");
+                tracing::debug!(server = %String::from_utf16_lossy(server), %error, "Ignoring invalid SDK MCP message");
                 return Ok(());
             }
         };
@@ -119,7 +217,7 @@ impl SdkMcpTransport {
         &self,
         names: &[String],
         projection: Option<&Utf16JsonProjection>,
-    ) -> Option<Value> {
+    ) -> Option<Utf16JsonProjection> {
         let projection = projection?;
         if projection
             .at_pointer("")
@@ -142,21 +240,35 @@ impl SdkMcpTransport {
             })
             .map(|endpoint| endpoint.server.clone())
             .collect();
-        let mut statuses = serde_json::Map::new();
+        let authored_names = self
+            .authored_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let authored = |name: &String| {
+            authored_names
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.into())
+        };
+        let mut statuses = Vec::new();
         if projection.object_entries().is_none() {
             for name in names {
-                statuses.insert(name.clone(), json!("malformed"));
+                statuses.push((authored(name).utf16_units().to_vec(), "malformed".into()));
             }
-            return Some(Value::Object(statuses));
+            return Utf16JsonProjection::object_units(statuses).ok();
         }
         let mut manifests = self
             .manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for name in names {
-            let Some(entry) = projection.get_property(name) else {
+            let source_name = authored(name);
+            let Ok(entry_source) =
+                projection.subprojection_property_units(source_name.utf16_units())
+            else {
                 continue;
             };
+            let entry = entry_source.at_pointer("")?;
             let initialize = entry
                 .get_property("initializeResult")
                 .filter(|value| value.object_entries().is_some());
@@ -179,28 +291,17 @@ impl SdkMcpTransport {
                 manifests.insert(
                     name.clone(),
                     Manifest {
-                        initialize: projection
-                            .subprojection(&format!(
-                                "/{}/initializeResult",
-                                name.replace('~', "~0").replace('/', "~1")
-                            ))
-                            .ok(),
-                        tools: tools.and_then(|_| {
-                            projection
-                                .subprojection(&format!(
-                                    "/{}/toolsListResult",
-                                    name.replace('~', "~0").replace('/', "~1")
-                                ))
-                                .ok()
-                        }),
+                        initialize: entry_source.subprojection("/initializeResult").ok(),
+                        tools: tools
+                            .and_then(|_| entry_source.subprojection("/toolsListResult").ok()),
                         swallow_initialized: false,
                     },
                 );
                 "parked"
             };
-            statuses.insert(name.clone(), json!(status));
+            statuses.push((source_name.utf16_units().to_vec(), status.into()));
         }
-        Some(Value::Object(statuses))
+        Utf16JsonProjection::object_units(statuses).ok()
     }
 }
 
@@ -467,11 +568,24 @@ async fn prepare_message(
     let wire = sdk_wire_message(&message)?;
     let request = Utf16JsonProjection::object(vec![
         ("subtype".into(), "mcp_message".into()),
-        ("server_name".into(), endpoint.server.as_str().into()),
+        (
+            "server_name".into(),
+            Utf16JsonProjection::root_string(
+                endpoint.authored_name.as_str().to_owned(),
+                endpoint.authored_name.utf16_units().to_vec(),
+            )
+            .expect("source MCP name"),
+        ),
         ("message".into(), wire),
     ])
     .expect("MCP control request has unique fields");
     let (id, response) = plane.send_request(request, None).await;
+    if initialize {
+        endpoint.handshake_admitted.store(true, Ordering::Release);
+        if let Some(transport) = plane.sdk_mcp_transport() {
+            transport.handshake_changed.notify_waiters();
+        }
+    }
     Ok(Some(PendingSdkMessage {
         id,
         response,
@@ -509,7 +623,7 @@ async fn await_control_reply(
             Err(()) => { plane.cancel_request(&request_id).await; return Err(closed()); }
         },
         () = endpoint.closed.cancelled() => {
-            plane.cancel_request(&request_id).await; return Err(closed());
+            plane.retire_request(&request_id).await; return Err(closed());
         }
     };
     if payload.contains_property("mcp_response") {
@@ -587,9 +701,24 @@ impl McpTransport for SdkMcpTransport {
         else {
             return self.delegate.transport.connect(spec).await;
         };
+        if self
+            .retired_servers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(server)
+        {
+            return Err(sdk_error("SDK server was retired"));
+        }
         let (inbound, receiver) = mpsc::unbounded_channel();
         let endpoint = Arc::new(Endpoint {
             server: server.clone(),
+            authored_name: self
+                .authored_names
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(server)
+                .cloned()
+                .unwrap_or_else(|| server.into()),
             inbound,
             connection: OnceLock::new(),
             client: OnceLock::new(),
@@ -601,6 +730,7 @@ impl McpTransport for SdkMcpTransport {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(server),
             ),
+            handshake_admitted: AtomicBool::new(false),
         });
         let reader = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver);
         let sender = endpoint.clone();
@@ -636,10 +766,22 @@ impl McpTransport for SdkMcpTransport {
             .set(client)
             .map_err(|_| sdk_error("duplicate SDK client"))?;
         let connection_id = McpConnectionId::new();
+        // Retirement and publication share this short synchronous lock. A
+        // queued connect cannot install a new endpoint after its host removed
+        // the server but before registry teardown acquired the lifecycle lock.
+        let retired = self
+            .retired_servers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retired.contains(server) {
+            return Err(sdk_error("SDK server was retired"));
+        }
         self.endpoints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(connection_id, endpoint);
+        self.handshake_changed.notify_waiters();
+        drop(retired);
         guard.disarmed = true;
         Ok(McpRawConnection { connection_id })
     }
@@ -926,24 +1068,21 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
     let Some(name_count) = frame.array_len("/request/sdkMcpServers") else {
         return Vec::new();
     };
-    let mut servers = serde_json::Map::new();
+    let mut servers = Vec::<::mcp::McpServerConfig>::new();
     for index in 0..name_count {
         let name_pointer = format!("/request/sdkMcpServers/{index}");
-        let Some(name) = frame
-            .string_units(&name_pointer)
-            .and_then(|units| String::from_utf16(&units).ok())
-        else {
+        let Some(name) = frame.string_units(&name_pointer) else {
             continue;
         };
-        let mut config = json!({"type":"sdk","name":name});
+        let mut config = json!({"type":"sdk","name":String::from_utf16_lossy(&name)});
         let settings = frame
             .subprojection("/request/sdkMcpServerConfigs")
             .ok()
-            .and_then(|configs| {
-                let units = name.encode_utf16().collect::<Vec<_>>();
-                configs.subprojection_property_units(&units).ok()
-            });
-        if let Some(settings) = settings.filter(|settings| settings.object_entries().is_some()) {
+            .and_then(|configs| configs.subprojection_property_units(&name).ok());
+        if let Some(settings) = settings
+            .as_ref()
+            .filter(|settings| settings.object_entries().is_some())
+        {
             for key in ["timeout", "disableAutoBackground"] {
                 if key == "timeout" {
                     let timeout = projection_u64_at(&settings, "/timeout");
@@ -962,13 +1101,29 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
                 config["tools"] = tools;
             }
         }
-        servers.insert(name.to_owned(), config);
+        if let Some(mut config) =
+            ::mcp::build_server_from_json_entry_utf16(&name, &config, ::mcp::ConfigScope::Dynamic)
+        {
+            if let Some(settings) = settings.as_ref() {
+                ::mcp::apply_sdk_mcp_settings(&mut config, settings);
+            }
+            if let Some(existing) = servers
+                .iter_mut()
+                .find(|entry| entry.name_matches_utf16(&name))
+            {
+                *existing = config;
+            } else {
+                servers.push(config);
+            }
+        }
     }
-    ::mcp::json_config::parse_mcp_json_string(
-        &Value::Object(servers).to_string(),
-        ::mcp::ConfigScope::Dynamic,
-    )
-    .unwrap_or_default()
+    ::mcp::finalize_mcp_server_names(&mut servers);
+    for config in &mut servers {
+        if let McpTransportSpec::SdkControl { control_channel_id } = &mut config.spec {
+            *control_channel_id = config.name.clone();
+        }
+    }
+    servers
 }
 
 /// Native `Lyt`/`Ie`/`rjn` (2.1.318 @257935226/@257936383/@257934789):
@@ -1070,8 +1225,9 @@ mod tests {
         assert_eq!(
             transport
                 .park_manifests(&["fixture".into()], Some(&manifest))
-                .unwrap()["fixture"],
-            "parked"
+                .unwrap()
+                .string_at("/fixture"),
+            Some("parked")
         );
         drop(transport); // Only the assembled runtime may retain the decorated transport.
         let initialize = Utf16JsonProjection::parse(
@@ -1224,12 +1380,14 @@ mod tests {
         (
             Endpoint {
                 server: "fixture".into(),
+                authored_name: "fixture".into(),
                 inbound,
                 connection: OnceLock::new(),
                 client: OnceLock::new(),
                 closed: CancellationToken::new(),
                 metadata: Mutex::new(None),
                 manifest: Mutex::new(None),
+                handshake_admitted: AtomicBool::new(false),
             },
             receiver,
         )
@@ -1387,21 +1545,19 @@ mod tests {
             "neither unanswered host reply serializes the writer"
         );
         endpoint.closed.cancel();
-        // Both independent waiters must cancel their broker entries on close.
-        for _ in 0..2 {
-            let OutboundMsg::Line(line) =
-                tokio::time::timeout(Duration::from_secs(2), outbound.recv())
-                    .await
-                    .unwrap()
-                    .unwrap()
-            else {
-                panic!("cancel")
-            };
-            assert_eq!(
-                serde_json::from_str::<Value>(&line).unwrap()["type"],
-                "control_cancel_request"
-            );
-        }
+        // Native SDK retirement is silent. Both independently owned reply
+        // waiters must still complete and release their captured endpoints.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&endpoint) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both SDK control waiters retire on close");
+        assert!(
+            outbound.try_recv().is_err(),
+            "SDK close emits no outer control_cancel_request"
+        );
     }
 
     #[tokio::test]
@@ -1524,8 +1680,9 @@ mod tests {
         assert_eq!(
             transport
                 .park_manifests(&["fixture".into()], Some(&manifest))
-                .unwrap()["fixture"],
-            "parked"
+                .unwrap()
+                .string_at("/fixture"),
+            Some("parked")
         );
         let connection = transport
             .connect_and_initialize(
@@ -1622,7 +1779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sdk_close_cancels_outstanding_native_control_request() {
+    async fn sdk_close_retires_outstanding_control_request_without_outer_cancel() {
         let (tx, mut outbound) = mpsc::unbounded_channel();
         let plane = StdioControlPlane::new(Arc::new(tx));
         let (endpoint, _inbound) = endpoint();
@@ -1644,15 +1801,13 @@ mod tests {
         let OutboundMsg::Line(request) = outbound.recv().await.unwrap() else {
             panic!("request")
         };
-        let request: Value = serde_json::from_str(&request).unwrap();
+        let _request: Value = serde_json::from_str(&request).unwrap();
         endpoint.closed.cancel();
         assert!(pending.await.unwrap().is_err());
-        let OutboundMsg::Line(cancel) = outbound.recv().await.unwrap() else {
-            panic!("cancel")
-        };
-        let cancel: Value = serde_json::from_str(&cancel).unwrap();
-        assert_eq!(cancel["type"], "control_cancel_request");
-        assert_eq!(cancel["request_id"], request["request_id"]);
+        assert!(
+            outbound.try_recv().is_err(),
+            "native pending SDK removal does not cancel the host's control request"
+        );
     }
 
     #[test]

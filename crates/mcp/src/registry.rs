@@ -60,9 +60,14 @@ use diagnostics::server_connection_failed_payload;
 use diagnostics::server_connection_succeeded_payload;
 use diagnostics::telemetry_mcp_server_base_url;
 use diagnostics::tool_call_auth_error_code;
+#[path = "registry/name_storage.rs"]
+mod name_storage;
+#[path = "registry/sdk_auth.rs"]
+mod sdk_auth;
 use diagnostics::tools_listed_payload;
 #[cfg(test)]
 use diagnostics::xaa_flow_failure_stage;
+pub use sdk_auth::SdkMcpAuthenticationError;
 
 /// OAuth seam injected into the registry for remote (SSE/HTTP) MCP servers that
 /// declare an `oauth` config. When unset, OAuth-configured servers fall back to
@@ -123,6 +128,19 @@ pub struct XaaInputs {
 /// host (desktop/CLI) once the IdP-settings + secret config surface exists.
 #[async_trait::async_trait]
 pub trait XaaConfigProvider: Send + Sync {
+    /// Bind host-proven per-server AS credentials to their selected storage.
+    /// Providers that resolve inputs externally can keep their existing seam.
+    /// The IdP account and its global token cache remain provider-owned.
+    fn for_server_credentials(
+        &self,
+        _server_name: &str,
+        _server_key: &str,
+        _client_id: Option<&str>,
+        _storage: Arc<dyn SecureStorage>,
+    ) -> Option<Arc<dyn XaaConfigProvider>> {
+        None
+    }
+
     /// Resolve the XAA inputs for `server_name` / `server_url`, performing the
     /// IdP login (or cache hit) as needed. Returns `Ok(None)` when this server
     /// is not actually XAA-provisioned (caller hard-fails with guidance).
@@ -131,6 +149,16 @@ pub trait XaaConfigProvider: Send + Sync {
         server_name: &str,
         server_url: &str,
     ) -> Result<Option<XaaInputs>, McpError>;
+
+    /// Exact JSON string source for an AS client secret when its storage
+    /// representation can contain unpaired JavaScript UTF-16 units.
+    async fn as_client_secret_source(
+        &self,
+        _server_name: &str,
+        _server_url: &str,
+    ) -> Result<Option<Utf16JsonProjection>, McpError> {
+        Ok(None)
+    }
 
     /// Whether the provider can confirm a cached IdP `id_token` exists before
     /// attempting XAA acquisition. Mirrors claude-code's pre-acquire cache peek
@@ -645,6 +673,10 @@ pub struct McpRegistry {
     /// restrictions available to every catalog publisher during that gap.
     pub(crate) sdk_initialize_permission_rules:
         Arc<StdMutex<crate::tool_policy::SdkInitializeRules>>,
+    /// Latest control-owned SDK tool declarations can change while the
+    /// transport's initialize is still holding its lifecycle lock.
+    sdk_control_tools:
+        Arc<StdMutex<HashMap<String, Vec<lingxi_core::host::McpConfiguredToolPolicyDto>>>>,
     /// Single-flight guard for the XAA token resolve chain, keyed by
     /// `oauth::server_key`. Mirrors the oracle's `_refreshInProgress`
     /// promise-sharing guard on `tokens()`/`xaaRefresh()` (@182213696, §26b
@@ -713,6 +745,9 @@ pub struct McpRegistry {
     /// static headers; static-token servers are unaffected either way. Wired
     /// via [`Self::with_oauth`].
     oauth: Option<OAuthDeps>,
+    raw_name_oauth_storage: Option<Arc<dyn SecureStorage>>,
+    oauth_identity: oauth::McpOAuthIdentity,
+    sdk_auth_flows: Arc<sdk_auth::SdkAuthFlows>,
     /// Host-owned Projects-session inputs. `None` means this registry has no
     /// host source; production composition injects one shared context into its
     /// main and child registries before they connect.
@@ -985,6 +1020,10 @@ pub fn sanitize_native_mcp_text(input: &str) -> String {
     diagnostics::sanitize_native_mcp_text(input)
 }
 
+pub(crate) fn sanitize_sdk_mcp_auth_text(input: &str) -> String {
+    diagnostics::sanitize_native_mcp_text_with_limit(input, 1024)
+}
+
 fn clone_mcp_error(error: &McpError) -> McpError {
     match error {
         McpError::UnsupportedTransport(kind) => McpError::UnsupportedTransport(*kind),
@@ -1050,6 +1089,7 @@ impl McpRegistry {
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             permission_policy_publish_lock: Arc::clone(&self.permission_policy_publish_lock),
             sdk_initialize_permission_rules: Arc::clone(&self.sdk_initialize_permission_rules),
+            sdk_control_tools: Arc::clone(&self.sdk_control_tools),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
             clients: Arc::clone(&self.clients),
             failure_diagnostics: Arc::clone(&self.failure_diagnostics),
@@ -1064,6 +1104,9 @@ impl McpRegistry {
             raw_conn: self.raw_conn.clone(),
             hook_dispatcher: self.hook_dispatcher.clone(),
             oauth: self.oauth.clone(),
+            raw_name_oauth_storage: self.raw_name_oauth_storage.clone(),
+            oauth_identity: self.oauth_identity.clone(),
+            sdk_auth_flows: Arc::clone(&self.sdk_auth_flows),
             projects_session_host: self.projects_session_host.clone(),
             headers_helper_cwd: self.headers_helper_cwd.clone(),
             headers_helper_plugin_roots: Arc::clone(&self.headers_helper_plugin_roots),
@@ -1102,6 +1145,7 @@ impl McpRegistry {
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             permission_policy_publish_lock: Arc::new(Mutex::new(())),
             sdk_initialize_permission_rules: Arc::new(StdMutex::new(Default::default())),
+            sdk_control_tools: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
             clients: Arc::new(RwLock::new(IndexMap::new())),
             failure_diagnostics: Arc::new(RwLock::new(HashMap::new())),
@@ -1116,6 +1160,9 @@ impl McpRegistry {
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
+            raw_name_oauth_storage: None,
+            oauth_identity: oauth::McpOAuthIdentity::default(),
+            sdk_auth_flows: Arc::new(sdk_auth::SdkAuthFlows::default()),
             projects_session_host: None,
             headers_helper_cwd: std::path::PathBuf::from("."),
             headers_helper_plugin_roots: Arc::new(RwLock::new(HashMap::new())),
@@ -1261,7 +1308,8 @@ impl McpRegistry {
             connections
                 .iter()
                 .find(|(name, state)| {
-                    normalize_name_for_mcp(name) == normalized
+                    (name.as_str() == server_name
+                        || state.config().normalized_name_for_mcp() == normalized)
                         && matches!(state, McpConnectionState::Connected { .. })
                 })
                 .and_then(|(_, state)| match state {
@@ -1432,8 +1480,17 @@ impl McpRegistry {
     /// spec's headers, and retries once after a 401. Static-token servers
     /// (`oauth: None`) take the unchanged path.
     #[must_use]
+    pub fn with_mcp_oauth_identity(mut self, identity: oauth::McpOAuthIdentity) -> Self {
+        self.assert_configuration_mutable("with_mcp_oauth_identity");
+        self.oauth_identity = identity;
+        self
+    }
+
     pub fn with_oauth(mut self, deps: OAuthDeps) -> Self {
         self.assert_configuration_mutable("with_oauth");
+        self.raw_name_oauth_storage = Some(Arc::new(name_storage::RawNameOAuthStorage::new(
+            Arc::clone(&deps.storage),
+        )));
         self.oauth = Some(deps);
         self
     }
@@ -1692,15 +1749,20 @@ impl McpRegistry {
     /// name). This mirrors claude-code's `normalizeNameForMCP(client.name) ===
     /// serverName` lookup (normalization.rs:22-24, client.ts).
     pub async fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
-        let clients = self.clients.read().await;
-        if let Some(entry) = clients.get(name) {
-            return Some(Arc::clone(&entry.client));
-        }
-        let normalized = normalize_name_for_mcp(name);
-        clients
-            .iter()
-            .find(|(k, _)| normalize_name_for_mcp(k) == normalized)
-            .map(|(_, entry)| Arc::clone(&entry.client))
+        let key = self
+            .public_server_key(name)
+            .await
+            .unwrap_or_else(|| name.to_owned());
+        self.get_client_by_key(&key).await
+    }
+
+    /// Retrieve an explicitly host-bound internal table key.
+    pub async fn get_client_by_key(&self, name: &str) -> Option<Arc<McpClient>> {
+        self.clients
+            .read()
+            .await
+            .get(name)
+            .map(|entry| Arc::clone(&entry.client))
     }
 
     /// Suggestion generation pauses while a live connected client is eliciting.
@@ -1719,21 +1781,34 @@ impl McpRegistry {
     /// hit when needed. `name` is matched by normalized form, exactly like
     /// [`Self::get_client`].
     pub async fn ensure_connected_client(&self, name: &str) -> Result<Arc<McpClient>, McpError> {
-        if let Some(client) = self.get_client(name).await {
+        let key = self
+            .public_server_key(name)
+            .await
+            .unwrap_or_else(|| name.to_owned());
+        self.ensure_connected_client_by_key(&key).await
+    }
+
+    /// Lazily connect an explicitly trusted table key without public-name
+    /// interpretation when an authored scalar name resembles another key.
+    pub async fn ensure_connected_client_by_key(
+        &self,
+        name: &str,
+    ) -> Result<Arc<McpClient>, McpError> {
+        if let Some(client) = self.get_client_by_key(name).await {
             return Ok(client);
         }
         #[cfg(test)]
         self.maybe_pause_after_initial_client_miss().await;
         if let Some(raw_key) = self.cached_raw_key(name).await {
             self.ensure_dialed_from_cache(&raw_key).await?;
-            return self.get_client(name).await.ok_or_else(|| {
+            return self.get_client_by_key(name).await.ok_or_else(|| {
                 McpError::Internal(
                     format!("MCP server \"{name}\" did not publish a client after cache lazy-dial")
                         .into(),
                 )
             });
         }
-        if let Some(client) = self.get_client(name).await {
+        if let Some(client) = self.get_client_by_key(name).await {
             return Ok(client);
         }
         Err(McpError::Internal(
@@ -1782,7 +1857,12 @@ impl McpRegistry {
             } else {
                 let normalized = normalize_name_for_mcp(name);
                 connections.iter().find_map(|(raw_name, state)| {
-                    if normalize_name_for_mcp(raw_name) != normalized {
+                    if (if state.config().metadata.authored_name.is_some() {
+                        state.config().normalized_name_for_mcp()
+                    } else {
+                        normalize_name_for_mcp(raw_name)
+                    }) != normalized
+                    {
                         return None;
                     }
                     match state {
@@ -1864,7 +1944,12 @@ impl McpRegistry {
         let connections = self.connections.read().await;
         connections.iter().find_map(|(raw_name, state)| {
             if raw_name != name
-                && (connections.contains_key(name) || normalize_name_for_mcp(raw_name) != name)
+                && (connections.contains_key(name)
+                    || (if state.config().metadata.authored_name.is_some() {
+                        state.config().normalized_name_for_mcp()
+                    } else {
+                        normalize_name_for_mcp(raw_name)
+                    }) != name)
             {
                 return None;
             }
@@ -1889,11 +1974,67 @@ impl McpRegistry {
     /// that carries one. Matches by NORMALIZED key (see [`Self::get_client`])
     /// so a model-supplied `<server>` token resolves a raw stored key.
     pub async fn get_config(&self, name: &str) -> Option<McpServerConfig> {
+        let key = self.public_server_key(name).await?;
+        self.get_config_by_key(&key).await
+    }
+
+    /// Retrieve an explicitly host-bound internal table key.
+    pub async fn get_config_by_key(&self, name: &str) -> Option<McpServerConfig> {
         let conns = self.connections.read().await;
-        conns
+        conns.get(name).map(|state| state.config().clone())
+    }
+
+    async fn public_server_key(&self, name: &str) -> Option<String> {
+        let units = name.encode_utf16().collect::<Vec<_>>();
+        let connections = self.connections.read().await;
+        if let Some((key, _)) = connections.iter().find(|(key, state)| {
+            *key == &state.config().name && state.config().name_matches_utf16(&units)
+        }) {
+            return Some(key.clone());
+        }
+        if connections.contains_key(name) {
+            return Some(name.to_owned());
+        }
+        let normalized = normalize_name_for_mcp(name);
+        let configured = connections
             .iter()
-            .find(|(k, _)| normalize_name_for_mcp(k) == name)
-            .map(|(_, v)| v.config().clone())
+            .find(|(key, state)| {
+                (if state.config().metadata.authored_name.is_some() {
+                    state.config().normalized_name_for_mcp()
+                } else {
+                    normalize_name_for_mcp(key)
+                }) == normalized
+            })
+            .map(|(key, _)| key.clone());
+        if configured.is_some() {
+            return configured;
+        }
+        drop(connections);
+        // A host may register an already-connected client without a config
+        // row. Preserve its ordinary normalized lookup only after the exact
+        // authored-name/config-key lookup above has found no candidate.
+        let clients = self.clients.read().await;
+        if clients.contains_key(name) {
+            return Some(name.to_owned());
+        }
+        clients
+            .keys()
+            .find(|key| normalize_name_for_mcp(key) == normalized)
+            .cloned()
+    }
+
+    /// Choose private handles for an SDK/dynamic batch against the existing
+    /// global catalog before its transport channel names are configured.
+    pub async fn finalize_authored_server_names(&self, configs: &mut [McpServerConfig]) {
+        let existing = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|(key, state)| *key == &state.config().name)
+            .map(|(_, state)| state.config().clone())
+            .collect::<Vec<_>>();
+        crate::finalize_mcp_server_names_against(configs, &existing);
     }
 
     /// Add initialize-time SDK policies without replacing a registered
@@ -1907,7 +2048,10 @@ impl McpRegistry {
         let mut connections = self.connections.write().await;
         let Some(state) = connections.get_mut(&incoming.name) else {
             drop(connections);
-            return self.connect_locked(incoming, None).await.map(|_| ());
+            let name = incoming.name.clone();
+            let result = self.connect_locked(incoming, None).await.map(|_| ());
+            self.apply_sdk_control_tools(&name).await;
+            return result;
         };
         let current = state.config_mut();
         if matches!(current.spec, McpTransportSpec::SdkControl { .. })
@@ -1923,6 +2067,134 @@ impl McpRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Stage a new host SDK entry before its initialize control response.
+    /// The caller starts its real connection only after publishing that reply.
+    pub async fn seed_sdk_control_pending(&self, config: McpServerConfig) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(&config.name);
+        let _guard = lifecycle.lock().await;
+        Self::validate_connectable_config(&config)?;
+        if let Some(refusal) = self.connection_refusal(&config) {
+            return Err(refusal.as_mcp_error());
+        }
+        self.remember_server_order(&config.name);
+        self.sdk_control_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(config.name.clone(), config.tools.clone());
+        self.connections.write().await.insert(
+            config.name.clone(),
+            McpConnectionState::Connecting {
+                config,
+                started_at: SystemTime::now(),
+            },
+        );
+        Ok(())
+    }
+
+    /// A removed/replaced control request must not resurrect its old SDK
+    /// config when its post-reply connection task finally gets scheduled.
+    pub async fn connect_seeded_sdk_control(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(&config.name);
+        let _guard = lifecycle.lock().await;
+        let current = self
+            .connections
+            .read()
+            .await
+            .get(&config.name)
+            .filter(|state| matches!(state, McpConnectionState::Connecting { .. }))
+            .map(|state| state.config().clone())
+            .filter(|current| {
+                let mut expected = config.clone();
+                expected.tools = current.tools.clone();
+                Self::same_config_snapshot(current, &expected)
+            });
+        let Some(config) = current else {
+            return Ok(());
+        };
+        let name = config.name.clone();
+        let result = self.connect_locked(config, None).await.map(|_| ());
+        self.apply_sdk_control_tools(&name).await;
+        result
+    }
+
+    /// SDK replacement changes only its declared tool list. Transport,
+    /// connector and verdict identity continue to belong to first registration.
+    pub async fn replace_sdk_control_tools(&self, incoming: &McpServerConfig) {
+        if let Some(state) = self.connections.write().await.get_mut(&incoming.name) {
+            if matches!(state.config().spec, McpTransportSpec::SdkControl { .. }) {
+                self.sdk_control_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(incoming.name.clone(), incoming.tools.clone());
+                state.config_mut().tools = incoming.tools.clone();
+            }
+        }
+    }
+
+    async fn apply_sdk_control_tools(&self, name: &str) {
+        // Acquire the async state lock first, consistently with replacement;
+        // never hold the synchronous sidecar lock across a suspension.
+        if let Some(state) = self.connections.write().await.get_mut(name) {
+            if matches!(state.config().spec, McpTransportSpec::SdkControl { .. }) {
+                if let Some(tools) = self
+                    .sdk_control_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(name)
+                {
+                    state.config_mut().tools = tools.clone();
+                }
+            }
+        }
+    }
+
+    /// Retire one still-current host-owned control config without logging its
+    /// MCP OAuth identity out or touching a concurrent settings replacement.
+    pub async fn retire_control_server(
+        &self,
+        expected: &McpServerConfig,
+    ) -> Result<bool, McpError> {
+        let removed = self
+            .remove_without_revoking_auth_if_config(&expected.name, expected)
+            .await?;
+        if removed {
+            self.sdk_control_tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&expected.name);
+            self.server_order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|name| name != &expected.name);
+        }
+        Ok(removed)
+    }
+
+    /// Native status preserves connection admission order; other public roster
+    /// APIs keep their established sorted display behavior.
+    pub async fn control_server_names(&self) -> Vec<String> {
+        let connections = self.connections.read().await;
+        let mut names = self
+            .server_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|name| connections.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut untracked = connections
+            .keys()
+            .filter(|name| !names.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        untracked.sort();
+        names.extend(untracked);
+        names
     }
 
     /// Register a host-trusted plugin identity against an already materialized
@@ -2211,7 +2483,7 @@ impl McpRegistry {
         let allowed = connections.get(server).is_some_and(|state| match state {
             McpConnectionState::Connected { config, tools, .. }
             | McpConnectionState::Cached { config, tools, .. } => {
-                let prefix = format!("mcp__{}__", normalize_name_for_mcp(&config.name));
+                let prefix = format!("mcp__{}__", config.normalized_name_for_mcp());
                 full_name.strip_prefix(&prefix).is_some_and(|raw_name| {
                     let mut matches = tools.iter().filter(|tool| tool.tool_name == raw_name);
                     let first = matches.next();
@@ -2262,13 +2534,115 @@ impl McpRegistry {
         on_progress: Option<crate::client::McpProgressCallback>,
         guard: Option<crate::tool_identity::McpToolDispatchGuard>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        self.call_tool_with_auth_retry_guarded_and_sdk_verdict(
+            server,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            guard,
+            None,
+        )
+        .await
+    }
+
+    /// Revalidate one host-owned server-classifier authority against the
+    /// actual config, exact upstream tool name and args at every RPC attempt.
+    pub async fn call_tool_with_auth_retry_guarded_and_sdk_verdict(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+        sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        let key_is_internal = guard.is_some();
+        self.call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
+            server,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            guard,
+            key_is_internal,
+            sdk_verdict,
+        )
+        .await
+    }
+
+    /// Registered tools carry a trusted key; public control names resolve
+    /// authored identity before any private registry handle.
+    pub async fn call_tool_with_auth_retry_guarded_with_key_hint(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+        key_is_internal: bool,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        self.call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
+            server,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            guard,
+            key_is_internal,
+            None,
+        )
+        .await
+    }
+
+    /// Registered/private tools retain their exact key while carrying an
+    /// invocation-owned authority independently of model-visible aliases.
+    pub async fn call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+        key_is_internal: bool,
+        sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        let key = if key_is_internal {
+            server.to_owned()
+        } else {
+            self.public_server_key(server)
+                .await
+                .unwrap_or_else(|| server.to_owned())
+        };
+        self.call_tool_with_auth_retry_guarded_by_key(
+            &key,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            guard,
+            sdk_verdict,
+        )
+        .await
+    }
+
+    async fn call_tool_with_auth_retry_guarded_by_key(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+        sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
         self.verify_tool_dispatch_guard(server, full_name, &guard)
             .await?;
         let mut lazy_dialed = false;
-        let client = if let Some(client) = self
-            .client_for_guarded_dispatch(server, guard.is_some())
-            .await
-        {
+        let client = if let Some(client) = self.client_for_guarded_dispatch(server, true).await {
             Some(client)
         } else {
             // ⚠️ Do NOT collapse this into `else if`. `clippy --fix` did exactly
@@ -2289,11 +2663,9 @@ impl McpRegistry {
                     .map_err(|error| {
                         crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
                     })?;
-                self.client_for_guarded_dispatch(server, guard.is_some())
-                    .await
+                self.client_for_guarded_dispatch(server, true).await
             } else {
-                self.client_for_guarded_dispatch(server, guard.is_some())
-                    .await
+                self.client_for_guarded_dispatch(server, true).await
             }
         };
         let Some(client) = client else {
@@ -2317,7 +2689,12 @@ impl McpRegistry {
             // The caller has already resolved the final segment back to the
             // server's raw tool name, so stripping the fixed prefix is safe and
             // avoids teaching an in-process provider about FQN normalization.
-            let prefix = format!("mcp__{}__", normalize_name_for_mcp(server));
+            let server_token = self
+                .get_config_by_key(server)
+                .await
+                .map(|config| config.normalized_name_for_mcp())
+                .unwrap_or_else(|| normalize_name_for_mcp(server));
+            let prefix = format!("mcp__{}__", server_token);
             let tool_name = full_name.strip_prefix(&prefix).ok_or_else(|| {
                 crate::client::McpClientError::Rpc(
                     format!("invalid MCP tool name {full_name:?} for server {server:?}").into(),
@@ -2335,8 +2712,15 @@ impl McpRegistry {
         };
         self.verify_tool_dispatch_guard(server, full_name, &guard)
             .await?;
+        let config = self.get_config_by_key(server).await;
         let first = client
-            .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
+            .call_tool_with_progress_and_sdk_verdict(
+                full_name,
+                input.clone(),
+                tool_use_id,
+                on_progress.clone(),
+                sdk_verdict.as_ref().zip(config.as_ref()),
+            )
             .await;
         let Err(error) = first else {
             return first;
@@ -2347,13 +2731,19 @@ impl McpRegistry {
                 Some(server.to_owned())
             } else {
                 connections
-                    .keys()
-                    .find(|name| normalize_name_for_mcp(name) == server)
-                    .cloned()
+                    .iter()
+                    .find(|(name, state)| {
+                        (if state.config().metadata.authored_name.is_some() {
+                            state.config().normalized_name_for_mcp()
+                        } else {
+                            normalize_name_for_mcp(name)
+                        }) == server
+                    })
+                    .map(|(name, _)| name.clone())
             }
         };
         let config = if let Some(raw_name) = raw_name.as_deref() {
-            self.get_config(raw_name).await
+            self.get_config_by_key(raw_name).await
         } else {
             None
         };
@@ -2368,7 +2758,8 @@ impl McpRegistry {
             let config = config
                 .as_ref()
                 .expect("session_expired implies config was resolved");
-            let identity = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+            let identity =
+                oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
             emit_session_expired(&telemetry::tengu::mcp::SessionExpiredPayload {
                 error_code: error
                     .session_expired_error_code()
@@ -2399,40 +2790,45 @@ impl McpRegistry {
             crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
         })?;
         let mut _refreshed_from_cache = false;
-        let refreshed = if let Some(client) = self
-            .client_for_guarded_dispatch(server, guard.is_some())
-            .await
-        {
-            Some(client)
-        } else if let Some(raw_key) = self.cached_raw_key(server).await {
-            _refreshed_from_cache = true;
-            self.ensure_dialed_from_cache(&raw_key)
-                .await
-                .map_err(|retry_error| {
-                    crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
-                })?;
-            self.client_for_guarded_dispatch(server, guard.is_some())
-                .await
-        } else {
-            self.client_for_guarded_dispatch(server, guard.is_some())
-                .await
-        }
-        .ok_or_else(|| {
-            crate::client::McpClientError::Rpc(
-                format!(
+        let refreshed =
+            if let Some(client) = self.client_for_guarded_dispatch(server, true).await {
+                Some(client)
+            } else if let Some(raw_key) = self.cached_raw_key(server).await {
+                _refreshed_from_cache = true;
+                self.ensure_dialed_from_cache(&raw_key)
+                    .await
+                    .map_err(|retry_error| {
+                        crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(
+                            &retry_error,
+                        ))
+                    })?;
+                self.client_for_guarded_dispatch(server, true).await
+            } else {
+                self.client_for_guarded_dispatch(server, true).await
+            }
+            .ok_or_else(|| {
+                crate::client::McpClientError::Rpc(
+                    format!(
                     "MCP server \"{server}\" did not publish a client after authentication refresh"
                 )
-                .into(),
-            )
-        })?;
+                    .into(),
+                )
+            })?;
         self.verify_tool_dispatch_guard(server, full_name, &guard)
             .await?;
+        let config = self.get_config_by_key(server).await;
         let second = refreshed
-            .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
+            .call_tool_with_progress_and_sdk_verdict(
+                full_name,
+                input,
+                tool_use_id,
+                on_progress,
+                sdk_verdict.as_ref().zip(config.as_ref()),
+            )
             .await;
         if let Err(error) = &second {
             if error.is_auth_response() {
-                if let Some(config) = self.get_config(&raw_name).await {
+                if let Some(config) = self.get_config_by_key(&raw_name).await {
                     emit_tool_call_auth_error_for_config(
                         &config,
                         tool_call_auth_error_code(error),
@@ -2480,6 +2876,7 @@ impl McpRegistry {
         self.freeze_configuration();
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
+        self.cancel_sdk_auth_if_reconfigured(&config);
         self.connect_locked(config, None).await
     }
 
@@ -2498,6 +2895,7 @@ impl McpRegistry {
         let key = config.name.clone();
         let lifecycle = self.lifecycle_lock(&key);
         let _guard = lifecycle.lock().await;
+        self.cancel_sdk_auth_if_reconfigured(&config);
         Self::validate_connectable_config(&config)?;
 
         let (current_config, retired_connection_id, retired_is_live) = {
@@ -3577,10 +3975,10 @@ impl McpRegistry {
                 if let Some(connection) = raw_conn.connection_for(connection_id) {
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let client_base = if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
-                        McpClient::new_sdk_hosted(config.name.clone(), cwd, connection.clone()).await
+                        McpClient::new_sdk_hosted(config.authored_name().as_str().to_owned(), cwd, connection.clone()).await
                     } else {
                         McpClient::with_roots(
-                            config.name.clone(),
+                            config.authored_name().as_str().to_owned(),
                             cwd,
                             self.additional_roots.clone(),
                             connection.clone(),
@@ -3588,6 +3986,7 @@ impl McpRegistry {
                         )
                         .await
                     };
+                    let client_base = client_base.with_authored_server_name(config.authored_name());
                     let client_base = match &self.json_schema_validator {
                         Some(validator) => client_base.with_json_schema_validator(Arc::clone(validator)),
                         None => client_base,
@@ -3695,7 +4094,7 @@ impl McpRegistry {
                 Vec::new()
             };
 
-            let normalized_server = normalize_name_for_mcp(&config.name);
+            let normalized_server = config.normalized_name_for_mcp();
             let server_display = config.name.clone();
             let mut degraded_counts: std::collections::HashMap<
                 telemetry::tengu::mcp::DegradedReason,
@@ -3724,6 +4123,9 @@ impl McpRegistry {
             }
             let mut dropped_tools = Vec::new();
             tools.retain_mut(|dto| {
+                let exact=dto.wire_tool_name_source();
+                dto.tool_name=crate::client::sanitize_catalog_name_units(&exact.string_units("").unwrap_or_default());
+                dto.wire_tool_name=None;
                 let decision = crate::tool_schema::decide_tool_schema_source(
                     gate_url.as_deref(),
                     &dto.input_schema,
@@ -4987,6 +5389,7 @@ impl McpRegistry {
         revoke_oauth: bool,
         remove_state: bool,
     ) -> Result<(), McpError> {
+        self.cancel_sdk_authentication(name);
         self.kick_pending_transport_cleanups().await;
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(name).await;
         // §11 Stage 2 — a `Cached` server has NO live transport connection to
@@ -5038,6 +5441,10 @@ impl McpRegistry {
                 let _publication = self.permission_policy_publish_lock.lock().await;
                 if !self.connections.read().await.contains_key(name) {
                     self.sdk_initialize_permission_rules
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(name);
+                    self.sdk_control_tools
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(name);
@@ -5111,6 +5518,10 @@ impl McpRegistry {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(name);
+                    self.sdk_control_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(name);
                 } else {
                     conns.insert(
                         name.to_string(),
@@ -5151,7 +5562,7 @@ impl McpRegistry {
         // resurrect a retired catalog. Plugin unload uses the same purge while
         // deliberately retaining its OAuth row (`revoke_oauth == false`).
         if let Some(store) = &self.discovery_cache_store {
-            if let Err(error) = store.purge_server_family(&config.name) {
+            if let Err(error) = store.purge_server_family(config.storage_name()) {
                 tracing::warn!(
                     server = %config.name,
                     %error,
@@ -5165,10 +5576,26 @@ impl McpRegistry {
         // a dead server continue to appear live.
         if revoke_oauth {
             if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
-                let key = oauth::server_key(&config.name, &config.spec);
+                let key = oauth::server_key(config.storage_name(), &config.spec);
+                let storage = self.oauth_storage_for_config(&config, &deps.storage);
+                let plugin_root = self
+                    .headers_helper_plugin_roots
+                    .read()
+                    .await
+                    .get(&config.name)
+                    .cloned();
+                let revoke_spec = crate::headers_helper::resolve_headers_helper_in(
+                    &config,
+                    &self.headers_helper_cwd,
+                    plugin_root.as_deref(),
+                )
+                .await
+                .map(|(spec, _)| spec)
+                .unwrap_or_else(|_| config.spec.clone());
+                let http = oauth::session::configured_revocation_http(&deps.http, &revoke_spec);
                 oauth::revoke_server_tokens(
-                    &deps.storage,
-                    &deps.http,
+                    &storage,
+                    &http,
                     &key,
                     spec_url(&config.spec),
                     oauth_cfg,
@@ -5343,6 +5770,7 @@ impl McpRegistry {
         // `{type:"failed"}` rather than rejecting, so the /mcp handler can emit
         // "Enabled …, but it isn't connected yet." instead of a hard error.
         let _ = self.connect_locked(config, Some(name.to_string())).await;
+        self.apply_sdk_control_tools(name).await;
         let resulting = {
             let conns = self.connections.read().await;
             conns.get(name).map_or(
@@ -5388,12 +5816,16 @@ impl McpRegistry {
     }
 
     /// Re-establish a stale Streamable HTTP session without revoking the
-    /// server's OAuth grant. A 400/404 session-id failure invalidates only the
-    /// transport session; treating it like a user-requested disconnect would
+    /// server's OAuth grant. SDK reconnect and a 400/404 session-id failure
+    /// invalidate only the transport connection. Revoking the grant here would
     /// log the user out and diverge from Claude Code's connection-cache reset.
-    async fn reconnect_preserving_auth(&self, name: &str) -> Result<(), McpError> {
+    pub async fn reconnect_preserving_auth(&self, name: &str) -> Result<(), McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
+        self.reconnect_preserving_auth_locked(name).await
+    }
+
+    async fn reconnect_preserving_auth_locked(&self, name: &str) -> Result<(), McpError> {
         let config = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
@@ -6000,7 +6432,7 @@ impl McpRegistry {
             if let McpConnectionState::Connected { config, tools, .. }
             | McpConnectionState::Cached { config, tools, .. } = state
             {
-                if normalize_name_for_mcp(&config.name) == normalized_server {
+                if config.normalized_name_for_mcp() == normalized_server {
                     return tools
                         .iter()
                         .find(|dto| dto.full_name == full_name)

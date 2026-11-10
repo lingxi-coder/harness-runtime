@@ -177,9 +177,10 @@ async fn native_322_http_header_overrides_initialize_and_explicit_cleanup() {
         ("X-Dupe".into(), "one".into()),
         ("x-dupe".into(), "two".into()),
     ]);
-    let connection = platform_common::connect_http(&url, None, &configured, None)
-        .await
-        .unwrap();
+    let (connection, session) =
+        platform_common::mcp_http::connect_http_with_session(&url, None, &configured, None)
+            .await
+            .unwrap();
     let _: Value = connection.call("initialize", json!({})).await.unwrap();
     let _: Value = connection.call("probe", json!({})).await.unwrap();
     let frames = state.frames.lock().await;
@@ -210,6 +211,7 @@ async fn native_322_http_header_overrides_initialize_and_explicit_cleanup() {
         "2025-11-25, configured-version"
     );
     drop(frames);
+    session.terminate_session().await.unwrap();
     connection.close();
     tokio::time::timeout(Duration::from_secs(2), state.deleted.notified())
         .await

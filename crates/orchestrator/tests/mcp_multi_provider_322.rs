@@ -42,6 +42,12 @@ enum Family {
     OpenAiChat,
     OpenAiResponses,
     Gemini,
+    BedrockClaude,
+    VertexClaude,
+    FoundryClaude,
+    AzureOpenAi,
+    GeminiInteractions,
+    VertexGemini,
 }
 
 impl Family {
@@ -59,13 +65,19 @@ impl Family {
                 "gemini_generate_content",
                 "https://generativelanguage.googleapis.com/v1beta",
             ),
+            Self::BedrockClaude => ("bedrock_claude", "bedrock_claude", "https://bedrock-runtime.us-east-1.amazonaws.com"),
+            Self::VertexClaude => ("vertex_claude", "vertex_claude", "https://us-central1-aiplatform.googleapis.com/v1/projects/test/locations/us-central1"),
+            Self::FoundryClaude => ("foundry_claude", "foundry_claude", "https://example.services.ai.azure.com/anthropic"),
+            Self::AzureOpenAi => ("azure_open_ai", "azure_open_ai", "https://example.openai.azure.com"),
+            Self::GeminiInteractions => ("gemini", "gemini_interactions", "https://generativelanguage.googleapis.com/v1beta"),
+            Self::VertexGemini => ("vertex_gemini", "vertex_gemini", "https://us-central1-aiplatform.googleapis.com/v1/projects/test/locations/us-central1"),
         }
     }
 
     fn responses(self) -> [Value; 2] {
         let args = json!({"text": ARGUMENT});
         match self {
-            Self::Anthropic => [
+            Self::Anthropic | Self::BedrockClaude | Self::VertexClaude | Self::FoundryClaude => [
                 json!({"id":"first","type":"message","role":"assistant","model":MODEL,
                     "content":[{"type":"tool_use","id":CALL_ID,"name":TOOL,"input":args}],
                     "stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":2}}),
@@ -73,7 +85,7 @@ impl Family {
                     "content":[{"type":"text","text":"done"}],"stop_reason":"end_turn",
                     "usage":{"input_tokens":5,"output_tokens":2}}),
             ],
-            Self::OpenAiChat => [
+            Self::OpenAiChat | Self::AzureOpenAi => [
                 json!({"id":"first","object":"chat.completion","model":MODEL,"choices":[{
                     "index":0,"message":{"role":"assistant","content":null,"tool_calls":[{
                         "id":CALL_ID,"type":"function","function":{"name":TOOL,"arguments":args.to_string()}}]},
@@ -91,12 +103,18 @@ impl Family {
                     "type":"message","role":"assistant","content":[{"type":"output_text","text":"done","annotations":[]}]}],
                     "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}),
             ],
-            Self::Gemini => [
+            Self::Gemini | Self::VertexGemini => [
                 json!({"candidates":[{"content":{"role":"model","parts":[{
                     "functionCall":{"id":CALL_ID,"name":TOOL,"args":args}}]},"finishReason":"STOP"}],
                     "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}),
                 json!({"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}],
                     "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}),
+            ],
+            Self::GeminiInteractions => [
+                json!({"id":"first","model":MODEL,"status":"requires_action","steps":[{
+                    "type":"function_call","id":CALL_ID,"name":TOOL,"arguments":args}]}),
+                json!({"id":"final","model":MODEL,"status":"completed","steps":[{
+                    "type":"model_output","content":[{"type":"text","text":"done"}]}]}),
             ],
         }
     }
@@ -150,19 +168,30 @@ impl Transport for ProviderFixture {
 
 fn service(family: Family, transport: Arc<ProviderFixture>) -> Arc<ApiService> {
     let (provider, protocol, endpoint) = family.route();
-    let mut config: ClientConfig = serde_json::from_value(json!({"providers":[{
+    let mut host_config = json!({"providers":[{
         "provider_id":provider,"profile_name":"fixture","base_url":endpoint,"protocol":protocol,
         "auth":"none","credential":{"type":"none"},"models":[{
             "display_model":MODEL,"request_model":MODEL,"billing_model":MODEL,
             "capabilities":{"streaming":true,"tools":true,"reasoning":false,
-                "vision":false,"documents":false,"structured_output":false}}]}]}))
-    .expect("provider fixture config");
+                "vision":false,"documents":false,"structured_output":false}}]}]});
+    if matches!(family, Family::AzureOpenAi) {
+        host_config["providers"][0]["azure"] = json!({"apiVersion":"2024-02-01"});
+    }
+    if matches!(family, Family::GeminiInteractions) {
+        host_config["providers"][0]["auth"] = json!("api_key");
+        host_config["providers"][0]["credential"] = json!({"type":"static","id":"fixture-key"});
+    }
+    let mut config: ClientConfig =
+        serde_json::from_value(host_config).expect("provider fixture config");
     // Unknown Messages models need an explicit application output budget.
     // Retain the admitted SDK setting through the host's wire-profile seam.
-    if matches!(family, Family::Anthropic) {
+    if matches!(
+        family,
+        Family::Anthropic | Family::BedrockClaude | Family::VertexClaude | Family::FoundryClaude
+    ) {
         config.providers[0].wire_profile = Some(
             serde_json::from_value(json!({
-                "provider_id":"anthropic","profile_name":"fixture","base_url":endpoint,
+                "provider_id":provider,"profile_name":"fixture","base_url":endpoint,
                 "protocol":protocol,"auth":"none","models":[{
                     "display_model":MODEL,"request_model":MODEL,"billing_model":MODEL,
                     "metadata":{"applicationOutputTokens":4096}}]
@@ -170,9 +199,16 @@ fn service(family: Family, transport: Arc<ProviderFixture>) -> Arc<ApiService> {
             .expect("explicit fixture output budget"),
         );
     }
+    let mut runtime = ModelRuntime::from_config(config).expect("provider route");
+    if matches!(family, Family::GeminiInteractions) {
+        runtime =
+            runtime.with_credential_provider(Arc::new(llm_runtime::StaticCredentialProvider::new(
+                llm_runtime::Credential::ApiKey("fake-mcp-provider-key".into()),
+            )));
+    }
     Arc::new(
         ApiService::new_with_routing(
-            Arc::new(ModelRuntime::from_config(config).expect("provider route")),
+            Arc::new(runtime),
             transport,
             SubscriberState::default(),
             UserAgentEnv::default(),
@@ -339,8 +375,11 @@ async fn roundtrip(family: Family) {
         requests[1]
     );
     match family {
-        Family::Anthropic => assert!(contains_string(&requests[1]["messages"], CALL_ID)),
-        Family::OpenAiChat => assert!(requests[1]["messages"]
+        Family::Anthropic
+        | Family::BedrockClaude
+        | Family::VertexClaude
+        | Family::FoundryClaude => assert!(contains_string(&requests[1]["messages"], CALL_ID)),
+        Family::OpenAiChat | Family::AzureOpenAi => assert!(requests[1]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -350,7 +389,7 @@ async fn roundtrip(family: Family) {
             .unwrap()
             .iter()
             .any(|item| item["type"] == "function_call_output" && item["call_id"] == CALL_ID)),
-        Family::Gemini => {
+        Family::Gemini | Family::VertexGemini => {
             assert!(requests[1]["contents"]
                 .as_array()
                 .unwrap()
@@ -362,6 +401,11 @@ async fn roundtrip(family: Family) {
                         == Some(TOOL))
                 ))
         }
+        Family::GeminiInteractions => assert!(requests[1]["input"]["steps"]
+            .as_array()
+            .expect("interaction steps")
+            .iter()
+            .any(|item| item["type"] == "function_result" && item["call_id"] == CALL_ID)),
     }
 }
 
@@ -384,3 +428,18 @@ async fn mcp_322_roundtrip_openai_responses() {
 async fn mcp_322_roundtrip_gemini() {
     roundtrip(Family::Gemini).await;
 }
+
+macro_rules! hosted_roundtrip {
+    ($test:ident, $family:ident) => {
+        #[tokio::test]
+        async fn $test() {
+            roundtrip(Family::$family).await;
+        }
+    };
+}
+hosted_roundtrip!(mcp_322_roundtrip_bedrock_claude, BedrockClaude);
+hosted_roundtrip!(mcp_322_roundtrip_vertex_claude, VertexClaude);
+hosted_roundtrip!(mcp_322_roundtrip_foundry_claude, FoundryClaude);
+hosted_roundtrip!(mcp_322_roundtrip_azure_openai, AzureOpenAi);
+hosted_roundtrip!(mcp_322_roundtrip_gemini_interactions, GeminiInteractions);
+hosted_roundtrip!(mcp_322_roundtrip_vertex_gemini, VertexGemini);

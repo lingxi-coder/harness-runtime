@@ -1,0 +1,624 @@
+{
+  "version": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "cases": [
+    {
+      "name": "arguments-number",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "arguments": 7
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received number\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "arguments-array",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "arguments": []
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received array\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "arguments-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "arguments": null
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received null\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "timeout-string",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": "5000"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "timeout-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": null
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "expires-number",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "expires_at": 7
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"expires_at\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "program-string",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "result_not_for_model": "true"
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"result_not_for_model\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": null
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\"\n    ],\n    \"message\": \"Invalid input: expected array, received null\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-object",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": {}
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\"\n    ],\n    \"message\": \"Invalid input: expected array, received object\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-entry-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": [
+          null
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0\n    ],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-missing-members",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": [
+          {}
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"lane_path\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-invalid-name",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": [
+          {
+            "name": "a b",
+            "lane_path": "/working/a"
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[A-Za-z0-9_-]{1,64}$/\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"name\"\n    ],\n    \"message\": \"Invalid string: must match pattern /^[A-Za-z0-9_-]{1,64}$/\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-lane-number",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": [
+          {
+            "name": "a",
+            "lane_path": 7
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"lane_path\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "output-if-match-empty",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "output_files": [
+          {
+            "name": "a",
+            "lane_path": "/working/a",
+            "if_match": ""
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_small\",\n    \"minimum\": 1,\n    \"inclusive\": true,\n    \"path\": [\n      \"output_files\",\n      0,\n      \"if_match\"\n    ],\n    \"message\": \"Too small: expected string to have >=1 characters\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "output-if-match-null",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "output_files": [
+          {
+            "name": "a",
+            "lane_path": "/working/a",
+            "if_match": null
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"output_files\",\n      0,\n      \"if_match\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "input-too-many",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": 5000,
+        "input_files": [
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          },
+          {
+            "name": "a",
+            "lane_path": "/working/a"
+          }
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"origin\": \"array\",\n    \"code\": \"too_big\",\n    \"maximum\": 64,\n    \"inclusive\": true,\n    \"path\": [\n      \"input_files\"\n    ],\n    \"message\": \"Too big: expected array to have <=64 items\"\n  }\n]"
+          }
+        }
+      }
+    },
+    {
+      "name": "schema-many-issues",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__ordinary__echo",
+        "timeout_ms": "x",
+        "arguments": 7,
+        "expires_at": 7,
+        "result_not_for_model": 7,
+        "input_files": [
+          {}
+        ],
+        "output_files": [
+          {}
+        ]
+      },
+      "response": {
+        "subtype": "success",
+        "response": {
+          "staging": {
+            "ok": false,
+            "error_code": "tool_error",
+            "detail": "invalid request: [\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"expires_at\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"result_not_for_model\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"input_files\",\n      0,\n      \"lane_path\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"output_files\",\n      0,\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"output_files\",\n      0,\n      \"lane_path\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]"
+          }
+        }
+      }
+    }
+  ],
+  "cancelError": "mcp_call cancelled by client: ordinary",
+  "supersededResponseSuppressed": true
+}

@@ -31,6 +31,15 @@ fn native_mcp_revocation_cause(
     }
     let (_, tool_name) = native_mcp_tool_identity(name)?;
     let normalized_tool_name = mcp::normalization::normalize_name_for_mcp(tool_name);
+    if config
+        .and_then(mcp::McpServerConfig::sdk_connector_deny_key)
+        .is_some_and(|key| {
+            let alias = format!("mcp__{key}__{normalized_tool_name}");
+            super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_context, &alias)
+        })
+    {
+        return Some("denied");
+    }
     if config.is_some_and(|config| {
         config.tool_permissions.get(&normalized_tool_name)
             == Some(&lingxi_core::host::McpPermissionCeiling::Deny)
@@ -4010,6 +4019,38 @@ mod native_deferred_revocation_tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn native_322_connector_denials_keep_the_dropped_tool_reason() {
+        let mut sdk = config(lingxi_core::host::McpTransportSpec::SdkControl {
+            control_channel_id: "host".into(),
+        });
+        mcp::apply_sdk_mcp_settings(
+            &mut sdk,
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"connectorId":"crm.proxy"}"#,
+            )
+            .unwrap(),
+        );
+        let denied = deny_context(&["mcp__crm_proxy__tool"]);
+        let allowed = deny_context(&[]);
+        let cause = |config: &mcp::McpServerConfig, context| {
+            native_mcp_revocation_cause(
+                "mcp__srv__tool",
+                context,
+                Some(lingxi_core::host::McpActionState::Connected),
+                Some(config),
+                None,
+            )
+        };
+        assert_eq!(cause(&sdk, &denied), Some("denied"));
+        assert_eq!(cause(&sdk, &allowed), None);
+        sdk.metadata.relayed = true;
+        assert_eq!(cause(&sdk, &denied), None);
+        sdk.metadata.relayed = false;
+        sdk.scope = mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project);
+        assert_eq!(cause(&sdk, &denied), None);
     }
 
     #[test]

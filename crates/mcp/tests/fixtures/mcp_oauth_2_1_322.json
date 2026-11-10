@@ -133,9 +133,39 @@
       "start": 305124928,
       "end": 305124992,
       "sha256": "96b68f1b39b5a5fbbf991f909371950d5220f3844d9a781328a1166b201e92c0"
+    },
+    {
+      "name": "bundled-zod-core",
+      "start": 260913877,
+      "end": 260925569,
+      "sha256": "b5a04d327a1f168024f6bb78466824994dcbadcdf984986ed08f4dcdb76ad9d9"
+    },
+    {
+      "name": "bundled-zod-constructors",
+      "start": 260925570,
+      "end": 261020487,
+      "sha256": "d010acd51e312f3506c5c811c020d0cf7b970a48524aaf2a8691861061e900ad"
+    },
+    {
+      "name": "bundled-zod-coercion",
+      "start": 261243918,
+      "end": 261244653,
+      "sha256": "31640b33c9ebf95eb4b1be5358b2f7a8f1dbf10a6e4e6dabc5cf4ad961b75fa3"
+    },
+    {
+      "name": "native-lazy-schema",
+      "start": 304765520,
+      "end": 304766103,
+      "sha256": "f9b75526657458946d99d880ea68f053ffa7d296d2cdab1bed6c852d9958f2d5"
+    },
+    {
+      "name": "native-oauth-schema-definitions",
+      "start": 304778776,
+      "end": 304783571,
+      "sha256": "259fb6071b5d0096aaf2c7987b9fe83d98675ea977196260c44adce35ac103ae"
     }
   ],
-  "scope": "MCP OAuth only. Unchanged native SDK/application helpers execute in isolated JS contexts with fake data and caller-supplied fetch. Schema parsers and error constructors are adapters; auth-failure presence is compared without host-specific btoa error prose. Schema validation and whole-CLI account login are not claimed. Branded client_name stays LingXi and provider-neutral DCR remains default; Anthropic-hosted CIMD is not adopted.",
+  "scope": "MCP OAuth only. Unchanged native SDK/application helpers execute in isolated JS contexts with fake data and caller-supplied fetch. OAuth schema definitions and all bundled Zod dependencies are unchanged native code. Error constructors are explicit adapters; auth-failure presence is compared without host-specific btoa error prose. Whole-CLI account login is not claimed. Branded client_name stays LingXi and provider-neutral DCR remains default; Anthropic-hosted CIMD is not adopted.",
   "pkceCases": [
     {
       "bytes": [

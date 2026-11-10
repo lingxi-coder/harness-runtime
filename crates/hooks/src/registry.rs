@@ -66,6 +66,9 @@ pub struct HookContext {
     /// Provenance from the actual MCP tool catalog entry. Never populate this
     /// by splitting a tool name: configured names can impersonate SDK prefixes.
     pub mcp_server: Option<crate::hook_payload::HookMcpServerProvenance>,
+    /// Restrictive connector names of the actual tool for this dispatch.
+    /// They affect hook matching only and never change hook payload identity.
+    pub mcp_deny_aliases: Vec<String>,
     /// Host-classified tool cancellation, supplied to PostToolUseFailure.
     /// A known non-interruption is serialized as false, independently of errors.
     pub tool_was_interrupted: Option<bool>,
@@ -76,6 +79,10 @@ pub struct HookContext {
     pub agent_id: Option<AgentId>,
     /// Engine cwd at the moment of dispatch.
     pub cwd: PathBuf,
+    /// Session scratchpad supplied by a host with that feature enabled.
+    /// Disabled hosts leave this absent; hook serialization never fabricates
+    /// or creates a directory as a side effect.
+    pub scratchpad_dir: Option<PathBuf>,
     /// UUID correlating a user prompt with every subsequent hook event until
     /// the next prompt, spliced into the shared hook-input base as `prompt_id`
     /// (oracle `createBaseHookInput`, 2.1.238 minified `c_` @ BIN off
@@ -188,6 +195,8 @@ pub struct HookRegistry {
     mod_host: Option<Arc<crate::mods::ModHost>>,
     mod_background_context: Option<Weak<dyn crate::mods::ModSessionContext>>,
     mod_model_policy: Option<Arc<dyn crate::mods::ModSettingsReader>>,
+    /// Loader-owned provenance, never parsed from hook response JSON.
+    personal_hook_origins: HashMap<HookId, bool>,
     sources: HashMap<HookSource, Vec<HookDefinition>>,
     plugin: HashMap<PluginId, Vec<HookDefinition>>,
     /// Session-scoped named hooks keyed by session id then logical hook name.
@@ -245,6 +254,7 @@ impl HookRegistry {
             mod_host: None,
             mod_background_context: None,
             mod_model_policy: None,
+            personal_hook_origins: HashMap::new(),
             sources: HashMap::new(),
             plugin: HashMap::new(),
             session_named: HashMap::new(),
@@ -312,6 +322,28 @@ impl HookRegistry {
         self.mod_host = None;
     }
 
+    /// Record the exact origin known by an agent, skill or plugin loader.
+    /// None deliberately preserves ambiguity, which restricted worktree path
+    /// selection holds instead of assuming a hook is organizationally owned.
+    pub fn set_personal_hook_origins(&mut self, hooks: &[HookDefinition], personal: Option<bool>) {
+        for hook in hooks {
+            if let Some(personal) = personal {
+                self.personal_hook_origins.insert(hook.id, personal);
+            } else {
+                self.personal_hook_origins.remove(&hook.id);
+            }
+        }
+    }
+
+    /// Exact registered origin where available, with source-tier fallback.
+    #[must_use]
+    pub fn personal_hook_origin(&self, id: HookId, source: HookSource) -> Option<bool> {
+        self.personal_hook_origins
+            .get(&id)
+            .copied()
+            .or_else(|| source.personal_config_origin())
+    }
+
     /// Register a hook under its declared source.
     pub fn register(&mut self, hook: HookDefinition) {
         warn_if_bare_mcp_matcher(&hook);
@@ -359,7 +391,11 @@ impl HookRegistry {
 
     /// Drop every hook owned by `plugin_id` (used when a plugin unloads).
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
-        self.plugin.remove(plugin_id);
+        if let Some(hooks) = self.plugin.remove(plugin_id) {
+            for hook in hooks {
+                self.personal_hook_origins.remove(&hook.id);
+            }
+        }
     }
 
     /// Insert or replace one named runtime hook scoped to `session_id`.
@@ -569,9 +605,9 @@ impl HookRegistry {
             // TS `getMatchingHooks`: only apply the tool-name matcher filter when
             // the event yields a `matchQuery`; otherwise every subscribed hook
             // passes. A hook with no matcher always passes.
-            let tool_name_ok = h
-                .matcher()
-                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
+            let tool_name_ok = h.matcher().is_none_or(|matcher| {
+                Self::matches_event_matcher(event, matcher, comma_mode, &ctx.mcp_deny_aliases)
+            });
             if !tool_name_ok {
                 return false;
             }
@@ -668,7 +704,7 @@ impl HookRegistry {
             }
             let tool_name_ok = h
                 .matcher()
-                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
+                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode, &[]));
             if !tool_name_ok {
                 return false;
             }
@@ -718,7 +754,7 @@ impl HookRegistry {
             }
             let tool_name_ok = h
                 .matcher()
-                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode));
+                .is_none_or(|matcher| Self::matches_event_matcher(event, matcher, comma_mode, &[]));
             if !tool_name_ok {
                 return false;
             }
@@ -753,6 +789,7 @@ impl HookRegistry {
         event: &HookEvent,
         matcher: &Utf16JsonProjection,
         comma_mode: bool,
+        mcp_deny_aliases: &[String],
     ) -> bool {
         match event {
             HookEvent::UserPromptExpansion { command_name, .. } => {
@@ -763,12 +800,28 @@ impl HookRegistry {
                 matches_pattern_source_with(to_model, matcher, comma_mode, None)
             }
             _ => match Self::match_query_for(event) {
-                Some(query) => matches_pattern_source_with(
-                    &Utf16JsonProjection::from(query),
-                    matcher,
-                    comma_mode,
-                    None,
-                ),
+                Some(query) => {
+                    matches_pattern_source_with(
+                        &Utf16JsonProjection::from(query),
+                        matcher,
+                        comma_mode,
+                        None,
+                    ) || (matches!(
+                        event,
+                        HookEvent::PreToolUse { .. }
+                            | HookEvent::PostToolUse { .. }
+                            | HookEvent::PostToolUseFailure { .. }
+                            | HookEvent::PermissionRequest { .. }
+                            | HookEvent::PermissionDenied { .. }
+                    ) && mcp_deny_aliases.iter().any(|alias| {
+                        matches_pattern_source_with(
+                            &Utf16JsonProjection::from(alias.as_str()),
+                            matcher,
+                            comma_mode,
+                            None,
+                        )
+                    }))
+                }
                 None => true,
             },
         }
@@ -1848,6 +1901,33 @@ mod match_event_matcher_tests {
         );
         // Dropped on a Bash tool event — the declared matcher does not match.
         assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
+    }
+
+    #[test]
+    fn native_322_connector_hook_aliases_are_invocation_local() {
+        let mut registry = HookRegistry::new();
+        for (name, matcher) in [
+            ("exact", "mcp__crm_proxy__ping"),
+            ("regexp", "^mcp__crm_proxy__.*$"),
+        ] {
+            registry.register(hook_with(name, HookEventType::PreToolUse, Some(matcher)));
+        }
+        let event = pre_tool_use("mcp__host-key__ping");
+        assert!(registry
+            .match_event(&event, &HookContext::default())
+            .is_empty());
+        let context = HookContext {
+            mcp_deny_aliases: vec!["mcp__crm_proxy__ping".into()],
+            ..Default::default()
+        };
+        assert_eq!(registry.match_event(&event, &context).len(), 2);
+        assert!(registry
+            .match_event(&event, &HookContext::default())
+            .is_empty());
+        assert_eq!(
+            HookRegistry::match_query_for(&event).as_deref(),
+            Some("mcp__host-key__ping")
+        );
     }
 
     #[test]

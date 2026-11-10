@@ -236,7 +236,7 @@ impl ProviderApiAdapter {
 }
 // ── Trait implementations ─────────────────────────────────────────────────────
 
-fn mcp_content_text_blocks(content: &Utf16JsonProjection) -> Option<Vec<ContentBlock>> {
+pub(crate) fn mcp_content_text_blocks(content: &Utf16JsonProjection) -> Option<Vec<ContentBlock>> {
     fn text_block(units: &[u16]) -> ContentBlock {
         ContentBlock::TextJsUtf16 {
             text: String::from_utf16_lossy(units),

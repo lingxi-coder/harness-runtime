@@ -274,9 +274,16 @@ pub(crate) fn build_client_with_proxy_auth_helper(
     // matching on by default. Disable it so only the Native-resolved route can
     // be used, including the direct/no-proxy case.
     // Bound TCP/TLS setup. This does not limit a live SSE body.
-    let mut builder = Client::builder()
-        .no_proxy()
-        .connect_timeout(std::time::Duration::from_secs(10));
+    let mut builder = http_client::configure_mcp_client_tls(
+        Client::builder()
+            .no_proxy()
+            // Native 2.1.322's redirect-loop receipt records 127 wire attempts
+            // per POST (mcp-gap-closure-322-20261109/work/remote/native-r3/
+            // redirect-loop/traffic.json). The pinned backend counts the
+            // initial URL in previous.len(), then rejects only above the limit.
+            .redirect(reqwest::redirect::Policy::limited(126))
+            .connect_timeout(std::time::Duration::from_secs(10)),
+    );
     if let Some(route) = route {
         let mut proxy = Proxy::all(&route.url)?;
         if route.proxy_auth_helper_allowed {

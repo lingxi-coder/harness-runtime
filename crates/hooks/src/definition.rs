@@ -481,6 +481,17 @@ pub enum HookSource {
 }
 
 impl HookSource {
+    /// Host-known personal configuration origin. Bundles without a precise
+    /// install/definition scope remain ambiguous until their loader supplies it.
+    #[must_use]
+    pub const fn personal_config_origin(self) -> Option<bool> {
+        match self {
+            Self::Settings(lingxi_core::types::SettingsScope::User) => Some(true),
+            Self::Settings(_) | Self::Session => Some(false),
+            Self::Plugin | Self::FrontMatter | Self::Skill => None,
+        }
+    }
+
     /// Claude-compatible source-family label used by deferred hook records.
     /// Plugin/skill identity is not part of the legacy definition wire shape,
     /// so those sources retain their trusted family rather than fabricating a

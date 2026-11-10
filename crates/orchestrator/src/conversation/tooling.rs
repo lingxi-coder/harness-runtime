@@ -1407,7 +1407,14 @@ impl ConversationOrchestrator {
                         .iter()
                         .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
                         .collect();
-                    tools.retain(|t| !def_denied.contains(t.name()));
+                    tools.retain(|t| {
+                        !def_denied.contains(t.name())
+                            && !t.mcp_deny_aliases().iter().any(|alias| {
+                                def_denied
+                                    .iter()
+                                    .any(|denied| permission::tool_wide_name_matches(denied, alias))
+                            })
+                    });
                 }
                 match &agent.tool_policy {
                     agent::AgentToolPolicy::All { .. } => {}
@@ -1419,7 +1426,14 @@ impl ConversationOrchestrator {
                     agent::AgentToolPolicy::Except(names) => {
                         let blocked: std::collections::HashSet<&str> =
                             names.iter().map(String::as_str).collect();
-                        tools.retain(|t| !blocked.contains(t.name()));
+                        tools.retain(|t| {
+                            !blocked.contains(t.name())
+                                && !t.mcp_deny_aliases().iter().any(|alias| {
+                                    blocked.iter().any(|denied| {
+                                        permission::tool_wide_name_matches(denied, alias)
+                                    })
+                                })
+                        });
                     }
                 }
                 *self

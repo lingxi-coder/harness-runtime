@@ -125,6 +125,10 @@ impl WindowsWorktreeManager {
 
 #[async_trait]
 impl WorktreeManager for WindowsWorktreeManager {
+    async fn validate_hook_worktree(&self, path: &std::path::Path) -> Result<(), WorktreeError> {
+        platform_common::worktree_root::validate_hook_worktree(path).await
+    }
+
     async fn create_worktree(
         &self,
         slug: &str,

@@ -18,6 +18,9 @@ use std::fmt;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const RELATED_TASK_META_KEY: &str = "io.modelcontextprotocol/related-task";
 
+#[path = "native_message_diagnostics.rs"]
+mod diagnostics;
+
 /// Which branch of the Native SDK's `JSONRPCMessageSchema` accepted the
 /// source projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +102,11 @@ pub fn decode_native_mcp_frame(bytes: &[u8]) -> Result<Message, CodecError> {
     // U+FFFD before JSON.parse. Keep that ingress behavior rather than
     // rejecting the frame at Rust's stricter UTF-8 boundary.
     let source = String::from_utf8_lossy(bytes);
-    let decoded = decode_native_mcp_message(&source)
-        .map_err(|error| CodecError::MessageDecode(error.to_string()))?;
+    let decoded = decode_native_mcp_message(&source).map_err(|error| {
+        CodecError::MessageDecode(
+            diagnostics::schema_error(&source).unwrap_or_else(|| error.to_string()),
+        )
+    })?;
     let normalized = normalize_native_projection(&decoded)
         .map_err(|error| CodecError::MessageDecode(error.to_string()))?;
     message_from_normalized(decoded.kind, &normalized)

@@ -2,9 +2,550 @@
 use super::*;
 use lingxi_core::host::{McpActionState, McpError, McpToolAnnotationsDto, McpTransportSpec};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::ToolUseId;
 use serde_json::{json, Value};
 
+#[path = "headless_mcp_auth.rs"]
+mod auth;
+#[path = "headless_mcp_control_tool.rs"]
+mod control_tool;
+#[path = "headless_mcp_servers.rs"]
+mod servers;
+
+fn control_rpc_error(error: &mcp::McpClientError) -> Utf16JsonProjection {
+    if let mcp::McpClientError::Rpc(message) = error {
+        let units = message.string_units("").unwrap_or_default();
+        let prefix = "router: remote error: code="
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let delimiter = ", message=".encode_utf16().collect::<Vec<_>>();
+        if units.starts_with(&prefix) {
+            if let Some(at) = units
+                .windows(delimiter.len())
+                .position(|part| part == delimiter)
+            {
+                return source_text_units(units[at + delimiter.len()..].to_vec());
+            }
+        }
+    }
+    error
+        .source_diagnostic()
+        .unwrap_or_else(|| error.to_string().into())
+}
+
+fn control_error_display(error: Utf16JsonProjection) -> String {
+    error.string_at("").unwrap_or_default().to_owned()
+}
+
+fn cap_control_error(error: Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = error
+        .string_units("")
+        .unwrap_or_default()
+        .into_iter()
+        .take(2000)
+        .collect::<Vec<_>>();
+    if units
+        .last()
+        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+    {
+        units.pop();
+    }
+    source_text_units(units)
+}
+
+struct ParsedControlMcpTool {
+    server_name: String,
+    server_name_units: Vec<u16>,
+    tool_name: Option<String>,
+    tool_name_source: Option<Utf16JsonProjection>,
+}
+
+fn parse_control_mcp_tool_name(value: &Utf16JsonProjection) -> Option<ParsedControlMcpTool> {
+    let units = value.string_units("")?;
+    if !units.starts_with(&[109, 99, 112, 95, 95]) {
+        return None;
+    }
+    let rest = &units[5..];
+    let delimiter = rest.windows(2).position(|pair| pair == [95, 95]);
+    let server = &rest[..delimiter.unwrap_or(rest.len())];
+    if server.is_empty() {
+        return None;
+    }
+    let tool = delimiter.map(|at| &rest[at + 2..]);
+    Some(ParsedControlMcpTool {
+        server_name: mcp::normalization::sanitize_control_name_units(server),
+        server_name_units: server.to_vec(),
+        tool_name: tool.map(String::from_utf16_lossy),
+        tool_name_source: tool.map(|units| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+                .expect("source tool name")
+        }),
+    })
+}
+
+struct McpControlTarget {
+    parsed: ParsedControlMcpTool,
+    server: String,
+    normalized_server: String,
+    client: Arc<mcp::McpClient>,
+}
+
 impl ConversationOrchestrator {
+    /// Resolve and validate a direct MCP target before any file staging.
+    pub async fn prepare_mcp_control_call(
+        &self,
+        full_name: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        self.prepare_mcp_control_call_source(&full_name.into(), cancel)
+            .await
+            .map_err(control_error_display)
+    }
+
+    /// Source-preserving direct-control target validation.
+    pub async fn prepare_mcp_control_call_source(
+        &self,
+        full_name: &Utf16JsonProjection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), Utf16JsonProjection> {
+        self.mcp_control_target(full_name, cancel).await.map(|_| ())
+    }
+
+    async fn mcp_control_target(
+        &self,
+        full_name: &Utf16JsonProjection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<McpControlTarget, Utf16JsonProjection> {
+        let parsed = parse_control_mcp_tool_name(full_name)
+            .filter(|name| name.tool_name.as_ref().is_some_and(|name| !name.is_empty()))
+            .ok_or_else(|| {
+                format!(
+                    "Not a fully-qualified MCP tool name: {}",
+                    mcp::normalization::sanitize_control_name_units(
+                        &full_name.string_units("").unwrap_or_default()
+                    )
+                )
+            })?;
+        let registry = self
+            .mcp_registry
+            .as_ref()
+            .ok_or_else(|| format!("MCP server not connected: {}", parsed.server_name))?;
+        let config = registry
+            .connections
+            .read()
+            .await
+            .values()
+            .map(|state| state.config())
+            .find(|config| {
+                config.name_matches_utf16(&parsed.server_name_units)
+                    || config
+                        .normalized_name_for_mcp()
+                        .encode_utf16()
+                        .eq(parsed.server_name_units.iter().copied())
+            })
+            .cloned()
+            .ok_or_else(|| format!("MCP server not connected: {}", parsed.server_name))?;
+        if config.disabled {
+            return Err(format!("MCP server not connected: {}", parsed.server_name).into());
+        }
+        let server = config.name.clone();
+        let normalized_server = config.normalized_name_for_mcp();
+        // Keep startup/lazy connection ownership in the registry. A direct
+        // control request does not create a second transport or model turn.
+        let client = tokio::select! {
+            _ = cancel.cancelled() => return Err(format!("mcp_call cancelled by client: {}", parsed.server_name).into()),
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), registry.ensure_connected_client_by_key(&server)) => result
+                .map_err(|_| format!("MCP server not connected: {}", parsed.server_name))?
+                .map_err(|_| format!("MCP server not connected: {}", parsed.server_name))?,
+        };
+        if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+            return Err(format!("mcp_call does not support SDK MCP servers. SDK servers are caller-provided — invoke {} directly.", parsed.server_name).into());
+        }
+        Ok(McpControlTarget {
+            parsed,
+            server,
+            normalized_server,
+            client,
+        })
+    }
+
+    /// Execute the host's direct MCP control call independently of the model
+    /// provider. SDK servers belong to the caller and must be invoked there.
+    /// An optional permission check uses the normal owned tool dispatcher.
+    pub async fn call_mcp_control_tool(
+        self: &Arc<Self>,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        check_permissions: bool,
+        program_result: bool,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<lingxi_core::host::McpToolResultDto, String> {
+        self.call_mcp_control_tool_source(
+            &full_name.into(),
+            input,
+            check_permissions,
+            program_result,
+            cancel,
+        )
+        .await
+        .map_err(control_error_display)
+    }
+
+    /// The caller's FQN and raw fallback name retain JavaScript string units.
+    pub async fn call_mcp_control_tool_source(
+        self: &Arc<Self>,
+        full_name: &Utf16JsonProjection,
+        input: Utf16JsonProjection,
+        check_permissions: bool,
+        program_result: bool,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<lingxi_core::host::McpToolResultDto, Utf16JsonProjection> {
+        self.call_mcp_control_tool_source_with_reason(
+            full_name,
+            input,
+            check_permissions,
+            program_result,
+            cancel,
+            Arc::new(std::sync::Mutex::new("AbortError: remote-cancel".into())),
+        )
+        .await
+        .map_err(cap_control_error)
+    }
+
+    /// Source cancellation ownership shared with a staged execution deadline.
+    pub async fn call_mcp_control_tool_source_with_reason(
+        self: &Arc<Self>,
+        full_name: &Utf16JsonProjection,
+        input: Utf16JsonProjection,
+        check_permissions: bool,
+        program_result: bool,
+        cancel: tokio_util::sync::CancellationToken,
+        cancellation_reason: Arc<std::sync::Mutex<Utf16JsonProjection>>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, Utf16JsonProjection> {
+        let McpControlTarget {
+            parsed,
+            server,
+            normalized_server,
+            client,
+        } = self.mcp_control_target(full_name, cancel.clone()).await?;
+        let registry = self.mcp_registry.as_ref().expect("resolved MCP registry");
+        let requested_tool = parsed.tool_name.expect("validated tool name");
+        let known = registry
+            .connections
+            .read()
+            .await
+            .get(&server)
+            .and_then(|state| match state {
+                mcp::McpConnectionState::Connected { tools, .. }
+                | mcp::McpConnectionState::Cached { tools, .. } => tools
+                    .iter()
+                    .find(|tool| full_name.string_at("") == Some(tool.full_name.as_str()))
+                    .cloned(),
+                _ => None,
+            });
+        let raw_tool = known
+            .as_ref()
+            .map_or(requested_tool, |tool| tool.tool_name.clone());
+        let wire_name = known.as_ref().map_or_else(
+            || {
+                parsed
+                    .tool_name_source
+                    .clone()
+                    .expect("validated tool name")
+            },
+            |tool| tool.wire_tool_name_source(),
+        );
+        let canonical = format!(
+            "mcp__{normalized_server}__{}",
+            mcp::normalization::normalize_name_for_mcp(&raw_tool)
+        );
+        let dispatch_name = canonical.clone();
+        if !check_permissions {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => Err(format!("mcp_call cancelled by client: {}", parsed.server_name).into()),
+                result = client.call_control_tool_with_wire_name(&dispatch_name,wire_name,input,cancellation_reason,None) => result.map_err(|error| control_rpc_error(&error)),
+            }?;
+            return self
+                .finish_mcp_control_result(result, &server, &raw_tool, program_result)
+                .await;
+        }
+        let base = self.find_tool_for_dispatch(&canonical).ok_or_else(|| {
+            "The tool did not run: this session has no such tool on that server.".to_owned()
+        })?;
+        let id = ToolUseId::from(format!("toolu_mcp_call_{}", uuid::Uuid::new_v4().simple()));
+        let result = Arc::new(tokio::sync::Mutex::new(None));
+        let failure = Arc::new(tokio::sync::Mutex::new(None));
+        let prepared = Arc::new(control_tool::ControlMcpTool {
+            base,
+            owner: self.clone(),
+            client,
+            dispatch_name,
+            server: server.clone(),
+            diagnostic_server: parsed.server_name,
+            raw_tool,
+            wire_name,
+            cancellation_reason,
+            program_result,
+            expected_id: id.clone(),
+            result: result.clone(),
+            failure: failure.clone(),
+        });
+        let meta_may_change = self
+            .control_mcp_has_result_observers(&canonical, &input, &id)
+            .await;
+        let tool_uses = vec![(id.clone(), canonical.clone(), input.clone(), None)];
+        let mut context =
+            crate::turn_loop::streaming_tool_context_base(self, self.snapshot_history().await)
+                .await;
+        context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+        let dispatched =
+            crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
+                self,
+                &tool_uses,
+                Some(cancel.clone()),
+                None,
+                None,
+                Some(prepared),
+                Some(context),
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| format!("The tool did not run: {error}"))?;
+        let (mut blocks, _, _, modifiers) =
+            crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(self, dispatched)
+                .await
+                .map_err(|error| format!("The tool did not run: {error}"))?;
+        crate::turn_loop::apply_model_context_modifiers(self, modifiers)
+            .await
+            .map_err(|error| format!("The tool did not run: {error}"))?;
+        let _ = self.take_queued_hook_attachments(&id).await;
+        if let Some(error) = failure.lock().await.take() {
+            return Err(error);
+        }
+        let captured = result.lock().await.take();
+        if captured.is_some() && cancel.is_cancelled() {
+            return Err("The tool ran, and its result was held back: the call was cancelled before its hooks finished.".into());
+        }
+        let block = blocks.pop().ok_or_else(|| {
+            "The tool did not run: no permission decision was reached.".to_owned()
+        })?;
+        let source = self
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .remove(&id.to_string());
+        let _ = self
+            .transcript
+            .tool_use_mcp_meta
+            .lock()
+            .await
+            .remove(&id.to_string());
+        let lingxi_core::types::ContentBlock::ToolResult {
+            content, is_error, ..
+        } = block
+        else {
+            return Err("The tool did not run: no permission decision was reached.".into());
+        };
+        let Some(mut result) = captured else {
+            return Err(format!(
+                "The tool did not run: {}",
+                content
+                    .string_at("")
+                    .unwrap_or("no permission decision was reached.")
+            )
+            .into());
+        };
+        if is_error == Some(true) {
+            return Err(format!(
+                "The tool ran, and its result was held back: {}",
+                content.string_at("").unwrap_or("the call was blocked.")
+            )
+            .into());
+        }
+        if let Some(source) = source {
+            result.content = source;
+        }
+        if meta_may_change
+            || self
+                .control_mcp_has_result_observers(&canonical, &input, &id)
+                .await
+        {
+            result.structured_content = None;
+            result.meta = None;
+        }
+        Ok(result)
+    }
+
+    async fn control_mcp_has_result_observers(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+        id: &ToolUseId,
+    ) -> bool {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return false;
+        };
+        let context = self.expansion_hook_context().await;
+        let event = HookEvent::PostToolUse {
+            tool_name: name.into(),
+            tool_input: input.clone(),
+            tool_output: Utf16JsonProjection::parse("null").unwrap(),
+            tool_use_id: id.clone(),
+            duration_ms: None,
+        };
+        let registry = registry.read().await;
+        registry
+            .match_event(&event, &context)
+            .into_iter()
+            .any(|hook| {
+                !matches!(
+                    hook.executor,
+                    hooks::definition::HookExecutor::Builtin { .. }
+                )
+            })
+            || registry
+                .mod_host()
+                .is_some_and(|host| host.has_event("tool.call"))
+    }
+
+    async fn finish_mcp_control_result(
+        &self,
+        mut result: lingxi_core::host::McpToolResultDto,
+        server: &str,
+        tool: &str,
+        program_result: bool,
+    ) -> Result<lingxi_core::host::McpToolResultDto, Utf16JsonProjection> {
+        if result.is_error {
+            return Err(tool_mcp::native_mcp_error_detail(
+                &result.content,
+                result.error.as_ref(),
+            ));
+        }
+        if program_result {
+            let full = Utf16JsonProjection::array(vec![
+                result.content.clone(),
+                result
+                    .structured_content
+                    .clone()
+                    .unwrap_or_else(|| Utf16JsonProjection::parse("null").unwrap()),
+                result
+                    .meta
+                    .clone()
+                    .unwrap_or_else(|| Utf16JsonProjection::parse("null").unwrap()),
+            ])
+            .unwrap();
+            if full
+                .to_json_string()
+                .map_err(|error| error.to_string())?
+                .encode_utf16()
+                .count()
+                > 10_485_760
+            {
+                return Err("The tool ran, but its result is over the 10485760-character limit of an mcp_call sent with result_not_for_model, so this mcp_call got no result. Check whether the call took effect before retrying mcp_call, and ask the tool for a smaller result if you retry.".into());
+            }
+            return Ok(result);
+        }
+        let session = self.session.lock().await;
+        let model = session.model.clone();
+        let profile = session.model_profile.clone();
+        let id = session.session_id.as_uuid().to_string();
+        drop(session);
+        let home = self
+            .config_home
+            .clone()
+            .unwrap_or_else(|| self.current_cwd());
+        let directory = crate::tool_result_persistence::tool_results_dir(
+            &home,
+            &self.current_cwd().to_string_lossy(),
+            &id,
+        );
+        let seed = || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            (now, uuid::Uuid::new_v4().simple().to_string())
+        };
+        let persist = tool_mcp::transform_result::PersistContext {
+            output_dir: &directory,
+            seed_factory: &seed,
+        };
+        let content = if let Some(structured) = &result.structured_content {
+            let json = structured
+                .to_json_string()
+                .map_err(|error| error.to_string())?;
+            let non_text = (0..result.content.array_len("").unwrap_or(0))
+                .filter_map(|index| result.content.subprojection(&format!("/{index}")).ok())
+                .filter(|block| block.string_at("/type") != Some("text"))
+                .collect::<Vec<_>>();
+            if non_text.is_empty() {
+                Utf16JsonProjection::from(json)
+            } else {
+                let transformed = tool_mcp::transform_result::transform_result_content_source(
+                    &Utf16JsonProjection::array(non_text).unwrap(),
+                    server,
+                    persist,
+                );
+                let mut content = (0..transformed.array_len("").unwrap_or(0))
+                    .filter_map(|index| transformed.subprojection(&format!("/{index}")).ok())
+                    .collect::<Vec<_>>();
+                content.push(source_object(vec![
+                    ("type".into(), "text".into()),
+                    ("text".into(), json.into()),
+                ])?);
+                Utf16JsonProjection::array(content).map_err(source_error)?
+            }
+        } else {
+            tool_mcp::transform_result::transform_result_content_source(
+                &result.content,
+                server,
+                persist,
+            )
+        };
+        let count = if tool_mcp::large_output::mcp_content_needs_exact_count_source(&content) {
+            if let Some(blocks) = crate::provider_adapter::mcp_content_text_blocks(&content) {
+                let message = ConversationMessage::User {
+                    id: MessageId::new(),
+                    content: blocks,
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
+                    api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
+                };
+                match self
+                    .api
+                    .count_tokens_exact(&model, profile.as_deref(), None, vec![message], Vec::new())
+                    .await
+                {
+                    Ok(Some(count)) => tool_mcp::ExactCountOutcome::Counted(count),
+                    Ok(None) => tool_mcp::ExactCountOutcome::Unsupported,
+                    Err(_) => tool_mcp::ExactCountOutcome::CountFailed,
+                }
+            } else {
+                tool_mcp::ExactCountOutcome::Unsupported
+            }
+        } else {
+            tool_mcp::ExactCountOutcome::Unsupported
+        };
+        result.content = tool_mcp::process_mcp_result_with_exact_count_source(
+            &content,
+            server,
+            tool,
+            &directory,
+            seed().0,
+            count,
+        );
+        Ok(result)
+    }
+
     /// Resolve `session.mcp.connect({server})` only against this plugin's
     /// already-registered dynamic MCP configuration. The storage identity is
     /// host-minted by the successful Mod load handshake; no worker field can
@@ -108,18 +649,31 @@ impl ConversationOrchestrator {
         }
     }
 
-    /// Register SDK-hosted servers after the initialize reply has been queued.
+    /// Allocate SDK-init private handles against the entire live catalog.
+    pub async fn finalize_sdk_mcp_initialize_names(&self, configs: &mut [mcp::McpServerConfig]) {
+        if let Some(registry) = &self.mcp_registry {
+            registry.finalize_authored_server_names(configs).await;
+        }
+        for config in configs {
+            if let McpTransportSpec::SdkControl { control_channel_id } = &mut config.spec {
+                *control_channel_id = config.name.clone();
+            }
+        }
+    }
+
+    /// Register SDK-hosted servers through independent connection owners.
     /// The registry publishes their ordinary catalog and connection events.
     pub async fn connect_sdk_mcp_servers(&self, configs: Vec<mcp::McpServerConfig>) {
         let Some(registry) = &self.mcp_registry else {
             return;
         };
         self.apply_sdk_mcp_initialize_policies(&configs).await;
-        for config in configs {
-            // A failure is recorded by the same registry as every platform
-            // connection. It cannot retroactively alter the initialize reply.
+        futures::future::join_all(configs.into_iter().map(|config| async move {
+            // Each server starts without waiting for an earlier host reply.
+            // The registry owns publication and records any failed handshake.
             let _ = registry.register_sdk_initialize(config).await;
-        }
+        }))
+        .await;
         mcp::tool_policy::synchronize_permission_policies(registry, self.perms.as_ref()).await;
     }
 
@@ -133,7 +687,7 @@ impl ConversationOrchestrator {
             )]);
         };
         let mut servers = Vec::new();
-        for name in registry.server_names().await {
+        for name in registry.control_server_names().await {
             let state = registry.connections.read().await.get(&name).cloned();
             let Some(state) = state else {
                 continue;
@@ -149,9 +703,30 @@ impl ConversationOrchestrator {
                 _ => "disconnected",
             };
             let mut server = source_object(vec![
-                ("name".into(), source_text(&name)),
+                (
+                    "name".into(),
+                    Utf16JsonProjection::root_string(
+                        state.config().authored_name().as_str().to_owned(),
+                        state.config().authored_name_units(),
+                    )
+                    .map_err(source_error)?,
+                ),
                 ("status".into(), source_text(status)),
             ])?;
+            server
+                .set_field(
+                    "transport",
+                    source_text(state.config().metadata.transport.as_deref().unwrap_or_else(
+                        || {
+                            if matches!(state.config().spec, McpTransportSpec::SdkControl { .. }) {
+                                "sdk"
+                            } else {
+                                state.config().spec.kind()
+                            }
+                        },
+                    )),
+                )
+                .map_err(source_error)?;
             if let Some(info) = registry
                 .server_metadata(&name)
                 .await
@@ -592,6 +1167,52 @@ fn projection_to_value(source: Utf16JsonProjection) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_322_direct_control_fqn_parser_preserves_authored_units() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../mcp/tests/fixtures/mcp_sdk_control_names_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let units = case["inputUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            let source =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap();
+            let parsed = parse_control_mcp_tool_name(&source);
+            if case["parsed"].is_null() {
+                assert!(parsed.is_none(), "{}", case["name"]);
+                continue;
+            }
+            let parsed = parsed.unwrap();
+            let expected = |key: &str| {
+                case["parsed"][key].as_array().map(|units| {
+                    units
+                        .iter()
+                        .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(
+                parsed.server_name_units,
+                expected("serverUnits").unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                parsed
+                    .tool_name_source
+                    .and_then(|source| source.string_units("").map(|units| units.to_vec())),
+                expected("toolUnits"),
+                "{}",
+                case["name"]
+            );
+        }
+    }
 
     #[test]
     fn mcp_connect_result_uses_native_success_and_refusal_fields() {

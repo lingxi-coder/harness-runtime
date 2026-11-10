@@ -47,7 +47,7 @@ pub async fn apply_sdk_initialize_policies(
                 };
                 let name = format!(
                     "mcp__{}__{}",
-                    lingxi_core::types::normalize_name_for_mcp(&config.name),
+                    config.normalized_name_for_mcp(),
                     lingxi_core::types::normalize_name_for_mcp(&tool.name)
                 );
                 rules
@@ -59,6 +59,50 @@ pub async fn apply_sdk_initialize_policies(
                     })
                     .or_insert(behavior);
             }
+        }
+    }
+    gate.replace_mcp_server_policy_rules(snapshot_permission_rules(registry, &connections));
+}
+
+/// Authoritative host replacement updates SDK tool policy rather than
+/// accumulating initialize declarations belonging to removed generations.
+pub async fn replace_sdk_control_policies(
+    registry: &crate::McpRegistry,
+    configs: &[McpServerConfig],
+    removed: &[String],
+    gate: &dyn PermissionGate,
+) {
+    let _publication = registry.permission_policy_publish_lock.lock().await;
+    let connections = registry.connections.read().await.clone();
+    {
+        let mut declared = registry
+            .sdk_initialize_permission_rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for name in removed {
+            declared.remove(name);
+        }
+        for config in configs
+            .iter()
+            .filter(|config| matches!(config.spec, McpTransportSpec::SdkControl { .. }))
+        {
+            let mut rules = std::collections::BTreeMap::new();
+            for tool in startup_permission_policies(config) {
+                let behavior = match tool.permission_policy {
+                    Some(McpToolPermissionPolicy::AlwaysDeny) => PermissionToolCheckBehavior::Deny,
+                    Some(McpToolPermissionPolicy::AlwaysAsk) => PermissionToolCheckBehavior::Ask,
+                    _ => continue,
+                };
+                rules.insert(
+                    format!(
+                        "mcp__{}__{}",
+                        config.normalized_name_for_mcp(),
+                        lingxi_core::types::normalize_name_for_mcp(&tool.name)
+                    ),
+                    behavior,
+                );
+            }
+            declared.insert(config.name.clone(), rules);
         }
     }
     gate.replace_mcp_server_policy_rules(snapshot_permission_rules(registry, &connections));

@@ -4173,8 +4173,39 @@ pub async fn build_with_credential_stack(
     // worktree + judges it on the SYNC path) and the LocalAgent handler (which
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
-    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> =
-        Arc::new(DesktopWorktreeManager::new(cwd.clone()));
+    let worktree_hook_context = {
+        let cwd_cell = teammate_session_cwd_cell.clone();
+        let original_cwd = cwd.clone();
+        let transcript_path = main_transcript_path.clone();
+        let permission_mode = cfg.permission_mode.wire_str().to_owned();
+        Arc::new(move || hooks::HookContext {
+            session_id: main_session_id,
+            cwd: cwd_cell
+                .get()
+                .map_or_else(|| original_cwd.clone(), |cell| cell.cwd()),
+            project_dir: Some(original_cwd.clone()),
+            transcript_path: transcript_path.clone(),
+            permission_mode: Some(permission_mode.clone()),
+            ..hooks::HookContext::default()
+        })
+    };
+    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> = Arc::new(
+        hooks::HookedWorktreeManager::new(
+            Arc::new(DesktopWorktreeManager::new(cwd.clone())),
+            hooks.clone(),
+            cwd.clone(),
+            worktree_hook_context,
+        )
+        .with_personal_hook_registry(hook_registry.clone())
+        .with_workspace_trust_provider(proxy_auth_workspace_trust_provider.clone())
+        .with_restrict_personal_config(lingxi_core::host::env::is_env_truthy(
+            lingxi_core::host::env::var_with_legacy(
+                "LINGXI_RESTRICT_PERSONAL_CONFIG",
+                "CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG",
+            )
+            .as_deref(),
+        )),
+    );
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
     // status sink solves); until then it reports "not fork-capable", which
@@ -7503,6 +7534,13 @@ pub async fn build_with_credential_stack(
                 && (!strict_plugin_only_hooks || agent_source_is_trusted(source))
             {
                 if agent::hooks_trust::agent_hooks_origin_trusted(&resolved_definition, &cfg.cwd) {
+                    plugin_hook_registry
+                        .write()
+                        .await
+                        .set_personal_hook_origins(
+                            &frontmatter_hooks,
+                            agent::hooks_trust::personal_config_origin(&resolved_definition),
+                        );
                     orch.replace_main_thread_agent_hooks(&frontmatter_hooks)
                         .await;
                 } else {

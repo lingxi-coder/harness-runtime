@@ -84,6 +84,7 @@ impl McpTransport for Transport {
         Ok(vec![McpToolDto {
             server_name: "ordinary".into(),
             tool_name: tool_name.to_owned(),
+            wire_tool_name: None,
             description: source_string("ordinary worker"),
             input_schema: value
                 .subprojection("/tools/0/inputSchema")

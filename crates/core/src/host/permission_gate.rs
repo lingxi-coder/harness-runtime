@@ -150,6 +150,10 @@ pub enum NonInteractivePermissionDecision {
 /// [`PermissionGate::check_with_worker`] with no worker.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionCheckContext {
+    /// Host-owned restrictive connector names for this exact invocation.
+    /// Kept per call so private/concurrent MCP catalogs cannot overwrite one
+    /// another, and never consulted by allow-rule matching.
+    pub mcp_deny_aliases: std::collections::BTreeMap<String, Vec<String>>,
     pub pause_observer: Option<PermissionPauseObserver>,
     /// Native MCP `mcpInfo.effectiveMaxPermission === "ask"` metadata for the
     /// current tool check. Only trusted host configuration may populate this;
@@ -343,6 +347,8 @@ pub enum AutoModePrompt {
 /// explicit rather than inferred from a tool name or payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionRequestSource {
+    /// A checked direct MCP call owned by the process's local host.
+    DirectMcp,
     /// A Bash call made by a workflow's spawned agent.
     WorkflowAgent,
     /// A remote execution source; never eligible for this local Auto row.
@@ -1232,6 +1238,12 @@ pub trait PermissionGate: Send + Sync {
     /// `PolicyPermissionGate` overrides it.
     fn set_command_input_denies(&self, specs: &[Utf16JsonProjection], union: bool) {
         let _ = (specs, union);
+    }
+
+    /// Replace the local host's ephemeral MCP-only deny list. Control intake
+    /// validates its bounded single-tool names; this never persists a grant.
+    fn replace_sdk_mcp_denied_tools(&self, tools: Vec<String>) {
+        let _ = tools;
     }
 
     /// Return the current `Read`-deny patterns rebased to `cwd` for search

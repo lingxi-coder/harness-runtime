@@ -85,6 +85,12 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Additional host-derived MCP names for deny/ask/hooks/disallowed checks.
+    /// These names must never satisfy an allow rule or select an RPC target.
+    fn mcp_deny_aliases(&self) -> &[String] {
+        &[]
+    }
+
     /// Tool-owned prompt for an inline or ToolSearch-loaded definition. MCP
     /// servers have separate budgets for these two descriptions.
     fn prompt_for_loading_mode(
@@ -408,6 +414,17 @@ pub trait Tool: Send + Sync {
     /// Whether this tool may require user interaction mid-call
     /// (e.g. an interactive prompt).
     fn requires_user_interaction(&self) -> bool {
+        false
+    }
+
+    /// Invocation wrappers may allow this call while withholding a persistent
+    /// permission grant. Ordinary model/tool execution retains its defaults.
+    fn suppresses_always_allow_rule(&self) -> bool {
+        false
+    }
+
+    /// A checked host MCP call cannot mutate standing permission policy.
+    fn suppresses_all_permission_updates(&self) -> bool {
         false
     }
 

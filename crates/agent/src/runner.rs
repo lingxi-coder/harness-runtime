@@ -2169,6 +2169,11 @@ async fn run_subagent_inner(
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             if crate::hooks_trust::agent_hooks_origin_trusted(&ctx.agent_definition, &cwd) {
+                he.set_personal_hook_origins(
+                    &ctx.agent_definition.frontmatter_hooks,
+                    crate::hooks_trust::personal_config_origin(&ctx.agent_definition),
+                )
+                .await;
                 he.register_agent_hooks(
                     ctx.agent_id,
                     &ctx.agent_definition.frontmatter_hooks,

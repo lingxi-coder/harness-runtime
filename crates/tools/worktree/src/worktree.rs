@@ -604,6 +604,7 @@ impl EnterWorktreeTool {
             // `true` for the `path` (enter-existing) branch, `false` for create —
             // gates `ExitWorktree`'s errorCode:4 "not the owner" remove guard.
             entered_existing,
+            hook_based: self.ctx.worktree.is_hook_based(handle),
             // The interactive `EnterWorktreeTool` never attaches tmux (206's
             // tool doesn't either); tmux sessions come only from the boot-time
             // `--worktree --tmux` launch path (`engine-desktop`'s
@@ -718,11 +719,13 @@ impl EnterWorktreeTool {
 
         match result {
             Ok(handle) => {
-                debug_assert_eq!(
-                    handle.branch_name,
-                    format!("{WORKTREE_BRANCH_PREFIX}{}", flatten_slug(&slug)),
-                    "M2-01 contract broken: branch_name must be worktree-<flatten(slug)>"
-                );
+                if !self.ctx.worktree.is_hook_based(&handle) {
+                    debug_assert_eq!(
+                        handle.branch_name,
+                        format!("{WORKTREE_BRANCH_PREFIX}{}", flatten_slug(&slug)),
+                        "M2-01 contract broken: branch_name must be worktree-<flatten(slug)>"
+                    );
+                }
                 // Capture the WorktreeSession substrate (Task 8) BEFORE the
                 // swap below — see `record_worktree_session`'s doc.
                 // `entered_existing: false` — this session CREATED the worktree,
@@ -794,6 +797,11 @@ impl EnterWorktreeTool {
             // through verbatim rather than reframing it as a git/io error.
             WorktreeError::SymlinkRejected(msg) => {
                 self.emit_failed(invocation_id, "symlink_rejected", duration_ms)
+                    .await;
+                Err(ToolError::Internal(msg))
+            }
+            WorktreeError::Hook(msg) => {
+                self.emit_failed(invocation_id, "hook_failed", duration_ms)
                     .await;
                 Err(ToolError::Internal(msg))
             }
@@ -1517,6 +1525,10 @@ impl Tool for ExitWorktreeTool {
             base_commit: session.base_commit.clone(),
         };
 
+        if session.hook_based {
+            self.ctx.worktree.restore_hook_worktree(&handle);
+        }
+
         // 2. `remove` without `discard_changes`: gate on the worktree's dirty
         // state (206 `RCd` change-summary + errorCode:2 / can't-verify
         // refusal). The query result is retained in `discard_summary` for the
@@ -1527,7 +1539,7 @@ impl Tool for ExitWorktreeTool {
         // failed/missing query rather than blocking when `discard_changes`
         // is set.
         let mut discard_summary: Option<WorktreeChangeSummary> = None;
-        if is_remove {
+        if is_remove && !session.hook_based {
             if discard_changes {
                 discard_summary = self
                     .ctx
@@ -2426,6 +2438,7 @@ mod tests {
             // tests exercise the removable path; the errorCode:4 test overrides
             // `entered_existing` to `true` inline.
             entered_existing: false,
+            hook_based: false,
             tmux_session_name: None,
         });
         // Mirror what EnterWorktree would have done: the session is now
@@ -2576,6 +2589,7 @@ mod tests {
             branch_name: "worktree-wt".into(),
             base_commit: None,
             entered_existing: true,
+            hook_based: false,
             tmux_session_name: None,
         });
         bctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
@@ -2615,6 +2629,7 @@ mod tests {
             branch_name: "worktree-wt".into(),
             base_commit: None,
             entered_existing: true,
+            hook_based: false,
             tmux_session_name: None,
         });
         bctx.session_cwd.swap(wt.clone(), vec![wt]);
@@ -3161,6 +3176,7 @@ mod tests {
             branch_name: branch_name.to_string(),
             base_commit: None,
             entered_existing: false,
+            hook_based: false,
             tmux_session_name: Some(tmux_session_name.to_string()),
         });
         bctx.session_cwd.swap(
@@ -3672,5 +3688,97 @@ mod tests {
             lexical_resolve(cwd, "a/b/../c"),
             PathBuf::from("/repo/sub/a/c")
         );
+    }
+    struct HookOwnedManager {
+        delegate: Arc<MockWorktreeManager>,
+        restored: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl WorktreeManager for HookOwnedManager {
+        async fn create_worktree(
+            &self,
+            slug: &str,
+            base: Option<&str>,
+            includes: &[PathBuf],
+        ) -> Result<WorktreeHandle, WorktreeError> {
+            let mut handle = self.delegate.create_worktree(slug, base, includes).await?;
+            handle.branch_name.clear();
+            Ok(handle)
+        }
+        async fn remove_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError> {
+            assert!(self.restored.load(std::sync::atomic::Ordering::SeqCst));
+            self.delegate.remove_worktree(handle).await
+        }
+        fn is_hook_based(&self, _: &WorktreeHandle) -> bool {
+            true
+        }
+        fn restore_hook_worktree(&self, _: &WorktreeHandle) {
+            self.restored
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn is_supported(&self) -> bool {
+            true
+        }
+        async fn list_worktrees(
+            &self,
+        ) -> Result<Vec<lingxi_core::host::worktree::WorktreeInfo>, WorktreeError> {
+            self.delegate.list_worktrees().await
+        }
+        async fn cleanup_stale(
+            &self,
+            age: std::time::Duration,
+        ) -> Result<Vec<PathBuf>, WorktreeError> {
+            self.delegate.cleanup_stale(age).await
+        }
+        async fn worktree_change_summary(
+            &self,
+            _: &WorktreeHandle,
+        ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
+            panic!("hook-owned folders do not use the git dirty-removal gate")
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_owned_enter_persists_and_resumed_exit_restores_hook_cleanup_owner() {
+        let mock = Arc::new(MockWorktreeManager::new());
+        let (mut bctx, _) = make_bctx(mock);
+        let manager = Arc::new(HookOwnedManager {
+            delegate: Arc::new(MockWorktreeManager::new()),
+            restored: std::sync::atomic::AtomicBool::new(false),
+        });
+        bctx.worktree = manager.clone();
+        let enter = EnterWorktreeTool::new(bctx.clone());
+        enter
+            .call(
+                source_json!({ "slug": "native-hook" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let persisted = bctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .to_persisted_json();
+        assert_eq!(persisted["hookBased"], true);
+        assert_eq!(persisted["worktreeBranch"], "");
+        *bctx.worktree_session.lock().unwrap() =
+            tool_api::WorktreeSession::from_persisted_json(&persisted);
+        let exit = ExitWorktreeTool::new_with_dir_exists(bctx.clone(), |_| true);
+        let result = exit
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(manager.restored.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(bctx.worktree_session.lock().unwrap().is_none());
     }
 }

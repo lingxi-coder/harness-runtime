@@ -13,10 +13,13 @@ use tokio::sync::broadcast;
 /// This is intentionally separate from [`sanitize_diagnostic`], which ports
 /// `xLt` for ToolSearch notes and does not redact credential-shaped text.
 pub(super) fn sanitize_native_mcp_text(input: &str) -> String {
+    sanitize_native_mcp_text_with_limit(input, 200)
+}
+
+pub(super) fn sanitize_native_mcp_text_with_limit(input: &str, output_limit: usize) -> String {
     use unicode_normalization::UnicodeNormalization;
 
     const INPUT_UTF16_LIMIT: usize = 4096;
-    const OUTPUT_LIMIT: usize = 200;
     const REDACTION_LOOKAHEAD: usize = 512;
     const SAFE_INPUT_FLOOR: usize = 2000;
 
@@ -25,7 +28,7 @@ pub(super) fn sanitize_native_mcp_text(input: &str) -> String {
     // ignorables, line separators, and non-ASCII space separators.
     let normalized: String = input.nfkc().collect();
     let normalized = native_nko(&normalized, INPUT_UTF16_LIMIT);
-    let safe_limit = SAFE_INPUT_FLOOR.max(OUTPUT_LIMIT + REDACTION_LOOKAHEAD);
+    let safe_limit = SAFE_INPUT_FLOOR.max(output_limit + REDACTION_LOOKAHEAD);
     let was_truncated = utf16_len(&normalized) > safe_limit;
     let safe_prefix = if was_truncated {
         truncate_utf16(&normalized, safe_limit)
@@ -35,8 +38,8 @@ pub(super) fn sanitize_native_mcp_text(input: &str) -> String {
 
     // l5t runs after delimiter/space normalization and before final clipping.
     let redacted = redact_native_mcp_secrets(&safe_prefix);
-    if was_truncated || utf16_len(&redacted) > OUTPUT_LIMIT {
-        format!("{}…", truncate_utf16(&redacted, OUTPUT_LIMIT))
+    if was_truncated || utf16_len(&redacted) > output_limit {
+        format!("{}…", truncate_utf16(&redacted, output_limit))
     } else {
         redacted
     }
@@ -737,7 +740,8 @@ pub(super) fn emit_session_expired(payload: &telemetry::tengu::mcp::SessionExpir
 }
 
 pub(super) fn emit_server_needs_auth_for_config(config: &McpServerConfig, cause: Option<&str>) {
-    let telemetry = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+    let telemetry =
+        oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
     let payload = telemetry::tengu::mcp::ServerNeedsAuthPayload {
         transport_type: telemetry.transport_type,
         mcp_server_key_hash: telemetry.mcp_server_key_hash,
@@ -756,7 +760,8 @@ pub(super) fn emit_tool_call_auth_error_for_config(
     error_code: &str,
     auth_error_kind: telemetry::tengu::mcp::ToolCallAuthErrorKind,
 ) {
-    let telemetry = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+    let telemetry =
+        oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
     let payload = telemetry::tengu::mcp::ToolCallAuthErrorPayload {
         error_code: telemetry::Verified::assert_safe(error_code.to_string()),
         transport_type: telemetry.transport_type,

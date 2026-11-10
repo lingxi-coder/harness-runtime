@@ -38,7 +38,7 @@ async fn sse_handler(
     *state.captured_get_headers.lock().await = headers;
     let evt = state.next_sse_event.lock().await.clone();
     // Delay emission slightly so the client has a chance to call() and
-    // register the pending oneshot for id=1 before the response arrives.
+    // register the pending oneshot for id=0 before the response arrives.
     // (Otherwise the client may receive the response *before* it has
     // registered the pending oneshot, and the response is dropped on the
     // floor — the router would then time out.)
@@ -79,7 +79,7 @@ async fn spawn_mock(initial_event: Value) -> (String, MockState) {
 async fn connect_sse_sends_get_with_accept_event_stream() {
     let pre_baked_reply = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": 0,
         "result": { "ok": true }
     });
     let (url, state) = spawn_mock(pre_baked_reply).await;
@@ -95,11 +95,14 @@ async fn connect_sse_sends_get_with_accept_event_stream() {
     .await
     .expect("connect_sse should succeed against mock");
 
-    // Send a request; the mock pre-baked the reply so it should match id=1.
-    let resp: Value = conn
-        .call("test.method", json!({"hello": "world"}))
-        .await
-        .expect("request should round-trip");
+    // MCP constructors opt into the captured native zero-based sequence.
+    let resp: Value = tokio::time::timeout(
+        Duration::from_secs(2),
+        conn.call("test.method", json!({"hello": "world"})),
+    )
+    .await
+    .expect("fixture response arrives without waiting for the RPC deadline")
+    .expect("request should round-trip");
     assert_eq!(resp, json!({"ok": true}));
 
     let get_headers = state.captured_get_headers.lock().await.clone();
@@ -123,14 +126,14 @@ async fn connect_sse_sends_get_with_accept_event_stream() {
     assert_eq!(post_bodies.len(), 1, "exactly one POST emitted");
     assert_eq!(post_bodies[0]["method"], "test.method");
     assert_eq!(post_bodies[0]["jsonrpc"], "2.0");
-    assert_eq!(post_bodies[0]["id"], 1);
+    assert_eq!(post_bodies[0]["id"], 0);
 }
 
 #[tokio::test]
 async fn connect_sse_passes_auth_header_when_token_supplied() {
     let pre_baked_reply = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": 0,
         "result": null
     });
     let (url, state) = spawn_mock(pre_baked_reply).await;

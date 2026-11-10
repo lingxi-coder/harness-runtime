@@ -764,6 +764,10 @@ pub struct McpClient {
     output_schema_session: Option<Arc<dyn JsonSchemaValidatorSession>>,
     output_schema_plans:
         RwLock<HashMap<String, Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>>,
+    /// Wire names from the current catalog, indexed by canonical and
+    /// display-based call identifiers. Never reconstructed from replacement text.
+    wire_tool_names: RwLock<HashMap<String, Utf16JsonProjection>>,
+    authored_server_name: Utf16JsonProjection,
     /// Transport kind of the underlying connection, feeding the `GLd` idle-timeout
     /// resolver ([`mcp_tool_idle_timeout_for`]): stdio → 30 min default, remote →
     /// 5 min, in-process (IDE/SDK) → no idle timeout. Defaults to
@@ -975,6 +979,7 @@ impl McpClient {
         Self {
             elicitation_pending,
             elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
+            authored_server_name: source_string(&server_name),
             server_name,
             cwd,
             connection,
@@ -989,6 +994,7 @@ impl McpClient {
             dropped_tools: RwLock::new(Vec::new()),
             output_schema_session: None,
             output_schema_plans: RwLock::new(HashMap::new()),
+            wire_tool_names: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
             negotiated: McpNegotiatedProtocol {
@@ -1098,6 +1104,12 @@ impl McpClient {
         {
             self.elicitation.legacy = lingxi_core::host::McpElicitationMode::Bare;
         }
+        self
+    }
+
+    /// Keep the source config identity for contextual transport diagnostics.
+    pub fn with_authored_server_name(mut self, name: crate::McpServerName) -> Self {
+        self.authored_server_name = source_string_units(name.utf16_units().to_vec());
         self
     }
 
@@ -1225,13 +1237,16 @@ impl McpClient {
     async fn call_modern_tool(
         &self,
         tool: &str,
+        tool_source: &Utf16JsonProjection,
         input: Utf16JsonProjection,
         timeout: std::time::Duration,
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
+        direct_control: Option<Arc<std::sync::Mutex<Utf16JsonProjection>>>,
+        auto_mode_verdict: bool,
     ) -> Result<McpToolResultDto, McpClientError> {
         let mut params = Utf16JsonProjection::object(vec![
-            ("name".to_owned(), source_string(tool)),
+            ("name".to_owned(), tool_source.clone()),
             ("arguments".to_owned(), input),
         ])
         .expect("fixed MCP tool-call members are unique");
@@ -1247,10 +1262,20 @@ impl McpClient {
                 )
                 .expect("MCP tool-call params are an object");
         }
+        if auto_mode_verdict {
+            let mut meta = params
+                .subprojection("/_meta")
+                .unwrap_or_else(|_| Utf16JsonProjection::object(Vec::new()).expect("empty object"));
+            meta.set_field("claudecode/autoModeVerdict", "allowed_by_server".into())
+                .expect("owned tool metadata is an object");
+            params
+                .set_field("_meta", meta)
+                .expect("tool params are an object");
+        }
         let params = self.request_params_projection("tools/call", params);
         let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
         let callback = on_progress
-            .filter(|_| tool_use_id.is_some())
+            .filter(|_| tool_use_id.is_some() || direct_control.is_some())
             .map(|callback| {
                 let activity = last_activity.clone();
                 Arc::new(move |event: McpResultProgress| {
@@ -1268,6 +1293,7 @@ impl McpClient {
             per_request_timeout: timeout,
             max_total_timeout: Some(timeout),
             on_progress: callback,
+            cancellation_reason: direct_control,
             ..Default::default()
         };
         let io = JsonrpcMcpResultIo {
@@ -1281,10 +1307,10 @@ impl McpClient {
         let value = if idle_timeout.is_zero() {
             request
                 .await
-                .map_err(|e| self.tool_result_error(e, tool, timeout))?
+                .map_err(|e| self.tool_result_error(e, tool, tool_source, timeout))?
         } else {
             tokio::select! {
-                value=request=>value.map_err(|e|self.tool_result_error(e,tool,timeout))?,
+                value=request=>value.map_err(|e|self.tool_result_error(e,tool,tool_source,timeout))?,
                 idle=idle_watchdog(idle_timeout,last_activity,self.server_name.clone(),tool.to_owned())=>return idle,
             }
         };
@@ -1307,6 +1333,7 @@ impl McpClient {
         &self,
         error: McpResultError,
         tool: &str,
+        tool_source: &Utf16JsonProjection,
         timeout: std::time::Duration,
     ) -> McpClientError {
         if matches!(&error,McpResultError::Sdk(error) if error.code == "REQUEST_TIMEOUT") {
@@ -1316,8 +1343,20 @@ impl McpClient {
                 secs: timeout.as_secs().max(1),
             }
         } else {
-            mcp_client_error_from_result(error)
+            match error {
+                McpResultError::Connection(error) => self.tool_rpc_error(&error, tool_source),
+                error => mcp_client_error_from_result(error),
+            }
         }
+    }
+
+    fn tool_rpc_error(
+        &self,
+        error: &jsonrpc::ConnectionError,
+        tool: &Utf16JsonProjection,
+    ) -> McpClientError {
+        native_transport_tool_error(error, &self.authored_server_name, tool)
+            .unwrap_or_else(|| mcp_client_error_from_rpc(error))
     }
 
     /// Send `notifications/roots/list_changed` to the server, telling it the
@@ -1744,9 +1783,11 @@ impl McpClient {
 
         let normalized_server = crate::normalization::normalize_name_for_mcp(&self.server_name);
         let mut dropped_tools = Vec::new();
+        let mut wire_tool_names = HashMap::new();
         let mut tools: Vec<McpToolDto> = raw_tools
             .into_iter()
-            .filter_map(|t| {
+            .filter_map(|mut t| {
+                t.name=sanitize_catalog_name_units(t.name.utf16_units()).into();
                 // §20a — normalize or drop the tool's `inputSchema` before it
                 // reaches the model (oracle `Wrt`/`qrt`, see
                 // `crate::tool_schema`). Must run before the DTO is built so
@@ -1757,7 +1798,7 @@ impl McpClient {
                 );
                 if let Some(reason) = decision.drop_reason {
                     dropped_tools.push(McpDroppedToolRecord {
-                        tool_name: t.name.clone(),
+                        tool_name: t.name.as_str().to_owned(),
                         reason: reason.clone(),
                     });
                     tracing::warn!(
@@ -1780,12 +1821,16 @@ impl McpClient {
                 // Normalize BOTH segments (server + tool) — 1:1 with TS
                 // `buildMcpToolName` = `getMcpPrefix(server) +
                 // normalizeNameForMCP(toolName)` (`mcpStringUtils.ts:51`).
-                let norm_tool = crate::normalization::normalize_name_for_mcp(&t.name);
+                let norm_tool = t.name.normalized();
                 let full_name = if skip_prefix {
-                    t.name.clone()
+                    t.name.as_str().to_owned()
                 } else {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
+                let raw_name=source_string_units(t.name.utf16_units().to_vec());
+                wire_tool_names.insert(full_name.clone(),raw_name.clone());
+                wire_tool_names.insert(format!("mcp__{normalized_server}__{}",t.name.as_str()),raw_name.clone());
+                let wire_tool_name=(!t.name.is_scalar()).then_some(raw_name);
                 let description = match decision.description_note {
                     // The note is generated UTF-8, while the remote description
                     // remains its original source projection.
@@ -1814,7 +1859,8 @@ impl McpClient {
                     annotations: t.annotations,
                     icons: t.icons,
                     meta: t.meta,
-                    tool_name: t.name,
+                    tool_name: t.name.as_str().to_owned(),
+                    wire_tool_name,
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
                     // to `None` for servers that omit `_meta`. A server-level
@@ -1832,6 +1878,7 @@ impl McpClient {
             })
             .collect();
         *self.dropped_tools.write().await = dropped_tools;
+        *self.wire_tool_names.write().await = wire_tool_names;
         self.apply_config_permission_ceilings(&mut tools);
         if let Some(session) = &self.output_schema_session {
             let mut plans = HashMap::new();
@@ -1996,6 +2043,30 @@ impl McpClient {
     /// (`{ progress, total, message }`) to the callback — mirroring how the SDK
     /// registers an `onprogress` handler keyed by the request's progressToken
     /// (`client.ts:3102-3114`).
+    pub(crate) async fn call_tool_with_progress_and_sdk_verdict(
+        &self,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+        verdict: Option<(
+            &crate::sdk_verdict::SdkAutoModeVerdictAuthority,
+            &crate::McpServerConfig,
+        )>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta_and_wire_name(
+            full_name,
+            input,
+            mcp_tool_timeout_for(self.config_timeout_ms),
+            tool_use_id,
+            on_progress,
+            None,
+            None,
+            verdict,
+        )
+        .await
+    }
+
     pub async fn call_tool_with_meta(
         &self,
         full_name: &str,
@@ -2003,6 +2074,89 @@ impl McpClient {
         timeout: std::time::Duration,
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta_and_wire_name(
+            full_name,
+            input,
+            timeout,
+            tool_use_id,
+            on_progress,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Invoke an SDK control call whose upstream name came from an exact
+    /// source string, including an unlisted name with isolated UTF-16 units.
+    pub async fn call_tool_with_wire_name(
+        &self,
+        full_name: &str,
+        wire_name: Utf16JsonProjection,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        if wire_name.string_units("").is_none() {
+            return Err(McpClientError::Deserialize(
+                "MCP tool name must be a string".into(),
+            ));
+        }
+        self.call_tool_with_meta_and_wire_name(
+            full_name,
+            input,
+            mcp_tool_timeout_for(self.config_timeout_ms),
+            tool_use_id,
+            on_progress,
+            Some(wire_name),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Native direct `mcp_call` always owns a numeric progress token and
+    /// cancellation notice, independently of model tool-use metadata.
+    pub async fn call_control_tool_with_wire_name(
+        &self,
+        full_name: &str,
+        wire_name: Utf16JsonProjection,
+        input: Utf16JsonProjection,
+        cancellation_reason: Arc<std::sync::Mutex<Utf16JsonProjection>>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        if wire_name.string_units("").is_none() {
+            return Err(McpClientError::Deserialize(
+                "MCP tool name must be a string".into(),
+            ));
+        }
+        self.call_tool_with_meta_and_wire_name(
+            full_name,
+            input,
+            mcp_tool_timeout_for(self.config_timeout_ms),
+            None,
+            on_progress,
+            Some(wire_name),
+            Some(cancellation_reason),
+            None,
+        )
+        .await
+    }
+
+    async fn call_tool_with_meta_and_wire_name(
+        &self,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        timeout: std::time::Duration,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+        wire_name: Option<Utf16JsonProjection>,
+        direct_control: Option<Arc<std::sync::Mutex<Utf16JsonProjection>>>,
+        sdk_verdict: Option<(
+            &crate::sdk_verdict::SdkAutoModeVerdictAuthority,
+            &crate::McpServerConfig,
+        )>,
     ) -> Result<McpToolResultDto, McpClientError> {
         // Strip the mcp__<server>__ prefix to recover the wire `name`. The
         // server token is normalized to match how `list_tools` built the FQN
@@ -2019,10 +2173,37 @@ impl McpClient {
                 )
             })?
             .to_string();
+        let tool_source = match wire_name {
+            Some(name) => name,
+            None => self
+                .wire_tool_names
+                .read()
+                .await
+                .get(full_name)
+                .cloned()
+                .unwrap_or_else(|| source_string(&tool_name)),
+        };
 
+        let auto_mode_verdict = direct_control.is_none()
+            && sdk_verdict.is_some_and(|(authority, config)| {
+                authority.authorizes(config, &tool_source, &input, tool_use_id)
+            });
         if self.modern() {
             let result = self
-                .call_modern_tool(&tool_name, input, timeout, tool_use_id, on_progress)
+                .call_modern_tool(
+                    &tool_name,
+                    &tool_source,
+                    input,
+                    timeout,
+                    tool_use_id,
+                    on_progress.or_else(|| {
+                        direct_control
+                            .as_ref()
+                            .map(|_| Arc::new(|_: McpProgressEvent| {}) as McpProgressCallback)
+                    }),
+                    direct_control.clone(),
+                    auto_mode_verdict,
+                )
                 .await?;
             return self.validate_tool_result_output(full_name, result).await;
         }
@@ -2035,6 +2216,12 @@ impl McpClient {
             meta.insert(
                 "claudecode/toolUseId".to_string(),
                 serde_json::Value::String(id.to_string()),
+            );
+        }
+        if auto_mode_verdict {
+            meta.insert(
+                "claudecode/autoModeVerdict".into(),
+                "allowed_by_server".into(),
             );
         }
 
@@ -2054,24 +2241,30 @@ impl McpClient {
 
         let progress_active = on_progress.is_some() && tool_use_id.is_some();
         let mut params = Utf16JsonProjection::object(vec![
-            ("name".to_owned(), source_string(&tool_name)),
+            ("name".to_owned(), tool_source.clone()),
             ("arguments".to_owned(), input),
         ])
         .expect("fixed MCP tool-call members are unique");
         let mut forwarder = None;
-        let call = if progress_active && self.transport_kind == McpTransportKind::SdkControl {
+        let call = if direct_control.is_some()
+            || progress_active && self.transport_kind == McpTransportKind::SdkControl
+        {
             // Reserve the router's id once. Install the progress receiver and
             // stamp that exact numeric id before the request can be written.
-            let callback = on_progress.expect("active progress callback");
             self.connection
                 .start_call_raw_json_with_params("tools/call", |id| {
                     let token = serde_json::to_value(id).expect("router request ids serialize");
                     meta.insert("progressToken".into(), token.clone());
-                    forwarder = Some(self.spawn_progress_forwarder(
-                        Utf16JsonProjection::from_serde_value(&token).expect("request id is JSON"),
-                        last_activity.clone(),
-                        callback,
-                    ));
+                    if let Some(callback) = on_progress {
+                        forwarder = Some(
+                            self.spawn_progress_forwarder(
+                                Utf16JsonProjection::from_serde_value(&token)
+                                    .expect("request id is JSON"),
+                                last_activity.clone(),
+                                callback,
+                            ),
+                        );
+                    }
                     params
                         .set_field(
                             "_meta",
@@ -2117,7 +2310,17 @@ impl McpClient {
                 .start_call_raw_json_unbounded("tools/call", params_json)
         };
         let _forwarder_guard = ProgressForwarderGuard(forwarder);
-        let call = call.map_err(|error| mcp_client_error_from_rpc(&error))?;
+        let call = call.map_err(|error| self.tool_rpc_error(&error, &tool_source))?;
+        let mut cancellation = (self.transport_kind == McpTransportKind::SdkControl
+            || direct_control.is_some())
+        .then(|| {
+            lingxi_core::host::mcp_result::RpcCallCancellationGuard::new(
+                self.connection.clone(),
+                call.id().clone(),
+                None,
+            )
+            .with_shared_reason(direct_control)
+        });
         let secs = timeout.as_secs().max(1);
         let fut = async {
             call.wait_raw_json()
@@ -2139,7 +2342,7 @@ impl McpClient {
                         tool: tool_name,
                         secs,
                     }),
-                    Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
+                    Ok(Err(e)) => Err(self.tool_rpc_error(&e, &tool_source)),
                     Ok(Ok(value)) => decode_tool_call_response(&value),
                 },
                 idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
@@ -2151,10 +2354,20 @@ impl McpClient {
                     tool: tool_name,
                     secs,
                 }),
-                Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
+                Ok(Err(e)) => Err(self.tool_rpc_error(&e, &tool_source)),
                 Ok(Ok(value)) => decode_tool_call_response(&value),
             }
         };
+
+        if let Some(guard) = &mut cancellation {
+            if matches!(&outcome, Err(McpClientError::Timeout { .. })) {
+                guard.set_reason(source_string(
+                    "McpError: MCP error -32001: Request timed out",
+                ));
+            } else {
+                guard.disarm();
+            }
+        }
 
         drop(_forwarder_guard);
         let result = outcome?;
@@ -3043,7 +3256,7 @@ struct ToolsListResponse {
 /// needs fresh interaction on every call).
 #[derive(Debug, Deserialize)]
 struct RawTool {
-    name: String,
+    name: crate::McpServerName,
     #[serde(default, deserialize_with = "deserialize_optional_source_string")]
     description: Option<JsonProjection>,
     #[serde(
@@ -3194,6 +3407,31 @@ fn sanitize_source_prompt_string(value: JsonProjection) -> JsonProjection {
     source_string(&partially_sanitize_unicode(&text))
 }
 
+/// Native catalog names pass through `fg` before compatibility normalization:
+/// isolated UTF-16 units are removed, rather than replaced or sent upstream.
+pub(crate) fn sanitize_catalog_name_units(units: &[u16]) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    static REMOVED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[\p{Cf}\p{Co}\p{Cn}]")
+            .expect("native Unicode category expression is valid")
+    });
+    let mut value = char::decode_utf16(units.iter().copied())
+        .filter_map(Result::ok)
+        .collect::<String>();
+    if value.is_ascii() {
+        return value;
+    }
+    for _ in 0..10 {
+        let normalized = value.nfkc().collect::<String>();
+        let clean = REMOVED.replace_all(&normalized, "").into_owned();
+        if clean == value {
+            return clean;
+        }
+        value = clean;
+    }
+    value
+}
+
 fn tool_meta_search_hint(meta: &Option<Utf16JsonProjection>) -> Option<JsonProjection> {
     let source = meta
         .as_ref()?
@@ -3302,6 +3540,10 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     /// failure; the inner string is the stringified `JsonRpcError`.
     #[error("JSON-RPC error: {}", .0.string_at("").unwrap_or_default())]
     Rpc(JsonProjection),
+    /// Native model-facing transport failure, already rendered with its
+    /// server/tool context. The exact UTF-16 text is retained for tool hooks.
+    #[error("{}", .0.string_at("").unwrap_or_default())]
+    ProtocolMessage(JsonProjection),
     /// HTTP status metadata retained by streamable HTTP/SSE transports.
     #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
     HttpResponse {
@@ -3349,6 +3591,7 @@ impl McpClientError {
     pub fn source_diagnostic(&self) -> Option<JsonProjection> {
         match self {
             Self::Rpc(message) => Some(prepend_source_text("JSON-RPC error: ", message)),
+            Self::ProtocolMessage(message) => Some(message.clone()),
             Self::HttpResponse { message, .. } => Some(message.clone()),
             Self::Result(error) => Some(result_error_diagnostic(error)),
             Self::Deserialize(message) => {
@@ -3449,6 +3692,62 @@ fn mcp_client_error_from_result(error: McpResultError) -> McpClientError {
     }
 }
 
+fn native_transport_tool_error(
+    error: &jsonrpc::ConnectionError,
+    server: &JsonProjection,
+    tool: &JsonProjection,
+) -> Option<McpClientError> {
+    let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error else {
+        return None;
+    };
+    if remote.code != -32_001 {
+        return None;
+    }
+    let data = Utf16JsonProjection::parse(remote.data.as_ref()?.as_json()).ok()?;
+    let detail = data.subprojection("/diagnostic").ok()?;
+    detail.string_units("")?;
+    if data.string_at("/nativeFailure") == Some("transport") {
+        return Some(
+            match data.number_at("/httpStatus").filter(|status| {
+                status.fract() == 0.0 && *status >= 0.0 && *status <= u16::MAX as f64
+            }) {
+                Some(status) => McpClientError::HttpResponse {
+                    status: status as u16,
+                    www_authenticate: data
+                        .string_at("/wwwAuthenticate")
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
+                    message: detail,
+                },
+                None => McpClientError::ProtocolMessage(detail),
+            },
+        );
+    }
+    let message = match data.string_at("/nativeFailure")? {
+        "body-overflow" => concat_source_strings(&[
+            &source_string("The response from MCP server \""), server,
+            &source_string("\" for tool \""), tool,
+            &source_string("\" was larger than 16MB, so it was not read. The tool may have run: check whether it did before running it again, and when you run it again, ask for less data."),
+        ]),
+        "syntax" => concat_source_strings(&[
+            &source_string("The connection to MCP server \""), server,
+            &source_string("\" was closed because a message from the server was too large or could not be parsed, so the result of tool \""), tool,
+            &source_string("\" was not read. The tool may have run: check whether it did before running it again."),
+        ]),
+        "schema" => concat_source_strings(&[
+            &source_string("MCP server \""), server,
+            &source_string("\" returned a malformed result that failed schema validation: "),
+            &detail,
+        ]),
+        _ => return None,
+    };
+    Some(McpClientError::ProtocolMessage(message))
+}
+
+#[cfg(test)]
+#[path = "client/native_transport_error_tests.rs"]
+mod native_transport_error_tests;
+
 fn mcp_client_error_from_rpc(error: &jsonrpc::ConnectionError) -> McpClientError {
     if let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error {
         if let Some(data) = remote
@@ -3547,6 +3846,103 @@ mod constructor_tests {
             Mode::Lines,
         ));
         (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    include!("client/exact_name_tests.rs");
+
+    #[tokio::test]
+    async fn native_322_sdk_and_direct_control_cancellation_uses_owned_id_and_reason() {
+        for direct in [false, true] {
+            let (connection, _peer_tx, mut peer_rx) = paired_connection();
+            let client = if direct {
+                McpClient::new("fixture", PathBuf::from("/tmp"), connection).await
+            } else {
+                McpClient::new_sdk_hosted("fixture", PathBuf::from("/tmp"), connection).await
+            };
+            let reason = Arc::new(std::sync::Mutex::new(source_string(
+                "AbortError: remote-cancel",
+            )));
+            let task_reason = reason.clone();
+            let task = tokio::spawn(async move {
+                if direct {
+                    client
+                        .call_control_tool_with_wire_name(
+                            "mcp__fixture__hold",
+                            source_string("hold"),
+                            source_object(),
+                            task_reason,
+                            None,
+                        )
+                        .await
+                } else {
+                    client
+                        .call_tool("mcp__fixture__hold", source_object())
+                        .await
+                }
+            });
+            let request: serde_json::Value =
+                serde_json::from_slice(&peer_rx.recv().await.unwrap()).unwrap();
+            if direct {
+                assert_eq!(
+                    request["params"]["_meta"],
+                    serde_json::json!({"progressToken":request["id"]})
+                );
+                *reason.lock().unwrap() = source_string("Error: staged mcp_call timed out");
+            }
+            task.abort();
+            let _ = task.await;
+            let cancellation: serde_json::Value = serde_json::from_slice(
+                &tokio::time::timeout(std::time::Duration::from_secs(1), peer_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                cancellation,
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":request["id"],"reason":if direct {"Error: staged mcp_call timed out"} else {"AbortError: remote-cancel"}}})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_control_success_disarms_cancellation_and_keeps_numeric_progress() {
+        let (connection, peer_tx, mut peer_rx) = paired_connection();
+        let client = McpClient::new("fixture", PathBuf::from("/tmp"), connection).await;
+        let task = tokio::spawn(async move {
+            client
+                .call_control_tool_with_wire_name(
+                    "mcp__fixture__hold",
+                    source_string("hold"),
+                    source_object(),
+                    Arc::new(std::sync::Mutex::new(source_string(
+                        "AbortError: remote-cancel",
+                    ))),
+                    None,
+                )
+                .await
+        });
+        let raw = peer_rx.recv().await.unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            request["params"],
+            serde_json::json!({"name":"hold","arguments":{},"_meta":{"progressToken":request["id"]}})
+        );
+        assert!(std::str::from_utf8(&raw)
+            .unwrap()
+            .contains(r#""params":{"name":"hold","arguments":{},"_meta":{"progressToken":"#));
+        peer_tx
+            .send(Bytes::from(format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[]}})
+            )))
+            .await
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), peer_rx.recv()).await,
+            Err(_) | Ok(None)
+        ));
     }
 
     #[test]
@@ -4501,6 +4897,7 @@ mod constructor_tests {
         let mut tools = vec![McpToolDto {
             server_name: "srv".into(),
             tool_name: "write".into(),
+            wire_tool_name: None,
             description: "write".into(),
             input_schema: Utf16JsonProjection::parse("{}").unwrap(),
             output_schema: None,
@@ -4514,6 +4911,8 @@ mod constructor_tests {
         }];
         tools.push(McpToolDto {
             tool_name: "local".into(),
+
+            wire_tool_name: None,
             full_name: "mcp__srv__local".into(),
             ..tools[0].clone()
         });

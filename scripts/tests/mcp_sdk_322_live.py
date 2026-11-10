@@ -15,6 +15,7 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary',type=Path,default=Path.home()/'.local/share/claude/versions/2.1.322')
 parser.add_argument('--output',type=Path,required=True)
 parser.add_argument('--write-fixture',action='store_true',help='Regenerate the checked-in deterministic SDK control fixture')
+parser.add_argument('--interrupt',action='store_true',help='Interrupt the held SDK call and record its cancellation frames instead of the success fixture')
 options=parser.parse_args()
 BINARY=options.binary.resolve()
 SHA='a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450'
@@ -155,6 +156,23 @@ try:
     seen_ping=True;report['concurrentPingResponse']=m;reply(f,{'jsonrpc':'2.0','id':0,'result':{}})
  report['peerAckBeforeCallSettles']=seen_ack;report['peerReplyBeforeCallSettles']=seen_ping
  assert seen_ack and seen_ping,report
+ if options.interrupt:
+  request('interrupt',{'subtype':'interrupt'})
+  deadline=time.monotonic()+15
+  while time.monotonic()<deadline:
+   try:f=next_frame(2)
+   except RuntimeError:continue
+   report['frames'].append(f)
+   if f.get('request',{}).get('subtype')=='mcp_message':
+    m=f['request']['message'];reply(f,{'jsonrpc':'2.0','id':0,'result':{}})
+    if m.get('method')=='notifications/cancelled':report['cancellation']=m
+   if report.get('cancellation') and f.get('type')=='result':break
+  assert report.get('cancellation'),report
+  assert report['cancellation']['params']['requestId']==call['request']['message']['id'],report
+  report['passed']=True
+  (ROOT/'report.json').write_text(json.dumps(report,ensure_ascii=True,indent=2)+'\n')
+  print(json.dumps({'passed':True,'cancellation':report['cancellation'],'receipt':str(ROOT/'report.json')},ensure_ascii=True))
+  raise SystemExit(0)
  reply(call,{'jsonrpc':'2.0','id':call['request']['message']['id'],'result':{'content':[{'type':'text','text':'SDK_PROBE_RESULT'}]}})
  for rid,server,message in [('missing','missing',{'jsonrpc':'2.0','id':1,'method':'ping'}),('invalid','fixture',{'invalid':True})]:
   request(rid,{'subtype':'mcp_message','server_name':server,'message':message})

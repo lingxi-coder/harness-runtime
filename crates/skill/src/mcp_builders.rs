@@ -39,6 +39,7 @@ mod tests {
         let tool = McpToolDto {
             server_name: "server".into(),
             tool_name: "tool".into(),
+            wire_tool_name: None,
             description: description.clone(),
             input_schema: Utf16JsonProjection::parse("{}").expect("object schema"),
             output_schema: None,

@@ -31,6 +31,15 @@ tracing = { workspace = true }
 url = "2"
 http = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(windows)'.dependencies]
+schannel = "0.1"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+openssl-probe = "0.2"
+
 [dev-dependencies]
 lingxi-llm-client = { workspace = true, features = ["realtime-websocket"] }
 axum = "0.7"

@@ -314,6 +314,9 @@ pub struct LayerFoldInputs {
 /// keeps the ordinary no-layer path byte-identical to its pre-layer behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FoldedPermissionContext {
+    /// Invocation-owned connector names. These are host facts, never a
+    /// permission layer authored by model input or a child agent.
+    pub mcp_deny_aliases: std::collections::BTreeMap<String, Vec<String>>,
     /// Fork-time `alwaysDenyRules.command` source strings. This is carried
     /// separately from ordinary permission layers so the policy gate can merge
     /// it BEFORE the live `command` source and the per-call layer additions,
@@ -340,7 +343,8 @@ impl FoldedPermissionContext {
     /// policy-clone path when it does not.)
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.frozen_command_denies.is_empty()
+        self.mcp_deny_aliases.is_empty()
+            && self.frozen_command_denies.is_empty()
             && self.mode.is_none()
             && self.allow_command_rules.is_empty()
             && self.deny_command_rules.is_empty()

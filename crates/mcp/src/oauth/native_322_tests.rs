@@ -66,17 +66,19 @@ impl CaptureHttp {
 #[async_trait::async_trait]
 impl HttpTransport for CaptureHttp {
     async fn request(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let registration = request.url.ends_with("/register");
+        let body = if request.url.ends_with("/register") {
+            let mut registration: Value = serde_json::from_str(request.body.as_deref().unwrap())
+                .expect("DCR request carries valid client metadata");
+            registration["client_id"] = json!("fake-dcr-client");
+            registration.to_string()
+        } else {
+            r#"{"access_token":"fake-access","token_type":"Bearer","expires_in":60}"#.to_owned()
+        };
         self.requests.lock().unwrap().push(request);
         Ok(HttpResponse {
             status: self.statuses.lock().unwrap().pop_front().unwrap_or(200),
             headers: Vec::new(),
-            body: if registration {
-                r#"{"client_id":"fake-dcr-client"}"#
-            } else {
-                r#"{"access_token":"fake-access","token_type":"Bearer","expires_in":60}"#
-            }
-            .into(),
+            body,
             body_bytes: Vec::new(),
         })
     }
@@ -484,13 +486,14 @@ async fn native_322_loopback_discovery_dcr_pkce_callback_refresh_and_revocation(
             let (status, response_body, extra) = match url.path() {
                 "/.well-known/oauth-protected-resource/mcp" | "/.well-known/oauth-authorization-server/issuer" | "/.well-known/openid-configuration/issuer" => (404, String::new(), String::new()),
                 "/.well-known/oauth-protected-resource" => (200, json!({"resource":format!("{server_base}/mcp"),"authorization_servers":[format!("{server_base}/issuer")],"scopes_supported":["read","write"]}).to_string(), String::new()),
-                "/issuer/.well-known/openid-configuration" => (200, json!({"issuer":format!("{server_base}/issuer"),"authorization_endpoint":format!("{server_base}/authorize"),"token_endpoint":format!("{server_base}/token"),"registration_endpoint":format!("{server_base}/register"),"revocation_endpoint":format!("{server_base}/revoke"),"response_types_supported":["code"],"scopes_supported":["read","write","offline_access"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"authorization_response_iss_parameter_supported":true}).to_string(), String::new()),
+                "/issuer/.well-known/openid-configuration" => (200, json!({"issuer":format!("{server_base}/issuer"),"jwks_uri":format!("{server_base}/keys"),"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"authorization_endpoint":format!("{server_base}/authorize"),"token_endpoint":format!("{server_base}/token"),"registration_endpoint":format!("{server_base}/register"),"revocation_endpoint":format!("{server_base}/revoke"),"response_types_supported":["code"],"scopes_supported":["read","write","offline_access"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"authorization_response_iss_parameter_supported":true}).to_string(), String::new()),
                 "/register" => {
-                    let request: Value = serde_json::from_str(&body).unwrap();
+                    let mut request: Value = serde_json::from_str(&body).unwrap();
                     assert_eq!(request["scope"], "read write offline_access");
                     assert_eq!(request["application_type"], "native");
                     assert_eq!(request["client_name"], "LingXi (fake-server)");
-                    (201, r#"{"client_id":"fake-dcr-client"}"#.into(), String::new())
+                    request["client_id"] = json!("fake-dcr-client");
+                    (201, request.to_string(), String::new())
                 }
                 "/authorize" => {
                     let query = url.query_pairs().into_owned().collect::<BTreeMap<_, _>>();
@@ -727,14 +730,11 @@ async fn native_322_loopback_auth_flow_uses_default_endpoints_after_all_discover
             let (status, response, extra) = match url.path() {
                 path if path.contains(".well-known/") => (404, String::new(), String::new()),
                 "/register" => {
-                    let body: Value = serde_json::from_str(&body).unwrap();
+                    let mut body: Value = serde_json::from_str(&body).unwrap();
                     assert_eq!(body["client_name"], "LingXi (fake-fallback)");
                     assert!(body.get("scope").is_none());
-                    (
-                        201,
-                        r#"{"client_id":"fake-default-client"}"#.into(),
-                        String::new(),
-                    )
+                    body["client_id"] = json!("fake-default-client");
+                    (201, body.to_string(), String::new())
                 }
                 "/authorize" => {
                     let query = url.query_pairs().into_owned().collect::<BTreeMap<_, _>>();

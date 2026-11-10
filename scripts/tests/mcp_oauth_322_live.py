@@ -81,7 +81,7 @@ const cancelServer=http.createServer(cancelled.handler);await new Promise(resolv
 await new Promise(resolve=>cancelServer.close(resolve));assert.deepEqual(cancelled.observations,[]);
 callbackServer.closeAllConnections();deniedServer.closeAllConnections();
 await Promise.all([new Promise(resolve=>callbackServer.close(resolve)),new Promise(resolve=>deniedServer.close(resolve))]);
-const result={scenario:missing?'missing-metadata':'metadata',mode:'Controlled execution of immutable native JavaScript helpers over real loopback HTTP. Schema/error constructors are adapters; callback page renderer is a JSON adapter. Not whole-CLI OAuth acceptance.',serverUrl,redirectUri,scope,authorizationUrl,verifier:material.codeVerifier,state,callback:callback.observations,wrongStateStatus:wrongState.status,tokenAccess:tokens.access_token,refreshedAccess:refreshed.access_token,httpError:rejected,denied:denied.observations,cancelledBeforeExchange:true};
+const result={scenario:missing?'missing-metadata':'metadata',mode:'Controlled execution of immutable native JavaScript helpers over real loopback HTTP. OAuth schemas and Zod dependencies are native; error constructors remain adapters; callback page renderer is a JSON adapter. Not whole-CLI OAuth acceptance.',serverUrl,redirectUri,scope,authorizationUrl,verifier:material.codeVerifier,state,callback:callback.observations,wrongStateStatus:wrongState.status,tokenAccess:tokens.access_token,refreshedAccess:refreshed.access_token,httpError:rejected,denied:denied.observations,cancelledBeforeExchange:true};
 writeFileSync(output,JSON.stringify(result,null,2)+'\n');
 console.log('native-source-loopback OAuth flow passed');
 """
@@ -143,6 +143,7 @@ def main() -> None:
             if parsed.path == "/issuer/.well-known/openid-configuration":
                 return self.reply(200, {"issuer": base + "/issuer", "authorization_endpoint": base + "/authorize",
                                        "token_endpoint": base + "/token", "registration_endpoint": base + "/register",
+                                       "jwks_uri": base + "/keys", "subject_types_supported": ["public"], "id_token_signing_alg_values_supported": ["RS256"],
                                        "revocation_endpoint": base + "/revoke", "response_types_supported": ["code"],
                                        "scopes_supported": ["read", "write", "offline_access"], "code_challenge_methods_supported": ["S256"],
                                        "token_endpoint_auth_methods_supported": ["none"], "authorization_response_iss_parameter_supported": True})
@@ -171,7 +172,7 @@ def main() -> None:
                 else:
                     assert "scope" not in body
                 assert body["application_type"] == "native"
-                return self.reply(201, {"client_id": "fake-dcr-client"})
+                return self.reply(201, {**body, "client_id": "fake-dcr-client"})
             form = parse_qs(raw.decode(), keep_blank_values=True)
             if parsed.path == "/token":
                 if parsed.query:
@@ -203,7 +204,9 @@ def main() -> None:
     oracle = (Path(__file__).resolve().parent / "mcp_oauth_322_oracle.mjs").as_uri()
     result = None
     try:
-        env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(root), "TMPDIR": str(root), "NO_PROXY": "127.0.0.1,localhost"}
+        env = {"PATH": os.environ.get("PATH", os.defpath), "TMPDIR": str(root), "CLAUDE_CONFIG_DIR": str(root), "NO_PROXY": "127.0.0.1,localhost"}
+        if "HOME" in os.environ:
+            env["HOME"] = os.environ["HOME"]
         process = subprocess.run(["node", "--input-type=module", "-e", NATIVE_DRIVER, oracle, base, str(binary), str(root / "native-result.json"), args.scenario], cwd=root, env=env, capture_output=True, text=True, timeout=30)
         (root / "native.stdout").write_text(process.stdout)
         (root / "native.stderr").write_text(process.stderr)
@@ -229,7 +232,7 @@ def main() -> None:
                               "pkce_checked_by_peer": True, "token_refresh": True, "revocation_401_bearer_retry": True,
                               "provider_error": True, "owner_listener_cancel": True,
                               "source_oracle": str(Path(__file__).resolve().parent / "mcp_oauth_322_oracle.mjs"),
-                              "limits": ["Schema/error constructors are explicit adapters", "Callback page renderer is a JSON adapter", "Owner cancellation is local server shutdown, not a whole-CLI signal test"]})
+                              "limits": ["OAuth schemas/Zod dependencies are native; error constructors are explicit adapters", "Callback page renderer is a JSON adapter", "Owner cancellation is local server shutdown, not a whole-CLI signal test"]})
         print(json.dumps({"status": "passed", "requests": len(traffic), "output": str(root)}))
     finally:
         peer.shutdown()

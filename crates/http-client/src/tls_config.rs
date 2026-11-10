@@ -178,6 +178,30 @@ impl TlsSettings {
         builder
     }
 
+    /// MCP reads the platform store directly, without OpenSSL path overrides.
+    /// Keep its cache separate from the ordinary/provider environment cache.
+    pub fn apply_to_mcp_builder(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+    ) -> reqwest::ClientBuilder {
+        if let Some(identity) = self.client_identity() {
+            builder = builder.identity(identity);
+        }
+        let sources = parse_cert_store(self.cert_store.as_deref());
+        builder = builder.tls_built_in_root_certs(sources.contains(&CertSource::Bundled));
+        if sources.contains(&CertSource::System) {
+            for der in crate::mcp_system_roots::certificates() {
+                if let Ok(cert) = reqwest::Certificate::from_der(der) {
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+        }
+        if let Some(path) = &self.extra_ca_certs {
+            builder = add_extra_ca_certs(builder, path);
+        }
+        builder
+    }
+
     /// Build the rustls configuration used by `tokio-tungstenite`.
     ///
     /// This deliberately assembles the same bundled/system/extra roots and

@@ -754,6 +754,15 @@ impl HookExecutorImpl {
         self.registry.read().await.has_hooks_for(event_type)
     }
 
+    /// Synchronous capability gate for hosts whose trait cannot await. A busy
+    /// registry is conservatively treated as potentially configured; execution
+    /// performs the authoritative subscription check under the async lock.
+    pub fn may_have_hooks_for(&self, event_type: &crate::events::HookEventType) -> bool {
+        self.registry
+            .try_read()
+            .map_or(true, |registry| registry.has_hooks_for(event_type))
+    }
+
     /// Register an agent's frontmatter hooks scoped to `agent_id` (G4 — claude
     /// `registerFrontmatterHooks(setAppState, agentId, hooks, …, isAgent)`,
     /// runAgent.ts:557-575). Writes through the shared registry so the hooks fire
@@ -771,6 +780,19 @@ impl HookExecutorImpl {
             .write()
             .await
             .register_agent_hooks(agent_id, hooks, is_agent);
+    }
+
+    /// Attach host loader provenance before frontmatter registration. Response
+    /// JSON never gains a way to assert that its own output is nonpersonal.
+    pub async fn set_personal_hook_origins(
+        &self,
+        hooks: &[HookDefinition],
+        personal: Option<bool>,
+    ) {
+        self.registry
+            .write()
+            .await
+            .set_personal_hook_origins(hooks, personal);
     }
 
     /// Remove every frontmatter hook scoped to `agent_id` (G4 — claude
@@ -1324,13 +1346,23 @@ impl HookExecutorImpl {
             return skipped;
         }
         let reg = self.registry.read().await;
-        let matched: Vec<HookDefinition> = reg
+        let mut matched: Vec<HookDefinition> = reg
             .match_event_partition(&event, &ctx, partition)
             .into_iter()
             .filter(|hook| Some(hook.id) != excluded)
             .cloned()
             .collect();
         drop(reg);
+        // WorktreeCreate owns the folder before any platform creation, and
+        // WorktreeRemove owns cleanup. Neither lifecycle can run detached.
+        if matches!(
+            &event,
+            HookEvent::WorktreeCreate { .. } | HookEvent::WorktreeRemove { .. }
+        ) {
+            for hook in &mut matched {
+                hook.blocking = true;
+            }
+        }
         // Native's UserPromptExpansion runner starts its matched hook work as a
         // batch and consumes each result as it settles. Keep the ordinary
         // priority-ordered path for every other event; non-blocking UPE hooks
@@ -2447,6 +2479,32 @@ impl Dispatcher {
         ctx: &HookContext,
         progress_id: Option<&str>,
     ) -> HookResult {
+        if matches!(
+            event,
+            HookEvent::WorktreeCreate { .. } | HookEvent::WorktreeRemove { .. }
+        ) {
+            let unsupported = match hook.executor {
+                HookExecutor::Prompt { .. } => {
+                    Some("Prompt stop hooks are not yet supported outside REPL")
+                }
+                HookExecutor::Agent { .. } => {
+                    Some("Agent stop hooks are not yet supported outside REPL")
+                }
+                HookExecutor::Function { .. } => {
+                    Some("Internal error: function hook executed outside REPL context")
+                }
+                _ => None,
+            };
+            if let Some(message) = unsupported {
+                return HookResult {
+                    outcome: HookOutcome::Error,
+                    stdout: ExactHookText::default(),
+                    stderr: message.into(),
+                    exit_code: None,
+                    response: None,
+                };
+            }
+        }
         match &hook.executor {
             HookExecutor::Function { source, budget_ms } => {
                 let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
@@ -3513,6 +3571,17 @@ impl HookExecutorImpl {
             }
             agg.attachments.extend(resp.attachments.clone());
         }
+        if matches!(hook_event, "WorktreeCreate" | "WorktreeRemove") {
+            let worktree_result =
+                crate::worktree_manager::WorktreeHookResult::from_result(hook, &r);
+            if hook_event == "WorktreeCreate"
+                && agg.worktree_path.is_none()
+                && worktree_result.succeeded
+            {
+                agg.worktree_path = worktree_result.selected_path();
+            }
+            agg.worktree_results.push(worktree_result);
+        }
         agg.all_results.push((hook.id, r));
     }
 }
@@ -3829,7 +3898,7 @@ fn is_existing_dir(path: &Path) -> bool {
 /// missing fields are filled by later B-cluster batches that thread richer
 /// context through `HookEvent` / `HookContext`.
 fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static str, String)> {
-    match event {
+    let (name, body) = match event {
         HookEvent::PreToolUse {
             tool_name,
             tool_input,
@@ -3881,7 +3950,32 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
         // Lifecycle events (B1) share the `createBaseHookInput` base shape; they
         // are split into a helper to keep this dispatch readable.
         _ => build_lifecycle_envelope_body(event, ctx),
+    }?;
+    let Some(directory) = &ctx.scratchpad_dir else {
+        return Some((name, body));
+    };
+    // Native Ip inserts this feature-gated base field directly after cwd.
+    // Rebuild through the exact carrier so tool/hook source strings retain
+    // arbitrary UTF-16 and the optional field is shared by every event arm.
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&body).ok()?;
+    let mut fields = Vec::new();
+    for entry in source.object_entries()? {
+        if entry.display_key == "scratchpad_dir" {
+            continue;
+        }
+        fields.push((entry.code_units.to_vec(), entry.value.to_projection().ok()?));
+        if entry.display_key == "cwd" {
+            fields.push((
+                "scratchpad_dir".encode_utf16().collect(),
+                directory.to_string_lossy().into_owned().into(),
+            ));
+        }
     }
+    let body = lingxi_core::types::utf16_json::Utf16JsonProjection::object_units(fields)
+        .ok()?
+        .to_json_string()
+        .ok()?;
+    Some((name, body))
 }
 
 /// The `createBaseHookInput` base shape (`utils/hooks.ts:301-328`) extracted
@@ -5151,6 +5245,83 @@ mod mcp_hook_source_tests {
 
     fn json(source: &str) -> Utf16JsonProjection {
         Utf16JsonProjection::parse(source).expect("fixture is valid JSON")
+    }
+
+    #[test]
+    fn native_322_scratchpad_base_field_is_conditional_ordered_and_source_preserving() {
+        let event = crate::HookEvent::PreToolUse {
+            tool_name: "mcp__fixture__echo".into(),
+            tool_input: json(r#"{"exact":"\ud800Ω"}"#),
+            tool_use_id: lingxi_core::types::ToolUseId::new(),
+        };
+        let mut context = crate::HookContext {
+            cwd: "/workspace".into(),
+            prompt_id: Some("prompt".into()),
+            ..Default::default()
+        };
+        let (_, disabled) = super::build_envelope_body(&event, &context).unwrap();
+        assert!(!disabled.contains("scratchpad_dir"));
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("scratchpad");
+        context.scratchpad_dir = Some(directory.clone());
+        let (_, enabled) = super::build_envelope_body(&event, &context).unwrap();
+        let path_json = serde_json::to_string(&directory.to_string_lossy()).unwrap();
+        assert!(enabled.contains(&format!(
+            r#""cwd":"/workspace","scratchpad_dir":{path_json},"prompt_id":"prompt""#
+        )));
+        assert!(enabled.contains(r#""exact":"\ud800Ω""#));
+        assert_eq!(
+            json(&enabled).string_at("/scratchpad_dir"),
+            directory.to_str()
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn native_322_scratchpad_base_fields_match_shipped_helper_fixtures() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/mcp_hook_features_2_1_322.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let context = crate::HookContext {
+                cwd: "/workspace".into(),
+                prompt_id: Some("prompt".into()),
+                scratchpad_dir: (case["enabled"] == true)
+                    .then(|| case["directory"].as_str().map(Into::into))
+                    .flatten(),
+                ..Default::default()
+            };
+            let event = crate::HookEvent::PreToolUse {
+                tool_name: "echo".into(),
+                tool_input: json("{}"),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
+            };
+            let (_, body) = super::build_envelope_body(&event, &context).unwrap();
+            let source = json(&body);
+            let expected = json(case["expected_json"].as_str().unwrap());
+            let selected = Utf16JsonProjection::object_units(
+                source
+                    .object_entries()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|entry| expected.get_property(entry.display_key).is_some())
+                    .map(|entry| {
+                        (
+                            entry.code_units.to_vec(),
+                            entry.value.to_projection().unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            assert_eq!(
+                selected.to_json_string().unwrap(),
+                case["expected_json"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]

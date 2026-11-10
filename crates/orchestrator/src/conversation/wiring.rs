@@ -1009,6 +1009,7 @@ impl ConversationOrchestrator {
         let primary_name_denied = std::iter::once(tool.name())
             .chain(tool.underlying_v1_tool_name())
             .chain(tool.aliases().iter().copied())
+            .chain(tool.mcp_deny_aliases().iter().map(String::as_str))
             .any(|name| permission::native_deny_context_matches_tool_name(context, name));
         if primary_name_denied {
             return true;

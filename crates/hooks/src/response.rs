@@ -612,6 +612,15 @@ pub struct HookResponse {
     /// the executor fills in, so it is `#[serde(skip)]`.
     #[serde(skip)]
     pub block_command: Option<ExactHookText>,
+    /// Folder supplied by a WorktreeCreate HTTP or callback hook. Command
+    /// hooks use their last nonempty stdout line instead, as the native runner does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "raw_exact_hook_text::serialize_option",
+        deserialize_with = "raw_exact_hook_text::deserialize_option"
+    )]
+    pub worktree_path: Option<ExactHookText>,
     /// Replacement input for the in-flight action (e.g. mutated tool input).
     #[serde(
         default,
@@ -1180,6 +1189,12 @@ pub struct HookOutputRewrite {
 /// `Block` decision wins and stops further folding.
 #[derive(Debug, Clone, Default)]
 pub struct AggregateHookResult {
+    /// Ordered lifecycle results, including successful hooks without a path.
+    /// The worktree adapter uses these to preserve native failure diagnostics
+    /// and the first-successful, nonheld folder selection.
+    pub worktree_results: Vec<crate::worktree_manager::WorktreeHookResult>,
+    /// First successful WorktreeCreate folder before host personal-source policy.
+    pub worktree_path: Option<ExactHookText>,
     /// Final aggregated decision (latest non-`None` wins until a `Block`).
     pub decision: Option<HookDecision>,
     /// Source of the hook whose decision currently owns [`Self::decision`].

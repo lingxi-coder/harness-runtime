@@ -73,6 +73,13 @@ impl<C> ConnectionBuilder<C> {
         self
     }
 
+    /// Opt into a protocol-owned request sequence. Generic JSON-RPC remains
+    /// one-based; native MCP transports explicitly select zero.
+    pub fn initial_request_id(mut self, id: i64) -> Self {
+        self.initial_request_id = id;
+        self
+    }
+
     /// Use a fixed error message for inbound requests with no registered
     /// handler. The generic default includes the exact method string.
     pub fn unknown_method_message(mut self, message: impl Into<JsonRpcString>) -> Self {
@@ -610,6 +617,35 @@ mod tests {
         };
         assert_eq!(remote.code, crate::messages::METHOD_NOT_FOUND);
         assert_eq!(remote.message, "Method not found");
+    }
+
+    #[tokio::test]
+    async fn builder_request_sequence_override_does_not_change_generic_default() {
+        struct EchoId;
+        #[async_trait::async_trait]
+        impl InboundHandler for EchoId {
+            async fn handle(&self, request: Request) -> Response {
+                Response::success(
+                    request.id.clone(),
+                    serde_json::to_value(request.id).unwrap(),
+                )
+            }
+        }
+        for initial in [None, Some(0)] {
+            let (a_in, a_out, b_in, b_out) = duplex_pipe();
+            let builder = Connection::builder(LineCodec::default());
+            let client = match initial {
+                Some(id) => builder.initial_request_id(id),
+                None => builder,
+            }
+            .build(a_in, a_out);
+            let server = Connection::builder(LineCodec::default()).build(b_in, b_out);
+            server.register_handler("echo-id", Arc::new(EchoId)).await;
+            for expected in initial.unwrap_or(1)..initial.unwrap_or(1) + 3 {
+                let id: i64 = client.call("echo-id", json!({})).await.unwrap();
+                assert_eq!(id, expected);
+            }
+        }
     }
 
     #[tokio::test]

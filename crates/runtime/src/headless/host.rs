@@ -62,6 +62,49 @@ pub trait HeadlessHostServices: Send + Sync {
     fn process_id(&self) -> u32 {
         std::process::id()
     }
+
+    /// Whether control frames come from a remote transport rather than the
+    /// process owner's pipes. This is host-owned transport provenance.
+    fn is_remote_control_transport(&self) -> bool {
+        false
+    }
+
+    /// A redacting lane cannot release unchecked program-only MCP payloads
+    /// or advertise the local permission-check control capability.
+    fn redacts_persisted_content(&self) -> bool {
+        false
+    }
+
+    /// Operator-owned MCP names are supplied by the embedding's startup
+    /// ownership record. An inbound set_servers frame cannot supply this list.
+    fn mcp_operator_owned_server_names(&self) -> Vec<mcp::McpServerName> {
+        Vec::new()
+    }
+
+    /// Authoritative host file lane, including synced or virtual rows. The
+    /// runner never falls back to OS paths when this service is supplied.
+    fn mcp_staged_file_store(&self) -> Option<std::sync::Arc<dyn super::McpStagedFileStore>> {
+        None
+    }
+
+    /// Opt in to an OS-backed staging lane for a real local workspace. Hosts
+    /// with a virtual FileSystem leave this absent and supply the service
+    /// above. `session_cwd` has already been resolved by the embedding.
+    fn mcp_local_staging_root(&self, _session_cwd: &Path) -> Option<PathBuf> {
+        None
+    }
+}
+
+pub(super) fn mcp_staged_store_for_session(
+    host: &dyn HeadlessHostServices,
+    session_cwd: &Path,
+) -> Option<std::sync::Arc<dyn super::McpStagedFileStore>> {
+    host.mcp_staged_file_store().or_else(|| {
+        host.mcp_local_staging_root(session_cwd).map(|root| {
+            std::sync::Arc::new(super::LocalMcpStagedFileStore::new(root))
+                as std::sync::Arc<dyn super::McpStagedFileStore>
+        })
+    })
 }
 
 /// Freeze request identity and UA from this embedding's environment overlay.
@@ -218,6 +261,94 @@ fn native_usage_credits_enabled(
 mod tests {
     use super::*;
     use crate::desktop::{DesktopConfig, DesktopRequestIdentity};
+    struct VirtualStore;
+    #[async_trait::async_trait]
+    impl crate::headless::McpStagedFileStore for VirtualStore {
+        async fn read(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::headless::McpStagedFile>, crate::headless::McpStagedFileError>
+        {
+            Ok(Some(crate::headless::McpStagedFile {
+                bytes: b"virtual row".to_vec(),
+                etag: "source-revision".into(),
+            }))
+        }
+        async fn compare_and_write(
+            &self,
+            _: &str,
+            _: Vec<u8>,
+            _: Option<&str>,
+        ) -> Result<String, crate::headless::McpStagedFileError> {
+            Ok("next-source-revision".into())
+        }
+    }
+    struct FileLaneHost {
+        injected: bool,
+        local: Option<PathBuf>,
+    }
+    impl HeadlessHostServices for FileLaneHost {
+        fn environment_variable(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn update_environment_variables(&self, _: HashMap<String, String>) -> Result<(), String> {
+            Ok(())
+        }
+        fn mcp_staged_file_store(
+            &self,
+        ) -> Option<std::sync::Arc<dyn crate::headless::McpStagedFileStore>> {
+            self.injected
+                .then(|| std::sync::Arc::new(VirtualStore) as _)
+        }
+        fn mcp_local_staging_root(&self, _: &Path) -> Option<PathBuf> {
+            assert!(
+                !self.injected,
+                "a virtual store is authoritative and must bypass local fallback"
+            );
+            self.local.clone()
+        }
+    }
+    #[tokio::test]
+    async fn staged_file_lane_requires_explicit_host_admission_and_prefers_virtual_store() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("same.txt"), b"local row").unwrap();
+        assert!(mcp_staged_store_for_session(
+            &FileLaneHost {
+                injected: false,
+                local: None
+            },
+            root.path()
+        )
+        .is_none());
+        let local = mcp_staged_store_for_session(
+            &FileLaneHost {
+                injected: false,
+                local: Some(root.path().to_path_buf()),
+            },
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            local.read("same.txt").await.unwrap().unwrap().bytes,
+            b"local row"
+        );
+        let virtual_store = mcp_staged_store_for_session(
+            &FileLaneHost {
+                injected: true,
+                local: Some(root.path().to_path_buf()),
+            },
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            virtual_store.read("same.txt").await.unwrap().unwrap().bytes,
+            b"virtual row"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("same.txt")).unwrap(),
+            b"local row"
+        );
+    }
     struct Host {
         environment: HashMap<String, String>,
         identity: Option<DesktopRequestIdentity>,

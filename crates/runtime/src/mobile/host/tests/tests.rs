@@ -3249,6 +3249,7 @@ fn chat_live_mcp_catalog_retires_removed_tools() {
             full_name: "mcp__remote__lookup".into(),
             server_name: "remote".into(),
             tool_name: "lookup".into(),
+            wire_tool_name: None,
             description: "Look up a value".into(),
             input_schema: Utf16JsonProjection::from_serde_value(
                 &serde_json::json!({"type": "object"}),

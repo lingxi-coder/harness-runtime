@@ -1101,6 +1101,15 @@ pub struct McpToolDto {
     pub server_name: String,
     /// Tool name as exposed by the server.
     pub tool_name: String,
+    /// Original upstream name when its JavaScript UTF-16 units cannot be
+    /// represented by `tool_name`. Ordinary scalar DTOs omit this sidecar.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "json_projection::raw_json_serde::serialize_option",
+        deserialize_with = "deserialize_optional_mcp_tool_wire_name"
+    )]
+    pub wire_tool_name: Option<json_projection::Utf16JsonProjection>,
     /// Root JSON string description shown to the model, retained as source.
     #[serde(
         serialize_with = "json_projection::raw_json_serde::serialize",
@@ -1189,6 +1198,18 @@ impl McpToolDto {
         &self.tool_name
     }
 
+    /// Exact `tools/call.name`, including any isolated surrogate units.
+    #[must_use]
+    pub fn wire_tool_name_source(&self) -> json_projection::Utf16JsonProjection {
+        self.wire_tool_name.clone().unwrap_or_else(|| {
+            json_projection::Utf16JsonProjection::root_string(
+                self.tool_name.clone(),
+                self.tool_name.encode_utf16().collect(),
+            )
+            .expect("Rust tool names are valid UTF-16")
+        })
+    }
+
     /// Model-facing tool description.
     #[must_use]
     pub fn description(&self) -> &json_projection::Utf16JsonProjection {
@@ -1212,6 +1233,21 @@ impl McpToolDto {
     pub const fn requires_user_interaction(&self) -> bool {
         self.requires_user_interaction
     }
+}
+
+fn deserialize_optional_mcp_tool_wire_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<json_projection::Utf16JsonProjection>, D::Error> {
+    let value = json_projection::raw_json_serde::deserialize_option(deserializer)?;
+    if value
+        .as_ref()
+        .is_some_and(|name| name.string_units("").is_none())
+    {
+        return Err(serde::de::Error::custom(
+            "MCP wire tool name must be a JSON string",
+        ));
+    }
+    Ok(value)
 }
 
 /// `serde(skip_serializing_if)` helper for a plain `bool` field defaulting to
@@ -1734,6 +1770,7 @@ mod tests {
         let value = serde_json::to_value(McpToolDto {
             server_name: "fixture".to_string(),
             tool_name: "save_item".to_string(),
+            wire_tool_name: None,
             description: project(r#""Save one fixture entry.""#),
             input_schema: project(r#"{"type":"object"}"#),
             output_schema: Some(project(

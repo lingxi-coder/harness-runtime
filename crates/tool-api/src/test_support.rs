@@ -329,6 +329,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         trusted_effective_permission_mode: None,
         classifier_only_review: None,
+        mcp_auto_mode_verdict: None,
         content_replacement_state: None,
         session: None,
         subagent_registry: None,

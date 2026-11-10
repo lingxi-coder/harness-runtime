@@ -89,7 +89,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
     let mut out: Vec<ScopedAgentMcpServer> = Vec::new();
     let mut upsert = |cfg: mcp::McpServerConfig, is_newly_created: bool| match out
         .iter_mut()
-        .find(|s| s.config.name == cfg.name)
+        .find(|s| s.config.authored_name_units() == cfg.authored_name_units())
     {
         Some(slot) => {
             *slot = ScopedAgentMcpServer {
@@ -103,7 +103,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
         }),
     };
     for spec in &def.mcp_servers {
-        let record = match spec {
+        let record: Vec<(mcp::McpServerName, serde_json::Value)> = match spec {
             // claude `typeof r === "string"` (`PRn`): a by-name entry
             // resolves from an EXISTING config rather than being built here.
             AgentMcpServerSpec::ByName(name) => {
@@ -115,7 +115,11 @@ pub fn agent_mcp_specs_to_scoped_configs(
                     );
                     continue;
                 }
-                match existing_configs.iter().find(|c| &c.name == name) {
+                let units: Vec<u16> = name.encode_utf16().collect();
+                match existing_configs
+                    .iter()
+                    .find(|c| c.name_matches_utf16(&units))
+                {
                     Some(cfg) => {
                         upsert(cfg.clone(), false);
                         continue;
@@ -130,7 +134,49 @@ pub fn agent_mcp_specs_to_scoped_configs(
                     }
                 }
             }
-            AgentMcpServerSpec::Record(map) => map,
+            AgentMcpServerSpec::BySourceName(name) => {
+                if strict_mcp_config {
+                    continue;
+                }
+                if let Some(config) = existing_configs
+                    .iter()
+                    .find(|config| config.name_matches_utf16(name.utf16_units()))
+                {
+                    upsert(config.clone(), false);
+                } else {
+                    tracing::warn!("[Agent: {}] MCP server not found: {}", def.agent_type, name);
+                }
+                continue;
+            }
+            AgentMcpServerSpec::Record(map) => map
+                .iter()
+                .map(|(name, body)| (name.into(), body.clone()))
+                .collect(),
+            AgentMcpServerSpec::SourceRecord(source) => {
+                let Some(entries) = source.object_entries() else {
+                    continue;
+                };
+                let rows = entries
+                    .iter()
+                    .map(|entry| {
+                        let raw = entry
+                            .value
+                            .to_projection()
+                            .map_err(|_| ())?
+                            .to_json_string()
+                            .map_err(|_| ())?;
+                        let body = serde_json::from_str(&raw).map_err(|_| ())?;
+                        Ok((
+                            mcp::McpServerName::from_utf16(entry.code_units.to_vec()),
+                            body,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ()>>();
+                let Ok(rows) = rows else {
+                    continue;
+                };
+                rows
+            }
         };
         if record.len() != 1 {
             tracing::warn!(
@@ -143,7 +189,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
             .iter()
             .next()
             .expect("record.len() == 1 guarantees one entry");
-        if mcp::normalization::is_reserved_mcp_server_name(name) {
+        if mcp::normalization::is_reserved_mcp_server_name(name.as_str()) {
             tracing::warn!(
                 "[Agent: {}] Skipping reserved MCP server name '{}' in frontmatter",
                 def.agent_type,
@@ -165,7 +211,11 @@ pub fn agent_mcp_specs_to_scoped_configs(
         // A plain object assignment, so a name declared twice in one list is
         // LAST-wins and keeps its original key position; the `Vec` stands in
         // for `t`'s insertion order.
-        if let Some(cfg) = mcp::build_server_from_json_entry(name, raw, mcp::ConfigScope::Agent) {
+        if let Some(cfg) = mcp::build_server_from_json_entry_utf16(
+            name.utf16_units(),
+            raw,
+            mcp::ConfigScope::Agent,
+        ) {
             let mut cfg = cfg;
             cfg.metadata.agent_source = Some(match def.source {
                 AgentSource::BuiltIn => mcp::McpAgentSource::BuiltIn,
@@ -187,6 +237,14 @@ pub fn agent_mcp_specs_to_scoped_configs(
             });
             upsert(cfg, true);
         }
+    }
+    let mut configs = out
+        .iter()
+        .map(|entry| entry.config.clone())
+        .collect::<Vec<_>>();
+    mcp::finalize_mcp_server_names_against(&mut configs, existing_configs);
+    for (entry, config) in out.iter_mut().zip(configs) {
+        entry.config = config;
     }
     out
 }

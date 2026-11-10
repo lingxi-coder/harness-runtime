@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerProvenance {
     /// Logical server name before MCP normalization.
-    pub name: String,
+    pub name: crate::McpServerName,
     /// Native provenance source (`user`, `project`, `plugin`, `sdk`, etc.).
     pub source: String,
 }
@@ -29,7 +29,7 @@ impl McpServerProvenance {
             .provenance_source
             .as_deref()
             .unwrap_or_else(|| {
-                if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+                if config.is_trusted_sdk() {
                     "sdk"
                 } else {
                     match config.scope {
@@ -45,9 +45,33 @@ impl McpServerProvenance {
                 }
             });
         Self {
-            name: config.name.clone(),
+            name: config.authored_name(),
             source: source.to_owned(),
         }
+    }
+}
+
+impl McpServerConfig {
+    /// Native `mbe`/`RF`: only a direct SDK config outside project scope and
+    /// actual plugin ownership may claim SDK provenance. A name is never proof.
+    #[must_use]
+    pub fn is_trusted_sdk(&self) -> bool {
+        matches!(self.spec, McpTransportSpec::SdkControl { .. })
+            && self.scope != ConfigScope::Settings(SettingsScope::Project)
+            && !self.metadata.relayed
+            && self.metadata.provenance_source.as_deref() != Some("plugin")
+    }
+
+    /// Native `brn`: connector aliases are available even without a matching
+    /// capability declaration, but only for deny/ask/hooks/disallowed checks.
+    #[must_use]
+    pub fn sdk_connector_deny_key(&self) -> Option<String> {
+        if !self.is_trusted_sdk() {
+            return None;
+        }
+        let units = self.metadata.sdk_connector_id.as_ref()?.string_units("")?;
+        let key = crate::normalization::normalize_name_for_mcp(&String::from_utf16_lossy(&units));
+        (key.len() <= 128 && !key.contains("__")).then_some(key)
     }
 }
 
@@ -98,6 +122,16 @@ mod tests {
                 && config.metadata.provenance_source.is_none()
             {
                 config.metadata.provenance_source = Some("plugin".into());
+            }
+            // This older fixture replays QIr's fallback for a raw mcpInfo row
+            // without its registered source. Actual SDK project admission
+            // runs RF/mbe first; the separate SDK-policy fixture pins that
+            // branch and intentionally keeps its source as project.
+            if input["serverType"] == "sdk"
+                && scope == ConfigScope::Settings(SettingsScope::Project)
+                && config.metadata.provenance_source.is_none()
+            {
+                continue;
             }
             assert_eq!(
                 serde_json::to_value(McpServerProvenance::from_config(&config)).unwrap(),

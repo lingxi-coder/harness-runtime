@@ -1435,6 +1435,7 @@ async fn agent_scoped_mcp_builder_filters_org_blocks_and_keeps_ask_metadata() {
     let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
         server_name: "srv".into(),
         tool_name: tool_name.into(),
+        wire_tool_name: None,
         description: tool_name.into(),
         input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
             &serde_json::json!({"type": "object"}),
@@ -1550,6 +1551,7 @@ async fn agent_scoped_sdk_builder_preserves_private_server_policies() {
     let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
         server_name: "srv".into(),
         tool_name: tool_name.into(),
+        wire_tool_name: None,
         description: tool_name.into(),
         input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
             &serde_json::json!({"type": "object"}),

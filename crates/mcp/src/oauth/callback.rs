@@ -50,6 +50,12 @@ struct CallbackResult {
     issuer: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallbackBehavior {
+    Mcp,
+    XaaIdp,
+}
+
 /// A bound loopback listener whose port is known before any browser hits it.
 ///
 /// Construct with [`CallbackListener::bind`] (which accepts `port == 0` for an
@@ -101,8 +107,15 @@ impl CallbackListener {
         expected_state: &str,
         redirect_uri: &str,
     ) -> Result<CallbackParams, CallbackError> {
-        self.accept_inner(expected_state, redirect_uri, None, false)
-            .await
+        self.accept_inner(
+            expected_state,
+            redirect_uri,
+            None,
+            false,
+            CallbackBehavior::Mcp,
+            None,
+        )
+        .await
     }
 
     /// Accept a callback and apply the RFC 9207 checks used by the current
@@ -120,6 +133,64 @@ impl CallbackListener {
             redirect_uri,
             expected_issuer,
             issuer_parameter_supported,
+            CallbackBehavior::Mcp,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn accept_with_issuer_units(
+        self,
+        expected_state: &str,
+        redirect_uri: &str,
+        expected_issuer: Option<&[u16]>,
+        required: bool,
+    ) -> Result<CallbackParams, CallbackError> {
+        let display = expected_issuer.map(String::from_utf16_lossy);
+        self.accept_inner(
+            expected_state,
+            redirect_uri,
+            display.as_deref(),
+            required,
+            CallbackBehavior::Mcp,
+            expected_issuer,
+        )
+        .await
+    }
+
+    pub(crate) async fn accept_xaa_with_issuer(
+        self,
+        expected_state: &str,
+        redirect_uri: &str,
+        expected_issuer: Option<&str>,
+        issuer_parameter_supported: bool,
+    ) -> Result<CallbackParams, CallbackError> {
+        self.accept_inner(
+            expected_state,
+            redirect_uri,
+            expected_issuer,
+            issuer_parameter_supported,
+            CallbackBehavior::XaaIdp,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn accept_xaa_with_issuer_units(
+        self,
+        expected_state: &str,
+        redirect_uri: &str,
+        expected_issuer: Option<&[u16]>,
+        required: bool,
+    ) -> Result<CallbackParams, CallbackError> {
+        let display = expected_issuer.map(String::from_utf16_lossy);
+        self.accept_inner(
+            expected_state,
+            redirect_uri,
+            display.as_deref(),
+            required,
+            CallbackBehavior::XaaIdp,
+            expected_issuer,
         )
         .await
     }
@@ -130,17 +201,22 @@ impl CallbackListener {
         redirect_uri: &str,
         expected_issuer: Option<&str>,
         issuer_parameter_supported: bool,
+        behavior: CallbackBehavior,
+        expected_issuer_units: Option<&[u16]>,
     ) -> Result<CallbackParams, CallbackError> {
         let mut pending = FuturesUnordered::new();
         loop {
             tokio::select! {
                 accepted=self.listener.accept()=>{
                     let (stream,_)=accepted.map_err(|error|CallbackError::Bind(error.to_string()))?;
-                    pending.push(handle_connection(stream,expected_state,redirect_uri));
+                    pending.push(handle_connection(stream,expected_state,redirect_uri,behavior));
                 }
                 connection=pending.next(), if !pending.is_empty()=>{
                     match connection.expect("nonempty callback connection set") {
                         Ok(Some(result))=>{
+                            if let (Some(issuer),Some(expected))=(result.issuer.as_deref(),expected_issuer_units) {
+                                if !issuer.encode_utf16().eq(expected.iter().copied()) {return Err(CallbackError::InvalidRequest("authorization response issuer does not match metadata issuer".into()));}
+                            }
                             validate_callback_issuer(result.issuer.as_deref(),expected_issuer,issuer_parameter_supported)?;
                             return Ok(result.params);
                         }
@@ -167,6 +243,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     expected_state: &str,
     redirect_uri: &str,
+    behavior: CallbackBehavior,
 ) -> Result<Option<CallbackResult>, CallbackError> {
     const MAX_CALLBACK_HEADER_BYTES: usize = 16 * 1024;
     let mut buf = Vec::new();
@@ -200,11 +277,34 @@ async fn handle_connection(
         .split_whitespace()
         .nth(1)
         .ok_or_else(|| CallbackError::InvalidRequest("no path".into()))?;
+    // Legacy url.parse normalizes absolute-form request targets and removes
+    // fragments before its querystring parser. Bun's built-in parser has no
+    // Node maxKeys truncation; the HTTP header-size bound limits the input.
+    let absolute = url::Url::parse(path).ok();
+    let target = absolute.as_ref().map(|url| {
+        format!(
+            "{}{}",
+            url.path(),
+            url.query()
+                .map(|query| format!("?{query}"))
+                .unwrap_or_default()
+        )
+    });
+    let path = target
+        .as_deref()
+        .unwrap_or(path)
+        .split('#')
+        .next()
+        .unwrap_or("");
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
     // Only the OAuth redirect path is interesting; everything else (favicon,
     // probes) gets a 404 and is skipped without aborting the flow.
     if route != "/callback" {
+        if behavior == CallbackBehavior::XaaIdp {
+            let _ = write_response(&mut stream, "404 Not Found", "").await;
+            return Ok(None);
+        }
         let body = render_page(
             false,
             "Not found",
@@ -246,6 +346,43 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
     let truthy = |values: &Vec<String>| {
         values.len() > 1 || values.first().is_some_and(|value| !value.is_empty())
     };
+    if behavior == CallbackBehavior::XaaIdp {
+        let failure = if truthy(&errors) {
+            let error = errors.join(",");
+            let description = descriptions.join(",");
+            Some((
+                "Close this tab and try again from LingXi.",
+                Some(format!("{error}: {description}")),
+                format!(
+                    "XAA IdP: {error}{}",
+                    if truthy(&descriptions) {
+                        format!(" — {description}")
+                    } else {
+                        String::new()
+                    }
+                ),
+            ))
+        } else if state != Some(expected_state) {
+            Some((
+                "State mismatch. Close this tab and try again.",
+                None,
+                "XAA IdP: state mismatch (possible CSRF)".into(),
+            ))
+        } else if !truthy(&codes) {
+            Some((
+                "No authorization code received. Close this tab and try again.",
+                None,
+                "XAA IdP: callback missing code".into(),
+            ))
+        } else {
+            None
+        };
+        if let Some((message, detail, error)) = failure {
+            let body = render_page(false, "Sign-in failed", message, detail.as_deref());
+            let _ = write_response(&mut stream, "400 Bad Request", &body).await;
+            return Err(CallbackError::Provider(error));
+        }
+    }
     // (1) state-check first (claude `state !== expectedState`): serve a 400 page
     //     and keep waiting. Native treats a missing/duplicate state as a mismatch.
     if state != Some(expected_state) {
@@ -285,13 +422,21 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
 
     // (3) success: a `code` is present → serve the success page and return.
     if !truthy(&codes) {
-        return Ok(None);
+        // Native leaves this request unanswered while retaining the active
+        // flow. The future owns the socket until cancellation or completion.
+        std::future::pending::<()>().await;
+        drop(stream);
+        unreachable!("pending callback only ends when its owner is dropped");
     }
     let code = codes.join(",");
     let state = state.expect("state checked above").to_owned();
     let body = render_page(
         true,
-        "Authentication successful",
+        if behavior == CallbackBehavior::XaaIdp {
+            "Sign-in complete"
+        } else {
+            "Authentication successful"
+        },
         "You can close this tab and return to LingXi.",
         None,
     );
@@ -655,6 +800,99 @@ mod tests {
         let response = send_get(port, "/callback?code=first&code=second&error=&state=S").await;
         assert!(response.contains("200 OK"));
         assert_eq!(server.await.unwrap().unwrap().code, "first,second");
+    }
+
+    #[tokio::test]
+    async fn no_code_socket_stays_pending_until_callback_owner_finishes() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S", RU).await });
+        let mut pending = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        pending
+            .write_all(b"GET /callback?state=S HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut byte = [0u8; 1];
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            pending.read(&mut byte)
+        )
+        .await
+        .is_err());
+        assert!(send_get(port, "/callback?code=valid&state=S")
+            .await
+            .contains("200 OK"));
+        assert_eq!(server.await.unwrap().unwrap().code, "valid");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), pending.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_query_and_absolute_target_preserve_complete_callback() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S", RU).await });
+        let prefix = std::iter::repeat_n("x=1", 1001)
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(send_get(
+            port,
+            &format!("http://localhost/callback?{prefix}&code=visible&state=S#ignored")
+        )
+        .await
+        .contains("200 OK"));
+        assert_eq!(server.await.unwrap().unwrap().code, "visible");
+    }
+
+    #[tokio::test]
+    async fn xaa_callback_errors_precede_state_and_missing_code_aborts() {
+        for (query, expected) in [
+            (
+                "error=access_denied&error_description=fake&state=WRONG",
+                "XAA IdP: access_denied — fake",
+            ),
+            ("state=S", "XAA IdP: callback missing code"),
+            (
+                "code=x&state=WRONG",
+                "XAA IdP: state mismatch (possible CSRF)",
+            ),
+        ] {
+            let listener = CallbackListener::bind(0).await.unwrap();
+            let port = listener.port();
+            let server =
+                tokio::spawn(
+                    async move { listener.accept_xaa_with_issuer("S", RU, None, false).await },
+                );
+            let response = send_get(port, &format!("/callback?{query}")).await;
+            assert!(response.contains("400 Bad Request"));
+            assert!(response.contains("Sign-in failed"));
+            assert!(
+                matches!(server.await.unwrap(),Err(CallbackError::Provider(error)) if error==expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn issuer_unit_binding_distinguishes_surrogate_from_replacement_character() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let server = tokio::spawn(async move {
+            listener
+                .accept_with_issuer_units("S", RU, Some(&[0xd800]), false)
+                .await
+        });
+        assert!(send_get(port, "/callback?code=x&state=S&iss=%EF%BF%BD")
+            .await
+            .contains("200 OK"));
+        assert!(matches!(
+            server.await.unwrap(),
+            Err(CallbackError::InvalidRequest(_))
+        ));
     }
 
     #[tokio::test]

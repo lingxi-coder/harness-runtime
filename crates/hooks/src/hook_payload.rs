@@ -2233,6 +2233,11 @@ pub fn parse_response_projection(
                 }
             }
         }
+        if expected_event == "WorktreeCreate" {
+            resp.worktree_path =
+                ExactHookText::from_json_projection(projection, "/hookSpecificOutput/worktreePath");
+        }
+
         if matches!(expected_event, "UserPromptSubmit" | "SessionStart") {
             validate_optional_nested_field_type(hs, "sessionTitle", "string", is_json_string)?;
         }
