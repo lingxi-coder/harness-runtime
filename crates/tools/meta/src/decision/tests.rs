@@ -9,6 +9,7 @@ struct Service {
     cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
     hold: bool,
     invalid: bool,
+    stale: bool,
 }
 #[async_trait]
 impl DecisionService for Service {
@@ -19,7 +20,7 @@ impl DecisionService for Service {
             return std::future::pending().await;
         }
         Ok(Response {
-            state_revision: 0,
+            state_revision: if self.stale { 1 } else { 0 },
             answers: std::collections::BTreeMap::from([(
                 "ok".into(),
                 Answer::Binary {
@@ -136,4 +137,54 @@ async fn invalid_service_answers_are_not_presented_as_success() {
         tool.call(input(), fresh_ctx(), fresh_tx()).await,
         Err(ToolError::Io(_))
     ));
+}
+
+#[tokio::test]
+async fn moved_evidence_still_rejects_a_stale_state_revision() {
+    let tool = DecisionTool::new(Arc::new(Service {
+        stale: true,
+        ..Default::default()
+    }));
+    assert!(matches!(
+        tool.call(input(), fresh_ctx(), fresh_tx()).await,
+        Err(ToolError::Io(_))
+    ));
+}
+
+#[tokio::test]
+async fn moved_evidence_still_rejects_missing_extra_and_wrong_answer_types() {
+    struct InvalidService(Response);
+    #[async_trait]
+    impl DecisionService for InvalidService {
+        async fn evaluate(&self, _: Input, _: InvocationContext) -> Result<Response, Error> {
+            Ok(self.0.clone())
+        }
+    }
+    for answers in [
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::from([
+            ("ok".into(), Answer::Binary { probability: 0.75 }),
+            ("extra".into(), Answer::Binary { probability: 0.75 }),
+        ]),
+        std::collections::BTreeMap::from([(
+            "ok".into(),
+            Answer::Score {
+                value: 0.5,
+                probabilities: None,
+                confidence: None,
+            },
+        )]),
+    ] {
+        let tool = DecisionTool::new(Arc::new(InvalidService(Response {
+            state_revision: 0,
+            answers,
+            usage: Usage::default(),
+            actual_model: None,
+            elapsed_ms: 1,
+        })));
+        assert!(matches!(
+            tool.call(input(), fresh_ctx(), fresh_tx()).await,
+            Err(ToolError::Io(_))
+        ));
+    }
 }

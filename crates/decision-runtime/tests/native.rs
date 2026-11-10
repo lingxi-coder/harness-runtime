@@ -175,6 +175,34 @@ async fn cancellation_and_deadline_do_not_replay() {
 }
 
 #[test]
+fn openai_evidence_wire_shapes_are_preserved() {
+    let mut request = request();
+    request.state = json!("Plain evidence");
+    assert_eq!(openai_input(&request), json!("Plain evidence"));
+    request.state = json!({"ticket":"refund"});
+    assert_eq!(
+        openai_input(&request),
+        json!([{"role":"user","content":[{"type":"input_json","data":{"ticket":"refund"}}]}])
+    );
+    request.state = json!(true);
+    assert_eq!(
+        openai_input(&request),
+        json!([{"role":"user","content":[{"type":"input_text","text":"true"}]}])
+    );
+    request.state = json!("Plain evidence");
+    request.images.push(Image {
+        data_url: "data:image/png;base64,aGVsbG8=".into(),
+    });
+    assert_eq!(
+        openai_input(&request),
+        json!([{"role":"user","content":[
+            {"type":"input_text","text":"Plain evidence"},
+            {"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}
+        ]}])
+    );
+}
+
+#[test]
 fn images_use_provider_native_shapes() {
     let mut request = request();
     request.images.push(Image {
