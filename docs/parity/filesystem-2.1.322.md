@@ -24,11 +24,45 @@ user file is used by these runners.
 | Edit/Write | Native 8,000-byte encoding classification, UTF-16LE/BOM preservation, CRLF handling and its 4,096-code-unit classification sample, Unicode escape transformation, partial-view write guards and file-type errors. |
 | Glob/Grep | Incomplete-result notices and timeout metadata; UTF-16 long-line cutoff; content/context separators; single-file and multiline rendering; NUL/binary search summaries; repeated directory-prefix handling. |
 | NotebookEdit | Hard validation failures, exact cell-source joining, metadata language, native cell IDs/results, one-space ECMAScript JSON serialization including unpaired surrogates and number/key ordering, native size guards and strict stale-read handling. |
+| Tool contracts | Latest prompt/description bytes, schema field metadata, mutation output validation and unknown-property stripping; partial Edit results omit the full-context reassurance. |
 
 Notebook insert IDs use the first eight characters of a fresh UUID. They do
 not truncate invocation IDs, whose timestamp prefix can repeat. Notebook
 serialization retains the source JSON projection while mutating cells, so
 unrelated properties and exact UTF-16 strings survive the edit.
+
+## Reference checks
+
+All five native replay runners passed: **403 cases across 64 pinned ranges**.
+
+| Runner | Cases | Source ranges |
+| --- | ---: | ---: |
+| Read | 207 | 20 |
+| Mutation | 47 | 11 |
+| Search, including 18 actual bundled-ripgrep searches | 49 | 10 |
+| Paths and notebooks | 48 | 6 |
+| Prompts, descriptions, schema factories and Edit result messages | 52 | 17 |
+
+## Rust verification
+
+Validation used an isolated checkout merged with runtime main `cba2130f`.
+Every command completed with zero failures:
+
+| Check | Passed |
+| --- | ---: |
+| Tool API suite, including atomic concurrent Read admission | 317 |
+| Default file-tool library suite | 417 |
+| Unix-socket Write regression, run separately | 1 |
+| File-tool library with all image/PDF/render features | 454 |
+| Prompt/schema/parser integration tests, in each feature configuration | 4 |
+| Main-loop context-budget host tests | 2 |
+
+The socket fixture required running outside the host sandbox and was filtered
+from the two larger suite invocations; it passed separately. There were no
+ignored tests. Rustfmt and `git diff --check` passed. Cargo ran offline with
+incremental compilation and debug information disabled after initial builds
+exhausted shared disk space. The main-loop check compiles the orchestrator
+test target but executes only the two named budget tests.
 
 ## Reproduction
 
@@ -39,7 +73,9 @@ node scripts/tests/file_read_322_oracle.mjs --check
 node scripts/tests/file_mutation_322_oracle.mjs --check
 node scripts/tests/file_search_322_oracle.mjs --check
 node scripts/tests/file_notebook_path_322_oracle.mjs --check
+node scripts/tests/file_tool_contract_322_oracle.mjs --check
 cargo test -p tool-file -p tool-api --offline --no-fail-fast
+cargo test -p tool-file --all-features --offline --no-fail-fast
 cargo test -p orchestrator --lib read_context_room_host_tests --offline
 ```
 
@@ -54,6 +90,12 @@ CLI end-to-end acceptance or cross-platform equivalence claim. POSIX path
 fixtures do not establish Windows drive/UNC semantics. LingXi's rooted I/O,
 permission checks, guest-path translation and provider support remain product
 adaptations.
+
+Schema receipts compare ordered field metadata, descriptions, requiredness,
+enums and defaults from native factories using controlled constructors. They
+do not establish native Zod JSON-schema serializer bytes or exact aggregate
+diagnostic paths for malformed outputs. Optional attached-machine transport
+and disabled edit-anchor/prefix feature gates are recorded but not enabled.
 
 Large Read uses LingXi's authoritative live context accounting and existing
 provider routing. Equivalence with Claude Code's separate history estimator
