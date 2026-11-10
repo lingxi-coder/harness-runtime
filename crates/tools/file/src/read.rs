@@ -1032,21 +1032,7 @@ pub const EMPTY_FILE_WARNING: &str =
 ///   * `${qhi}` final bullet => appended (present in BOTH branches; em-dash is
 ///     U+2014).
 /// The `cat -n` / directory / shell-tool wording matches the binary exactly.
-const READ_PROMPT_LONG: &str = "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\
-\n\
-Usage:\n\
-- The file_path parameter must be an absolute path, not a relative path\n\
-- By default, it reads up to 2000 lines starting from the beginning of the file\n\
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n\
-- Results are returned using cat -n format, with line numbers starting at 1\n\
-- This tool reads images (eg PNG, JPG, etc). When reading an image file, the contents are presented visually to the selected model.\n\
-- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.\n\
-- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.\n\
-- This tool can only read files, not directories. To list files in a directory, use the registered shell tool.\n\
-- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.\n\
-- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.\n\
-- Do NOT re-read a file you just edited to verify \u{2014} Edit/Write would have errored if the change failed, and the harness tracks file state for you.";
+const READ_PROMPT_LONG: &str = include_str!("templates/claude-code-2.1.319/read-long.md");
 
 /// The SHORT Read prompt — byte-locked VERBATIM to claude-code `Yhi(e,…)`'s
 /// `Dh(e)===true` branch (binary offset 195602702), served to current-gen
@@ -1055,15 +1041,10 @@ Usage:\n\
 ///   * `${r}` (offsetInstruction) => `Khi`; `${t}` (lineFormat) => `VBr`;
 ///   * `${PQe()?…:""}` PDF fragment => INCLUDED;  `${qhi}` => appended.
 /// The ellipsis in "(PNG, JPG, …)" is U+2026; the qhi em-dash is U+2014.
-const READ_PROMPT_SHORT: &str = "Reads a file from the local filesystem.\n\
-\n\
-- `file_path` must be an absolute path.\n\
-- Reads up to 2000 lines by default.\n\
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n\
-- Results are returned using cat -n format, with line numbers starting at 1\n\
-- Reads images (PNG, JPG, \u{2026}) and presents them visually. Reads PDFs via the `pages` parameter (e.g. \"1-5\", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.\n\
-- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.\n\
-- Do NOT re-read a file you just edited to verify \u{2014} Edit/Write would have errored if the change failed, and the harness tracks file state for you.";
+const READ_PROMPT_SHORT: &str = include_str!("templates/claude-code-2.1.319/read-lean.md");
+
+const READ_PROMPT_SHORT_REWRITE: &str =
+    include_str!("templates/claude-code-2.1.319/read-lean-rewrite.md");
 
 /// Build the model-facing offset-beyond-EOF warning — byte-locked to claude-code
 /// (`FileReadTool.ts:707`). `offset` is the requested 1-based start line
@@ -1911,13 +1892,11 @@ impl Tool for FileReadTool {
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
-        // Model-gated, mirroring claude-code `Yhi(e,…){if(Dh(e))return SHORT;
-        // return LONG}` (binary offset 195602689). `Dh(model)` selects the terse
-        // variant for current-gen default models (opus-4-8 / fable-5 / mythos-5)
-        // and whenever `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy; classic
-        // models and `None` (the `Dh(undefined)` path) get the verbose one. The
-        // predicate is shared with TodoWrite via `tool_api`.
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        // The request's bundle owns style selection and Claude-only rewrites.
+        if tool_api::prompt_uses_lean(opts) {
+            if tool_api::prompt_uses_rewrite(opts) {
+                return READ_PROMPT_SHORT_REWRITE.into();
+            }
             READ_PROMPT_SHORT.into()
         } else {
             READ_PROMPT_LONG.into()
@@ -3729,10 +3708,11 @@ mod tests {
         assert_eq!(desc, "Read a file from the local filesystem.");
         let prompt_source = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -3740,7 +3720,7 @@ mod tests {
         let prompt = prompt_source
             .string_at("")
             .expect("prompt is a JSON string");
-        // model:None ⇒ Dh(undefined)=false ⇒ LONG prompt.
+        // model:claude-sonnet-4-6 selects the native long template prompt.
         assert_eq!(prompt, READ_PROMPT_LONG);
         // Spot-check the VERBATIM template fragments.
         assert!(prompt.starts_with(
@@ -3752,8 +3732,9 @@ mod tests {
         assert!(prompt.contains(
             "- Results are returned using cat -n format, with line numbers starting at 1"
         ));
-        assert!(prompt
-            .contains("it's recommended to read the whole file by not providing these parameters"));
+        assert!(prompt.contains(
+            "When you already know which part of the file you need, only read that part. This can be important for larger files."
+        ));
         // PDF fragment is INCLUDED in the default (PDF-supported) build.
         assert!(prompt.contains("This tool can read PDF files (.pdf)."));
         // R-T3: directory line uses the registered-shell-tool wording.
@@ -3774,6 +3755,7 @@ mod tests {
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
         let prompt_source = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,

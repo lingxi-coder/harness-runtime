@@ -462,6 +462,14 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
             .and_then(|invoker| invoker.fork_for_memory(inherit_reads))
     }
 
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.trusted_session_profile())
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
@@ -608,6 +616,48 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 
 #[async_trait::async_trait]
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
+    async fn conversation_mode(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::ConversationMode> {
+        let orchestrator = self.orchestrator.upgrade()?;
+        Some(
+            OrchestratorHandle::conversation_mode(orchestrator.as_ref())
+                .await
+                .mode,
+        )
+    }
+
+    async fn render_prompt_context_for_target(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        match self.orchestrator.upgrade() {
+            Some(orchestrator) => {
+                orchestrator
+                    .assemble_subagent_prompt_context_for_target_preview(target)
+                    .await
+            }
+            None => Ok(agent::handle::SubagentPromptContext::default()),
+        }
+    }
+
+    async fn render_system_prompt_for_target(
+        &self,
+        target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::settings::SettingsError,
+    > {
+        match self.orchestrator.upgrade() {
+            Some(orchestrator) => {
+                orchestrator
+                    .assemble_default_system_prompt_for_target_preview(target)
+                    .await
+            }
+            None => Ok("".into()),
+        }
+    }
+
     async fn render_default_system_prompt(
         &self,
     ) -> Result<
@@ -6273,6 +6323,8 @@ fn registry_skill_listing_provider_with_sources(
                     },
                 )
                 .collect::<Vec<_>>();
+            let display_names =
+                orchestrator::prompt::skill_listing::NativeDisplayNameResolver::new(&full_catalog);
             let entries = commands
                 .into_iter()
                 // Native `getSkillToolCommands`: preserve the registry's
@@ -6309,10 +6361,7 @@ fn registry_skill_listing_provider_with_sources(
                             .as_ref()
                             .map_or(0.0, |snapshot| snapshot.priority_for_command(&c.name)),
                     );
-                    entry.display_name = orchestrator::prompt::skill_listing::native_display_name(
-                        &entry,
-                        &full_catalog,
-                    );
+                    entry.display_name = display_names.display_name(&entry);
                     let listing_mode = settings.listing_mode_for_command(c, &entry);
                     if matches!(
                         listing_mode,

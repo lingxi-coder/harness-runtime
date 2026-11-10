@@ -55,8 +55,8 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     generated_builtin_result, generated_builtin_schema, source_text_projection,
-    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
-    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    source_text_projection_units, CoercedInput, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
     ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
@@ -236,6 +236,9 @@ pub struct AgentToolInput {
     /// Optional configured provider profile for the model override.
     #[serde(default)]
     pub model_profile: Option<String>,
+    /// Explicit reasoning level for this launch; forks inherit the parent's effort.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// `run_in_background?` — optional (AgentTool.tsx:87). Carried; background
     /// dispatch is handled by the host runtime / coordinator.
     #[serde(default)]
@@ -360,6 +363,16 @@ fn parse_agent_tool_input(source: &Utf16JsonProjection) -> Result<AgentToolInput
         subagent_type: optional_string("subagent_type")?,
         model: optional_string("model")?,
         model_profile: optional_string("model_profile")?,
+        effort: match root.get_property("effort") {
+            None => None,
+            Some(value) => {
+                let level = value.as_str().ok_or(())?;
+                if !lingxi_core::host::effort::LEVELS.contains(&level) {
+                    return Err(());
+                }
+                Some(level.to_owned())
+            }
+        },
         run_in_background: optional_bool("run_in_background")?,
         name: optional_string("name")?,
         isolation: optional_string("isolation")?,
@@ -442,26 +455,53 @@ fn drop_coordinator_hidden_builtins(
     }
 }
 
-/// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
-/// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
-/// object carrying [`lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
-/// (the pool spawner's sentinel wrapper); `None` for a plain nested-activity
-/// line, which never parses as such an object.
-fn decode_forward_subagent_message(line: &str) -> Option<Value> {
-    let parsed: Value = serde_json::from_str(line).ok()?;
-    parsed
-        .get(lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
-        .cloned()
+enum ForwardedSubagentProgress {
+    Message(Value),
+    Tombstone { message: Value, display_only: bool },
 }
 
+/// Parse each private progress envelope once and move its owned payload out.
+fn decode_forward_subagent_progress(line: &str) -> Option<ForwardedSubagentProgress> {
+    let Value::Object(mut parsed) = serde_json::from_str(line).ok()? else {
+        return None;
+    };
+    use lingxi_core::host::subagent_spawn::{
+        FORWARD_SUBAGENT_MESSAGE_SENTINEL, FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL,
+    };
+    if let Some(Value::Object(payload)) =
+        parsed.get_mut(FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL)
+    {
+        if let Some(display_only) = payload.get("display_only").and_then(Value::as_bool) {
+            if let Some(message) = payload.remove("message") {
+                return Some(ForwardedSubagentProgress::Tombstone {
+                    message,
+                    display_only,
+                });
+            }
+        }
+    }
+    parsed
+        .remove(FORWARD_SUBAGENT_MESSAGE_SENTINEL)
+        .map(ForwardedSubagentProgress::Message)
+}
+
+#[cfg(test)]
+fn decode_forward_subagent_message(line: &str) -> Option<Value> {
+    match decode_forward_subagent_progress(line)? {
+        ForwardedSubagentProgress::Message(message) => Some(message),
+        ForwardedSubagentProgress::Tombstone { .. } => None,
+    }
+}
+
+#[cfg(test)]
 fn decode_forward_subagent_tombstone(line: &str) -> Option<(Value, bool)> {
-    let parsed: Value = serde_json::from_str(line).ok()?;
-    let payload = parsed.get(
-        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL,
-    )?;
-    let message = payload.get("message")?.clone();
-    let display_only = payload.get("display_only")?.as_bool()?;
-    Some((message, display_only))
+    match decode_forward_subagent_progress(line)? {
+        ForwardedSubagentProgress::Tombstone {
+            message,
+            display_only,
+        } => Some((message, display_only)),
+        ForwardedSubagentProgress::Message(_) => None,
+    }
 }
 
 /// Unicode `Pd` (dash punctuation) membership test for [`normalize_agent_type`].
@@ -540,8 +580,12 @@ fn validate_agent_name(name: &str) -> Result<(), String> {
         return Err(reserved_agent_name_message());
     }
     let normalized = name.to_ascii_lowercase();
-    if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized) {
-        return Err("name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly".into());
+    if matches!(
+        normalized.as_str(),
+        "main" | "team-lead" | "user" | "system"
+    ) || reserved_agent_id_shape(&normalized)
+    {
+        return Err(AGENT_RESERVED_NAME_MESSAGE.into());
     }
     Ok(())
 }
@@ -575,6 +619,69 @@ fn reserved_agent_id_shape(name: &str) -> bool {
 /// replace the complete model/profile selection.
 pub(crate) const AGENT_MODEL_PARAM_DESCRIPTION: &str = "Optional catalog model ID, configured alias, or profile-qualified model (\"profile/model\") for this agent. Takes precedence over the agent definition's model and the configured default subagent model. A configured deployment model override can replace this model and profile. If omitted, uses the agent definition's model, else the configured default or the parent model. Unqualified selections prefer the parent's provider profile unless model_profile is specified. Ignored for subagent_type: \"fork\" — forks always inherit the parent model and profile.";
 const AGENT_MODEL_PROFILE_PARAM_DESCRIPTION: &str = "Optional configured provider profile for the model selection; requires model. Omit it to prefer the parent's profile for an unqualified model, or specify the profile in model as \"profile/model\". Ignored for subagent_type: \"fork\" — forks always inherit the parent model and profile.";
+
+const AGENT_EFFORT_PARAM_DESCRIPTION: &str = "Reasoning effort for this agent. Set this ONLY when the user, or instructions such as LINGXI.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort.";
+const AGENT_RESERVED_NAME_MESSAGE: &str = "name must not be a reserved name (\"main\", \"team-lead\", \"user\" or \"system\", in any spelling) or have the shape of an agent id — those already address an agent directly";
+
+fn project_agent_effort_schema(schema: &mut Value, fork_enabled: bool, effort_fixed: bool) {
+    let props = schema["properties"]
+        .as_object_mut()
+        .expect("Agent object schema");
+    if effort_fixed {
+        props.remove("effort");
+    } else if fork_enabled {
+        props["effort"]["description"] = Value::String(format!(
+            "{AGENT_EFFORT_PARAM_DESCRIPTION} Ignored for subagent_type: \"fork\": a fork runs at your own effort."
+        ));
+    }
+}
+
+fn coerce_agent_effort_input(input: &Utf16JsonProjection) -> Option<CoercedInput> {
+    if !matches!(input.string_at("/effort"), Some("lower" | "higher")) {
+        return None;
+    }
+    let mut input = input.clone();
+    input.remove_field("effort").ok()?;
+    Some(CoercedInput {
+        input,
+        shape_class: "drop_relative_effort".into(),
+    })
+}
+
+fn caller_has_tool(ctx: &ToolUseContext, name: &str) -> bool {
+    if let Some(names) = &ctx.available_tool_names {
+        return names
+            .iter()
+            .any(|candidate| candidate.string_at("") == Some(name));
+    }
+    ctx.subagent_registry
+        .as_ref()
+        .is_some_and(|registry| registry.find_by_name(name).is_some())
+}
+
+fn fork_context_for_launch(
+    is_fork: bool,
+    prompt: &Utf16JsonProjection,
+    ctx: &ToolUseContext,
+    parent_cwd: &std::path::Path,
+    worktree: Option<&lingxi_core::host::worktree::WorktreeHandle>,
+) -> Option<Vec<lingxi_core::types::ConversationMessage>> {
+    if !is_fork {
+        return None;
+    }
+    let mut messages =
+        lingxi_core::host::fork_subagent::build_forked_context(prompt, &ctx.messages);
+    if let Some(worktree) = worktree {
+        messages.push(lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            lingxi_core::host::fork_subagent::build_worktree_notice(
+                &parent_cwd.to_string_lossy(),
+                &worktree.path.to_string_lossy(),
+            ),
+        ));
+    }
+    Some(messages)
+}
 
 /// The coordinator-mode suffix `G4o()` appends to
 /// [`AGENT_MODEL_PARAM_DESCRIPTION`] (`xi()?…:""`, @3573581 / @3573661).
@@ -628,6 +735,11 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "model_profile": {
                 "type": "string",
                 "description": AGENT_MODEL_PROFILE_PARAM_DESCRIPTION
+            },
+            "effort": {
+                "type": "string",
+                "enum": lingxi_core::host::effort::LEVELS,
+                "description": AGENT_EFFORT_PARAM_DESCRIPTION
             },
             "run_in_background": {
                 "type": "boolean",
@@ -764,6 +876,19 @@ static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                     "usage": usage,
                     "worktreePath": { "type": "string" },
                     "worktreeBranch": { "type": "string" },
+                    "canContinueAgent": { "type": "boolean" },
+                    "taskCalls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "enum": ["TaskCreate", "TaskUpdate"] },
+                                "input": {},
+                                "result": { "type": "string" }
+                            },
+                            "required": ["name", "result"]
+                        }
+                    },
                     "harnessNoteCount": { "type": "number" },
                     "harnessTailCount": { "type": "number" },
                     "harnessSectionHash": { "type": "string" }
@@ -777,7 +902,7 @@ static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "type": "object",
                 "properties": {
                     "status": { "const": "async_launched" },
-                    "isAsync": { "type": "boolean" },
+                    "isAsync": { "const": true },
                     "agentId": { "type": "string", "description": "The ID of the async agent" },
                     "description": { "type": "string", "description": "The description of the task" },
                     "resolvedModel": { "type": "string", "description": "Model in use at the backgrounding transition (a pre-background swap is reflected here)" },
@@ -788,7 +913,9 @@ static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                     },
                     "prompt": { "type": "string", "description": "The prompt for the agent" },
                     "outputFile": { "type": "string", "description": "Path to the output file for checking agent progress" },
-                    "canReadOutputFile": { "type": "boolean", "description": "Whether the calling agent has Read/Bash tools to check progress" }
+                    "canReadOutputFile": { "type": "boolean", "description": "Whether the calling agent has Read/Bash tools to check progress" },
+                    "canContinueAgent": { "type": "boolean" },
+                    "sharesCwd": { "type": "boolean" }
                 },
                 "required": ["status", "agentId", "description", "prompt", "outputFile"]
             },
@@ -1187,43 +1314,52 @@ struct BackgroundDecision {
     is_coordinator: bool,
     /// `callerIsInProcessTeammate`.
     caller_is_in_process_teammate: bool,
+    /// Nested ordinary worker in a headless session (`kn` in 2.1.319).
+    caller_is_headless_subagent: bool,
+    /// Fork background capability, excluding teammates and headless children.
+    force_async: bool,
     /// `backgroundTasksDisabled` — the only negative gate on the whole group.
     background_tasks_disabled: bool,
 }
 
-/// `vBo`'s `shouldRunAsync` for a LOCAL spawn (2.1.266 @2957xxx):
-///
-/// ```js
-/// let d=e.isCoordinator&&!o||e.forceAsync||!o&&r!==!1;
-/// let y=r===!0||n.background===!0||!Pw(n)&&d;
-/// return {…, shouldRunAsync: E||y&&!e.backgroundTasksDisabled}
-/// ```
-///
-/// (`E` is the remote-launch arm, which the port does not have.)
-///
-/// The two EXPLICIT arms — an explicit `run_in_background: true` and a
-/// definition's `background: true` — sit outside the `!Pw(n)` factor, so they
-/// still background the built-in web-fetch agent; only the implicit default
-/// does not.
-///
-/// ⛔ `e.forceAsync` (`L5()&&!Le`, the raw fork FEATURE flag) is NOT modeled.
-/// The binary backgrounds every spawn once fork is enabled, but the port's fork
-/// path is synchronous end to end — the parent's rendered system prompt and the
-/// fork context messages are threaded onto the request the SYNC dispatch builds
-/// (`fork_threads_parent_system_prompt_onto_request`,
-/// `fork_gate_on_explicit_fork_takes_fork_path`), and `dispatch_async` has no
-/// equivalent. Adding the disjunct before the async fork path exists would send
-/// forks down a route that drops their inherited context. It only changes the
-/// answer for an explicit `run_in_background: false`, which the schema does not
-/// advertise while fork is on.
+/// Claude Code 2.1.319 `Gr` local background decision. The public call
+/// boundary separately rejects nested teammate background requests. Headless
+/// children suppress the implicit default; explicit and definition background
+/// choices remain independent. Fork capability may force asynchronous launch.
 fn should_run_in_background(d: BackgroundDecision) -> bool {
-    let auto_background =
-        !d.caller_is_in_process_teammate && (d.is_coordinator || d.wants_background != Some(false));
+    let nested = d.caller_is_in_process_teammate || d.caller_is_headless_subagent;
+    let auto_background = (d.is_coordinator && !d.caller_is_in_process_teammate)
+        || d.force_async
+        || (!nested && d.wants_background != Some(false));
     (d.wants_background == Some(true)
         || d.definition_background
         || (!d.is_builtin_web_fetch && auto_background))
         && !d.background_tasks_disabled
-        && !d.caller_is_in_process_teammate
+}
+
+fn render_async_model_content(
+    agent_id_str: &str,
+    output_file: &str,
+    can_read_output_file: bool,
+    can_continue_agent: bool,
+) -> String {
+    let continuation = if can_continue_agent {
+        format!(" Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.")
+    } else {
+        String::new()
+    };
+    let prefix = format!(
+        "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user.{continuation})\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
+    );
+    let tail = if can_read_output_file && !output_file.is_empty() {
+        format!(
+            "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.",
+            output_file
+        )
+    } else {
+        "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
+    };
+    format!("{prefix}\n{tail}")
 }
 
 fn async_launch_result(
@@ -1233,19 +1369,9 @@ fn async_launch_result(
     description: &Utf16JsonProjection,
     resolved_model: &str,
     can_read_output_file: bool,
+    can_continue_agent: bool,
 ) -> ToolCallResult {
     let agent_id_str = launch.agent_id.as_uuid().to_string();
-    let prefix = format!(
-        "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
-    );
-    let tail = if can_read_output_file {
-        format!(
-            "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.",
-            launch.output_file
-        )
-    } else {
-        "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
-    };
     let mut data = generated_builtin_result(&json!({
         "isAsync": true,
         "status": "async_launched",
@@ -1255,6 +1381,7 @@ fn async_launch_result(
         "resolvedModel": resolved_model,
         "outputFile": launch.output_file,
         "canReadOutputFile": can_read_output_file,
+        "canContinueAgent": can_continue_agent,
     }));
     data.set_field("prompt", prompt.clone())
         .expect("generated async Agent result is an object");
@@ -1266,7 +1393,12 @@ fn async_launch_result(
     }
     ToolCallResult {
         data,
-        model_content: Some(source_text_projection(&format!("{prefix}\n{tail}"))),
+        model_content: Some(source_text_projection(&render_async_model_content(
+            &agent_id_str,
+            &launch.output_file,
+            can_read_output_file,
+            can_continue_agent,
+        ))),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
@@ -1275,10 +1407,17 @@ fn async_launch_result(
     }
 }
 
+#[cfg(test)]
+#[path = "contract_319_test.rs"]
+mod contract_319_test;
+
 #[path = "foreground_task.rs"]
 mod foreground_task;
 
-use lingxi_core::host::subagent_output::max_turns_harness_note;
+#[path = "result_framing.rs"]
+mod result_framing;
+
+use lingxi_core::host::subagent_output::max_turns_harness_note_with_continuation;
 
 /// `N2n(e)` (@3530xxx) reduced to the shape the port's runner publishes: the
 /// max-turns fall-through is the only completion that stamps
@@ -1291,7 +1430,7 @@ fn max_turns_reached_from_result(
         return None;
     }
     let value = result.get_property("max_turns")?.as_number()?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
+    if !value.is_finite() || value <= 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
         return None;
     }
     Some(value as u64)
@@ -1310,6 +1449,7 @@ fn max_turns_reached_from_result(
 /// claude joins the `tool_result` content blocks with `\n` when collapsing to a
 /// single string; LingXi's `model_content` IS that single string, so the text
 /// blocks (and the trailer block) are `\n`-joined here.
+#[allow(clippy::too_many_arguments)]
 fn render_completed_model_content(
     content_texts: &[Vec<u16>],
     agent_id: &str,
@@ -1318,15 +1458,26 @@ fn render_completed_model_content(
     total_tool_use_count: u64,
     total_duration_ms: u64,
     worktree_info: Option<(&str, &str)>,
+    can_continue_agent: bool,
+    framing: Option<(usize, usize, Option<&str>)>,
 ) -> Utf16JsonProjection {
     // contentOrMarker (AgentTool.tsx:1347-1350).
-    let content_or_marker: Vec<Vec<u16>> = if content_texts.is_empty() {
+    let mut content_or_marker: Vec<Vec<u16>> = if content_texts.is_empty() {
         vec!["(Subagent completed but returned no output.)"
             .encode_utf16()
             .collect()]
     } else {
         content_texts.to_vec()
     };
+    if let Some((note_count, tail_count, section_hash)) = framing {
+        let (note_count, tail_count) = if content_texts.is_empty() {
+            (0, 0)
+        } else {
+            (note_count, tail_count)
+        };
+        content_or_marker =
+            result_framing::frame_content(&content_or_marker, note_count, tail_count, section_hash);
+    }
 
     // One-shot built-ins skip the trailer when there is no worktree info
     // (AgentTool.tsx:1356). A KEPT worktree (the agent made changes) appends its
@@ -1334,10 +1485,15 @@ fn render_completed_model_content(
     // AgentTool.tsx:1368-1370) right before the `<usage>` block; `None` (no
     // worktree, or a clean one that was removed) keeps the trailer empty.
     let worktree_info_text = match worktree_info {
-        Some((path, branch)) => {
-            format!("\nworktreePath: {path}\nworktreeBranch: {branch}")
+        Some((path, branch)) if !path.is_empty() => {
+            let branch = if branch.is_empty() {
+                String::new()
+            } else {
+                format!("\nworktreeBranch: {branch}")
+            };
+            format!("\nworktreePath: {path}{branch}")
         }
-        None => String::new(),
+        _ => String::new(),
     };
     let is_one_shot = ONE_SHOT_BUILTIN_AGENT_TYPES.contains(&agent_type);
     if is_one_shot && worktree_info_text.is_empty() {
@@ -1349,8 +1505,13 @@ fn render_completed_model_content(
     // token key `total_tokens` → `subagent_tokens` (binary off 202120031;
     // confirmed live in subagent result trailers); the leaked TS still shows the
     // old `total_tokens`, so the binary is canonical here.
+    let continuation = if can_continue_agent {
+        format!(" (use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent)")
+    } else {
+        String::new()
+    };
     let trailer = format!(
-        "agentId: {agent_id} (use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent){worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
+        "agentId: {agent_id}{continuation}{worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
     );
     let mut blocks = content_or_marker;
     blocks.push(trailer.encode_utf16().collect());
@@ -1433,7 +1594,10 @@ pub struct AgentTool {
 /// ends. (`split_whitespace` does both; it tracks Unicode White_Space, matching
 /// JS `\s` for the typical ASCII description.)
 fn normalize_description_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    s.split(lingxi_core::host::effort::javascript_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn normalize_description_source(source: &Utf16JsonProjection) -> Utf16JsonProjection {
@@ -1460,8 +1624,7 @@ fn normalize_description_source(source: &Utf16JsonProjection) -> Utf16JsonProjec
         } else {
             (char::from_u32(u32::from(first)), 1)
         };
-        let is_whitespace =
-            character.is_some_and(|character| character.is_whitespace() || character == '\u{feff}');
+        let is_whitespace = character.is_some_and(lingxi_core::host::effort::javascript_whitespace);
         if is_whitespace {
             pending_space |= has_content;
         } else {
@@ -2208,33 +2371,9 @@ impl AgentTool {
 
     /// Construct.
     ///
-    /// Resolves the advertised-schema gate, binary `nul` @292883815:
-    ///
-    /// ```js
-    /// nul=we(()=>{let e=e9v().omit({cwd:!0});return WA()||z1e()?e.omit({run_in_background:!0}):e})
-    /// ```
-    ///
-    /// * `WA()` @286250643 = `wZe().backgroundTasksDisabled||CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
-    ///   — the host-scoped half is settable only by an in-process SDK host, which
-    ///   LingXi does not have, so the port reads the env kill-switch
-    ///   (`LINGXI_DISABLE_BACKGROUND_TASKS`) alone, exactly as every other
-    ///   `WA()`/`DT()` site here does.
-    /// * `z1e()` @286314232 = `Obp()!=="disabled"` — the RAW fork-subagent
-    ///   FEATURE flag. It is NOT `is_fork_subagent_enabled`: the coordinator /
-    ///   non-interactive conditioning lives in `CGf`'s `forkAvailable` argument
-    ///   (`i = o && r`), not in `z1e()` itself, and this schema builder has no
-    ///   session context at all. The port's stand-in for the missing GrowthBook
-    ///   flag is `LINGXI_FORK_SUBAGENT` (see
-    ///   [`lingxi_core::host::fork_subagent::is_fork_subagent_enabled`]), read raw here.
-    ///
-    /// The pre-2.1.238 port gated on `lingxi_core::host::subscription::is_pro_plan()`
-    /// instead of the fork flag. That was wrong in both directions: on a Pro plan
-    /// it hid `run_in_background` and forced synchronous dispatch, and with fork
-    /// enabled it kept advertising a field the binary omits. All four
-    /// `Cc()==="pro"` sites in 2.1.238 (284189548, 285093692, 292442005,
-    /// 302317223) are the plan predicate, the model-picker suffix, the
-    /// Agent-prompt discouragement block, and a statusline hint — none gates
-    /// background agents.
+    /// Native 2.1.319 `yr` hides the background parameter when background
+    /// execution is disabled or fork background capability is active. The same
+    /// session and headless gates also drive the dispatch decision.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
         let background_tasks_disabled = lingxi_core::host::env::is_env_truthy(
@@ -2242,9 +2381,15 @@ impl AgentTool {
                 .ok()
                 .as_deref(),
         );
-        let fork_feature_enabled = lingxi_core::host::env::is_env_truthy(
-            std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref(),
-        );
+        let is_coordinator = ctx
+            .coordinator_mode
+            .as_ref()
+            .is_some_and(|mode| mode.is_enabled());
+        let fork_feature_enabled =
+            lingxi_core::host::fork_subagent::is_fork_subagent_background_enabled(
+                is_coordinator,
+                lingxi_core::host::session_flags::effective_non_interactive_session(),
+            );
         let advertise_run_in_background = !background_tasks_disabled && !fork_feature_enabled;
         Self {
             ctx,
@@ -3207,63 +3352,55 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         }
     }
 
-    /// Format one agent catalog line for the tool prompt, matching claude-code's
-    /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
-    /// `getPrompt` (binary `bin/claude.exe` offset ~208233723). 2.1.193 ALWAYS
-    /// externalizes the agent catalog to a per-turn `agent_listing_delta`
-    /// `<system-reminder>` attachment (built by the orchestrator,
-    /// [`crate::PoolSubagentSpawner`]-fed); the tool DESCRIPTION carries only the
-    /// static pointer line "Available agent types are listed in <system-reminder>
-    /// messages in the conversation." — there is NO inline-catalog variant in the
-    /// description. The catalog always travels in the per-turn reminder.
-    ///
-    /// The body is MODEL-GATED, exactly as the binary's `if(m){…}` split
-    /// (`m = qk(model)` = `tool_api::dh_simple_system_prompt`): a lean-prompt
-    /// model gets the SHORT form (intro + `## When to use` + four terse
-    /// bullets); every classic model (sonnet / haiku / `claude-3-*` /
-    /// `opus-4-0..4-7`) — and an unknown/absent model, since `Dh(undefined)` is
-    /// `false` — gets the LONG form: `## When not to use`, `## Usage notes`,
-    /// `## Writing the prompt`, and the `Example usage:` `<example>` blocks.
-    ///
-    /// `is_coordinator` selects the slim coordinator prompt (intro only; the
-    /// coordinator system prompt already covers usage / examples).
-    ///
-    /// The `d` pro-plan gate (`vi()==="pro"`) IS modeled: a `pro` subscription
-    /// (read from the process-global [`lingxi_core::host::subscription::is_pro_plan`]) injects
-    /// the "Do not spawn agents unless the user asks" block after the catalog
-    /// pointer line and suppresses `## When to use`. It is inert until a
-    /// composition root resolves the plan via
-    /// [`lingxi_core::host::subscription::set_current_subscription`] (subscription resolution
-    /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
-    /// default).
-    ///
-    /// The `o` fork-subagent gate (`isForkSubagentEnabled` / 2.1.232 `SPe`) IS
-    /// modeled: when fork is enabled (`is_fork_subagent_enabled(is_coordinator,
-    /// is_non_interactive)`, reading the process-global
-    /// [`lingxi_core::host::session_flags::is_non_interactive_session`]), the subagent_type
-    /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
-    /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
-    /// qualifier. Default ON for interactive non-coordinator sessions; set
-    /// `LINGXI_FORK_SUBAGENT=0` to disable.
-    ///
-    /// Deferred vs binary (no behavioral surface here): the embedded-grep hint
-    /// swap (`S = VH()&&Sh()?…`, which only fires in sessions where Glob/Grep
-    /// are REMOVED — LingXi always registers them), teammate (`yB`/`_m`) notes,
-    /// and the remote-isolation (`V8t`) note. The
-    /// fabricated "# MCP Servers" note (NOT present in the 2.1.193 binary) is
-    /// removed; `_mcp_server_names` is retained for signature stability.
-    ///
-    /// `model` is the binary's `CGf({model:e,…})` argument, consumed by the
-    /// LEAN/LONG gate `m = qk(e)` (`tool_api::dh_simple_system_prompt`);
-    /// `general_purpose_available` is 2.1.238's `generalPurposeAvailable`
-    /// (`p7f(agents, allowedAgentTypes)`), computed by the caller from the
-    /// PRE-deny-filter listing exactly as the binary's `prompt({agents,…})`
-    /// wrapper does (@292885292).
+    #[cfg(test)]
     fn build_prompt(
         agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
         model: Option<&str>,
+        general_purpose_available: bool,
+    ) -> String {
+        Self::build_prompt_for_options(
+            agents,
+            mcp_server_names,
+            is_coordinator,
+            &PromptOptions {
+                model: model.map(str::to_owned),
+                ..PromptOptions::default()
+            },
+            general_purpose_available,
+        )
+    }
+
+    #[cfg(test)]
+    fn build_prompt_with_async_agents(
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+        async_agents_available: bool,
+        model: Option<&str>,
+        general_purpose_available: bool,
+    ) -> String {
+        Self::build_prompt_with_async_agents_for_options(
+            agents,
+            mcp_server_names,
+            is_coordinator,
+            async_agents_available,
+            &PromptOptions {
+                model: model.map(str::to_owned),
+                ..PromptOptions::default()
+            },
+            general_purpose_available,
+        )
+    }
+
+    /// Build a tool description from the owning request's resolved policy and
+    /// the host's actual agent capabilities.
+    fn build_prompt_for_options(
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+        options: &PromptOptions,
         general_purpose_available: bool,
     ) -> String {
         // Binary `l=!DT()&&!aZ()` @234652470.
@@ -3280,29 +3417,27 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
                 .ok()
                 .as_deref(),
         );
-        Self::build_prompt_with_async_agents(
+        Self::build_prompt_with_async_agents_for_options(
             agents,
             mcp_server_names,
             is_coordinator,
             async_agents_available,
-            model,
+            options,
             general_purpose_available,
         )
     }
 
-    /// `build_prompt` with the binary's `l` gate supplied explicitly, so tests
-    /// can exercise both arms without touching the process-global env.
-    fn build_prompt_with_async_agents(
+    /// Supply the background-agent capability explicitly for deterministic
+    /// rendering and tests.
+    fn build_prompt_with_async_agents_for_options(
         agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
-        model: Option<&str>,
+        options: &PromptOptions,
         general_purpose_available: bool,
     ) -> String {
-        // `re = PC({model, leanPrompt})` — the LEAN-prompt flag, computed ONCE
-        // and used for the SHORT/LONG arm split below, exactly as `H2n` does.
-        let lean = tool_api::dh_simple_system_prompt(model);
+        let lean = tool_api::prompt_uses_lean(options);
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
         // description carries only the static pointer line.
@@ -3347,7 +3482,9 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         // binary's unknown-plan default). The block is injected right after the
         // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
         // section — both per the binary's `${d}` / `${d?"":…}` placements.
-        let pro_block = if lingxi_core::host::subscription::is_pro_plan() {
+        let pro_block = if tool_api::prompt_uses_native(options)
+            && lingxi_core::host::subscription::is_pro_plan()
+        {
             // Binary `d=Pi()==="pro"?`\n\n**Do not spawn…`:""` — DOUBLE leading `\n`
             // (injected as `…conversation.${d}\n\n${subagent}`; od -c verified on
             // 2.1.195 @211615145).
@@ -3429,14 +3566,8 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         // the Agent tool prompt consults the SAME gate.
         let steer_is_default = lingxi_core::host::live_sessions::subagent_steer_is_default();
 
-        // LEAN/LONG split (binary `m = qk(e)`, the shared `Dh(model)` gate the
-        // port already implements as `tool_api::dh_simple_system_prompt`):
-        // `if(m){ …SHORT… } return …LONG…`. Every other ported tool consults it
-        // through `PromptOptions.model` (Read/Bash/Glob/Grep/Write/TodoWrite);
-        // the Agent tool used to discard `PromptOptions` entirely and always
-        // render the SHORT arm, so a sonnet / haiku / `claude-3-*` /
-        // `opus-4-0..4-7` session never saw `## When not to use`,
-        // `## Usage notes`, `## Writing the prompt`, or the `<example>` blocks.
+        // Preserve the synchronized native arms while allowing the resolved
+        // bundle to select generic Lean for a different model family.
         if lean {
             // ---- SHORT (lean) arm — binary `if(m){…}` ----
             //
@@ -3447,24 +3578,13 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
             // qJn()?…:""`, gate `tengu_neapolitan`) are gated OFF by default and
             // remain unmodeled.
             //
-            // `## When to use` is SUPPRESSED on the pro plan (binary
-            // `${y?"":g?…:…}`): when the pro-block is present, the
-            // discouragement replaces the when-to-use guidance. When the steer
-            // is NOT `"default"` the heading survives but the "Reach for this
-            // when…" lead sentence is dropped and `R` stands alone. The four
-            // bullets are NOT gated and always render.
-            const WHEN_TO_USE_SEARCH_DIRECTLY: &str = "For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.";
             let when_to_use = if !pro_block.is_empty() {
                 String::new()
-            } else if steer_is_default {
-                // Binary `${g?`\n\n## When to use\n\nReach…`}` — DOUBLE `\n`
-                // before the heading AND before the paragraph (od -c verified on
-                // 2.1.195).
-                format!(
-                    "\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. {WHEN_TO_USE_SEARCH_DIRECTLY}"
-                )
             } else {
-                format!("\n\n## When to use\n\n{WHEN_TO_USE_SEARCH_DIRECTLY}")
+                format!(
+                    "\n\n## When to use\n\n{}",
+                    include_str!("templates/when_to_use_319.md").trim_end_matches('\n')
+                )
             };
             // Fork addendum (binary `${A}`), after `## When to use`, before the
             // bullets.
@@ -4106,6 +4226,13 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             tool_invoker: invoker,
             budget,
         };
+        let fork_context_messages = fork_context_for_launch(
+            is_fork,
+            prompt_source,
+            ctx,
+            &ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd()),
+            agent_worktree.as_ref(),
+        );
         let request = SubagentSpawnRequest {
             agent_spawn_token: agent_spawn_token.clone(),
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
@@ -4128,7 +4255,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             team_name: None,
             // Permission mode belongs to the parent session and agent definition.
             mode: None,
-            isolation: if is_fork { None } else { effective_isolation },
+            isolation: effective_isolation,
             // The RESOLVED cwd (explicit `cwd` override, else the isolation
             // worktree's path — claude `cwd ?? worktreePath`); `None` on fork.
             cwd: resolved_cwd,
@@ -4136,14 +4263,39 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             // `getWorktreeResult` handed to the detached task): the local_agent
             // handler runs the terminal keep/cleanup judgment.
             worktree: agent_worktree,
-            fork_context_messages: None,
+            fork_context_messages,
             instruction_context: ctx.instruction_context.clone(),
-            fork_parent_system_prompt: None,
+            fork_parent_system_prompt: is_fork
+                .then(|| ctx.fork_parent_system_prompt.clone())
+                .flatten(),
+            fork_prompt_policy: is_fork
+                .then(|| {
+                    ctx.fork_prompt_policy.clone().or_else(|| {
+                        ctx.options
+                            .prompt_policy
+                            .as_ref()
+                            .map(|policy| policy.metadata())
+                    })
+                })
+                .flatten(),
+            fork_custom_system_prompt: is_fork
+                .then(|| ctx.fork_custom_system_prompt.clone())
+                .flatten(),
+            fork_append_system_prompt: is_fork
+                .then(|| ctx.fork_append_system_prompt.clone())
+                .flatten(),
+            fork_role_system_prompt: is_fork
+                .then(|| ctx.fork_role_system_prompt.clone())
+                .flatten(),
             // The Agent tool has no structured-output schema param.
             schema: None,
             structured_output_mode: StructuredOutputMode::default(),
             structured_output_parse_retries: 0,
-            effort: None,
+            effort: if is_fork {
+                ctx.fork_parent_effort.clone()
+            } else {
+                parsed.effort.clone().map(Value::String)
+            },
             // Thread the originating tool_use_id so the backgrounded agent's
             // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
             tool_use_id: ctx
@@ -4208,9 +4360,8 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 // claude `canReadOutputFile = tools.some(Read || Bash)`
                 // (AgentTool.tsx:753): whether the parent pool can read the
                 // output file. Approximated via the wired parent registry.
-                let can_read_output_file = ctx.subagent_registry.as_ref().is_some_and(|reg| {
-                    reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
-                });
+                let can_read_output_file =
+                    caller_has_tool(ctx, "Read") || caller_has_tool(ctx, "Bash");
                 Ok(async_launch_result(
                     launch,
                     None,
@@ -4218,6 +4369,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     &description_source,
                     &selected.resolved_model,
                     can_read_output_file,
+                    caller_has_tool(ctx, "SendMessage"),
                 ))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
@@ -4333,7 +4485,19 @@ impl Tool for AgentTool {
                 .coordinator_mode
                 .as_ref()
                 .is_some_and(|m| m.is_enabled());
-            generated_builtin_schema(&project_agent_input_schema(base, is_coordinator))
+            let mut schema = project_agent_input_schema(base, is_coordinator);
+            project_agent_effort_schema(
+                &mut schema,
+                lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
+                    is_coordinator,
+                    lingxi_core::host::session_flags::effective_non_interactive_session(),
+                ),
+                lingxi_core::host::effort::environment_override(
+                    std::env::var(branding::EFFORT_LEVEL_ENV).ok().as_deref(),
+                )
+                .is_some(),
+            );
+            generated_builtin_schema(&schema)
         })
     }
     fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
@@ -4359,11 +4523,17 @@ impl Tool for AgentTool {
             || lingxi_core::host::live_sessions::normalize_name(name),
             |spawner| spawner.normalize_teammate_recipient(name),
         );
-        if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized)
+        if matches!(
+            normalized.as_str(),
+            "main" | "team-lead" | "user" | "system"
+        ) || reserved_agent_id_shape(&normalized)
         {
-            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"})));
+            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":["name"],"message":AGENT_RESERVED_NAME_MESSAGE})));
         }
         issues
+    }
+    fn coerce_input(&self, input: &Utf16JsonProjection) -> Option<CoercedInput> {
+        coerce_agent_effort_input(input)
     }
     fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(if self.fusion_services.is_some() {
@@ -4513,11 +4683,11 @@ impl Tool for AgentTool {
         // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
         // web-fetch agent for a coordinator session.
         drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
-        let prompt = Self::build_prompt(
+        let prompt = Self::build_prompt_for_options(
             &agents,
             &mcp_server_names,
             is_coordinator,
-            opts.model.as_deref(),
+            opts,
             general_purpose_available,
         );
         // The catalog rows here are host-parsed UTF-8 definitions and the
@@ -4717,13 +4887,19 @@ impl Tool for AgentTool {
         // The gate (`is_fork_subagent_enabled`) is off in coordinator mode.
         // `is_coordinator` is read LIVE from the `coordinator_mode` seam on
         // `BuiltinToolContext` (`None` ⇒ not coordinator). Headless is honored
-        // via `ctx.options.is_non_interactive_session` unless the env override
-        // is explicitly true.
+        // via the owning session's mode, independently of a background caller's
+        // non-interactive permission-prompt flag.
         let is_coordinator = self
             .ctx
             .coordinator_mode
             .as_ref()
             .is_some_and(|m| m.is_enabled());
+        let session_is_non_interactive = ctx
+            .options
+            .session_interactive
+            .map_or(ctx.options.is_non_interactive_session, |interactive| {
+                !interactive
+            });
         let wants_fork = parsed
             .subagent_type
             .as_deref()
@@ -4731,7 +4907,7 @@ impl Tool for AgentTool {
         let is_fork = wants_fork
             && lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
                 is_coordinator,
-                ctx.options.is_non_interactive_session,
+                session_is_non_interactive,
             );
 
         // Recursion guard (claude `AgentTool.tsx:332-334`): fork children keep the
@@ -5660,6 +5836,21 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // only an explicit `run_in_background: true`, or `background: true` in a
         // definition, still can. The two explicit arms stay outside the factor,
         // exactly as the binary has them.
+        let fork_enabled = lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
+            is_coordinator,
+            session_is_non_interactive,
+        );
+        let caller_is_headless_subagent = fork_enabled
+            && ctx.agent_id.is_some()
+            && !caller_is_in_process_teammate
+            && session_is_non_interactive;
+        let force_async = fork_enabled
+            && lingxi_core::host::fork_subagent::is_fork_subagent_background_enabled(
+                is_coordinator,
+                session_is_non_interactive,
+            )
+            && !caller_is_in_process_teammate
+            && !caller_is_headless_subagent;
         let mut run_in_background = should_run_in_background(BackgroundDecision {
             wants_background: parsed.run_in_background,
             definition_background: selected.background,
@@ -5670,6 +5861,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .as_ref()
                 .is_some_and(|m| m.is_enabled()),
             caller_is_in_process_teammate,
+            caller_is_headless_subagent,
+            force_async,
             background_tasks_disabled,
         });
         // Claude's `agent.spawn` Mod chain is two-phase: `next(e)` first hands
@@ -5854,6 +6047,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                             .as_ref()
                             .is_some_and(|m| m.is_enabled()),
                         caller_is_in_process_teammate,
+                        caller_is_headless_subagent,
+                        force_async,
                         background_tasks_disabled,
                     });
                 }
@@ -5953,6 +6148,12 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 ctx.depth + 1,
             )
         });
+        if caller_is_in_process_teammate && run_in_background {
+            self.release_spawn_reservation();
+            return Err(ToolError::InvalidInput(
+                "In-process teammates cannot spawn background agents; a plugin's agent.spawn hook backgrounded this one.".into(),
+            ));
+        }
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -5983,14 +6184,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // the `getWorktreeResult` closure to the task — see `dispatch_async`).
         // The model-facing `isolation` argument wins over the definition's
         // frontmatter; omitted args inherit `SelectedAgentMeta.isolation`.
-        let effective_isolation = if is_fork {
-            None
-        } else {
-            parsed
-                .isolation
-                .clone()
-                .or_else(|| selected.isolation.clone())
-        };
+        let effective_isolation = parsed
+            .isolation
+            .clone()
+            .or_else(|| selected.isolation.clone());
         // claude 2.1.238 @292890415, immediately after `z = s ?? G.isolation`:
         //
         // ```js
@@ -6099,22 +6296,13 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // directive text is already the trailing block, so on the fork path
         // `request.prompt` is unused as a seed (the spawner seeds an empty
         // prompt_messages — see handle.rs spawn note (A)).
-        let fork_context_messages: Option<Vec<lingxi_core::types::ConversationMessage>> = if is_fork
-        {
-            let fork_msgs = lingxi_core::host::fork_subagent::build_forked_context(
-                &prompt_source,
-                &ctx.messages,
-            );
-            // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
-            // runs in an isolated worktree, claude appends
-            // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
-            // fork prefix. LingXi's fork path deliberately carries no
-            // teammate/isolation/cwd overrides (see the request fields below), so
-            // there is no worktree to notice here — do NOT fabricate one.
-            Some(fork_msgs)
-        } else {
-            None
-        };
+        let fork_context_messages = fork_context_for_launch(
+            is_fork,
+            &prompt_source,
+            &ctx,
+            &ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd()),
+            agent_worktree.as_ref(),
+        );
 
         let request = SubagentSpawnRequest {
             agent_spawn_token: agent_spawn_token.clone(),
@@ -6152,11 +6340,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             team_name: None,
             // Permission mode belongs to the parent session and agent definition.
             mode: None,
-            isolation: if is_fork {
-                None
-            } else {
-                effective_isolation.clone()
-            },
+            isolation: effective_isolation.clone(),
             // The RESOLVED cwd (the explicit `cwd` override, else the worktree
             // path for `isolation:"worktree"`) — the spawner sets
             // `SubagentContext.cwd` from this so the agent's tools operate there.
@@ -6180,10 +6364,33 @@ Use /mcp to configure and authenticate the required MCP servers.",
             } else {
                 None
             },
+            fork_prompt_policy: is_fork
+                .then(|| {
+                    ctx.fork_prompt_policy.clone().or_else(|| {
+                        ctx.options
+                            .prompt_policy
+                            .as_ref()
+                            .map(|policy| policy.metadata())
+                    })
+                })
+                .flatten(),
+            fork_custom_system_prompt: is_fork
+                .then(|| ctx.fork_custom_system_prompt.clone())
+                .flatten(),
+            fork_append_system_prompt: is_fork
+                .then(|| ctx.fork_append_system_prompt.clone())
+                .flatten(),
+            fork_role_system_prompt: is_fork
+                .then(|| ctx.fork_role_system_prompt.clone())
+                .flatten(),
             schema: None,
             structured_output_mode: StructuredOutputMode::default(),
             structured_output_parse_retries: 0,
-            effort: None,
+            effort: if is_fork {
+                ctx.fork_parent_effort.clone()
+            } else {
+                parsed.effort.clone().map(Value::String)
+            },
             // Keep the model's tool-use identity across both launch paths so
             // foreground registration and Mod `agent.spawn` name the same call.
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
@@ -6245,20 +6452,17 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // payload so the turn loop's stream-json sink can re-emit it with
                 // `parent_tool_use_id` set. Everything else is a plain nested
                 // activity line.
-                let data = if let Some((message, display_only)) =
-                    decode_forward_subagent_tombstone(&line)
-                {
-                    serde_json::json!({
-                        "forward_server_fallback_tombstone": {
-                            "message": message,
-                            "display_only": display_only,
-                        }
-                    })
-                } else {
-                    decode_forward_subagent_message(&line).map_or_else(
-                        || serde_json::json!({ "subagent_activity": line }),
-                        |message| serde_json::json!({ "forward_subagent_message": message }),
-                    )
+                let data = match decode_forward_subagent_progress(&line) {
+                    Some(ForwardedSubagentProgress::Tombstone {
+                        message,
+                        display_only,
+                    }) => serde_json::json!({
+                        "forward_server_fallback_tombstone": { "message": message, "display_only": display_only }
+                    }),
+                    Some(ForwardedSubagentProgress::Message(message)) => {
+                        serde_json::json!({ "forward_subagent_message": message })
+                    }
+                    None => serde_json::json!({ "subagent_activity": line }),
                 };
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
@@ -6318,9 +6522,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                             spawner.register_name(name, launch.agent_id).await;
                         }
                     }
-                    let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| {
-                        reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
-                    });
+                    let can_read = caller_has_tool(&ctx, "Read") || caller_has_tool(&ctx, "Bash");
                     return Ok(async_launch_result(
                         launch,
                         Some(task_id),
@@ -6328,6 +6530,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         &description_source,
                         &selected.resolved_model,
                         can_read,
+                        caller_has_tool(&ctx, "SendMessage"),
                     ));
                 }
             }
@@ -6493,6 +6696,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     Self::emit_subagent_output_flagged(&bus, &agent_id.to_string(), &sanitized)
                         .await;
                 }
+                let mut harness_note_count = usize::from(sanitized.any_reportable());
                 let mut content_texts = sanitized.content;
                 // `bft`'s harness notes (`Le`) are unshifted in front of the
                 // report before anything else reads the content, so they reach
@@ -6502,12 +6706,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // told the run produced nothing, with no hint that it had merely
                 // run out of turns and could be continued.
                 if let Some(limit) = max_turns_reached_from_result(&content) {
-                    let note = max_turns_harness_note(
+                    let note = max_turns_harness_note_with_continuation(
                         limit,
                         &effective_type,
                         !raw_content_texts.is_empty(),
+                        caller_has_tool(&ctx, "SendMessage"),
                     );
                     content_texts.insert(0, note.encode_utf16().collect());
+                    harness_note_count += 1;
                 }
                 // `EZe` — the auto-mode classifier's second consumer. A
                 // subagent's hand-back is agent-authored untrusted output that
@@ -6548,8 +6754,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
                                 .string_units("")
                                 .expect("handoff warning is a root string"),
                         );
+                        harness_note_count += 1;
                     }
                 }
+                let harness_section_hash = result_framing::section_hash(&content_texts);
                 let content_blocks: Vec<Utf16JsonProjection> = content_texts
                     .iter()
                     .map(|units| {
@@ -6577,6 +6785,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     worktree_result
                         .as_ref()
                         .map(|(p, b)| (p.as_str(), b.as_str())),
+                    caller_has_tool(&ctx, "SendMessage"),
+                    Some((harness_note_count, 0, Some(&harness_section_hash))),
                 );
 
                 // claude completed return shape (AgentTool.tsx:1253-1260 +
@@ -6610,6 +6820,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     "totalDurationMs": total_duration_ms,
                     "totalTokens": total_tokens,
                     "usage": {},
+                    "canContinueAgent": caller_has_tool(&ctx, "SendMessage"),
+                    "harnessNoteCount": harness_note_count,
+                    "harnessTailCount": 0,
+                    "harnessSectionHash": harness_section_hash,
                     // Internal hook ownership markers consumed by the
                     // orchestrator chokepoint; model content stays unchanged.
                     "subagentHooksFired": true,

@@ -1,14 +1,8 @@
-//! Byte locks on the prompt surface this port assembles.
+//! Production prompt byte locks and source-vector projection checks.
 //!
-//! Deliberately NOT named after a version. Every digest below is a hash of
-//! LingXi's OWN normalized output, so it catches unintended drift and says
-//! nothing about which oracle release the text matches — the oracle-derived
-//! truth lives in the per-sentence assertions in
-//! `orchestrator/src/prompt/body_sections.rs` and `env_block.rs`. The values
-//! have been re-based four times now (see the PROVENANCE block below); a
-//! version in the file name would have gone stale at the first of them, and
-//! did: these tests spent three re-bases inside `parity_claude_2_1_220.rs`
-//! asserting 2.1.267 content.
+//! Digests track LingXi's normalized output. Fixed-artifact native fixtures and
+//! source oracles independently establish upstream parity. Each rebase records
+//! its cause in the provenance block below.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +49,8 @@ fn prompt_tool_names() -> Vec<String> {
 
 fn prompt_context(model: &str, cwd: PathBuf, memory_dir: PathBuf) -> SystemPromptContext {
     SystemPromptContext {
+        native_system_turns: None,
+        prompt_policy: None,
         cwd,
         platform: "darwin".to_string(),
         model: model.to_string(),
@@ -294,6 +290,16 @@ impl tool_api::Tool for PromptAgentTool {
 /// change with no named cause is indistinguishable from the unintended drift
 /// these locks exist to catch.
 ///
+/// 2.1.319 synchronization (2026-11-09): all model and style locks move to
+/// the pinned artifact 1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd.
+/// Main-body and memory protocols changed; environment and model identity now
+/// travel in typed request ingress. Classic models can therefore share body
+/// hashes while their request identities remain distinct. Upstream 2.1.319 also
+/// retains proactive guidance with explicit output styles. These own-output
+/// locks were measured through production after the six complete native-body
+/// fixtures and source oracles passed; they do not replace that independent
+/// upstream evidence. The live test checks ingress on the actual mock request.
+///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
 /// spoof that private billing identity. This fixture uses no provider route
@@ -307,53 +313,53 @@ fn production_prompt_bodies_match_their_byte_locks() {
     let cases = [
         (
             "claude-fable-5-1",
-            10_442,
-            "321a0dc5abedf4c99a2a63a39f8a950c87ed21f66ed62bc93098dfe6a9bca5bc",
+            11_673,
+            "ceebcf08808be0cb794b1ee2c1432edc95e70c78a55120ac037e0e838ef61bf0",
         ),
         (
             "claude-haiku-4-5-20251001",
-            27_531,
-            "ca95b52c17e71163fe111875d5ce17693faf00c186775f3f09ad1ae2240d7c09",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
         (
             "claude-mythos-5-1",
-            10_444,
-            "59edba1d7761f0ff71eb0f629664d9e2d968beb30134e72f2c0aeda4a8572951",
+            10_986,
+            "caa7171ee4f05683f6d25cb83fd58c0890162cb801c2d81b7f3b1ab544784280",
         ),
         (
             "claude-opus-4-5",
-            27_515,
-            "9d2bd6aa81cccd4678f9466acab5919bb41bb1e6193586b2115d9ba3c2d95148",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
         (
             "claude-opus-4-6",
-            27_515,
-            "7e171ab72e680671dea567ccf1d0ccac8bf9819cc43e7c14a59efe04914ce15f",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
         (
             "claude-opus-4-7",
-            27_519,
-            "50845105872aff4f4b83ef915563282748f1f61e4195f044c69197a0b107825a",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
         (
             "claude-opus-4-8",
-            5_971,
-            "5970d3bf23bf4e9a4363900e51ca5303ada519fd961441095992955d0465e0e1",
+            5_425,
+            "835d85be520ccff6c38cd94fb8f5cab43443e8a74653abb0b844684f117a8496",
         ),
         (
             "claude-opus-5",
-            9_301,
-            "b89957b3af9694a5bb371527e60dd963bf69913fe37456bb97afcff13a8c7438",
+            8_875,
+            "19007d31ee05647ebefb1cdeb62c1bf8d78c11e7944a8708a1b610bd737979c6",
         ),
         (
             "claude-sonnet-4-6",
-            27_522,
-            "c7c420b349e953a0ae832f675e98bf022300d2227f4e4a187de71f265da3dfeb",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
         (
             "claude-sonnet-5",
-            27_519,
-            "3555fdf60684429183e0c2cd372f194e63db4e4cae28b24e95878a157b835a5d",
+            26_991,
+            "f411342e4bb96a9b94bb6f18ae45618e662497b0cf5ae806e75f3a8ff78c8b85",
         ),
     ];
 
@@ -393,24 +399,16 @@ fn production_prompt_bodies_match_their_byte_locks() {
         );
 
         let body = normalize_prompt_body(body_text, &cwd, &memory_dir);
-        assert_eq!(body.len(), expected_len, "{model}: body length drifted");
         let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        assert_eq!(body.len(), expected_len, "{model}: body length drifted");
         assert_eq!(digest, expected_sha, "{model}: normalized body drifted");
     }
 }
 
-/// Exercise the same live prompt builder used by real turns. The byte manifests
-/// above intentionally use a synthetic context so dynamic machine fields can be
-/// normalized deterministically; this test prevents that stable fixture from
-/// masking a broken composition path.
-///
-/// Its 14_601/`80dba21f…` byte lock shares the PROVENANCE block above
-/// `production_prompt_bodies_match_their_byte_locks` — read it
-/// before changing either value, and record WHY the number moved.
-/// The previous lock included `Darwin 24.6.0` because the normalizer used
-/// `OS version` instead of the emitted `OS Version`. Replacing only that
-/// machine-dependent value with `<OS_VERSION>` removes one byte; the production
-/// prompt is unchanged.
+/// Exercise the live builder and verify typed context on the real request.
+/// The body lock was rebased with the 2.1.319 synchronization documented above;
+/// environment, model identity and project instructions are checked separately
+/// in the captured request rather than assumed to be system-body suffixes.
 #[tokio::test]
 async fn live_orchestrator_prompt_uses_production_context() {
     use std::sync::Arc;
@@ -466,9 +464,18 @@ async fn live_orchestrator_prompt_uses_production_context() {
         interactive_session: true,
         ..OrchestratorConfig::default()
     };
+    let api = Arc::new(MockApiClient::new(vec![
+        orchestrator::test_support::mock_message_response(
+            vec![serde_json::from_value(serde_json::json!({
+                "type": "text", "text": "Done."
+            }))
+            .unwrap()],
+            Some("end_turn"),
+        ),
+    ]));
     let orchestrator = ConversationOrchestrator::new(
         config,
-        Arc::new(MockApiClient::new(Vec::new())),
+        api.clone(),
         Arc::new(registry),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
@@ -492,16 +499,16 @@ async fn live_orchestrator_prompt_uses_production_context() {
         .await
         .expect("production system prompt preview must succeed");
     assert!(
-        prompt.contains(&format!(" - Primary working directory: {}", cwd.display())),
-        "live cwd must come from the production prompt context"
+        !prompt.contains("Primary working directory:"),
+        "the preview body leaves environment facts in typed ingress"
     );
     assert!(
         prompt.contains("If you need the user to run a shell command themselves"),
         "interactive production prompt must include the ! command guidance"
     );
     assert!(
-        prompt.contains("The exact model ID is claude-sonnet-5."),
-        "live model must drive the production environment block"
+        !prompt.contains("The exact model ID is"),
+        "model identity is rendered by typed request ingress"
     );
     assert!(
         prompt.contains("Calling Agent with subagent_type: \"fork\" creates a fork"),
@@ -517,11 +524,22 @@ async fn live_orchestrator_prompt_uses_production_context() {
         "live memory provider must contribute through the production additional-context path"
     );
 
+    orchestrator
+        .run_turn("Verify the supplied context.")
+        .await
+        .unwrap();
+    let requests = api.captured_msgs().await;
+    assert_eq!(requests.len(), 1);
+    let request_context = serde_json::to_string(&requests[0]).unwrap();
+    assert!(request_context.contains(&format!("Primary working directory: {}", cwd.display())));
+    assert!(request_context.contains("The exact model ID is claude-sonnet-5."));
+    assert!(request_context.contains(memory_body));
+
     let normalized = normalize_live_prompt(&prompt, &cwd);
     let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    assert_eq!(normalized.len(), 14_601, "live prompt length drifted");
+    assert_eq!(normalized.len(), 14_274, "live prompt length drifted");
     assert_eq!(
-        digest, "80dba21fd57101276064ae42542b67805db7c7a8f3e42a81cd63a0dba8cdc28a",
+        digest, "c65f40d524d232641e107e8398d6a447450c14d7955507adad85acf5690278b1",
         "live normalized production prompt drifted"
     );
 }
@@ -539,23 +557,23 @@ fn production_output_style_bodies_match_their_byte_locks() {
         // cc2.1.270 built-ins this port had never shipped.
         (
             "Proactive",
-            10_455,
-            "42f817633fe318b5411275733e670555b0508c3894b4d5c3742b14a8b37fc460",
+            10_283,
+            "0ed9e8cef363da7794f59dd2971ad8e0fe14b73a75dde042d5892f66d2099787",
         ),
         (
             "Concise",
-            10_472,
-            "ae01b874c2384a31c722f5661db14c4eac3d26ed2cd219af6677c55051edd7eb",
+            10_300,
+            "7f0dfa4fd73f2428c329aed423bfeedbad43007354bcb403ec660b933a1a3f51",
         ),
         (
             "Explanatory",
-            10_312,
-            "3064865b24b6bf0f1e93efc45997b4ae5193b59828e40ea0c79bbc0445879b8c",
+            10_140,
+            "3c8af9089f234fd191378718c5661d719a223aad35359203ea89021e2c16b3ef",
         ),
         (
             "Learning",
-            14_188,
-            "3b8cf74ef28ee660139815cee4aab374fe71af5549b9e932b6a6b39a17a48913",
+            14_016,
+            "ad638f6be84002cabf40c7b00984418207c568ca661af5d3c7654f7fe96018da",
         ),
     ];
 
@@ -595,25 +613,25 @@ fn production_output_style_bodies_match_their_byte_locks() {
             .expect("brand header followed by the complete two-LF section separator");
 
         let body = normalize_prompt_body(body_text, &cwd, &memory_dir);
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
         assert_eq!(
             body.len(),
             expected_len,
             "{style_name}: body length drifted"
         );
         assert_eq!(
-            format!("{:x}", Sha256::digest(body.as_bytes())),
-            expected_sha,
+            digest, expected_sha,
             "{style_name}: normalized body drifted"
         );
         assert!(
-            !body.contains("When you have enough information to act"),
-            "{style_name}: explicit style must suppress act-don't-rederive"
+            body.contains("When you have enough information to act"),
+            "{style_name}: 2.1.319 retains proactive guidance with an explicit output style"
         );
     }
 }
 
 #[test]
-fn non_claude_models_keep_full_harness_without_claude_metadata_leakage() {
+fn non_claude_models_use_generic_lean_without_claude_metadata_leakage() {
     let context = prompt_context(
         "vendor-compat-claude-sonnet-5",
         PathBuf::from("/not-materialized"),
@@ -621,13 +639,20 @@ fn non_claude_models_keep_full_harness_without_claude_metadata_leakage() {
     );
     let prompt = assemble_system_prompt(&context);
 
-    assert!(prompt.contains("# System"));
-    assert!(prompt.contains("# Text output (does not apply to tool calls)"));
-    assert!(prompt.contains("# auto memory"));
+    assert!(prompt.contains("# Working with the user"));
+    assert!(prompt.contains("# Tools and actions"));
+    assert!(prompt.contains("# Memory"));
+    assert!(!prompt.contains("# auto memory"));
     assert!(!prompt.contains("# Communicating with the user"));
     assert!(!prompt.contains("The most recent Claude models are"));
     assert_eq!(
-        lingxi_core::host::model_capabilities::prompt_profile_for(&context.model),
-        lingxi_core::host::model_capabilities::PromptProfile::FullHarness
+        lingxi_core::host::prompt_policy::resolve_prompt_policy(
+            lingxi_core::host::prompt_policy::PromptTarget::for_model(
+                lingxi_core::host::session_context::ConversationMode::Code,
+                &context.model,
+            )
+        )
+        .bundle_id,
+        "generic-code-lean-v1"
     );
 }

@@ -1663,12 +1663,31 @@ impl ConversationOrchestrator {
             .await?;
         prepared_transcript.prepare_legacy().await;
         let prepared_plan_files = self.prepare_plan_file_identity(runtime.plan_slug.as_deref());
+        let restored_silent_clocks = runtime
+            .transcript_source
+            .as_ref()
+            .map(|source| {
+                let rows = source
+                    .expected_content
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<session::JsonlMessage>(line).ok())
+                    .filter(|row| {
+                        !row.is_sidechain && row.session_id == session_id.as_uuid().to_string()
+                    })
+                    .collect::<Vec<_>>();
+                crate::prompt::silent_turn::restore_silent_clocks(&rows, &history)
+            })
+            .unwrap_or_default();
         self.reset_session_scoped_runtime().await;
+        self.prompt_runtime
+            .install_silent_clocks(restored_silent_clocks);
         self.restore_prompt_suggestion_api_errors(runtime.api_error_message_ids.iter().copied());
         self.restore_response_usage(runtime.current_usage);
         self.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
+        self.prompt_runtime
+            .restore_prompt_snapshot_append_source(runtime.prompt_snapshot.as_ref());
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
         *self.prompt_runtime.prompt_snapshot_epoch.lock().await =
             Some(runtime.prompt_snapshot_epoch.unwrap_or(0));
@@ -2277,12 +2296,25 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // profile revision. Building a fresh prompt can call Mods, so do that
         // outside the transition gate and retry if a selection changed while
         // it was assembled.
-        let (history, origin_session_id, parent_sys, instruction_context, owner_profile) = loop {
+        let (
+            history,
+            origin_session_id,
+            parent_sys,
+            parent_prompt_policy,
+            instruction_context,
+            owner_profile,
+        ) = loop {
             let profile = self.conversation_profile().await;
-            let parent_sys = match self.current_turn_system_prompt().await {
-                Some(prompt) => prompt,
-                None => Self::system_prompt_source_text(
-                    &self.provider_side_query_system_prompt().await?,
+            let (parent_sys, parent_prompt_policy) = match self.current_turn_prompt_state().await {
+                Some(state) => state,
+                None => (
+                    Self::system_prompt_source_text(
+                        &self.provider_side_query_system_prompt().await?,
+                    ),
+                    self.current_prompt_policy()
+                        .await
+                        .ok()
+                        .map(|policy| policy.metadata()),
                 ),
             };
             let instruction_context = self.instruction_context_snapshot().await;
@@ -2300,6 +2332,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 history,
                 session_id,
                 parent_sys,
+                parent_prompt_policy,
                 instruction_context,
                 profile,
             );
@@ -2353,6 +2386,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
             fork_context_messages: Some(fork_msgs),
             instruction_context: Some(instruction_context),
             fork_parent_system_prompt: Some(parent_sys),
+            fork_prompt_policy: parent_prompt_policy,
+            fork_custom_system_prompt: self.config.system_prompt_override.clone(),
+            fork_append_system_prompt: self.effective_append_system_prompt(),
+            fork_role_system_prompt: self
+                .lifecycle_runtime
+                .main_thread_agent
+                .read()
+                .await
+                .as_ref()
+                .and_then(|agent| agent.system_prompt.clone()),
             schema: None,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
@@ -3574,14 +3617,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         while let Some((name, result)) = toggles.next().await {
             let outcome = match result {
                 Ok(None) => continue,
-                Ok(state @ Some(_)) => lingxi_core::host::McpToggleOutcome {
-                    name,
-                    state,
-                },
-                Err(_) => lingxi_core::host::McpToggleOutcome {
-                    name,
-                    state: None,
-                },
+                Ok(state @ Some(_)) => lingxi_core::host::McpToggleOutcome { name, state },
+                Err(_) => lingxi_core::host::McpToggleOutcome { name, state: None },
             };
             outcomes.push(outcome);
         }

@@ -1558,6 +1558,24 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         );
     }
 
+    #[test]
+    fn skill_prompt_variants_match_319_native_selector() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["skill"].as_array().unwrap() {
+            if case["coordinator"].as_bool().unwrap() {
+                continue;
+            }
+            let expected = format!("{}\nWhen a skill explicitly loads reference topics through `args`, calling it with a topic not yet loaded retrieves new material; do not repeat a topic already present.\n", case["body"].as_str().unwrap());
+            assert_eq!(
+                super::skill_prompt_for_rewrite(case["rewrite"].as_bool().unwrap()),
+                expected,
+            );
+        }
+    }
+
     // The tool produces provenance; its host owns actual activation.
     #[tokio::test]
     async fn invocation_does_not_register_before_host_admission() {

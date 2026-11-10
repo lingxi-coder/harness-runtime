@@ -52,6 +52,51 @@ struct CompiledInputSchema {
     index: boon::SchemaIndex,
 }
 
+fn schema_has_external_dependencies(schema: &serde_json::Value) -> bool {
+    fn builtin_draft(reference: &str) -> bool {
+        let reference = reference.strip_suffix('#').unwrap_or(reference);
+        let Some(path) = reference
+            .strip_prefix("https://")
+            .or_else(|| reference.strip_prefix("http://"))
+        else {
+            return false;
+        };
+        matches!(
+            path,
+            "json-schema.org/schema"
+                | "json-schema.org/draft/2020-12/schema"
+                | "json-schema.org/draft/2019-09/schema"
+                | "json-schema.org/draft-07/schema"
+                | "json-schema.org/draft-06/schema"
+                | "json-schema.org/draft-04/schema"
+        )
+    }
+    let mut pending = vec![schema];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, value) in object {
+                    if let Some(reference) = value.as_str() {
+                        match key.as_str() {
+                            "$ref" | "$dynamicRef" | "$recursiveRef"
+                                if !reference.is_empty() && !reference.starts_with('#') =>
+                            {
+                                return true
+                            }
+                            "$schema" if !builtin_draft(reference) => return true,
+                            _ => {}
+                        }
+                    }
+                    pending.push(value);
+                }
+            }
+            serde_json::Value::Array(values) => pending.extend(values),
+            _ => {}
+        }
+    }
+    false
+}
+
 fn compiled_input_schema(
     schema: &serde_json::Value,
 ) -> Option<std::sync::Arc<CompiledInputSchema>> {
@@ -62,13 +107,18 @@ fn compiled_input_schema(
     static CACHE: OnceLock<Mutex<VecDeque<(serde_json::Value, Arc<CompiledInputSchema>)>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
-    if let Some((_, compiled)) = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .find(|(key, _)| key == schema)
-    {
-        return Some(Arc::clone(compiled));
+    // External references and custom metaschemas can change independently of
+    // this root value. Compile them afresh, retaining ordinary local caches.
+    let cacheable = !schema_has_external_dependencies(schema);
+    if cacheable {
+        if let Some((_, compiled)) = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(key, _)| key == schema)
+        {
+            return Some(Arc::clone(compiled));
+        }
     }
     let mut schemas = Schemas::new();
     let mut compiler = Compiler::new();
@@ -84,6 +134,9 @@ fn compiled_input_schema(
         }
     };
     let compiled = Arc::new(CompiledInputSchema { schemas, index });
+    if !cacheable {
+        return Some(compiled);
+    }
     let mut guard = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -991,6 +1044,82 @@ mod tests {
         let changed = json!({"type": "object", "properties": {"x": {"const": 8}}, "required": ["x"]});
         assert!(validate_tool_input_schema(&changed, &json!({"x": 8})).is_ok());
         assert!(validate_tool_input_schema(&changed, &json!({"x": 7})).is_err());
+    }
+
+    #[test]
+    fn external_schema_references_observe_file_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("referenced.json");
+        let reference = url::Url::from_file_path(&file).unwrap().to_string();
+        for (keyword, draft) in [
+            ("$ref", "https://json-schema.org/draft/2020-12/schema"),
+            (
+                "$dynamicRef",
+                "https://json-schema.org/draft/2020-12/schema",
+            ),
+            (
+                "$recursiveRef",
+                "https://json-schema.org/draft/2019-09/schema",
+            ),
+        ] {
+            let mut schema = json!({"$schema": draft});
+            schema[keyword] = reference.clone().into();
+            std::fs::write(&file, r#"{"type":"string","enum":["old"]}"#).unwrap();
+            assert!(validate_rich_input_schema("External", &schema, &json!("old")).is_ok());
+            assert!(validate_rich_input_schema("External", &schema, &json!("new")).is_err());
+            std::fs::write(&file, r#"{"type":"string","enum":["new"]}"#).unwrap();
+            assert!(validate_rich_input_schema("External", &schema, &json!("old")).is_err());
+            assert!(validate_rich_input_schema("External", &schema, &json!("new")).is_ok());
+        }
+    }
+
+    #[test]
+    fn nested_relative_references_and_custom_metaschemas_are_not_cached() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("referenced.json");
+        let base = url::Url::from_file_path(directory.path().join("root.json")).unwrap();
+        let schema = json!({"$id": base.as_str(), "type":"object", "properties":{
+            "value":{"$ref":"referenced.json"}
+        }});
+        std::fs::write(&file, r#"{"const":"old"}"#).unwrap();
+        assert!(validate_rich_input_schema("External", &schema, &json!({"value":"old"})).is_ok());
+        std::fs::write(&file, r#"{"const":"new"}"#).unwrap();
+        assert!(validate_rich_input_schema("External", &schema, &json!({"value":"old"})).is_err());
+        assert!(validate_rich_input_schema("External", &schema, &json!({"value":"new"})).is_ok());
+
+        let meta = directory.path().join("meta.json");
+        let schema = json!({"$schema":url::Url::from_file_path(&meta).unwrap().as_str(),
+            "$ref":"#/definitions/value", "definitions":{"value":{"type":"string"}},
+            "const":"new"
+        });
+        std::fs::write(
+            &meta,
+            r#"{"$schema":"http://json-schema.org/draft-04/schema#"}"#,
+        )
+        .unwrap();
+        assert!(validate_tool_input_schema(&schema, &json!("old")).is_ok());
+        std::fs::write(
+            &meta,
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema"}"#,
+        )
+        .unwrap();
+        assert!(validate_tool_input_schema(&schema, &json!("old")).is_err());
+        assert!(validate_tool_input_schema(&schema, &json!("new")).is_ok());
+    }
+
+    #[test]
+    fn local_references_and_builtin_metaschemas_still_reuse_compiled_schemas() {
+        let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema#",
+            "$ref":"#/$defs/local", "$defs":{"local":{
+                "$id":"file:///virtual/local.json", "$ref":"#/$defs/value",
+                "$defs":{"value":{"type":"string","const":"inside"}}
+            }}
+        });
+        let first = compiled_input_schema(&schema).unwrap();
+        let second = compiled_input_schema(&schema).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(validate_tool_input_schema(&schema, &json!("inside")).is_ok());
+        assert!(validate_tool_input_schema(&schema, &json!("outside")).is_err());
     }
 
     #[test]

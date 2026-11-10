@@ -136,6 +136,7 @@ async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
         None,
         None,
         Some(scope),
+        false,
     );
     let release = async {
         probe.accounting_failed.acquire().await.unwrap().forget();

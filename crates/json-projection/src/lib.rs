@@ -1408,6 +1408,15 @@ pub struct JsonValueView<'a> {
 }
 
 impl<'a> JsonValueView<'a> {
+    /// Copy this value into its own flat projection. Work and temporary
+    /// storage are proportional to this subtree, not its source arena.
+    /// A sparse-array hole cannot be copied as a standalone JSON value.
+    pub fn to_projection(self) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+        let mut builder = Utf16JsonBuilder::new();
+        let root = builder.import_view(self)?;
+        builder.finish(root)
+    }
+
     /// Whether both views identify the same node in the same source arena.
     /// This preserves JavaScript object identity for reference-walk guards.
     #[must_use]
@@ -1800,34 +1809,37 @@ impl Utf16JsonBuilder {
         fields: Vec<(Vec<u16>, usize)>,
     ) -> Result<usize, Utf16JsonProjectionError> {
         self.validate_children(&fields.iter().map(|(_, id)| *id).collect::<Vec<_>>())?;
-        let mut entries = Vec::<JsonProperty>::new();
+        let mut entries = Vec::<JsonProperty>::with_capacity(fields.len());
+        let mut exact_keys = HashMap::<Vec<u16>, usize>::with_capacity(fields.len());
+        let mut display_keys = HashMap::<String, usize>::with_capacity(fields.len());
+        let mut unpaired_keys = Vec::<bool>::with_capacity(fields.len());
         for (code_units, value) in fields {
-            if let Some(existing) = entries
-                .iter_mut()
-                .find(|entry| entry.code_units == code_units)
-            {
-                existing.value = value;
+            if let Some(&index) = exact_keys.get(&code_units) {
+                entries[index].value = value;
                 continue;
             }
-            let display = match String::from_utf16(&code_units) {
+            let (display, unpaired) = match String::from_utf16(&code_units) {
                 Ok(key) => {
-                    if let Some(index) = entries.iter().position(|entry| {
-                        entry.display == key
-                            && entry.code_units != code_units
-                            && String::from_utf16(&entry.code_units).is_err()
-                    }) {
-                        let replacement = self.allocate_placeholder(&entries);
-                        entries[index].display = replacement;
+                    if let Some(&index) = display_keys.get(&key) {
+                        if unpaired_keys[index] {
+                            let replacement = self.allocate_indexed_placeholder(&display_keys);
+                            display_keys.remove(&key);
+                            display_keys.insert(replacement.clone(), index);
+                            entries[index].display = replacement;
+                        }
                     }
-                    key
+                    (key, false)
                 }
-                Err(_) => self.allocate_placeholder(&entries),
+                Err(_) => (self.allocate_indexed_placeholder(&display_keys), true),
             };
-            if entries.iter().any(|entry| entry.display == display) {
+            if display_keys.contains_key(&display) {
                 return Err(Utf16JsonProjectionError::InvalidProjection(
                     "object contains colliding display keys",
                 ));
             }
+            exact_keys.insert(code_units.clone(), entries.len());
+            display_keys.insert(display.clone(), entries.len());
+            unpaired_keys.push(unpaired);
             entries.push(JsonProperty {
                 display,
                 code_units,
@@ -1835,6 +1847,108 @@ impl Utf16JsonBuilder {
             });
         }
         Ok(self.push(JsonNode::Object(entries)))
+    }
+
+    /// Copy a borrowed value into this builder using an explicit work stack.
+    /// Only the selected subtree is visited or allocated. Exact strings,
+    /// property displays and keys, and sparse-array named properties are
+    /// retained. A hole is `undefined`, not a standalone JSON value.
+    pub fn import_view(
+        &mut self,
+        view: JsonValueView<'_>,
+    ) -> Result<usize, Utf16JsonProjectionError> {
+        let root = view.id.ok_or(Utf16JsonProjectionError::UndefinedNotJson)?;
+        if root >= view.nodes.len() {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "root node is outside the arena",
+            ));
+        }
+        if matches!(
+            &view.nodes[root],
+            JsonNode::Null | JsonNode::Bool(_) | JsonNode::Number(_) | JsonNode::String { .. }
+        ) {
+            return Ok(self.push(view.nodes[root].clone()));
+        }
+        let mut remap = HashMap::<usize, usize>::new();
+        let mut pending = vec![(root, false)];
+        while let Some((id, expanded)) = pending.pop() {
+            let node = view
+                .nodes
+                .get(id)
+                .ok_or(Utf16JsonProjectionError::InvalidProjection(
+                    "child node is outside the arena",
+                ))?;
+            if expanded {
+                let imported = match node {
+                    JsonNode::Array(items) => {
+                        JsonNode::Array(items.iter().map(|id| remap[id]).collect())
+                    }
+                    JsonNode::SparseArray {
+                        length,
+                        entries,
+                        properties,
+                    } => JsonNode::SparseArray {
+                        length: *length,
+                        entries: entries
+                            .iter()
+                            .map(|entry| SparseArrayEntry {
+                                index: entry.index,
+                                value: remap[&entry.value],
+                            })
+                            .collect(),
+                        properties: properties
+                            .iter()
+                            .map(|entry| JsonProperty {
+                                display: entry.display.clone(),
+                                code_units: entry.code_units.clone(),
+                                value: remap[&entry.value],
+                            })
+                            .collect(),
+                    },
+                    JsonNode::Object(entries) => JsonNode::Object(
+                        entries
+                            .iter()
+                            .map(|entry| JsonProperty {
+                                display: entry.display.clone(),
+                                code_units: entry.code_units.clone(),
+                                value: remap[&entry.value],
+                            })
+                            .collect(),
+                    ),
+                    leaf => leaf.clone(),
+                };
+                let imported_id = self.push(imported);
+                remap.insert(id, imported_id);
+                continue;
+            }
+            if remap.insert(id, usize::MAX).is_some() {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "flat JSON graph contains a cycle or shared child",
+                ));
+            }
+            pending.push((id, true));
+            match node {
+                JsonNode::Array(items) => {
+                    pending.extend(items.iter().rev().map(|id| (*id, false)));
+                }
+                JsonNode::SparseArray {
+                    entries,
+                    properties,
+                    ..
+                } => {
+                    pending.extend(properties.iter().rev().map(|entry| (entry.value, false)));
+                    pending.extend(entries.iter().rev().map(|entry| (entry.value, false)));
+                }
+                JsonNode::Object(entries) => {
+                    pending.extend(entries.iter().rev().map(|entry| (entry.value, false)));
+                }
+                JsonNode::Null
+                | JsonNode::Bool(_)
+                | JsonNode::Number(_)
+                | JsonNode::String { .. } => {}
+            }
+        }
+        Ok(remap[&root])
     }
 
     /// Import a serde_json value by reference using an explicit work stack.
@@ -1935,6 +2049,16 @@ impl Utf16JsonBuilder {
             self.next_placeholder = self.next_placeholder.saturating_add(1);
             let candidate = format!("__lingxiUtf16KeyProjectionV2_{}__", self.next_placeholder);
             if entries.iter().all(|entry| entry.display != candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    fn allocate_indexed_placeholder(&mut self, display_keys: &HashMap<String, usize>) -> String {
+        loop {
+            self.next_placeholder = self.next_placeholder.saturating_add(1);
+            let candidate = format!("__lingxiUtf16KeyProjectionV2_{}__", self.next_placeholder);
+            if !display_keys.contains_key(&candidate) {
                 return candidate;
             }
         }
@@ -3538,6 +3662,151 @@ mod sparse_array_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_view_import_copies_only_the_selected_exact_sparse_subtree() {
+        let sparse = Utf16JsonProjection::sparse_array_with_properties(
+            u32::MAX,
+            vec![(
+                7,
+                Utf16JsonProjection::parse(r#"{"\ud800":"\udc00","�":-0}"#).unwrap(),
+            )],
+            vec![(
+                vec![0xd800],
+                Utf16JsonProjection::parse(r#"["\ud800",null]"#).unwrap(),
+            )],
+        )
+        .unwrap();
+        let source = Utf16JsonProjection::object(vec![
+            (
+                "unrelated".into(),
+                Utf16JsonProjection::parse(&format!("[{}]", "0,".repeat(8_192) + "0")).unwrap(),
+            ),
+            ("selected".into(), sparse.clone()),
+        ])
+        .unwrap();
+        let selected = source.get_property("selected").unwrap();
+        let mut builder = Utf16JsonBuilder::new();
+        let root = builder.import_view(selected).unwrap();
+        assert_eq!(builder.nodes.len(), sparse.nodes.len());
+        let imported = builder.finish(root).unwrap();
+        assert_eq!(imported, sparse);
+        assert_eq!(selected.to_projection().unwrap(), sparse);
+        assert!(imported.at_pointer("/0").unwrap().is_undefined());
+        assert_eq!(imported.array_len(""), Some(u32::MAX as usize));
+        assert_eq!(
+            imported.array_named_properties().unwrap()[0].code_units,
+            [0xd800]
+        );
+    }
+
+    #[test]
+    fn borrowed_view_import_does_not_visit_unrelated_nodes_and_rejects_bad_selected_graphs() {
+        // The internal malformed sibling makes an accidental source-wide
+        // validation observable without relying on wall-clock thresholds.
+        let nodes = [JsonNode::Null, JsonNode::Array(vec![1])];
+        let leaf = JsonValueView {
+            nodes: &nodes,
+            id: Some(0),
+        };
+        assert_eq!(leaf.to_projection().unwrap().nodes, [JsonNode::Null]);
+        for nodes in [
+            vec![JsonNode::Array(vec![0])],
+            vec![JsonNode::Array(vec![1, 1]), JsonNode::Null],
+            vec![JsonNode::Array(vec![1])],
+        ] {
+            let view = JsonValueView {
+                nodes: &nodes,
+                id: Some(0),
+            };
+            assert!(Utf16JsonBuilder::new().import_view(view).is_err());
+        }
+        let hole = JsonValueView {
+            nodes: &nodes,
+            id: None,
+        };
+        assert!(matches!(
+            hole.to_projection(),
+            Err(Utf16JsonProjectionError::UndefinedNotJson)
+        ));
+    }
+
+    #[test]
+    fn borrowed_view_import_is_iterative_at_large_depth() {
+        let depth = 20_000;
+        let json = format!("{}\"\\ud800\"{}", "[".repeat(depth), "]".repeat(depth));
+        let source = Utf16JsonProjection::parse(&json).unwrap();
+        let imported = source.at_pointer("").unwrap().to_projection().unwrap();
+        assert_eq!(imported.nodes.len(), depth + 1);
+        assert_eq!(imported.to_json_string().unwrap(), json);
+    }
+
+    #[test]
+    fn indexed_builder_preserves_duplicate_positions_and_placeholder_renaming() {
+        let mut builder = Utf16JsonBuilder::new();
+        let values: Vec<_> = (0..7).map(|n| builder.push_number(f64::from(n))).collect();
+        let first = "__lingxiUtf16KeyProjectionV2_1__";
+        let third = "__lingxiUtf16KeyProjectionV2_3__";
+        let root = builder
+            .push_object_units(vec![
+                (vec![0xd800], values[0]),
+                (vec![0xd800], values[1]),
+                (first.encode_utf16().collect(), values[2]),
+                (vec![0xdc00], values[3]),
+                (third.encode_utf16().collect(), values[4]),
+                (first.encode_utf16().collect(), values[5]),
+                (vec![0xdc00], values[6]),
+            ])
+            .unwrap();
+        let projection = builder.finish(root).unwrap();
+        let entries = projection.object_entries().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.display_key)
+                .collect::<Vec<_>>(),
+            [
+                "__lingxiUtf16KeyProjectionV2_2__",
+                first,
+                "__lingxiUtf16KeyProjectionV2_4__",
+                third,
+            ]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.value.as_number().unwrap())
+                .collect::<Vec<_>>(),
+            [1.0, 5.0, 6.0, 4.0]
+        );
+        assert_eq!(
+            projection.to_json_string().unwrap(),
+            format!(r#"{{"\ud800":1,"{first}":5,"\udc00":6,"{third}":4}}"#)
+        );
+    }
+
+    #[test]
+    fn indexed_builder_handles_wide_objects_and_overwrites_in_place() {
+        for count in [128, 1_024, 8_192] {
+            let mut builder = Utf16JsonBuilder::new();
+            let mut fields = Vec::with_capacity(count * 2);
+            for pass in [0, 1] {
+                for index in 0..count {
+                    let id = builder.push_number((pass * count + index) as f64);
+                    fields.push((format!("key{index}").encode_utf16().collect(), id));
+                }
+            }
+            let root = builder.push_object_units(fields).unwrap();
+            let projection = builder.finish(root).unwrap();
+            assert_eq!(projection.nodes.len(), count + 1);
+            let entries = projection.object_entries().unwrap();
+            assert_eq!(entries.len(), count);
+            for (index, entry) in entries.iter().enumerate() {
+                assert_eq!(entry.display_key, format!("key{index}"));
+                assert_eq!(entry.value.as_number(), Some((count + index) as f64));
+            }
+        }
+    }
 
     #[test]
     fn pretty_stringifier_matches_js_layout_and_keeps_deep_walk_iterative() {

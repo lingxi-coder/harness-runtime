@@ -139,6 +139,76 @@ pub fn resolve_mode(settings_mode: Option<&str>) -> TotalTokensMode {
     PORT_DEFAULT_MODE
 }
 
+#[must_use]
+pub fn resolve_mode_for_model(model: &str, settings_mode: Option<&str>) -> TotalTokensMode {
+    let mode_override = std::env::var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER").ok();
+    let capabilities = lingxi_core::host::model_capabilities::prompt_capabilities_environment();
+    resolve_mode_for_facts(
+        model,
+        settings_mode,
+        mode_override.as_deref(),
+        capabilities.as_deref(),
+    )
+}
+
+fn resolve_mode_for_facts(
+    model: &str,
+    settings_mode: Option<&str>,
+    mode_override: Option<&str>,
+    capabilities: Option<&str>,
+) -> TotalTokensMode {
+    if let Some(mode) = mode_override
+        .and_then(TotalTokensMode::parse)
+        .or_else(|| settings_mode.and_then(TotalTokensMode::parse))
+    {
+        return mode;
+    }
+    if lingxi_core::host::model_capabilities::prompt_feature_enabled(
+        model,
+        "total_tokens_reminder",
+        capabilities,
+        None,
+        None,
+    ) {
+        ORACLE_DEFAULT_MODE
+    } else {
+        TotalTokensMode::Off
+    }
+}
+
+/// `G_n` / `W_n`: the initial prefix budget, before any request usage is charged.
+#[must_use]
+pub fn system_prompt_section(model: &str) -> Option<String> {
+    for (product, legacy) in [
+        (
+            branding::DISABLE_ATTACHMENTS_ENV,
+            "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+        ),
+        (branding::SIMPLE_ENV, "CLAUDE_CODE_SIMPLE"),
+    ] {
+        // These attachment gates use JS string truthiness in the live
+        // reminder path: every defined non-empty value disables attachments.
+        if lingxi_core::host::env::var_os_with_legacy(product, legacy)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return None;
+        }
+    }
+    let mode = resolve_mode_for_model(model, None);
+    let remaining = match mode {
+        TotalTokensMode::Off => return None,
+        TotalTokensMode::PaddedCountdown => resolve_budget(None),
+        TotalTokensMode::Countdown => {
+            llm_runtime::model::context_window::context_window_for_model(model, &[])
+        }
+        TotalTokensMode::Infinite | TotalTokensMode::Fixed => 0,
+    };
+    Some(format_total_tokens(
+        mode,
+        i64::try_from(remaining).unwrap_or(i64::MAX),
+    ))
+}
+
 /// `WBv()` — resolve the `padded-countdown` budget.
 #[must_use]
 pub fn resolve_budget(settings_budget: Option<u64>) -> u64 {
@@ -246,6 +316,59 @@ pub fn remaining_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_token_default_gate_matches_319_baked_catalog() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../core/tests/fixtures/model_capabilities_2_1_319.json"
+        ))
+        .unwrap();
+        for case in fixture["models"].as_array().unwrap() {
+            let enabled = case["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str() == Some("total_tokens_reminder"));
+            assert_eq!(
+                resolve_mode_for_facts(case["id"].as_str().unwrap(), None, None, None),
+                if enabled {
+                    TotalTokensMode::PaddedCountdown
+                } else {
+                    TotalTokensMode::Off
+                },
+                "{case}",
+            );
+        }
+        assert_eq!(
+            resolve_mode_for_facts("claude-sonnet-5-5", None, Some("countdown"), None),
+            TotalTokensMode::Countdown
+        );
+        assert_eq!(
+            resolve_mode_for_facts("claude-opus-5", Some("off"), None, None),
+            TotalTokensMode::Off
+        );
+        assert_eq!(
+            resolve_mode_for_facts("unknown-model", None, None, None),
+            TotalTokensMode::Off
+        );
+    }
+
+    #[test]
+    fn total_token_bodies_match_319_native_formatter() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["totalTokens"].as_array().unwrap() {
+            assert_eq!(
+                format_total_tokens(
+                    TotalTokensMode::parse(case["mode"].as_str().unwrap()).unwrap(),
+                    case["remaining"].as_i64().unwrap(),
+                ),
+                case["body"].as_str().unwrap(),
+            );
+        }
+    }
 
     #[test]
     fn formatter_is_byte_exact_against_2_1_238() {

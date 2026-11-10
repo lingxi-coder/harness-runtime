@@ -5,6 +5,7 @@ use crate::error::OrchestratorError;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use llm_runtime::LlmError;
+use std::sync::Arc;
 
 /// Construct large phase futures outside the caller's poll stack frame.
 /// Passing the factory also avoids a large temporary before heap allocation.
@@ -85,8 +86,6 @@ use error_reporting::goal_cleared_after_error_message;
 pub(crate) use error_reporting::is_carveout_propagated;
 use error_reporting::maybe_checkpoint_on_rate_limit;
 pub(crate) use error_reporting::orchestrator_error_text_source;
-#[cfg(test)]
-use error_reporting::refusal_explanation_clause;
 pub(crate) use error_reporting::surface_api_error_notice;
 pub(crate) use error_reporting::surface_model_error;
 pub(crate) use error_reporting::surface_prompt_too_long;
@@ -204,6 +203,9 @@ mod turn_loop_test;
 /// `query.ts:164` `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3`.
 pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 
+/// Native 2.1.319 retries a malformed tool-use response twice before failing.
+pub(crate) const MALFORMED_TOOL_USE_RETRY_LIMIT: u32 = 2;
+
 #[cfg(test)]
 pub(crate) const TEST_RECOVERY_OUTPUT_BUDGET: u32 = 77_777;
 
@@ -315,7 +317,7 @@ pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
 pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
     "The previous response failed to produce a valid tool call. Please retry the tool call now.";
 
-/// Byte-exact NON-meta message emitted on the SECOND malformed-tool-use failure
+/// Byte-exact NON-meta message emitted on the THIRD malformed-tool-use failure
 /// (the retry also produced no `tool_use` block): the turn terminates as
 /// completed. 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
 /// ~202946360, the `tc({content:...})` terminal branch).
@@ -372,14 +374,11 @@ pub(crate) struct RecoveryState {
     /// separate flag because the override is TAKEN per call). Reset alongside
     /// [`Self::max_output_tokens_recovery_count`].
     pub(crate) max_output_tokens_escalated: bool,
-    /// #77: whether a malformed-tool-use retry (`stop_reason == "tool_use"` with
-    /// zero `tool_use` blocks) has already fired this turn. Mirrors claude-code's
-    /// `transition.reason === "malformed_tool_use_retry"` guard so the SECOND
-    /// such failure terminates instead of looping. NOT reset by
-    /// [`Self::reset_max_output_tokens_recovery`] — it is a per-turn one-shot
-    /// independent of the max-output-tokens escalation episode.
+    /// Native `malformedToolUseRetryCount`: two malformed-tool repairs per
+    /// tool round. Output-limit and thinking-only retries preserve the count;
+    /// a normal tool round or blocking Stop hook resets it.
     #[allow(clippy::struct_field_names)]
-    pub(crate) malformed_tool_use_retried: bool,
+    pub(crate) malformed_tool_use_retry_count: u32,
     /// #78: whether the thinking-only nudge (an `end_turn`/`stop_sequence`
     /// response with no visible text) has already fired this turn. Mirrors
     /// claude-code's `thinkingOnlyNudged` loop-state flag.
@@ -549,129 +548,157 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     {
         orch.persist_prepared_turn_attachments(&mut prepared).await;
     }
-    let mut skip_global_cache_for_system_prompt = prepared.skip_global_cache_for_system_prompt;
-    let mut history_snapshot = prepared.snapshot;
-    let mut model = prepared.model;
-    let mut model_profile = prepared.model_profile;
-    let query_model = model.clone();
-    let query_model_profile = model_profile.clone();
-    // The unmodified `w` supplied to a turn.step is the correct request-history
-    // fallback only for a fully synthetic Mod response. Successful physical
-    // requests carry their own post-PTL/compact message snapshot below.
-    let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
-    let mut native_anthropic_request_context = prepared.native_anthropic_request_context;
-    let thinking_resumption_host_facts = prepared.thinking_resumption_host_facts;
-    let mut turn_reminders = prepared.turn_reminders;
-    let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
-    let context_announcements = prepared.context_announcements;
-    let mut tools = prepared.wire_tools;
-    let mut available_tool_names = prepared.available_tool_names;
-    let deferred_tools_reminder = prepared.deferred_reminder;
-    let date_change_reminder = prepared.date_change_reminder;
+    let route = crate::query_model::ModelRoute {
+        model: prepared.model.clone(),
+        profile: prepared.model_profile.clone(),
+    };
+    let policy = std::sync::Arc::clone(&prepared.prompt_policy);
+    crate::query_model::ROUTE
+        .scope(
+            Some(route.clone()),
+            crate::conversation::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                (route, policy),
+                boxed_turn_future(|| async {
+                    let effective_system_prompt = prepared.effective_system_prompt;
+                    let mut skip_global_cache_for_system_prompt =
+                        prepared.skip_global_cache_for_system_prompt;
+                    let mut history_snapshot = prepared.snapshot;
+                    let mut model = prepared.model;
+                    let mut model_profile = prepared.model_profile;
+                    let query_model = model.clone();
+                    let query_model_profile = model_profile.clone();
+                    // The unmodified `w` supplied to a turn.step is the correct request-history
+                    // fallback only for a fully synthetic Mod response. Successful physical
+                    // requests carry their own post-PTL/compact message snapshot below.
+                    let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
+                    let mut native_anthropic_request_context =
+                        prepared.native_anthropic_request_context;
+                    let thinking_resumption_host_facts = prepared.thinking_resumption_host_facts;
+                    let mut turn_reminders = prepared.turn_reminders;
+                    let engine_reminder_sources = prepared.engine_reminder_sources;
+                    let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
+                    let context_announcements = prepared.context_announcements;
+                    let mut tools = prepared.wire_tools;
+                    let mut available_tool_names = prepared.available_tool_names;
+                    let deferred_tools_reminder = prepared.deferred_reminder;
+                    let date_change_reminder = prepared.date_change_reminder;
 
-    let mut system_override = None;
-    if let Some(frozen) = recovery.retry_generation.take() {
-        let latest_user = |messages: &[ConversationMessage]| {
-            messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m, ConversationMessage::User { is_meta: false, .. }))
-                .map(ConversationMessage::id)
-        };
-        if latest_user(&history_snapshot) == latest_user(&frozen.messages)
-            && model == frozen.model
-            && model_profile == frozen.profile
-        {
-            history_snapshot = frozen.messages;
-            tools = frozen.tools;
-            available_tool_names = frozen.available_tool_names;
-            skip_global_cache_for_system_prompt = frozen.skip_global_cache;
-            system_override = Some(frozen.system);
-        } else {
-            recovery.max_output_tokens_override = None;
-        }
-    }
-    let system = system_override.as_ref().map_or(system, Option::as_ref);
-    // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
-    // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
-    // applies to EXACTLY this call and never leaks to the next turn.
-    let max_tokens_override = recovery.max_output_tokens_override.take();
-    // #5: wall-clock the API round-trip (incl. any in-adapter retries + the PTL
-    // reactive-recovery tail) so the CostTracker records a REAL duration instead
-    // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
-    let mut cost_scope = orch
-        .model_runtime
-        .cost_scope
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if cost_scope.is_none() {
-        if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
-            let session_id = orch.session.lock().await.session_id;
-            cost_scope = Some(tracker.session_scope(session_id));
-        }
-    }
-    if let Some(scope) = cost_scope.as_ref() {
-        scope.preflight().await.map_err(|error| {
-            OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
-        })?;
-    }
-    let api_call_started = std::time::Instant::now();
-    // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from the
-    // input snapshot BEFORE it is moved into `call_api_with_ptl_recovery`.
-    let api_success_message_count = u32::try_from(history_snapshot.len()).unwrap_or(u32::MAX);
-    let api_success_message_tokens =
-        compaction::grouping::estimate_tokens_for_range(&history_snapshot);
-    let mut requested_model = true;
-    let mut physical_responses = Vec::new();
-    let mut preceding_responses = Vec::new();
-    let mut mod_response_request_history_source = None;
-    let mod_host = if mod_step.is_some() {
-        if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
-            registry
-                .read()
-                .await
-                .mod_host()
-                .filter(|host| host.has_event("turn.step"))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if mod_host.is_none() {
-        recovery.apply_native_thinking_resume_intent(
-            &model,
-            model_profile.as_deref(),
-            &mut native_anthropic_request_context,
-        );
-    } else {
-        recovery.resume_incomplete_thinking_next_request = None;
-    }
-    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
-        &mut history_snapshot,
-        &mut turn_reminders,
-        &mut guarded_async_hook_reminders,
-    );
-    recovery.last_generation = if mod_host.is_none() {
-        Some(crate::output_recovery::FrozenGeneration {
-            model: model.clone(),
-            profile: model_profile.clone(),
-            system: system.cloned(),
-            messages: history_snapshot.clone(),
-            tools: tools.clone(),
-            available_tool_names: available_tool_names.clone(),
-            skip_global_cache: skip_global_cache_for_system_prompt,
-            thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
-        })
-    } else {
-        None
-    };
-    let turn_step_input_history = history_snapshot.clone();
-    let computer_projection =
-        crate::native_computer::prepare_projection(orch, &model, model_profile.as_deref(), &tools)
-            .await?;
-    let api_result = llm_runtime::computer::scope_computer_request(
+                    let mut system_override = None;
+                    if let Some(frozen) = recovery.retry_generation.take() {
+                        let latest_user = |messages: &[ConversationMessage]| {
+                            messages
+                                .iter()
+                                .rev()
+                                .find(|m| {
+                                    matches!(m, ConversationMessage::User { is_meta: false, .. })
+                                })
+                                .map(ConversationMessage::id)
+                        };
+                        if latest_user(&history_snapshot) == latest_user(&frozen.messages)
+                            && model == frozen.model
+                            && model_profile == frozen.profile
+                        {
+                            history_snapshot = frozen.messages;
+                            tools = frozen.tools;
+                            available_tool_names = frozen.available_tool_names;
+                            skip_global_cache_for_system_prompt = frozen.skip_global_cache;
+                            system_override = Some(frozen.system);
+                        } else {
+                            recovery.max_output_tokens_override = None;
+                        }
+                    }
+                    let system = system_override
+                        .as_ref()
+                        .unwrap_or(&effective_system_prompt)
+                        .as_ref();
+                    // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
+                    // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
+                    // applies to EXACTLY this call and never leaks to the next turn.
+                    let max_tokens_override = recovery.max_output_tokens_override.take();
+                    // #5: wall-clock the API round-trip (incl. any in-adapter retries + the PTL
+                    // reactive-recovery tail) so the CostTracker records a REAL duration instead
+                    // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
+                    let mut cost_scope = orch
+                        .model_runtime
+                        .cost_scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if cost_scope.is_none() {
+                        if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
+                            let session_id = orch.session.lock().await.session_id;
+                            cost_scope = Some(tracker.session_scope(session_id));
+                        }
+                    }
+                    if let Some(scope) = cost_scope.as_ref() {
+                        scope.preflight().await.map_err(|error| {
+                            OrchestratorError::Internal(format!(
+                                "cost durability preflight failed: {error}"
+                            ))
+                        })?;
+                    }
+                    let api_call_started = std::time::Instant::now();
+                    // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from the
+                    // input snapshot BEFORE it is moved into `call_api_with_ptl_recovery`.
+                    let api_success_message_count =
+                        u32::try_from(history_snapshot.len()).unwrap_or(u32::MAX);
+                    let api_success_message_tokens =
+                        compaction::grouping::estimate_tokens_for_range(&history_snapshot);
+                    let mut requested_model = true;
+                    let mut physical_responses = Vec::new();
+                    let mut preceding_responses = Vec::new();
+                    let mut mod_response_request_history_source = None;
+                    let mut mod_prompt_components = None;
+                    let mod_host = if mod_step.is_some() {
+                        if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
+                            registry
+                                .read()
+                                .await
+                                .mod_host()
+                                .filter(|host| host.has_event("turn.step"))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if mod_host.is_none() {
+                        recovery.apply_native_thinking_resume_intent(
+                            &model,
+                            model_profile.as_deref(),
+                            &mut native_anthropic_request_context,
+                        );
+                    } else {
+                        recovery.resume_incomplete_thinking_next_request = None;
+                    }
+                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                        &mut history_snapshot,
+                        &mut turn_reminders,
+                        &mut guarded_async_hook_reminders,
+                    );
+                    recovery.last_generation = if mod_host.is_none() {
+                        Some(crate::output_recovery::FrozenGeneration {
+                            model: model.clone(),
+                            profile: model_profile.clone(),
+                            system: system.cloned(),
+                            messages: history_snapshot.clone(),
+                            tools: tools.clone(),
+                            available_tool_names: available_tool_names.clone(),
+                            skip_global_cache: skip_global_cache_for_system_prompt,
+                            thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
+                        })
+                    } else {
+                        None
+                    };
+                    let turn_step_input_history = history_snapshot.clone();
+                    let computer_projection = crate::native_computer::prepare_projection(
+                        orch,
+                        &model,
+                        model_profile.as_deref(),
+                        &tools,
+                    )
+                    .await?;
+                    let api_result = llm_runtime::computer::scope_computer_request(
         computer_projection,
         crate::native_computer::cancel_before_effects(boxed_turn_future(|| async {
             if let (Some(host), Some((turn_id, index))) = (mod_host, mod_step) {
@@ -692,10 +719,14 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         history: history_snapshot,
                         rewriter: outgoing_history_rewriter,
                         tools: tools.clone(),
+                        available_tool_names: available_tool_names.clone(),
                         max_tokens: max_tokens_override,
                         deferred: deferred_tools_reminder,
                         date_change: date_change_reminder,
-                        reminders: turn_reminders.clone(),
+                        reminders: crate::conversation::PreparedReminders {
+                            messages: turn_reminders.clone(),
+                            engine_sources: engine_reminder_sources.clone(),
+                        },
                         guarded_async_hook_reminders: guarded_async_hook_reminders.clone(),
                         context_announcements: context_announcements.clone(),
                         cost_scope: cost_scope.clone(),
@@ -717,6 +748,11 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         preceding_responses = answer.preceding_responses;
                         mod_response_request_history_source =
                             answer.response_request_history_source;
+                        if let Some(components) = answer.prompt_components {
+                            tools = components.tools.clone();
+                            available_tool_names = components.available_tool_names.clone();
+                            mod_prompt_components = Some(components);
+                        }
                         Ok(answer.outcome)
                     }
                     Err(error) => Err(error),
@@ -729,10 +765,13 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                             crate::query_model::fallback_target_context(orch, &model, None).await
                         }
                     };
-                crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
-                    model: model.clone(),
-                    profile: model_profile.clone(),
-                });
+                crate::server_fallback::record_request_route_with_refusal_text(
+                    orch,
+                    crate::query_model::ModelRoute {
+                        model: model.clone(),
+                        profile: model_profile.clone(),
+                    },
+                );
                 crate::prompt::async_hook_response::retain_current_async_hook_reminders(
                     &mut history_snapshot,
                     &mut turn_reminders,
@@ -768,489 +807,586 @@ async fn execute_one_turn_with_recovery_tracked_impl(
         })),
     )
     .await;
-    orch.persist_thinking_signature_strip_latch().await;
-    let (response, final_request_history) = match api_result {
-        Ok(outcome) => match outcome {
-            PtlCallOutcome::Response {
-                response,
-                request_history,
-            } => (response, request_history),
-            PtlCallOutcome::Cancelled => {
-                return Ok((
-                    TurnStepOutcome::Ended {
-                        final_message_id: MessageId::new(),
-                        stop_reason: "aborted_streaming".into(),
-                        allow_budget_continuation: false,
-                        tool_requested_end: false,
-                    },
-                    0,
-                ));
-            }
-            PtlCallOutcome::PromptTooLong => {
-                let assistant_id = surface_prompt_too_long(orch).await;
-                // SLASH-04: `w4v` maps `prompt_too_long` to `context_limit`.
-                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
-                return Ok((
-                    TurnStepOutcome::Ended {
-                        final_message_id: assistant_id,
-                        stop_reason: "prompt_too_long".to_string(),
-                        allow_budget_continuation: false,
-                        tool_requested_end: false,
-                    },
-                    0,
-                ));
-            }
-            PtlCallOutcome::BlockingLimit => {
-                // PROACTIVE blocking-limit preempt: surface the prompt-too-long
-                // message (its api-error field is `invalid_request`, like the
-                // binary's `Ol({...,error:"invalid_request"})`) but end the turn with
-                // the DISTINCT terminal reason `"blocking_limit"` — the binary's
-                // `{reason:"blocking_limit"}` (offset ~208021400), kept separate from
-                // the reactive-exhausted `prompt_too_long` so SDK/stream-json
-                // consumers categorize the two preempt origins distinctly.
-                let assistant_id = surface_prompt_too_long(orch).await;
-                // SLASH-04: `w4v` maps `blocking_limit` to `context_limit`.
-                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
-                return Ok((
-                    TurnStepOutcome::Ended {
-                        final_message_id: assistant_id,
-                        stop_reason: "blocking_limit".to_string(),
-                        allow_budget_continuation: false,
-                        tool_requested_end: false,
-                    },
-                    0,
-                ));
-            }
-            PtlCallOutcome::RapidRefillBreaker => {
-                // #54 reactive trip: surface the thrashing message (api-error field
-                // `invalid_request`, matching the binary `Ol({...,error:"invalid_request"})`)
-                // but end the turn with the terminal reason `"rapid_refill_breaker"`
-                // — the binary's loop returns `{reason:"rapid_refill_breaker"}` even
-                // though the assistant MESSAGE carries `error:"invalid_request"`
-                // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
-                // `rapid_refill_breaker`, never `invalid_request`).
-                let assistant_id = surface_rapid_refill_thrashing(orch).await;
-                // SLASH-04: `w4v` maps `rapid_refill_breaker` to `context_limit`.
-                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
-                return Ok((
-                    TurnStepOutcome::Ended {
-                        final_message_id: assistant_id,
-                        stop_reason: "rapid_refill_breaker".to_string(),
-                        allow_budget_continuation: false,
-                        tool_requested_end: false,
-                    },
-                    0,
-                ));
-            }
-        },
-        // #10: a model/runtime error that escaped the API layer is NOT a hard
-        // failure (faithful port of `query.ts:955-997` catch → `model_error`).
-        // PROPAGATE the carve-outs that have dedicated downstream handling
-        // (RateLimited → wrapper rate-limit enrichment; Overloaded /
-        // RepeatedOverloaded → the "Repeated 529" surface); surface EVERYTHING
-        // else gracefully as an `isApiErrorMessage` assistant message + end the
-        // turn with `reason:"model_error"` (no Stop/StopFailure hooks — the catch
-        // path runs neither). 0 output tokens.
-        Err(e) if is_carveout_propagated(&e) => {
-            // SC-02: the `rate_limited` half of the rate-limit resume
-            // checkpoint. This is the port's twin of the oracle's REPL trigger
-            // (@306528240: the `vut` rate-limit callback fires
-            // `performRateLimitCheckpoint({todos, trigger:"rate_limited"})`
-            // fire-and-forget) — the point at which a rate-limited response
-            // ends the turn is where the user's in-progress files are worth
-            // snapshotting.
-            crate::server_fallback::flush_pending_notice(orch).await;
-            maybe_checkpoint_on_rate_limit(orch, &e).await;
-            return Err(e);
-        }
-        Err(e) => {
-            // Classify the TYPED error into the api-error envelope (`Flp`/`KNn`)
-            // BEFORE producing the user-facing text. The envelope adds
-            // `error`/`apiErrorStatus`; the text source keeps exact provider
-            // code units when this error came from the SDK.
-            let env = classify_api_error(&e);
-            let content = match &e {
-                OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error)
-                    if matches!(error.classification_source(), LlmError::RequestTooLarge) =>
-                {
-                    crate::conversation::request_too_large_notice(orch.prompt_is_interactive())
-                        .into()
-                }
-                _ => orchestrator_error_text_source(&e, &model),
-            };
-            let error_kind = env.error;
-            crate::server_fallback::flush_pending_notice(orch).await;
-            let provider_status = match &e {
-                OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner)
-                    if !matches!(inner.classification_source(), LlmError::RequestTooLarge) =>
-                {
-                    inner.http_status()
-                }
-                _ => None,
-            };
-            orch.output
-                .note_model_error_kind(error_reporting::model_error_kind(&e));
-            let assistant_id = surface_model_error(orch, content, env, provider_status).await;
-            orch.mark_mod_turn_error();
-            // SLASH-04: this arm is the oracle's `api_error` reason (see the
-            // NAMING NOTE on `GoalClearBucket`), so it is classified by
-            // errorKind, not by the port's `model_error` spelling.
-            // `mal(Wr)`'s `apiErrorIsTransient` field has no port analogue; the
-            // `overloaded`/`server_error` half of the predicate is subsumed by
-            // those categories' own no-clear arms.
-            clear_goal_after_unrecoverable_error(
-                orch,
-                GoalClearReason::ApiError {
-                    error_kind,
-                    is_transient: false,
-                },
-            )
-            .await;
-            return Ok((
-                TurnStepOutcome::Ended {
-                    final_message_id: assistant_id,
-                    stop_reason: "model_error".to_string(),
-                    allow_budget_continuation: false,
-                    tool_requested_end: false,
-                },
-                0,
-            ));
-        }
-    };
+                    let actual_route = mod_prompt_components.as_ref().map_or_else(
+                        || crate::query_model::current().expect("prepared route is in scope"),
+                        |components| components.route.clone(),
+                    );
+                    let actual_policy = match &mod_prompt_components {
+                        Some(components) => Arc::clone(&components.policy),
+                        None => orch.current_prompt_policy().await?,
+                    };
+                    let system = mod_prompt_components
+                        .as_ref()
+                        .map_or(system, |components| components.system.as_ref());
+                    crate::query_model::ROUTE.scope(
+                        Some(actual_route.clone()),
+                        crate::conversation::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                            (actual_route, actual_policy), boxed_turn_future(|| async {
+                    orch.persist_thinking_signature_strip_latch().await;
+                    let (response, final_request_history) = match api_result {
+                        Ok(outcome) => match outcome {
+                            PtlCallOutcome::Response {
+                                response,
+                                request_history,
+                            } => (response, request_history),
+                            PtlCallOutcome::Cancelled => {
+                                return Ok((
+                                    TurnStepOutcome::Ended {
+                                        final_message_id: MessageId::new(),
+                                        stop_reason: "aborted_streaming".into(),
+                                        allow_budget_continuation: false,
+                                        tool_requested_end: false,
+                                    },
+                                    0,
+                                ));
+                            }
+                            PtlCallOutcome::PromptTooLong => {
+                                let assistant_id = surface_prompt_too_long(orch).await;
+                                // SLASH-04: `w4v` maps `prompt_too_long` to `context_limit`.
+                                clear_goal_after_unrecoverable_error(
+                                    orch,
+                                    GoalClearReason::ContextLimit,
+                                )
+                                .await;
+                                return Ok((
+                                    TurnStepOutcome::Ended {
+                                        final_message_id: assistant_id,
+                                        stop_reason: "prompt_too_long".to_string(),
+                                        allow_budget_continuation: false,
+                                        tool_requested_end: false,
+                                    },
+                                    0,
+                                ));
+                            }
+                            PtlCallOutcome::BlockingLimit => {
+                                // PROACTIVE blocking-limit preempt: surface the prompt-too-long
+                                // message (its api-error field is `invalid_request`, like the
+                                // binary's `Ol({...,error:"invalid_request"})`) but end the turn with
+                                // the DISTINCT terminal reason `"blocking_limit"` — the binary's
+                                // `{reason:"blocking_limit"}` (offset ~208021400), kept separate from
+                                // the reactive-exhausted `prompt_too_long` so SDK/stream-json
+                                // consumers categorize the two preempt origins distinctly.
+                                let assistant_id = surface_prompt_too_long(orch).await;
+                                // SLASH-04: `w4v` maps `blocking_limit` to `context_limit`.
+                                clear_goal_after_unrecoverable_error(
+                                    orch,
+                                    GoalClearReason::ContextLimit,
+                                )
+                                .await;
+                                return Ok((
+                                    TurnStepOutcome::Ended {
+                                        final_message_id: assistant_id,
+                                        stop_reason: "blocking_limit".to_string(),
+                                        allow_budget_continuation: false,
+                                        tool_requested_end: false,
+                                    },
+                                    0,
+                                ));
+                            }
+                            PtlCallOutcome::RapidRefillBreaker => {
+                                // #54 reactive trip: surface the thrashing message (api-error field
+                                // `invalid_request`, matching the binary `Ol({...,error:"invalid_request"})`)
+                                // but end the turn with the terminal reason `"rapid_refill_breaker"`
+                                // — the binary's loop returns `{reason:"rapid_refill_breaker"}` even
+                                // though the assistant MESSAGE carries `error:"invalid_request"`
+                                // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
+                                // `rapid_refill_breaker`, never `invalid_request`).
+                                let assistant_id = surface_rapid_refill_thrashing(orch).await;
+                                // SLASH-04: `w4v` maps `rapid_refill_breaker` to `context_limit`.
+                                clear_goal_after_unrecoverable_error(
+                                    orch,
+                                    GoalClearReason::ContextLimit,
+                                )
+                                .await;
+                                return Ok((
+                                    TurnStepOutcome::Ended {
+                                        final_message_id: assistant_id,
+                                        stop_reason: "rapid_refill_breaker".to_string(),
+                                        allow_budget_continuation: false,
+                                        tool_requested_end: false,
+                                    },
+                                    0,
+                                ));
+                            }
+                        },
+                        // #10: a model/runtime error that escaped the API layer is NOT a hard
+                        // failure (faithful port of `query.ts:955-997` catch → `model_error`).
+                        // PROPAGATE the carve-outs that have dedicated downstream handling
+                        // (RateLimited → wrapper rate-limit enrichment; Overloaded /
+                        // RepeatedOverloaded → the "Repeated 529" surface); surface EVERYTHING
+                        // else gracefully as an `isApiErrorMessage` assistant message + end the
+                        // turn with `reason:"model_error"` (no Stop/StopFailure hooks — the catch
+                        // path runs neither). 0 output tokens.
+                        Err(e) if is_carveout_propagated(&e) => {
+                            // SC-02: the `rate_limited` half of the rate-limit resume
+                            // checkpoint. This is the port's twin of the oracle's REPL trigger
+                            // (@306528240: the `vut` rate-limit callback fires
+                            // `performRateLimitCheckpoint({todos, trigger:"rate_limited"})`
+                            // fire-and-forget) — the point at which a rate-limited response
+                            // ends the turn is where the user's in-progress files are worth
+                            // snapshotting.
+                            crate::server_fallback::flush_pending_notice(orch).await;
+                            maybe_checkpoint_on_rate_limit(orch, &e).await;
+                            return Err(e);
+                        }
+                        Err(e) => {
+                            // Classify the TYPED error into the api-error envelope (`Flp`/`KNn`)
+                            // BEFORE producing the user-facing text. The envelope adds
+                            // `error`/`apiErrorStatus`; the text source keeps exact provider
+                            // code units when this error came from the SDK.
+                            let env = classify_api_error(&e);
+                            let content = match &e {
+                                OrchestratorError::ApiCall(error)
+                                | OrchestratorError::Streaming(error)
+                                    if matches!(
+                                        error.classification_source(),
+                                        LlmError::RequestTooLarge
+                                    ) =>
+                                {
+                                    crate::conversation::request_too_large_notice(
+                                        orch.prompt_is_interactive(),
+                                    )
+                                    .into()
+                                }
+                                _ => orchestrator_error_text_source(&e, &model),
+                            };
+                            let error_kind = env.error;
+                            crate::server_fallback::flush_pending_notice(orch).await;
+                            let provider_status = match &e {
+                                OrchestratorError::ApiCall(inner)
+                                | OrchestratorError::Streaming(inner)
+                                    if !matches!(
+                                        inner.classification_source(),
+                                        LlmError::RequestTooLarge
+                                    ) =>
+                                {
+                                    inner.http_status()
+                                }
+                                _ => None,
+                            };
+                            orch.output
+                                .note_model_error_kind(error_reporting::model_error_kind(&e));
+                            let assistant_id =
+                                surface_model_error(orch, content, env, provider_status).await;
+                            orch.mark_mod_turn_error();
+                            // SLASH-04: this arm is the oracle's `api_error` reason (see the
+                            // NAMING NOTE on `GoalClearBucket`), so it is classified by
+                            // errorKind, not by the port's `model_error` spelling.
+                            // `mal(Wr)`'s `apiErrorIsTransient` field has no port analogue; the
+                            // `overloaded`/`server_error` half of the predicate is subsumed by
+                            // those categories' own no-clear arms.
+                            clear_goal_after_unrecoverable_error(
+                                orch,
+                                GoalClearReason::ApiError {
+                                    error_kind,
+                                    is_transient: false,
+                                },
+                            )
+                            .await;
+                            return Ok((
+                                TurnStepOutcome::Ended {
+                                    final_message_id: assistant_id,
+                                    stop_reason: "model_error".to_string(),
+                                    allow_budget_continuation: false,
+                                    tool_requested_end: false,
+                                },
+                                0,
+                            ));
+                        }
+                    };
 
-    let mut visible_responses = preceding_responses;
-    visible_responses.push(*response);
-    let mut declined_server_fallback = None;
-    for visible in &mut visible_responses {
-        let server_fallback_events = visible.server_fallback_events();
-        for info in &server_fallback_events {
-            if !matches!(info.event.reason.as_str(), "refusal" | "sticky") {
-                continue;
-            }
-            match crate::server_fallback::handle(orch, info, false).await? {
-                crate::server_fallback::ServerFallbackAdmission::Applied => {
-                    if matches!(info.event.reason.as_str(), "refusal" | "sticky") {
-                        visible.model =
+                    let mut visible_responses = preceding_responses;
+                    visible_responses.push(*response);
+                    let mut declined_server_fallback = None;
+                    for visible in &mut visible_responses {
+                        let server_fallback_events = visible.server_fallback_events();
+                        for info in &server_fallback_events {
+                            if !matches!(info.event.reason.as_str(), "refusal" | "sticky") {
+                                continue;
+                            }
+                            match crate::server_fallback::handle(orch, info, false).await? {
+                                crate::server_fallback::ServerFallbackAdmission::Applied => {
+                                    if matches!(info.event.reason.as_str(), "refusal" | "sticky") {
+                                        visible.model =
                             lingxi_core::host::refusal_server_control::resolve_received_model(
                                 Some(&info.lane.model),
                                 &info.event.to_model,
                             );
+                                    }
+                                }
+                                crate::server_fallback::ServerFallbackAdmission::Declined => {
+                                    declined_server_fallback = Some(info.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        if declined_server_fallback.is_some() {
+                            break;
+                        }
                     }
-                }
-                crate::server_fallback::ServerFallbackAdmission::Declined => {
-                    declined_server_fallback = Some(info.clone());
-                    break;
-                }
-            }
-        }
-        if declined_server_fallback.is_some() {
-            break;
-        }
-    }
-    let response = visible_responses
-        .last()
-        .expect("a successful turn step contains a visible assistant response");
+                    let response = visible_responses
+                        .last()
+                        .expect("a successful turn step contains a visible assistant response");
 
-    // A Mod may call `next` more than once and replace the visible answer.
-    // Keep each paid provider response separate from the outer history record.
-    struct MeteredCall<'a> {
-        response: &'a llm_runtime::HistoryResponse,
-        model: &'a str,
-        profile: Option<&'a str>,
-        duration: std::time::Duration,
-        retries: u32,
-        request_id: Option<&'a str>,
-    }
-    let metered_calls: Vec<_> = if physical_responses.is_empty() {
-        requested_model
-            .then(|| MeteredCall {
-                response,
-                model: &model,
-                profile: model_profile.as_deref(),
-                duration: api_call_started.elapsed(),
-                retries: orch.api.last_retry_count(),
-                request_id: None,
-            })
-            .into_iter()
-            .collect()
-    } else {
-        physical_responses
-            .iter()
-            .map(|call| MeteredCall {
-                response: &call.response,
-                model: &call.model,
-                profile: call.profile.as_deref(),
-                duration: call.duration,
-                retries: call.retries,
-                request_id: call.request_id.as_deref(),
-            })
-            .collect()
-    };
-    let metered_response = metered_calls.last().map_or(response, |call| call.response);
+                    // A Mod may call `next` more than once and replace the visible answer.
+                    // Keep each paid provider response separate from the outer history record.
+                    struct MeteredCall<'a> {
+                        response: &'a llm_runtime::HistoryResponse,
+                        model: &'a str,
+                        profile: Option<&'a str>,
+                        duration: std::time::Duration,
+                        retries: u32,
+                        request_id: Option<&'a str>,
+                    }
+                    let metered_calls: Vec<_> = if physical_responses.is_empty() {
+                        requested_model
+                            .then(|| MeteredCall {
+                                response,
+                                model: &model,
+                                profile: model_profile.as_deref(),
+                                duration: api_call_started.elapsed(),
+                                retries: orch.api.last_retry_count(),
+                                request_id: None,
+                            })
+                            .into_iter()
+                            .collect()
+                    } else {
+                        physical_responses
+                            .iter()
+                            .map(|call| MeteredCall {
+                                response: &call.response,
+                                model: &call.model,
+                                profile: call.profile.as_deref(),
+                                duration: call.duration,
+                                retries: call.retries,
+                                request_id: call.request_id.as_deref(),
+                            })
+                            .collect()
+                    };
+                    let metered_response =
+                        metered_calls.last().map_or(response, |call| call.response);
 
-    // Transfer each directly dispatched provider response into its session-owned
-    // accounting supervisor. Mod source calls settle at the physical-response
-    // boundary in `mod_batched_step::PhysicalStepResponse::capture`.
-    let owned_cost_responses: Vec<_> = metered_calls
-        .iter()
-        .filter_map(|call| {
-            if !physical_responses.is_empty() {
-                return None;
-            }
-            orch.model_runtime.cost_tracker.as_ref().map(|_| {
-                let usage = crate::cost_wiring::llm_usage_to_cost_usage(&call.response.usage);
-                let cache_read = call.response.usage.counts().cache_read_tokens;
-                let cache_create = call.response.usage.counts().cache_write_tokens;
-                let native_quote =
-                    crate::cost_wiring::has_native_fallback_quote(&call.response.provider_metadata);
-                let (quoted_model, pricing) =
-                    crate::cost_wiring::response_pricing(call.response.cost.as_ref(), native_quote);
-                let billing_model = if native_quote {
-                    crate::cost_wiring::native_fallback_cost_model(&call.response.provider_metadata)
-                        .unwrap_or_else(|| call.model.to_owned())
-                } else {
-                    call.model.to_owned()
-                };
-                let model_ref = quoted_model.unwrap_or_else(|| {
-                    crate::cost_wiring::model_ref_from_string(&billing_model, call.profile)
-                });
-                let scope = cost_scope
+                    // Transfer each directly dispatched provider response into its session-owned
+                    // accounting supervisor. Mod source calls settle at the physical-response
+                    // boundary in `mod_batched_step::PhysicalStepResponse::capture`.
+                    let owned_cost_responses: Vec<_> = metered_calls
+                        .iter()
+                        .filter_map(|call| {
+                            if !physical_responses.is_empty() {
+                                return None;
+                            }
+                            orch.model_runtime.cost_tracker.as_ref().map(|_| {
+                                let usage = crate::cost_wiring::llm_usage_to_cost_usage(
+                                    &call.response.usage,
+                                );
+                                let cache_read = call.response.usage.counts().cache_read_tokens;
+                                let cache_create = call.response.usage.counts().cache_write_tokens;
+                                let native_quote = crate::cost_wiring::has_native_fallback_quote(
+                                    &call.response.provider_metadata,
+                                );
+                                let (quoted_model, pricing) = crate::cost_wiring::response_pricing(
+                                    call.response.cost.as_ref(),
+                                    native_quote,
+                                );
+                                let billing_model = if native_quote {
+                                    crate::cost_wiring::native_fallback_cost_model(
+                                        &call.response.provider_metadata,
+                                    )
+                                    .unwrap_or_else(|| call.model.to_owned())
+                                } else {
+                                    call.model.to_owned()
+                                };
+                                let model_ref = quoted_model.unwrap_or_else(|| {
+                                    crate::cost_wiring::model_ref_from_string(
+                                        &billing_model,
+                                        call.profile,
+                                    )
+                                });
+                                let scope = cost_scope
                     .clone()
                     .expect("a wired cost tracker captured its scope before provider dispatch");
-                let measurement = if call.response.usage.report.usage.is_some() {
-                    cost::CostResponseMeasurement::Observed
-                } else {
-                    cost::CostResponseMeasurement::Missing
-                };
-                let receipt = scope.submit_model_response_with_pricing(
-                    cost::CostModelResponse {
-                        model_ref: model_ref.clone(),
-                        usage,
-                        duration: call.duration,
-                        retries: call.retries,
-                        cache_read_input_tokens: cache_read,
-                        cache_creation_input_tokens: cache_create,
-                        is_batch_request: false,
-                        account: call.response.usage.account_usage.clone(),
-                        bus: orch.model_runtime.analytics_bus.clone(),
-                    },
-                    pricing,
-                    measurement,
-                );
-                (call, receipt, model_ref, cache_read, cache_create)
-            })
-        })
-        .collect();
+                                let measurement = if call.response.usage.report.usage.is_some() {
+                                    cost::CostResponseMeasurement::Observed
+                                } else {
+                                    cost::CostResponseMeasurement::Missing
+                                };
+                                let receipt = scope.submit_model_response_with_pricing(
+                                    cost::CostModelResponse {
+                                        model_ref: model_ref.clone(),
+                                        usage,
+                                        duration: call.duration,
+                                        retries: call.retries,
+                                        cache_read_input_tokens: cache_read,
+                                        cache_creation_input_tokens: cache_create,
+                                        is_batch_request: false,
+                                        account: call.response.usage.account_usage.clone(),
+                                        bus: orch.model_runtime.analytics_bus.clone(),
+                                    },
+                                    pricing,
+                                    measurement,
+                                );
+                                (call, receipt, model_ref, cache_read, cache_create)
+                            })
+                        })
+                        .collect();
 
-    if requested_model && physical_responses.is_empty() {
-        orch.record_prompt_cache_usage(&response.usage).await;
-    }
-
-    // Retain paid usage in the owned cost mutation before surfacing output failure.
-    orch.check_output_accounting()?;
-
-    // Inline tool descriptions may grow after MCP/plugin discovery. Commit an
-    // append-only replacement only after a successful non-API-error response;
-    // deferred entries are excluded and existing descriptions are immutable.
-    if requested_model && physical_responses.is_empty() {
-        orch.record_inline_prompt_tools_after_success(&tools).await;
-    }
-
-    // A3: this call's output-token count, returned to the budget loop so it can
-    // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
-    let output_tokens = metered_calls.iter().fold(0u64, |total, call| {
-        total.saturating_add(
-            call.response
-                .usage
-                .counts()
-                .output_tokens
-                .saturating_sub(call.response.usage.counts().reasoning_tokens),
-        )
-    });
-
-    // #55: cache this response's total input tokens (the `Xtt` last-usage
-    // snapshot) so the proactive fixed-prefix overflow guard can compute the
-    // immovable prefix on the next `maybe_compact_before_call`.
-    if requested_model && physical_responses.is_empty() {
-        orch.record_response_input_tokens(&metered_response.usage);
-    }
-
-    // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix now the
-    // call has succeeded, so the forked autocompact summarizer can replay this
-    // turn's prefix and share Anthropic's prompt cache. `session.history` here is
-    // the exact message set the model saw (post any PTL truncation / reactive
-    // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
-    // is appended below. Strict no-op when no cache-safe slot is wired.
-    if requested_model && physical_responses.is_empty() {
-        orch.save_cache_safe_params_for_request(
-            system,
-            &model,
-            &tools,
-            &final_request_history,
-            context_announcements.inline_context.as_ref(),
-        )
-        .await?;
-    }
-    // FORK (codex #5 follow-up): record the rendered system prompt this turn
-    // handed the model, so a fork-subagent spawn dispatched below in this same
-    // turn can thread the exact bytes onto its child (cache-identical prefix).
-    orch.save_current_turn_system_prompt(system).await;
-
-    // Task 8 (llm-runtime future-work batch 3): the call succeeded — forward
-    // the adapter's unified rate-limit snapshot to the output stream when it
-    // changed since the last emission (emit-on-change; no-op for clients
-    // without a snapshot). Covers the batched AND cancelable drivers (both
-    // funnel through this function).
-    if requested_model && physical_responses.is_empty() {
-        orch.emit_rate_limit_if_changed().await;
-    }
-    // Task 2 (llm-runtime future-work batch 5): same seam, raw per-window
-    // utilization snapshot (emit-on-change; empty snapshot never emitted).
-    if requested_model && physical_responses.is_empty() {
-        orch.emit_raw_utilization_if_changed().await;
-    }
-
-    // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
-    // #5 (main-loop parity): pass the REAL wall-clock duration of the API
-    // round-trip and the REAL retry count (`last_retry_count()`, the adapter's
-    // `RetryState::attempt`) instead of the previous hardcoded `Duration::ZERO`
-    // / `0`. claude-code's cost recorder receives both.
-    for (call, receipt, model_ref, cache_read, cache_create) in owned_cost_responses {
-        let settlement = receipt.settle().await;
-        let cost_for_this_call = settlement.observed_nano_usd();
-        orch.model_runtime
-            .api_calls_recorded
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Err(error) = settlement.persistence_result() {
-            orch.note_cost_settlement_failure(error).await;
-        }
-        // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
-        // success path (claude `j("tengu_api_success", {...})`). The port-only
-        // `tengu_cost_recorded` event was dropped. request id / stop reason /
-        // provider live on the orchestrator, so we emit directly here.
-        if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
-            #[allow(clippy::cast_possible_truncation)]
-            let dur_ms = u64::try_from(call.duration.as_millis()).unwrap_or(u64::MAX);
-            cost::emit_api_success(
-                bus,
-                &cost::ApiSuccessFields {
-                    model: call.model.to_owned(),
-                    input_tokens: call.response.usage.counts().input_tokens,
-                    output_tokens: call
-                        .response
-                        .usage
-                        .counts()
-                        .output_tokens
-                        .saturating_sub(call.response.usage.counts().reasoning_tokens),
-                    cached_input_tokens: cache_read,
-                    uncached_input_tokens: cache_create,
-                    duration_ms: dur_ms,
-                    duration_ms_including_retries: dur_ms,
-                    attempt: call.retries + 1,
-                    cost_nano_usd: cost_for_this_call,
-                    provider: crate::cost_wiring::provider_tag(&model_ref.provider),
-                    stop_reason: call.response.stop_reason.clone(),
-                    request_id: if physical_responses.is_empty() {
-                        orch.api.last_request_id()
-                    } else {
-                        call.request_id.map(str::to_owned)
-                    },
-                    message_count: api_success_message_count,
-                    message_tokens: api_success_message_tokens,
-                    did_fall_back_to_non_streaming: false,
-                    is_non_interactive_session: !orch.prompt_is_interactive(),
-                    print: orch.config.print,
-                    is_tty: orch.config.is_tty,
-                    query_source: crate::config::sanitize_query_source(&orch.config.query_source)
-                        .to_string(),
-                    permission_mode: if orch.session.lock().await.plan_mode {
-                        "plan"
-                    } else {
-                        "default"
+                    if requested_model && physical_responses.is_empty() {
+                        orch.record_prompt_cache_usage(&response.usage).await;
                     }
-                    .to_string(),
-                    ttft_ms: None,
-                    fast_mode: call.response.usage.inference.service_tier
-                        == Some(llm_runtime::services::sdk::protocol::ServiceTier::Fast),
-                    time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
-                },
-            )
-            .await;
-        }
-    }
 
-    if let Some(info) = declined_server_fallback {
-        crate::server_fallback::flush_pending_notice(orch).await;
-        let (assistant_id, stop_reason) =
-            crate::server_fallback::surface_declined(orch, &info, Some(response.id.as_str())).await;
-        return Ok((
-            TurnStepOutcome::Ended {
-                final_message_id: assistant_id,
-                stop_reason: stop_reason.to_owned(),
-                allow_budget_continuation: false,
-                tool_requested_end: false,
-            },
-            output_tokens,
-        ));
-    }
+                    // Retain paid usage in the owned cost mutation before surfacing output failure.
+                    orch.check_output_accounting()?;
 
-    let final_index = visible_responses.len() - 1;
-    let mut outcome = TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry);
-    let mut same_turn_tool_uses = Vec::new();
-    for (index, visible) in visible_responses.iter().enumerate() {
-        let final_response = index == final_index;
-        let (request_history, request_history_source) = select_visible_response_request_history(
-            &visible.id,
-            physical_responses
-                .iter()
-                .map(|call| (call.response.id.as_str(), call.request_history.as_slice())),
-            final_response,
-            &final_request_history,
-            mod_response_request_history_source,
-            &turn_step_input_history,
-        );
-        let (request_model, request_profile) = select_visible_response_request_route(
-            &visible.id,
-            &physical_responses,
-            &query_model,
-            query_model_profile.as_deref(),
-        );
-        outcome = visible_response::process_visible_response(
-            orch,
-            visible,
-            if final_response {
-                Some(&mut *recovery)
-            } else {
-                None
-            },
-            request_model,
-            request_profile,
-            final_response && requested_model,
-            physical_responses.is_empty(),
-            !visible.server_fallback_events().is_empty(),
-            request_history,
-            same_turn_tool_uses.clone(),
-            request_history_source,
-            available_tool_names.clone(),
-            query_depth,
+                    // Inline tool descriptions may grow after MCP/plugin discovery. Commit an
+                    // append-only replacement only after a successful non-API-error response;
+                    // deferred entries are excluded and existing descriptions are immutable.
+                    if requested_model && physical_responses.is_empty() {
+                        orch.record_inline_prompt_tools_after_success(&tools).await;
+                    }
+
+                    // A3: this call's output-token count, returned to the budget loop so it can
+                    // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
+                    let output_tokens = metered_calls.iter().fold(0u64, |total, call| {
+                        total.saturating_add(
+                            call.response
+                                .usage
+                                .counts()
+                                .output_tokens
+                                .saturating_sub(call.response.usage.counts().reasoning_tokens),
+                        )
+                    });
+
+                    // #55: cache this response's total input tokens (the `Xtt` last-usage
+                    // snapshot) so the proactive fixed-prefix overflow guard can compute the
+                    // immovable prefix on the next `maybe_compact_before_call`.
+                    if requested_model && physical_responses.is_empty() {
+                        orch.record_response_input_tokens(&metered_response.usage);
+                    }
+
+                    // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix now the
+                    // call has succeeded, so the forked autocompact summarizer can replay this
+                    // turn's prefix and share Anthropic's prompt cache. `session.history` here is
+                    // the exact message set the model saw (post any PTL truncation / reactive
+                    // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
+                    // is appended below. Strict no-op when no cache-safe slot is wired.
+                    if requested_model && physical_responses.is_empty() {
+                        orch.save_cache_safe_params_for_request(
+                            system,
+                            &model,
+                            &tools,
+                            &final_request_history,
+                            context_announcements.inline_context.as_ref(),
+                        )
+                        .await?;
+                    }
+                    // FORK (codex #5 follow-up): record the rendered system prompt this turn
+                    // handed the model, so a fork-subagent spawn dispatched below in this same
+                    // turn can thread the exact bytes onto its child (cache-identical prefix).
+                    orch.save_current_turn_system_prompt(system).await;
+
+                    // Task 8 (llm-runtime future-work batch 3): the call succeeded — forward
+                    // the adapter's unified rate-limit snapshot to the output stream when it
+                    // changed since the last emission (emit-on-change; no-op for clients
+                    // without a snapshot). Covers the batched AND cancelable drivers (both
+                    // funnel through this function).
+                    if requested_model && physical_responses.is_empty() {
+                        orch.emit_rate_limit_if_changed().await;
+                    }
+                    // Task 2 (llm-runtime future-work batch 5): same seam, raw per-window
+                    // utilization snapshot (emit-on-change; empty snapshot never emitted).
+                    if requested_model && physical_responses.is_empty() {
+                        orch.emit_raw_utilization_if_changed().await;
+                    }
+
+                    // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
+                    // #5 (main-loop parity): pass the REAL wall-clock duration of the API
+                    // round-trip and the REAL retry count (`last_retry_count()`, the adapter's
+                    // `RetryState::attempt`) instead of the previous hardcoded `Duration::ZERO`
+                    // / `0`. claude-code's cost recorder receives both.
+                    for (call, receipt, model_ref, cache_read, cache_create) in owned_cost_responses
+                    {
+                        let settlement = receipt.settle().await;
+                        let cost_for_this_call = settlement.observed_nano_usd();
+                        orch.model_runtime
+                            .api_calls_recorded
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(error) = settlement.persistence_result() {
+                            orch.note_cost_settlement_failure(error).await;
+                        }
+                        // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
+                        // success path (claude `j("tengu_api_success", {...})`). The port-only
+                        // `tengu_cost_recorded` event was dropped. request id / stop reason /
+                        // provider live on the orchestrator, so we emit directly here.
+                        if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
+                            #[allow(clippy::cast_possible_truncation)]
+                            let dur_ms =
+                                u64::try_from(call.duration.as_millis()).unwrap_or(u64::MAX);
+                            cost::emit_api_success(
+                                bus,
+                                &cost::ApiSuccessFields {
+                                    model: call.model.to_owned(),
+                                    input_tokens: call.response.usage.counts().input_tokens,
+                                    output_tokens: call
+                                        .response
+                                        .usage
+                                        .counts()
+                                        .output_tokens
+                                        .saturating_sub(
+                                            call.response.usage.counts().reasoning_tokens,
+                                        ),
+                                    cached_input_tokens: cache_read,
+                                    uncached_input_tokens: cache_create,
+                                    duration_ms: dur_ms,
+                                    duration_ms_including_retries: dur_ms,
+                                    attempt: call.retries + 1,
+                                    cost_nano_usd: cost_for_this_call,
+                                    provider: crate::cost_wiring::provider_tag(&model_ref.provider),
+                                    stop_reason: call.response.stop_reason.clone(),
+                                    request_id: if physical_responses.is_empty() {
+                                        orch.api.last_request_id()
+                                    } else {
+                                        call.request_id.map(str::to_owned)
+                                    },
+                                    message_count: api_success_message_count,
+                                    message_tokens: api_success_message_tokens,
+                                    did_fall_back_to_non_streaming: false,
+                                    is_non_interactive_session: !orch.prompt_is_interactive(),
+                                    print: orch.config.print,
+                                    is_tty: orch.config.is_tty,
+                                    query_source: crate::config::sanitize_query_source(
+                                        &orch.config.query_source,
+                                    )
+                                    .to_string(),
+                                    permission_mode: if orch.session.lock().await.plan_mode {
+                                        "plan"
+                                    } else {
+                                        "default"
+                                    }
+                                    .to_string(),
+                                    ttft_ms: None,
+                                    fast_mode: call.response.usage.inference.service_tier
+                                        == Some(
+                                            llm_runtime::services::sdk::protocol::ServiceTier::Fast,
+                                        ),
+                                    time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
+                    if let Some(info) = declined_server_fallback {
+                        crate::server_fallback::flush_pending_notice(orch).await;
+                        let (assistant_id, stop_reason) = crate::server_fallback::surface_declined(
+                            orch,
+                            &info,
+                            Some(response.id.as_str()),
+                        )
+                        .await;
+                        return Ok((
+                            TurnStepOutcome::Ended {
+                                final_message_id: assistant_id,
+                                stop_reason: stop_reason.to_owned(),
+                                allow_budget_continuation: false,
+                                tool_requested_end: false,
+                            },
+                            output_tokens,
+                        ));
+                    }
+
+                    let final_index = visible_responses.len() - 1;
+                    let mut outcome =
+                        TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry);
+                    let mut same_turn_tool_uses = Vec::new();
+                    for (index, visible) in visible_responses.iter().enumerate() {
+                        let final_response = index == final_index;
+                        let (request_history, request_history_source) =
+                            select_visible_response_request_history(
+                                &visible.id,
+                                physical_responses.iter().map(|call| {
+                                    (call.response.id.as_str(), call.request_history.as_slice())
+                                }),
+                                final_response,
+                                &final_request_history,
+                                mod_response_request_history_source,
+                                &turn_step_input_history,
+                            );
+                        let (request_model, request_profile) =
+                            select_visible_response_request_route(
+                                &visible.id,
+                                &physical_responses,
+                                &query_model,
+                                query_model_profile.as_deref(),
+                            );
+                        let physical_components = physical_responses.iter()
+                            .find(|physical| physical.response.id == visible.id)
+                            .map(|physical| &physical.prompt_components);
+                        let request_tool_names = physical_components.map_or_else(
+                            || available_tool_names.clone(),
+                            |components| components.available_tool_names.clone(),
+                        );
+                        let visible_route = physical_components.map_or_else(
+                            || crate::query_model::current().expect("response route is in scope"),
+                            |components| components.route.clone(),
+                        );
+                        let visible_policy = match physical_components {
+                            Some(components) => Arc::clone(&components.policy),
+                            None => orch.current_prompt_policy().await?,
+                        };
+                        outcome = crate::query_model::ROUTE.scope(
+                            Some(visible_route.clone()),
+                            crate::conversation::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                                (visible_route, visible_policy),
+                                boxed_turn_future(|| async {
+                                    if let Some(components) = physical_components {
+                                        orch.save_current_turn_system_prompt(components.system.as_ref()).await;
+                                    }
+                                    visible_response::process_visible_response(
+                            orch,
+                            visible,
+                            if final_response {
+                                Some(&mut *recovery)
+                            } else {
+                                None
+                            },
+                            request_model,
+                            request_profile,
+                            final_response && requested_model,
+                            physical_responses.is_empty(),
+                            !visible.server_fallback_events().is_empty(),
+                            request_history,
+                            same_turn_tool_uses.clone(),
+                            request_history_source,
+                            request_tool_names,
+                            query_depth,
+                        )
+                        .await
+                                }),
+                            ),
+                        ).await?;
+                        same_turn_tool_uses.extend(
+                            translate_response_blocks(&visible.content)
+                                .into_iter()
+                                .filter(|block| matches!(block, ContentBlock::ToolUse { .. })),
+                        );
+                        if matches!(
+                            outcome,
+                            TurnStepOutcome::Ended {
+                                allow_budget_continuation: false,
+                                ..
+                            }
+                        ) {
+                            break;
+                        }
+                    }
+                    Ok((outcome, output_tokens))
+                            }),
+                        ),
+                    ).await
+                }),
+            ),
         )
-        .await?;
-        same_turn_tool_uses.extend(
-            translate_response_blocks(&visible.content)
-                .into_iter()
-                .filter(|block| matches!(block, ContentBlock::ToolUse { .. })),
-        );
-        if matches!(
-            outcome,
-            TurnStepOutcome::Ended {
-                allow_budget_continuation: false,
-                ..
-            }
-        ) {
-            break;
-        }
-    }
-    Ok((outcome, output_tokens))
+        .await
 }
 
 /// PARITY the binary's `Xi`. Spelled out rather than imported: `orchestrator`

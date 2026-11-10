@@ -18,7 +18,16 @@ pub enum MemoryUpdateSource {
 }
 
 impl MemoryUpdateSource {
-    /// `F5T[e.source]`.
+    #[must_use]
+    pub fn from_native(source: &str) -> Self {
+        match source {
+            "dream" => Self::Dream,
+            "extract" => Self::Extract,
+            "sync_unsaved" => Self::SyncUnsaved,
+            _ => Self::Other,
+        }
+    }
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -161,7 +170,9 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
     #[test]
     fn empty_lists_drop_their_lines_but_keep_the_trailer() {
         assert_eq!(
-            render_memory_update(&update(&[], &[])).string_at("").unwrap(),
+            render_memory_update(&update(&[], &[]))
+                .string_at("")
+                .unwrap(),
             format!(
                 "Background memory consolidation updated your memory directory: merged 3 notes\n{AMBIENT_CONTEXT_TRAILER}"
             )
@@ -203,6 +214,35 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
             vec!["a.md".to_string(), "c.md".to_string()]
         );
         assert!(select_in_context_paths(&paths, |_| false).is_empty());
+    }
+
+    #[test]
+    fn context_319_memory_updates_match_native_attachment_rendering() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/context_prompts_319.json"
+        ))
+        .unwrap();
+        for case in oracle["memory_updates"].as_array().unwrap() {
+            let input = &case["input"];
+            let string_list = |key: &str| {
+                input[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect()
+            };
+            let update = MemoryUpdate {
+                source: MemoryUpdateSource::from_native(input["source"].as_str().unwrap()),
+                summary: input["summary"].as_str().unwrap().into(),
+                paths: string_list("paths"),
+                in_context_paths: string_list("inContextPaths"),
+            };
+            assert_eq!(
+                render_memory_update(&update).string_at("").unwrap(),
+                case["expected"][0]["content"].as_str().unwrap()
+            );
+        }
     }
 
     #[test]

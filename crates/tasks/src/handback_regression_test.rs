@@ -237,9 +237,25 @@ async fn handback_nested_journal_exact_ack_and_cold_recovery() {
         .await
         .unwrap();
     let journal: serde_json::Value = serde_json::from_str(&disk.content).unwrap();
-    assert_eq!(
-        journal["pending"].as_array().unwrap().len(),
-        1,
+    let durable_journal = registry
+        .fs
+        .read_file_rooted_no_follow(
+            registry.output_manager.output_dir(),
+            &std::path::Path::new(&journal_name).with_extension("jsonl"),
+        )
+        .await
+        .unwrap();
+    let durable_receipt = serde_json::to_value(&receipt).unwrap();
+    assert!(
+        journal["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|envelope| envelope["receipt"] == durable_receipt)
+            || durable_journal.content.lines().any(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record["operation"]["admit"]["envelope"]["receipt"] == durable_receipt
+            }),
         "receipt requires a real durable queue entry"
     );
     let next_scope = HandbackSessionScope {

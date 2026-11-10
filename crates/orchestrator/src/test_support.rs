@@ -478,6 +478,7 @@ pub fn mock_message_response(
 pub struct MockOutputStream {
     tool_result_mcp_meta: Arc<Mutex<Vec<Option<Utf16JsonProjection>>>>,
     partial_stream_events: Arc<Mutex<Vec<String>>>,
+    partial_stream_metadata: Arc<Mutex<Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata>>>,
     include_partial_stream_events: bool,
     lifecycle_events: Arc<Mutex<Vec<Utf16JsonProjection>>>,
     model_fallback_frames: Arc<Mutex<Vec<Utf16JsonProjection>>>,
@@ -525,6 +526,7 @@ impl MockOutputStream {
         Self {
             tool_result_mcp_meta: Arc::new(Mutex::new(Vec::new())),
             partial_stream_events: Arc::new(Mutex::new(Vec::new())),
+            partial_stream_metadata: Arc::new(Mutex::new(Vec::new())),
             include_partial_stream_events: false,
             events: Arc::new(Mutex::new(Vec::new())),
             lifecycle_events: Arc::new(Mutex::new(Vec::new())),
@@ -544,6 +546,10 @@ impl MockOutputStream {
 
     pub async fn partial_stream_event_snapshot(&self) -> Vec<String> {
         self.partial_stream_events.lock().await.clone()
+    }
+
+    pub async fn partial_stream_metadata_snapshot(&self) -> Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata> {
+        self.partial_stream_metadata.lock().await.clone()
     }
 
     /// How many times the orchestrator announced a turn the client did not
@@ -626,6 +632,16 @@ impl Default for MockOutputStream {
 impl OutputStream for MockOutputStream {
     fn wants_partial_stream_events(&self) -> bool {
         self.include_partial_stream_events
+    }
+
+    async fn emit_stream_event_with_metadata(
+        &self,
+        event_json: &str,
+        is_message_start: bool,
+        metadata: &lingxi_core::host::orchestrator::PartialStreamEventMetadata,
+    ) {
+        self.partial_stream_metadata.lock().await.push(metadata.clone());
+        self.emit_stream_event(event_json, is_message_start).await;
     }
 
     async fn emit_stream_event(&self, event_json: &str, _is_message_start: bool) {

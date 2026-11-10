@@ -23,6 +23,7 @@ mod prepare;
 mod projected_content;
 mod realtime;
 mod streaming;
+pub(crate) use prepare::PreparedReminders;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
@@ -353,7 +354,6 @@ pub(crate) struct TurnLoopState {
     /// One query reissue after a Native safety refusal or its configured
     /// Native refusal fallback does not consume another turn-count slot.
     pub(crate) refusal_reissue_pending: bool,
-    malformed_tool_use_retried: bool,
     thinking_only_nudged: bool,
     /// A notification may intentionally finish silently. Any newly accepted
     /// non-meta user message restores the ordinary visible-answer requirement.
@@ -397,7 +397,6 @@ impl TurnLoopState {
             turn_count: 0,
             native_query_depth: 0,
             refusal_reissue_pending: false,
-            malformed_tool_use_retried: false,
             thinking_only_nudged: false,
             notification_user_boundary: None,
             last_message_id,
@@ -1032,8 +1031,15 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        let prompt = prompt.into();
+        crate::turn_loop::boxed_turn_future(|| self.run_turn_source(prompt)).await
+    }
+
+    async fn run_turn_source(
+        &self,
+        prompt: Utf16JsonProjection,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
         llm_runtime::catalog_task::scope(async {
-            let prompt = prompt.into();
             self.cancel_idle_compaction();
             let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
             self.begin_turn_metrics();
@@ -2341,26 +2347,32 @@ impl ConversationOrchestrator {
             self.session.lock().await.history.push(err_msg.clone());
             let envelope = match stop_reason {
                 "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+                    api_error: Some("max_output_tokens"),
                     error: Some("max_output_tokens"),
                     ..ApiErrorEnvelope::default()
                 },
                 "refusal" => ApiErrorEnvelope {
+                    request_id,
                     error: Some("invalid_request"),
                     inner_stop_reason: Some("refusal"),
                     inner_stop_details: pumped.stop_details.clone(),
-                    refused_message_id: pumped.response_message_id.clone(),
+                    refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
+                        pumped.response_message_id.as_deref(),
+                    )
+                    .map(str::to_owned),
                     ..ApiErrorEnvelope::default()
                 },
                 _ => ApiErrorEnvelope::default(),
             };
-            self.persist_api_error_message_to_jsonl(&err_msg, envelope)
+            self.persist_api_error_message_to_jsonl(&err_msg, envelope.clone())
                 .await;
-            if stop_reason == "refusal" {
-                self.output
-                    .emit_terminal_api_error(None, "api_error", "refusal")
-                    .await;
-            }
-            self.output.emit_text(&text).await;
+            let terminal_reason = if stop_reason == "refusal" {
+                "api_error"
+            } else {
+                stop_reason
+            };
+            self.emit_synthetic_api_error_message(&err_msg, &envelope, terminal_reason, true)
+                .await;
             Some(err_msg.id())
         } else {
             None
@@ -2389,17 +2401,15 @@ impl ConversationOrchestrator {
         stop_details: Option<&llm_runtime::HistoryStopDetails>,
         response_message_id: Option<&str>,
     ) -> Result<bool, OrchestratorError> {
-        let text = {
-            let request_id = self.api.last_request_id();
-            crate::turn_loop::terminal_api_error_text(
-                request_model,
-                self.prompt_is_interactive(),
-                "refusal",
-                request_id.as_deref(),
-                stop_details,
-                response_message_id,
-            )
-        };
+        let request_id = self.api.last_request_id();
+        let text = crate::turn_loop::terminal_api_error_text(
+            request_model,
+            self.prompt_is_interactive(),
+            "refusal",
+            request_id.as_deref(),
+            stop_details,
+            response_message_id,
+        );
         let Some(text) = text else {
             return Ok(false);
         };
@@ -2419,21 +2429,21 @@ impl ConversationOrchestrator {
             stop_reason: Some("refusal".into()),
             resumable: None,
         };
-        self.persist_api_error_message_to_jsonl(
-            &err_msg,
-            ApiErrorEnvelope {
-                error: Some("invalid_request"),
-                inner_stop_reason: Some("refusal"),
-                inner_stop_details: stop_details.cloned(),
-                refused_message_id: response_message_id.map(str::to_owned),
-                ..ApiErrorEnvelope::default()
-            },
-        )
-        .await;
-        self.output
-            .emit_terminal_api_error(None, "api_error", "refusal")
+        let envelope = ApiErrorEnvelope {
+            request_id,
+            error: Some("invalid_request"),
+            inner_stop_reason: Some("refusal"),
+            inner_stop_details: stop_details.cloned(),
+            refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
+                response_message_id,
+            )
+            .map(str::to_owned),
+            ..ApiErrorEnvelope::default()
+        };
+        self.persist_api_error_message_to_jsonl(&err_msg, envelope.clone())
             .await;
-        self.output.emit_text(&text).await;
+        self.emit_synthetic_api_error_message(&err_msg, &envelope, "api_error", true)
+            .await;
         Ok(true)
     }
 
@@ -2515,15 +2525,6 @@ impl ConversationOrchestrator {
             .iter()
             .map(|row| row.row_id)
             .collect::<Vec<_>>();
-
-        // The oracle guard checks the immediately preceding transition,
-        // rather than whether any earlier attempt in this turn was malformed.
-        if (pumped.stop_reason.as_deref() != Some("tool_use")
-            && pumped.tool_input_issues.is_empty())
-            || !pumped.tool_uses.is_empty()
-        {
-            loop_state.malformed_tool_use_retried = false;
-        }
 
         // 6. Decide loop disposition.
         let disposition_reason = if !pumped.tool_input_issues.is_empty()
@@ -2894,6 +2895,7 @@ impl ConversationOrchestrator {
                     self.inject_meta_user_message(crate::output_recovery::INCOMPLETE_TOOL_NUDGE)
                         .await;
                 }
+                loop_state.recovery.malformed_tool_use_retry_count = 0;
                 Ok(StreamingIterationDisposition::Continue(
                     crate::turn_loop::NativeQueryTransition::NextTurn,
                 ))
@@ -2930,32 +2932,12 @@ impl ConversationOrchestrator {
                 self.finish_natural_streaming_end(loop_state, assistant_id)
                     .await
             }
-            // #77 malformed-tool-use retry (claude-code `bin/claude.exe`
-            // offset ~202945837): `stop_reason == "tool_use"` but the
-            // assistant produced ZERO tool_use blocks (a malformed /
-            // leaked-invoke response). On the FIRST such failure, inject the
-            // byte-exact meta retry nudge, reset the max-output-tokens
-            // recovery bookkeeping (TS resets `maxOutputTokensRecoveryCount:
-            // 0` + `hasAttemptedReactiveCompact: false`), arm the guard, and
-            // loop. On the SECOND (`malformed_tool_use_retried` already set),
-            // surface the non-meta terminal message and end the turn. The
-            // `!isApiErrorMessage` guard holds (API errors are caught
-            // upstream as `Err(..)`). cc 2.1.263 unconditionally removes
-            // the malformed attempt and injects the clean-retry nudge (`ZZe`).
+            // Native 2.1.319 retries malformed tool output twice, independently
+            // of output-limit recovery, then emits its specialized API error.
             Some("tool_use") => {
-                if loop_state.malformed_tool_use_retried
-                    || loop_state.recovery.output_recovery_actions
-                        >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                if loop_state.recovery.malformed_tool_use_retry_count
+                    >= MALFORMED_TOOL_USE_RETRY_LIMIT
                 {
-                    // Second failure → terminal NON-meta message, complete.
-                    // Binary `ql(...)`→`mcc({isApiErrorMessage:!0})`: an
-                    // ASSISTANT api-error message (`role:"assistant",
-                    // stop_reason:"stop_sequence", stop_details:null`) appended
-                    // after the malformed assistant response (two assistants in
-                    // a row, matching the binary). Shape mirrors
-                    // `surface_model_error`. (Was a USER message.)
-                    let message = Utf16JsonProjection::from(MALFORMED_TOOL_USE_RETRY_FAILED);
-                    self.output.emit_text(&message).await;
                     let failed_msg = ConversationMessage::Assistant {
                         per_turn_effort: None,
                         id: MessageId::new(),
@@ -2970,25 +2952,42 @@ impl ConversationOrchestrator {
                         let mut s = self.session.lock().await;
                         s.history.push(failed_msg.clone());
                     }
-                    self.persist_api_error_message_to_jsonl(
+                    let envelope = ApiErrorEnvelope {
+                        api_error: Some("malformed_tool_use_exhausted"),
+                        ..Default::default()
+                    };
+                    self.persist_api_error_message_to_jsonl(&failed_msg, envelope.clone())
+                        .await;
+                    self.note_turn_api_error_terminal_reason("malformed_tool_use_exhausted");
+                    self.emit_synthetic_api_error_message(
                         &failed_msg,
-                        ApiErrorEnvelope::default(),
+                        &envelope,
+                        "malformed_tool_use_exhausted",
+                        true,
                     )
                     .await;
                     let cost = self.snapshot_cost_real().await;
-                    self.emit_turn_terminal("end_turn", &cost).await;
+                    self.emit_turn_terminal("malformed_tool_use_exhausted", &cost)
+                        .await;
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
                     .await?;
-                self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
-                    .await;
+                let mut nudge = ConversationMessage::user_meta(
+                    MessageId::new(),
+                    MALFORMED_TOOL_USE_RETRY_NUDGE.to_owned(),
+                );
+                if let ConversationMessage::User { turn_companion, .. } = &mut nudge {
+                    *turn_companion = Some(Some(true));
+                }
+                self.session.lock().await.history.push(nudge.clone());
+                self.persist_message_to_jsonl(&nudge).await;
+                self.note_query_user_event();
                 // TS resets the recovery counters on the retry transition so
                 // the continued turn starts a fresh max-output-tokens
                 // escalation episode.
                 loop_state.recovery.reset_max_output_tokens_recovery();
-                loop_state.recovery.output_recovery_actions += 1;
-                loop_state.malformed_tool_use_retried = true;
+                loop_state.recovery.malformed_tool_use_retry_count += 1;
                 Ok(StreamingIterationDisposition::Continue(
                     crate::turn_loop::NativeQueryTransition::InPlaceRetry,
                 ))
@@ -4014,7 +4013,9 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() {
             return Ok(TurnOutcome::Cancelled);
         }
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.run_turn_streaming_source_with_origin(prompt, images, cancel, None, true)
             .await
     }
@@ -4035,7 +4036,9 @@ impl ConversationOrchestrator {
         // the already-decoded entry below — so the path-based and bridge (inline
         // base64) flows share ONE cancel race + ONE turn core. A failed image read
         // aborts the turn with `Err` before any API call (unchanged).
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.run_turn_streaming_with_cancel_image_sources_and_message_id(
             prompt, images, cancel, message_id,
         )
@@ -4087,7 +4090,9 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() {
             return Ok(TurnOutcome::Cancelled);
         }
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.reset_goal_interruption();
         let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
             return Ok(TurnOutcome::Cancelled);
@@ -4661,14 +4666,13 @@ impl ConversationOrchestrator {
         Ok(TurnOutcome::Cancelled)
     }
 
-    /// Load + base64-encode each pasted image path into an [`ImageSource`].
-    fn load_images(
+    /// Load + base64-encode pasted images off the runtime worker, in path order.
+    /// `None` means cancellation won before turn admission.
+    async fn load_images(
         image_paths: &[std::path::PathBuf],
-    ) -> Result<Vec<lingxi_core::types::ImageSource>, OrchestratorError> {
-        image_paths
-            .iter()
-            .map(|p| crate::image_input::load_image_source(p))
-            .collect()
+        cancel: &CancellationToken,
+    ) -> Result<Option<Vec<lingxi_core::types::ImageSource>>, OrchestratorError> {
+        crate::image_input::load_image_sources(image_paths, cancel).await
     }
 }
 

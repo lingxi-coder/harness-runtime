@@ -158,7 +158,7 @@ async fn dispatch_content(
 }
 
 #[tokio::test]
-async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
+async fn safe_surrogate_preview_survives_dispatch_jsonl_resume_and_request_encoding() {
     use lingxi_core::types::{ConversationMessage, MessageId};
     use llm_runtime::services::sdk::{self, WireCodec};
     let tmp = tempfile::tempdir().unwrap();
@@ -224,8 +224,12 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
         let wire = String::from_utf8(encoded.body.to_vec())
             .expect("SDK request body is UTF-8 JSON and retains exact escaped UTF-16");
         assert!(
-            wire.contains("\\ud83d\\n..."),
-            "exact JS surrogate must reach wire: {wire}"
+            wire.contains(&format!("{}\\n...", "x".repeat(1999))),
+            "the safe native preview must reach the wire: {wire}"
+        );
+        assert!(
+            !wire.contains("\\ud83d"),
+            "the cut edge must not introduce a lone high surrogate: {wire}"
         );
         assert!(
             !wire.contains("lingxi_tool_result_string_utf16"),
@@ -576,4 +580,140 @@ async fn blank_results_become_the_no_output_sentinel() {
     let orch = orch_with(Arc::new(SizedTool), None);
     let content = dispatch_content(&orch, &use_of("Sized", 0)).await;
     assert_eq!(content, "(Sized completed with no output)");
+}
+
+fn native_319_persistence_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/tool_result_persistence_319.json"
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn native_319_blank_result_whitespace_matches_javascript() {
+    let orch = orch_with(Arc::new(SizedTool), None);
+    for case in native_319_persistence_fixture()["blankCases"]
+        .as_array()
+        .unwrap()
+    {
+        let input = Utf16JsonProjection::from_serde_value(&case["input"]).unwrap();
+        let is_json = case["input"].is_array();
+        let blocks = is_json.then_some(&input);
+        let content = if blocks.is_some() {
+            "IGNORED".into()
+        } else {
+            input.clone()
+        };
+        let result = super::apply_tool_result_persistence(
+            &orch,
+            "Fixture",
+            &ToolUseId::new(),
+            Some(THRESHOLD),
+            content.clone(),
+            blocks,
+        )
+        .await;
+        let blank = case["expectedBlank"].as_bool().unwrap();
+        assert_eq!(result.replaced, blank, "{}", case["name"]);
+        assert_eq!(
+            result.content,
+            if blank {
+                "(Fixture completed with no output)".into()
+            } else {
+                content
+            },
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_319_persistence_guards_keep_non_text_blocks_and_threshold_ties() {
+    for case in native_319_persistence_fixture()["dispatchCases"]
+        .as_array()
+        .unwrap()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let orch = orch_with(Arc::new(SizedTool), Some(root.path().into()));
+        let input = Utf16JsonProjection::from_serde_value(&case["input"]).unwrap();
+        let is_json = case["input"].is_array();
+        let blocks = is_json.then_some(&input);
+        let content = if blocks.is_some() {
+            "IGNORED".into()
+        } else {
+            input.clone()
+        };
+        let id = ToolUseId::from("toolu_fixture");
+        let threshold = usize::try_from(case["threshold"].as_u64().unwrap()).unwrap();
+        let result = super::apply_tool_result_persistence(
+            &orch,
+            "Fixture",
+            &id,
+            Some(threshold),
+            content,
+            blocks,
+        )
+        .await;
+        let stored = case["stored"].as_bool().unwrap();
+        assert_eq!(result.replaced, stored, "{}", case["name"]);
+        let actual = if result.replaced {
+            result.content
+        } else {
+            input
+        };
+        let session_uuid = orch.session.lock().await.session_id.as_uuid().to_string();
+        let dir = crate::tool_result_persistence::tool_results_dir(
+            root.path(),
+            "/tmp/wsp",
+            &session_uuid,
+        );
+        // The fixture's storage root is an input to LK. Interpolate that one
+        // per-run path; all remaining envelope/source bytes stay exact.
+        let expected = match case["expectedContent"].as_str() {
+            Some(text) => text
+                .replace("/fixture/tool-results", &dir.to_string_lossy())
+                .into(),
+            None => Utf16JsonProjection::from_serde_value(&case["expectedContent"]).unwrap(),
+        };
+        assert_eq!(actual, expected, "{}", case["name"]);
+        let extension = if is_json { "json" } else { "txt" };
+        assert_eq!(
+            dir.join(format!("{}.{}", id.as_str(), extension)).exists(),
+            stored,
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_319_normal_storage_failure_keeps_the_original_result() {
+    let root = tempfile::tempdir().unwrap();
+    let blocked_home = root.path().join("blocked-config-root");
+    std::fs::write(&blocked_home, "ordinary file").unwrap();
+    let orch = orch_with(Arc::new(SizedTool), Some(blocked_home));
+    for case in native_319_persistence_fixture()["normalStorageFailures"]
+        .as_array()
+        .unwrap()
+    {
+        let source = Utf16JsonProjection::from_serde_value(&case["input"]).unwrap();
+        let threshold = usize::try_from(case["threshold"].as_u64().unwrap()).unwrap();
+        let result = super::apply_tool_result_persistence(
+            &orch,
+            "Fixture",
+            &ToolUseId::new(),
+            Some(threshold),
+            source,
+            None,
+        )
+        .await;
+        assert!(!result.replaced, "{}", case["code"]);
+        assert_eq!(
+            result.content,
+            Utf16JsonProjection::from_serde_value(&case["expectedContent"]).unwrap(),
+            "{}",
+            case["code"]
+        );
+    }
 }

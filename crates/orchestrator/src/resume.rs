@@ -922,6 +922,13 @@ pub fn prompt_snapshot_from_messages(
             lingxi_core::host::instructions::InstructionRendering,
         >(attachment, "/contextRendering");
         let snapshot = lingxi_core::host::PromptSnapshot {
+            prompt_policy: projection_value::<
+                lingxi_core::host::prompt_policy::PromptPolicyMetadata,
+            >(attachment, "/promptPolicy"),
+            append_system_prompt: attachment
+                .subprojection("/appendSystemPrompt")
+                .ok()
+                .filter(|source| source.string_units("").is_some()),
             system_prompt,
             system_prompt_utf16,
             tools,
@@ -3580,6 +3587,10 @@ impl ConversationOrchestrator {
     /// Used by the CLI's remount path, which intentionally constructs the
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
+        let history = self.session.lock().await.history.clone();
+        self.prompt_runtime.install_silent_clocks(
+            crate::prompt::silent_turn::restore_silent_clocks(messages, &history),
+        );
         let metadata = resume_runtime_metadata(messages);
         self.restore_plan_file_slug(metadata.plan_slug.as_deref());
         restore_deferred_tool_state_from_messages(self.tools.deferral(), messages);
@@ -3595,6 +3606,8 @@ impl ConversationOrchestrator {
         self.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
+        self.prompt_runtime
+            .restore_prompt_snapshot_append_source(metadata.prompt_snapshot.as_ref());
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
         self.prompt_runtime
             .memory_resume_prompt_checked
@@ -3636,6 +3649,8 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.context_rendering_hint.lock().await =
             context_rendering_hint_from_messages(messages);
         if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
+            self.prompt_runtime
+                .restore_prompt_snapshot_append_source(Some(&snapshot));
             *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
             self.prompt_runtime
                 .memory_resume_prompt_checked
@@ -3668,6 +3683,8 @@ impl ConversationOrchestrator {
     ) {
         let (snapshot, rendering) =
             prompt_state_for_epoch_from_source(source, session_id, active_epoch);
+        self.prompt_runtime
+            .restore_prompt_snapshot_append_source(snapshot.as_ref());
         *self.prompt_runtime.prompt_snapshot.lock().await = snapshot;
         self.prompt_runtime
             .memory_resume_prompt_checked
@@ -3761,7 +3778,7 @@ impl ConversationOrchestrator {
     /// The new appends emitted by the M5-07 writer chain off
     /// `last_jsonl_uuid` so the parent-uuid chain continues unbroken.
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_resume(
+    pub fn with_resume(
         mut config: OrchestratorConfig,
         session_id: Uuid,
         lingxi_home: PathBuf,
@@ -3775,159 +3792,170 @@ impl ConversationOrchestrator {
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
         cwd: std::path::PathBuf,
         jsonl_writer: Option<Arc<JsonlWriter>>,
-    ) -> Result<Self, ResumeError> {
-        config.resume_session_id = Some(session_id);
-        let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs.clone()).await?;
-        let metadata_source = replayed
-            .transcript_metadata
-            .iter()
-            .map(|row| {
-                row.to_json_string()
-                    .map_err(|error| ResumeError::Profile(error.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        let fixed_profile = JsonlWriter::fixed_session_profile_from_source(
-            &metadata_source,
-            &session_id.to_string(),
-        )
-        .map_err(ResumeError::Profile)?;
-        let effort_was_explicit = config.effort.is_some();
-        if config.effort.is_none() {
-            config.effort.clone_from(&replayed.runtime_metadata.effort);
-        }
+    ) -> futures::future::BoxFuture<'static, Result<Self, ResumeError>> {
+        crate::turn_loop::boxed_turn_future(|| async move {
+            config.resume_session_id = Some(session_id);
+            let replayed =
+                replay_session_state(&lingxi_home, &cwd_str, session_id, fs.clone()).await?;
+            let metadata_source = replayed
+                .transcript_metadata
+                .iter()
+                .map(|row| {
+                    row.to_json_string()
+                        .map_err(|error| ResumeError::Profile(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            let fixed_profile = JsonlWriter::fixed_session_profile_from_source(
+                &metadata_source,
+                &session_id.to_string(),
+            )
+            .map_err(ResumeError::Profile)?;
+            let effort_was_explicit = config.effort.is_some();
+            if config.effort.is_none() {
+                config.effort.clone_from(&replayed.runtime_metadata.effort);
+            }
 
-        // Re-seed dynamic-tool discovery from both surviving tool_reference
-        // blocks and compact-boundary carry metadata. Scanning only boundaries
-        // loses every tool discovered in a session that has not compacted yet.
-        restore_deferred_tool_state_from_messages(tools.deferral(), &replayed.messages);
+            // Re-seed dynamic-tool discovery from both surviving tool_reference
+            // blocks and compact-boundary carry metadata. Scanning only boundaries
+            // loses every tool discovered in a session that has not compacted yet.
+            restore_deferred_tool_state_from_messages(tools.deferral(), &replayed.messages);
 
-        let mut orch = Self::new_with_streaming(
-            config,
-            api,
-            Arc::new(NoStreamingApiClient),
-            tools,
-            hooks,
-            perms,
-            output,
-            memory,
-            cwd,
-        )
-        .with_conversation_mode(fixed_profile.mode);
-        orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
-            &replayed.messages,
-        ));
-        // A transcript-inherited effort must remain inheritable if this
-        // runtime later hot-resumes another session. Only the caller's
-        // pre-resume launch choice pins the value.
-        orch.model_runtime
-            .current_effort_explicit
-            .store(effort_was_explicit, std::sync::atomic::Ordering::Release);
-        // Override the auto-generated session + chain pointer with the
-        // replayed values. Both fields are `pub(crate)` so this is allowed
-        // from a sibling module in the same crate.
-        orch.session = Arc::new(Mutex::new(replayed.state));
-        {
-            let mut state = orch.session.lock().await;
-            let recorded_model = replayed.messages.iter().any(|message| {
-                carries_human_turn_settings(message)
-                    && message.message.string_at("/model").is_some_and(|model| {
-                        !model.is_empty() && !(model.starts_with('<') && model.ends_with('>'))
-                    })
-            });
-            if recorded_model {
-                // The assistant row selects the cold-resume model. A server
-                // notice may supply only the provider-profile companion, and
-                // only when its target matches that independently selected
-                // model. A notice written just before a crash cannot select a
-                // fallback route before any fallback assistant response.
-                if let Some(profile) =
-                    crate::query_model::server_session_serving_profile(&state.history, &state.model)
-                {
-                    state.model_profile = profile;
+            let mut orch = Self::new_with_streaming(
+                config,
+                api,
+                Arc::new(NoStreamingApiClient),
+                tools,
+                hooks,
+                perms,
+                output,
+                memory,
+                cwd,
+            )
+            .with_conversation_mode(fixed_profile.mode);
+            orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
+                &replayed.messages,
+            ));
+            // A transcript-inherited effort must remain inheritable if this
+            // runtime later hot-resumes another session. Only the caller's
+            // pre-resume launch choice pins the value.
+            orch.model_runtime
+                .current_effort_explicit
+                .store(effort_was_explicit, std::sync::atomic::Ordering::Release);
+            // Override the auto-generated session + chain pointer with the
+            // replayed values. Both fields are `pub(crate)` so this is allowed
+            // from a sibling module in the same crate.
+            orch.session = Arc::new(Mutex::new(replayed.state));
+            {
+                let mut state = orch.session.lock().await;
+                let recorded_model = replayed.messages.iter().any(|message| {
+                    carries_human_turn_settings(message)
+                        && message.message.string_at("/model").is_some_and(|model| {
+                            !model.is_empty() && !(model.starts_with('<') && model.ends_with('>'))
+                        })
+                });
+                if recorded_model {
+                    // The assistant row selects the cold-resume model. A server
+                    // notice may supply only the provider-profile companion, and
+                    // only when its target matches that independently selected
+                    // model. A notice written just before a crash cannot select a
+                    // fallback route before any fallback assistant response.
+                    if let Some(profile) = crate::query_model::server_session_serving_profile(
+                        &state.history,
+                        &state.model,
+                    ) {
+                        state.model_profile = profile;
+                    }
+                }
+                let restored = crate::query_model::restore_refusal_selection(
+                    &orch,
+                    recorded_model.then_some(state.model.as_str()),
+                    &state.history,
+                    false,
+                );
+                if !restored {
+                    state.model = orch.config.model.clone();
+                    state.model_profile = None;
                 }
             }
-            let restored = crate::query_model::restore_refusal_selection(
-                &orch,
-                recorded_model.then_some(state.model.as_str()),
-                &state.history,
-                false,
+            orch.main_reports
+                .reset_for_builder(orch.session.lock().await.session_id);
+            orch.restore_plan_file_slug(replayed.runtime_metadata.plan_slug.as_deref());
+            orch.restore_response_usage(replayed.runtime_metadata.current_usage);
+            orch.restore_main_loop_latest_assistant_usage(
+                replayed
+                    .runtime_metadata
+                    .main_loop_latest_assistant_usage
+                    .clone(),
             );
-            if !restored {
-                state.model = orch.config.model.clone();
-                state.model_profile = None;
+            orch.sync_thinking_signature_strip_flag_to_api().await;
+            orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
+                replayed.last_message_uuid.map(|u| u.to_string()),
+            ));
+            orch.compaction_runtime
+                .compaction_cumulative_dropped_tokens
+                .store(
+                    replayed.runtime_metadata.cumulative_dropped_tokens,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            orch.compaction_runtime.compaction_tracking =
+                Mutex::new(replayed.runtime_metadata.compaction_tracking);
+            *orch
+                .transcript
+                .post_compact_skill_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                post_compact_skill_attachments_from_messages(&replayed.messages);
+            *orch
+                .transcript
+                .model_reminder_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                model_reminder_attachments_from_messages(&replayed.messages);
+            orch.prompt_runtime
+                .prompt_snapshot_resume
+                .store(true, std::sync::atomic::Ordering::Release);
+            orch.prompt_runtime.restore_prompt_snapshot_append_source(
+                replayed.runtime_metadata.prompt_snapshot.as_ref(),
+            );
+            *orch.prompt_runtime.prompt_snapshot.lock().await =
+                replayed.runtime_metadata.prompt_snapshot.clone();
+            *orch.prompt_runtime.prompt_snapshot_epoch.lock().await =
+                replayed.runtime_metadata.prompt_snapshot_epoch;
+            *orch.prompt_runtime.context_rendering_hint.lock().await =
+                replayed.runtime_metadata.context_rendering_hint;
+            let history = orch.session.lock().await.history.clone();
+            orch.prompt_runtime.install_silent_clocks(
+                crate::prompt::silent_turn::restore_silent_clocks(&replayed.messages, &history),
+            );
+            orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
+                .await;
+            if let Some(writer) = jsonl_writer {
+                orch.transcript.jsonl_writer = Some(writer);
             }
-        }
-        orch.main_reports
-            .reset_for_builder(orch.session.lock().await.session_id);
-        orch.restore_plan_file_slug(replayed.runtime_metadata.plan_slug.as_deref());
-        orch.restore_response_usage(replayed.runtime_metadata.current_usage);
-        orch.restore_main_loop_latest_assistant_usage(
-            replayed
-                .runtime_metadata
-                .main_loop_latest_assistant_usage
-                .clone(),
-        );
-        orch.sync_thinking_signature_strip_flag_to_api().await;
-        orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
-            replayed.last_message_uuid.map(|u| u.to_string()),
-        ));
-        orch.compaction_runtime
-            .compaction_cumulative_dropped_tokens
-            .store(
-                replayed.runtime_metadata.cumulative_dropped_tokens,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        orch.compaction_runtime.compaction_tracking =
-            Mutex::new(replayed.runtime_metadata.compaction_tracking);
-        *orch
-            .transcript
-            .post_compact_skill_attachments
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            post_compact_skill_attachments_from_messages(&replayed.messages);
-        *orch
-            .transcript
-            .model_reminder_attachments
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            model_reminder_attachments_from_messages(&replayed.messages);
-        orch.prompt_runtime
-            .prompt_snapshot_resume
-            .store(true, std::sync::atomic::Ordering::Release);
-        *orch.prompt_runtime.prompt_snapshot.lock().await =
-            replayed.runtime_metadata.prompt_snapshot.clone();
-        *orch.prompt_runtime.prompt_snapshot_epoch.lock().await =
-            replayed.runtime_metadata.prompt_snapshot_epoch;
-        *orch.prompt_runtime.context_rendering_hint.lock().await =
-            replayed.runtime_metadata.context_rendering_hint;
-        orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
-            .await;
-        if let Some(writer) = jsonl_writer {
-            orch.transcript.jsonl_writer = Some(writer);
-        }
-        // The metadata was captured with the same source that supplied the
-        // history and prompt snapshot, even when no writer is attached.
-        orch.restore_captured_conversation_profile(
-            fixed_profile.mode,
-            fixed_profile.instruction_epoch,
-        )
-        .await
-        .map_err(|error| ResumeError::Profile(error.to_string()))?;
-        orch.initialize_conversation_mode()
-            .await
-            .map_err(|error| ResumeError::Profile(error.to_string()))?;
-        orch.sync_active_goal_stop_hook_for_current_state().await;
-        orch.restore_file_read_state().await;
-        if !replayed.runtime_metadata.deferred_tools.is_empty() {
-            replay_deferred_tools_after_resume(
-                &orch,
-                replayed.runtime_metadata.deferred_tools.clone(),
+            // The metadata was captured with the same source that supplied the
+            // history and prompt snapshot, even when no writer is attached.
+            orch.restore_captured_conversation_profile(
+                fixed_profile.mode,
+                fixed_profile.instruction_epoch,
             )
             .await
-            .map_err(|error| ResumeError::DeferredReplay(error.to_string()))?;
-        }
-        Ok(orch)
+            .map_err(|error| ResumeError::Profile(error.to_string()))?;
+            orch.initialize_conversation_mode()
+                .await
+                .map_err(|error| ResumeError::Profile(error.to_string()))?;
+            orch.sync_active_goal_stop_hook_for_current_state().await;
+            orch.restore_file_read_state().await;
+            if !replayed.runtime_metadata.deferred_tools.is_empty() {
+                replay_deferred_tools_after_resume(
+                    &orch,
+                    replayed.runtime_metadata.deferred_tools.clone(),
+                )
+                .await
+                .map_err(|error| ResumeError::DeferredReplay(error.to_string()))?;
+            }
+            Ok(orch)
+        })
     }
 }
 

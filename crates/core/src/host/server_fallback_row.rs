@@ -22,6 +22,12 @@ pub struct ServerFallbackApiErrorRow {
     pub error: String,
     #[serde(rename = "isApiErrorMessage")]
     pub is_api_error_message: bool,
+    #[serde(
+        rename = "refusedMessageId",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub refused_message_id: Option<String>,
 }
 
 /// Synthetic inner message. Null fields are deliberately serialized because
@@ -97,6 +103,7 @@ impl ServerFallbackApiErrorRow {
                 context_management: None,
             },
             request_id: None,
+            refused_message_id: None,
             error: "invalid_request".into(),
             is_api_error_message: true,
         }
@@ -108,6 +115,12 @@ impl ServerFallbackApiErrorRow {
         self.request_id = request_id;
         self.message.stop_reason = "refusal".into();
         self.message.stop_details = Some(stop_details);
+    }
+
+    /// Native `e9t` retains only a response id accepted by `Nln`.
+    pub fn set_refused_message_id(&mut self, message_id: Option<&str>) {
+        self.refused_message_id =
+            super::refusal_api_text::sanitized_refusal_id(message_id).map(str::to_owned);
     }
 
     /// Raw query row. Complete envelope metadata remains available separately
@@ -231,5 +244,59 @@ mod tests {
             parsed.string_units("/message/stop_details/explanation"),
             Some(vec![0xd800])
         );
+    }
+
+    #[test]
+    fn refusal_row_retains_native_filtered_response_id_and_source_category() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/refusal_api_text_2_1_319.json"
+        ))
+        .unwrap();
+        for vector in fixture["cases"].as_array().unwrap() {
+            let input = &vector["input"];
+            let mut row = ServerFallbackApiErrorRow::new(&"refusal".into(), "created".into());
+            let source = input["sourceStopDetails"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    if input["details"].is_object() {
+                        input["details"].to_string()
+                    } else {
+                        "{}".into()
+                    }
+                });
+            let details = Utf16JsonProjection::parse(&source).unwrap();
+            row.set_refusal(input["requestId"].as_str().map(str::to_owned), details);
+            row.set_refused_message_id(input["messageId"].as_str());
+            let encoded = serde_json::to_string(&row).unwrap();
+            let source = Utf16JsonProjection::parse(&encoded).unwrap();
+            let expected_id = vector["expected"]["refusedMessageId"]
+                .as_str()
+                .map(|id| id.encode_utf16().collect::<Vec<_>>());
+            assert_eq!(
+                source.string_units("/refusedMessageId"),
+                expected_id,
+                "{}",
+                vector["name"]
+            );
+            if let Some(units) = input["categoryUtf16"].as_array() {
+                let expected = units
+                    .iter()
+                    .map(|unit| unit.as_u64().unwrap() as u16)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    source.string_units("/message/stop_details/category"),
+                    Some(expected),
+                    "{}",
+                    vector["name"]
+                );
+            }
+            if row.refused_message_id.is_some() {
+                assert!(
+                    encoded.find("\"isApiErrorMessage\"").unwrap()
+                        < encoded.find("\"refusedMessageId\"").unwrap()
+                );
+            }
+        }
     }
 }

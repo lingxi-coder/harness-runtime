@@ -259,6 +259,10 @@ pub struct SubagentContext {
     pub resumed_history: Option<Vec<ConversationMessage>>,
     /// Pre-rendered system prompt (post template + frontmatter expansion).
     pub rendered_system_prompt: Option<Arc<Utf16JsonProjection>>,
+    /// One policy shared by this request's system, tools and dispatch context.
+    pub prompt_policy: Option<Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
+    /// Source material retained to re-render after an actual route change.
+    pub prompt_state: Option<Arc<crate::prompt_policy::SubagentPromptState>>,
     /// Fixed engine-owned mobile runtime reminder for a fresh child. Rendered
     /// after this spawn's tool policy is resolved, so shell details are exposed
     /// only when `Shell` is in the child's actual advertised tool set. The

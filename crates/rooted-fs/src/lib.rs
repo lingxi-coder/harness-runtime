@@ -17,6 +17,8 @@
 // at a time, by deleting this line.
 #![allow(missing_docs)]
 
+mod journal;
+mod text_window;
 mod types;
 
 use fs2::FileExt;
@@ -24,6 +26,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
+pub use journal::{
+    append_journal_durable, read_journal_pinned, sync_journal_durable, truncate_journal_durable,
+    JournalCursor, JournalRead, JournalWriteError,
+};
+pub use text_window::{
+    read_text_tail_lossy, read_text_window, read_text_window_pinned, TextWindow,
+};
 pub use types::{FileAppendError, FileAppendStage, FlockGuard, FsError};
 
 /// Failure of a checked atomic replacement. Once `published` is true the
@@ -2461,8 +2470,8 @@ pub fn adopt_task_output_link(
     imp::adopt_task_output_link(root, relative, expected, target)
 }
 
-/// Verify that both Windows hard-link names still address the held source file.
-#[cfg(windows)]
+/// Verify the rooted transcript link and its source still address the held file.
+#[cfg(any(unix, windows))]
 pub fn validate_task_output_link(
     root: &Path,
     relative: &Path,
@@ -3654,6 +3663,35 @@ mod imp {
             return Err(map_unix_io(relative, error));
         }
         Ok(std::fs::File::from(source))
+    }
+
+    pub(super) fn validate_task_output_link(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+        pinned: &std::fs::File,
+    ) -> Result<(), FsError> {
+        use std::os::unix::ffi::OsStrExt;
+        let (parent, filename) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let advertised = fs::readlinkat(&parent, &filename, Vec::new())
+            .map_err(|error| map_unix_io(relative, error))?;
+        let target_parent = target
+            .parent()
+            .ok_or_else(|| FsError::Io("transcript has no parent".into()))?;
+        let target_name = target
+            .file_name()
+            .ok_or_else(|| FsError::Io("transcript has no name".into()))?;
+        let source = open_read_file_pinned(target_parent, Path::new(target_name), None)?;
+        if advertised.as_bytes() != target.as_os_str().as_bytes()
+            || opened_file_identity(&source)? != opened_file_identity(pinned)?
+        {
+            return Err(FsError::OutsideWorkspace(
+                "task output link identity changed".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn open_create_new_file_pinned(

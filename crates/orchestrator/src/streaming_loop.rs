@@ -10,7 +10,7 @@
 
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
-use crate::sse::event_router::{dispatch_event, RouterAction};
+use crate::sse::event_router::{dispatch_event_with_metadata, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
 use lingxi_core::host::{OutputStream, ServerFallbackTombstoneMessage};
@@ -1507,6 +1507,7 @@ async fn pump_stream_inner(
     let mut partial_close = PartialStreamClose::default();
     let mut completion = StreamCompletionState::default();
     let mut any_event = false;
+    let mut authoritative_partial_frames = false;
     // Providers close tool blocks before reporting why generation stopped.
     // Do not abort on incomplete JSON until the terminal reason is available.
     let mut pending_tool_json_error = None;
@@ -1602,7 +1603,7 @@ async fn pump_stream_inner(
                         )
                         .await
                     );
-                    partial_close.close(output.as_ref()).await;
+                    partial_close.close_complete(output.as_ref()).await;
                     return Ok((turn, stream));
                 }
                 return Err(build_failure(
@@ -1617,6 +1618,22 @@ async fn pump_stream_inner(
             }
         };
         any_event = true;
+        if let HistoryEvent::NativeStreamFrame { event, thinking_display } = &event {
+            authoritative_partial_frames = true;
+            if output.wants_partial_stream_events() {
+                let message_start = event.string_at("/type").as_deref() == Some("message_start");
+                if message_start {
+                    output.note_response_timing(
+                        lingxi_core::host::orchestrator::ResponseTimingEvent::MessageStart,
+                        event_received_at,
+                    );
+                }
+                let metadata = partial_close.observe_native_frame(event, thinking_display.as_deref());
+                output.emit_stream_event_with_metadata(event.as_json_source(), message_start, &metadata).await;
+            }
+            poll_ready_stream_tool_results(&mut pump).await;
+            continue;
+        }
         if matches!(
             &event,
             HistoryEvent::ContentBlockStart { .. } | HistoryEvent::ContentBlockDelta { .. }
@@ -2059,16 +2076,20 @@ async fn pump_stream_inner(
                 output.emit_assistant_block_start(block_key).await;
             }
         }
-        if output.wants_partial_stream_events() {
-            partial_close.observe(&event);
-        }
+        let partial_metadata = if !authoritative_partial_frames && output.wants_partial_stream_events() {
+            partial_close.observe(&event)
+        } else {
+            Default::default()
+        };
         completion.observe(&event);
-        let action = match dispatch_event(
+        let action = match dispatch_event_with_metadata(
             event,
             &mut acc,
             output,
             suppress_live_text,
             suppress_live_thinking,
+            &partial_metadata,
+            authoritative_partial_frames,
         )
         .await
         {
@@ -2096,6 +2117,11 @@ async fn pump_stream_inner(
         };
         let completed_block_key =
             completed_block_index.and_then(|index| open_block_keys.remove(&index));
+        if matches!(&action, RouterAction::AppendAssistantBlock(_) | RouterAction::DispatchToolUse { .. }) {
+            if let Some(index) = completed_block_index {
+                partial_close.record_completed_block(index);
+            }
+        }
         match action {
             RouterAction::Continue => {}
             RouterAction::AppendAssistantBlock(block) => {
@@ -2456,7 +2482,7 @@ async fn pump_stream_inner(
             )
             .await
         );
-        partial_close.close(output.as_ref()).await;
+        partial_close.close_complete(output.as_ref()).await;
         return Ok((turn, stream));
     }
     // A non-recoverable JSON failure still applies if the final message_stop

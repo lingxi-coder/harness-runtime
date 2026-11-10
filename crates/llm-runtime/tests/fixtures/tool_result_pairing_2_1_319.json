@@ -1,0 +1,2812 @@
+{
+  "version": "2.1.319",
+  "binary_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "source_byte_ranges": [
+    {
+      "label": "NO_CONTENT_MESSAGE literal",
+      "start": 259365908,
+      "end_exclusive": 259365929,
+      "sha256": "bd6f4bf3378d488a39381fb3cd6d4da173f714a5b95011488f46dd67b3523ab6"
+    },
+    {
+      "label": "missing tool-result literal",
+      "start": 274506447,
+      "end_exclusive": 274506500,
+      "sha256": "0e0c72a01d56ff4101b8a64d55eae6d76e6867d1691e2e18e86df9b73ced215b"
+    },
+    {
+      "label": "createUserMessage",
+      "start": 274527076,
+      "end_exclusive": 274529181,
+      "sha256": "cabd6331f56a50dae7faa97782b440e49c8f8d416d1015acb6714c7cd74237b2"
+    },
+    {
+      "label": "misplaced assistant tool-result predicate",
+      "start": 274691163,
+      "end_exclusive": 274691209,
+      "sha256": "ad788f94d2dfaf230c3d92b3d2c8be3063ac57a68234feba36ecd33e39d3920c"
+    },
+    {
+      "label": "ensureToolResultPairing",
+      "start": 274691209,
+      "end_exclusive": 274695064,
+      "sha256": "8801ee9257d7fe1879b813b00689a52583e0a87190933ed84fff2112fbe91da7"
+    }
+  ],
+  "scope": "Native ensureToolResultPairing with reminderFold:false; strings project to protocol text-block arrays; generated UUID/time and classifier sidecars are excluded from Rust comparison.",
+  "host_stubs": [
+    "UUID and clock",
+    "classifier metadata lookups",
+    "telemetry renderers/sinks",
+    "strict pairing gate=false"
+  ],
+  "cases": [
+    {
+      "name": "clean_pair_is_identity",
+      "input": [
+        {
+          "type": "user",
+          "uuid": "user-1",
+          "message": {
+            "role": "user",
+            "content": "hello"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-2",
+          "message": {
+            "role": "assistant",
+            "id": "msg-2",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-3",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "user",
+          "uuid": "user-1",
+          "message": {
+            "role": "user",
+            "content": "hello"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-2",
+          "message": {
+            "role": "assistant",
+            "id": "msg-2",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-3",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ],
+          "is_meta": false
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "ok"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "missing_results_follow_tool_use_order",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-4",
+          "message": {
+            "role": "assistant",
+            "id": "msg-4",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "z",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "m",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-4",
+          "message": {
+            "role": "assistant",
+            "id": "msg-4",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "z",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "m",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "z",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "m",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "b",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              }
+            ]
+          },
+          "isMeta": true,
+          "uuid": "oracle-generated-1",
+          "timestamp": "2026-11-09T00:00:00.000Z"
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "z",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "m",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "b",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "z",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "m",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "b",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            }
+          ],
+          "is_meta": true
+        }
+      ]
+    },
+    {
+      "name": "missing_results_precede_existing_content",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-5",
+          "message": {
+            "role": "assistant",
+            "id": "msg-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "z",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "m",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-6",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "m",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-5",
+          "message": {
+            "role": "assistant",
+            "id": "msg-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "z",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "m",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-6",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "z",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "b",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "text",
+                "text": "after"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "m",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "z",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "m",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "b",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "z",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "b",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "text",
+              "text": "after"
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "m",
+              "content": "ok"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "leading_orphan_becomes_placeholder",
+      "input": [
+        {
+          "type": "user",
+          "uuid": "user-7",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "user",
+          "uuid": "user-7",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Orphaned tool result removed due to conversation resume]"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Orphaned tool result removed due to conversation resume]"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "leading_orphan_preserves_text",
+      "input": [
+        {
+          "type": "user",
+          "uuid": "user-8",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              },
+              {
+                "type": "text",
+                "text": "keep"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "user",
+          "uuid": "user-8",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "keep"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "keep"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "later_orphan_only_user_is_removed",
+      "input": [
+        {
+          "type": "user",
+          "uuid": "user-9",
+          "message": {
+            "role": "user",
+            "content": "hello"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-10",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "user",
+          "uuid": "user-9",
+          "message": {
+            "role": "user",
+            "content": "hello"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "duplicate_call_between_thinking_gets_spacer",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-11",
+          "message": {
+            "role": "assistant",
+            "id": "msg-11",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-12",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-13",
+          "message": {
+            "role": "assistant",
+            "id": "msg-13",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-11",
+          "message": {
+            "role": "assistant",
+            "id": "msg-11",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-12",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-13",
+          "message": {
+            "role": "assistant",
+            "id": "msg-13",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "ok"
+            }
+          ],
+          "is_meta": false
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "redacted_thinking",
+              "data": "after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "orphan_server_between_thinking_gets_spacer",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-14",
+          "message": {
+            "role": "assistant",
+            "id": "msg-14",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "server_tool_use",
+                "id": "gone",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-14",
+          "message": {
+            "role": "assistant",
+            "id": "msg-14",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "thinking",
+              "thinking": "after",
+              "signature": "sig-after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "misplaced_result_between_thinking_gets_spacer",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-15",
+          "message": {
+            "role": "assistant",
+            "id": "msg-15",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-15",
+          "message": {
+            "role": "assistant",
+            "id": "msg-15",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "redacted_thinking",
+              "data": "after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "misplaced_result_only_becomes_interrupted",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-16",
+          "message": {
+            "role": "assistant",
+            "id": "msg-16",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-16",
+          "message": {
+            "role": "assistant",
+            "id": "msg-16",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Tool use interrupted]",
+                "citations": []
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Tool use interrupted]",
+              "citations": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "removed_adjacent_calls_do_not_invent_spacer",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-17",
+          "message": {
+            "role": "assistant",
+            "id": "msg-17",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "server_tool_use",
+                "id": "gone-1",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "server_tool_use",
+                "id": "gone-2",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-17",
+          "message": {
+            "role": "assistant",
+            "id": "msg-17",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "thinking",
+              "thinking": "after",
+              "signature": "sig-after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hosted_web_result_retains_server_use",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-18",
+          "message": {
+            "role": "assistant",
+            "id": "msg-18",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "web",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "web_search_tool_result",
+                "tool_use_id": "web",
+                "content": []
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-18",
+          "message": {
+            "role": "assistant",
+            "id": "msg-18",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "web",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "web_search_tool_result",
+                "tool_use_id": "web",
+                "content": []
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "server_tool_use",
+              "id": "web",
+              "name": "web_search",
+              "input": {
+                "query": "test"
+              }
+            },
+            {
+              "type": "web_search_tool_result",
+              "tool_use_id": "web",
+              "content": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hosted_mcp_result_retains_mcp_use",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-19",
+          "message": {
+            "role": "assistant",
+            "id": "msg-19",
+            "content": [
+              {
+                "type": "mcp_tool_use",
+                "id": "mcp",
+                "name": "search",
+                "server_name": "example",
+                "input": {}
+              },
+              {
+                "type": "mcp_tool_result",
+                "tool_use_id": "mcp",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "found"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-19",
+          "message": {
+            "role": "assistant",
+            "id": "msg-19",
+            "content": [
+              {
+                "type": "mcp_tool_use",
+                "id": "mcp",
+                "name": "search",
+                "server_name": "example",
+                "input": {}
+              },
+              {
+                "type": "mcp_tool_result",
+                "tool_use_id": "mcp",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "found"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "mcp_tool_use",
+              "id": "mcp",
+              "name": "search",
+              "server_name": "example",
+              "input": {}
+            },
+            {
+              "type": "mcp_tool_result",
+              "tool_use_id": "mcp",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "found"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "orphan_mcp_use_is_removed_with_spacer",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-20",
+          "message": {
+            "role": "assistant",
+            "id": "msg-20",
+            "content": [
+              {
+                "type": "redacted_thinking",
+                "data": "before"
+              },
+              {
+                "type": "mcp_tool_use",
+                "id": "gone",
+                "name": "search",
+                "server_name": "example",
+                "input": {}
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-20",
+          "message": {
+            "role": "assistant",
+            "id": "msg-20",
+            "content": [
+              {
+                "type": "redacted_thinking",
+                "data": "before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "redacted_thinking",
+              "data": "before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "thinking",
+              "thinking": "after",
+              "signature": "sig-after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "advisor_result_retains_its_server_use",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-21",
+          "message": {
+            "role": "assistant",
+            "id": "msg-21",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "advisor",
+                "name": "advisor",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "advisor_tool_result",
+                "tool_use_id": "advisor",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "advice"
+                  }
+                ],
+                "is_error": false
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-21",
+          "message": {
+            "role": "assistant",
+            "id": "msg-21",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "advisor",
+                "name": "advisor",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "advisor_tool_result",
+                "tool_use_id": "advisor",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "advice"
+                  }
+                ],
+                "is_error": false
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "server_tool_use",
+              "id": "advisor",
+              "name": "advisor",
+              "input": {
+                "query": "test"
+              }
+            },
+            {
+              "type": "advisor_tool_result",
+              "tool_use_id": "advisor",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "advice"
+                }
+              ],
+              "is_error": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "any_nonclient_result_identity_retains_server_use",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-22",
+          "message": {
+            "role": "assistant",
+            "id": "msg-22",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "hosted",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "future_hosted_result",
+                "tool_use_id": "hosted",
+                "content": null
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-22",
+          "message": {
+            "role": "assistant",
+            "id": "msg-22",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "hosted",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "future_hosted_result",
+                "tool_use_id": "hosted",
+                "content": null
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "server_tool_use",
+              "id": "hosted",
+              "name": "web_search",
+              "input": {
+                "query": "test"
+              }
+            },
+            {
+              "type": "future_hosted_result",
+              "tool_use_id": "hosted",
+              "content": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "misplaced_client_result_does_not_pair_server_use",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-23",
+          "message": {
+            "role": "assistant",
+            "id": "msg-23",
+            "content": [
+              {
+                "type": "server_tool_use",
+                "id": "gone",
+                "name": "web_search",
+                "input": {
+                  "query": "test"
+                }
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-23",
+          "message": {
+            "role": "assistant",
+            "id": "msg-23",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Tool use interrupted]",
+                "citations": []
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Tool use interrupted]",
+              "citations": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "duplicate_and_orphan_results_are_removed",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-24",
+          "message": {
+            "role": "assistant",
+            "id": "msg-24",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-25",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "orphan",
+                "content": "ok"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "first"
+              },
+              {
+                "type": "text",
+                "text": "tail"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "duplicate"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-24",
+          "message": {
+            "role": "assistant",
+            "id": "msg-24",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-25",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "first"
+              },
+              {
+                "type": "text",
+                "text": "tail"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "first"
+            },
+            {
+              "type": "text",
+              "text": "tail"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "orphan_only_after_assistant_becomes_meta_placeholder",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-26",
+          "message": {
+            "role": "assistant",
+            "id": "msg-26",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-27",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "orphan",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-26",
+          "message": {
+            "role": "assistant",
+            "id": "msg-26",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "(no content)"
+          },
+          "isMeta": true,
+          "uuid": "oracle-generated-2",
+          "timestamp": "2026-11-09T00:00:00.000Z"
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "(no content)"
+            }
+          ],
+          "is_meta": true
+        }
+      ]
+    },
+    {
+      "name": "repaired_user_preserves_shutdown_and_refusal_metadata",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-28",
+          "message": {
+            "role": "assistant",
+            "id": "msg-28",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-29",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          },
+          "interruptedByShutdown": true,
+          "refusedMessageId": "refused-id",
+          "isMeta": true
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-28",
+          "message": {
+            "role": "assistant",
+            "id": "msg-28",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "b",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-29",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "b",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          },
+          "interruptedByShutdown": true,
+          "refusedMessageId": "refused-id",
+          "isMeta": true
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "b",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "b",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "ok"
+            }
+          ],
+          "is_meta": true,
+          "interrupted_by_shutdown": true,
+          "refused_message_id": "refused-id"
+        }
+      ]
+    },
+    {
+      "name": "empty_assistant_remains_empty",
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-30",
+          "message": {
+            "role": "assistant",
+            "id": "msg-30",
+            "content": []
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-30",
+          "message": {
+            "role": "assistant",
+            "id": "msg-30",
+            "content": []
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": []
+        }
+      ]
+    },
+    {
+      "name": "empty_assistant_stays_empty_when_other_rows_repair",
+      "input": [
+        {
+          "type": "user",
+          "uuid": "user-31",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "orphan",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-32",
+          "message": {
+            "role": "assistant",
+            "id": "msg-32",
+            "content": []
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "user",
+          "uuid": "user-31",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Orphaned tool result removed due to conversation resume]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-32",
+          "message": {
+            "role": "assistant",
+            "id": "msg-32",
+            "content": []
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Orphaned tool result removed due to conversation resume]"
+            }
+          ],
+          "is_meta": false
+        },
+        {
+          "role": "assistant",
+          "content": []
+        }
+      ]
+    },
+    {
+      "name": "raw_client_tool_use_retains_fields_and_pairs",
+      "raw_blocks": [
+        [
+          0,
+          0
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-33",
+          "message": {
+            "role": "assistant",
+            "id": "msg-33",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "raw",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-33",
+          "message": {
+            "role": "assistant",
+            "id": "msg-33",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "raw",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "raw",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              }
+            ]
+          },
+          "isMeta": true,
+          "uuid": "oracle-generated-3",
+          "timestamp": "2026-11-09T00:00:00.000Z"
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "raw",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "raw",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            }
+          ],
+          "is_meta": true
+        }
+      ]
+    },
+    {
+      "name": "raw_duplicate_tool_use_is_removed",
+      "raw_blocks": [
+        [
+          2,
+          1
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-34",
+          "message": {
+            "role": "assistant",
+            "id": "msg-34",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-35",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-36",
+          "message": {
+            "role": "assistant",
+            "id": "msg-36",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-34",
+          "message": {
+            "role": "assistant",
+            "id": "msg-34",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-35",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "assistant-36",
+          "message": {
+            "role": "assistant",
+            "id": "msg-36",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "ok"
+            }
+          ],
+          "is_meta": false
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "thinking",
+              "thinking": "after",
+              "signature": "sig-after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "raw_client_result_keeps_first_and_removes_duplicate",
+      "raw_blocks": [
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-37",
+          "message": {
+            "role": "assistant",
+            "id": "msg-37",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-38",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok",
+                "extra_field": "kept"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok",
+                "extra_field": "duplicate"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-37",
+          "message": {
+            "role": "assistant",
+            "id": "msg-37",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-38",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "ok",
+                "extra_field": "kept"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "ok",
+              "extra_field": "kept"
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    },
+    {
+      "name": "raw_misplaced_result_is_removed",
+      "raw_blocks": [
+        [
+          0,
+          1
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-39",
+          "message": {
+            "role": "assistant",
+            "id": "msg-39",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok",
+                "extra_field": "raw"
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-39",
+          "message": {
+            "role": "assistant",
+            "id": "msg-39",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "thinking",
+                "thinking": "after",
+                "signature": "sig-after"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "thinking",
+              "thinking": "after",
+              "signature": "sig-after"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "raw_thinking_neighbors_receive_spacer",
+      "raw_blocks": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-40",
+          "message": {
+            "role": "assistant",
+            "id": "msg-40",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before",
+                "extra_field": "raw"
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "gone",
+                "content": "ok"
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after",
+                "extra_field": "raw"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-40",
+          "message": {
+            "role": "assistant",
+            "id": "msg-40",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "before",
+                "signature": "sig-before",
+                "extra_field": "raw"
+              },
+              {
+                "type": "text",
+                "text": "[Tool use removed]",
+                "citations": []
+              },
+              {
+                "type": "redacted_thinking",
+                "data": "after",
+                "extra_field": "raw"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "before",
+              "signature": "sig-before",
+              "extra_field": "raw"
+            },
+            {
+              "type": "text",
+              "text": "[Tool use removed]",
+              "citations": []
+            },
+            {
+              "type": "redacted_thinking",
+              "data": "after",
+              "extra_field": "raw"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "raw_result_without_identity_is_removed",
+      "raw_blocks": [
+        [
+          1,
+          0
+        ]
+      ],
+      "input": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-41",
+          "message": {
+            "role": "assistant",
+            "id": "msg-41",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-42",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "content": "invalid"
+              }
+            ]
+          }
+        }
+      ],
+      "native_expected": [
+        {
+          "type": "assistant",
+          "uuid": "assistant-41",
+          "message": {
+            "role": "assistant",
+            "id": "msg-41",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "a",
+                "name": "Read",
+                "input": {
+                  "file_path": "/repo/a"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "user-42",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "[Tool result missing due to internal error]",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "a",
+              "name": "Read",
+              "input": {
+                "file_path": "/repo/a"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "a",
+              "content": "[Tool result missing due to internal error]",
+              "is_error": true
+            }
+          ],
+          "is_meta": false
+        }
+      ]
+    }
+  ],
+  "source_cases": [
+    {
+      "name": "distinct_lone_client_ids",
+      "wire": true,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-43\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-43\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"\\udfff\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"\\udfff\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true},{\"type\":\"tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}],\"is_meta\":true}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"\\udfff\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true},{\"type\":\"tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}]}]"
+    },
+    {
+      "name": "lone_and_replacement_client_ids_are_distinct",
+      "wire": false,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-44\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-44\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"�\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"�\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true},{\"type\":\"tool_result\",\"tool_use_id\":\"�\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}],\"is_meta\":true}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"tool_use\",\"id\":\"�\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true},{\"type\":\"tool_result\",\"tool_use_id\":\"�\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}]}]"
+    },
+    {
+      "name": "wrong_lone_result_is_orphaned",
+      "wire": true,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-45\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-45\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]}},{\"type\":\"user\",\"uuid\":\"user-46\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":\"wrong\"}]},\"interruptedByShutdown\":true,\"refusedMessageId\":\"refused\\ud800\",\"isMeta\":true}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}],\"is_meta\":true,\"interrupted_by_shutdown\":true,\"refused_message_id\":\"refused\\ud800\"}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"[Tool result missing due to internal error]\",\"is_error\":true}]}]"
+    },
+    {
+      "name": "matching_lone_result_preserves_source_fields",
+      "wire": true,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-47\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-47\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"},\"provider_metadata\":{\"label\":\"\\udfff\"}}]}},{\"type\":\"user\",\"uuid\":\"user-48\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"body\\udfff\",\"provider_metadata\":{\"label\":\"\\ud800\"}}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"},\"provider_metadata\":{\"label\":\"\\udfff\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"body\\udfff\",\"provider_metadata\":{\"label\":\"\\ud800\"}}],\"is_meta\":false}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"},\"provider_metadata\":{\"label\":\"\\udfff\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"body\\udfff\",\"provider_metadata\":{\"label\":\"\\ud800\"}}]}]"
+    },
+    {
+      "name": "duplicate_lone_id_preserves_first_and_thinking_spacer",
+      "wire": true,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-49\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-49\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]}},{\"type\":\"user\",\"uuid\":\"user-50\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\"}]}},{\"type\":\"assistant\",\"uuid\":\"assistant-51\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-51\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"before\",\"signature\":\"sig-before\"},{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}},{\"type\":\"redacted_thinking\",\"data\":\"after\"}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\"}],\"is_meta\":false},{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"before\",\"signature\":\"sig-before\"},{\"type\":\"text\",\"text\":\"[Tool use removed]\",\"citations\":[]},{\"type\":\"redacted_thinking\",\"data\":\"after\"}]}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"before\",\"signature\":\"sig-before\"},{\"type\":\"text\",\"text\":\"[Tool use removed]\",\"citations\":[]},{\"type\":\"redacted_thinking\",\"data\":\"after\"}]}]"
+    },
+    {
+      "name": "duplicate_lone_result_preserves_first_source_fields",
+      "wire": true,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-52\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-52\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]}},{\"type\":\"user\",\"uuid\":\"user-53\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\",\"provider_metadata\":{\"label\":\"first\\udfff\"}},{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\",\"provider_metadata\":{\"label\":\"duplicate\\ud800\"}}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\",\"provider_metadata\":{\"label\":\"first\\udfff\"}}],\"is_meta\":false}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"\\ud800\",\"name\":\"Read\",\"input\":{\"file_path\":\"/repo/a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":\"ok\",\"provider_metadata\":{\"label\":\"first\\udfff\"}}]}]"
+    },
+    {
+      "name": "wrong_lone_hosted_result_does_not_pair_server_use",
+      "wire": false,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-54\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-54\",\"content\":[{\"type\":\"server_tool_use\",\"id\":\"\\ud800\",\"name\":\"web_search\",\"input\":{\"query\":\"test\"}},{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":[]}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":[]}]}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"\\udfff\",\"content\":[]}]}]"
+    },
+    {
+      "name": "matching_lone_hosted_result_preserves_mcp_use",
+      "wire": false,
+      "input_json": "[{\"type\":\"assistant\",\"uuid\":\"assistant-55\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-55\",\"content\":[{\"type\":\"mcp_tool_use\",\"id\":\"\\ud800\",\"name\":\"search\",\"server_name\":\"example\",\"input\":{}},{\"type\":\"mcp_tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":[{\"type\":\"text\",\"text\":\"found\\udfff\"}]}]}}]",
+      "expected_rows_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"mcp_tool_use\",\"id\":\"\\ud800\",\"name\":\"search\",\"server_name\":\"example\",\"input\":{}},{\"type\":\"mcp_tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":[{\"type\":\"text\",\"text\":\"found\\udfff\"}]}]}]",
+      "expected_sdk_messages_json": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"mcp_tool_use\",\"id\":\"\\ud800\",\"name\":\"search\",\"server_name\":\"example\",\"input\":{}},{\"type\":\"mcp_tool_result\",\"tool_use_id\":\"\\ud800\",\"content\":[{\"type\":\"text\",\"text\":\"found\\udfff\"}]}]}]"
+    }
+  ]
+}

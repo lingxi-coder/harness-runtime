@@ -27,6 +27,16 @@ fn blocks(message: &ConversationMessage) -> &[ContentBlock] {
     }
 }
 
+fn first_execution_positions(records: &[ToolExecutionRecord]) -> HashMap<String, usize> {
+    let mut positions = HashMap::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        // Recovery lookups used `.find`, so later duplicate identities must
+        // never replace the first record selected from the journal view.
+        positions.entry(record.execution_id()).or_insert(index);
+    }
+    positions
+}
+
 /// Keep an unsent native round's complete accepted origin and subsequent rows,
 /// together with ledger-backed abandonment markers, through compaction.
 pub(super) async fn preserve_pending_compaction_tail(
@@ -107,15 +117,17 @@ pub(super) async fn preserve_pending_compaction_tail(
         }
     }
     let mut first_origin = history.len();
+    let mut execution_positions = None;
     for receipt in pending {
         if receipt.execution_ids.is_empty() {
             return Err(internal("pending receipt has no execution identities"));
         }
         for id in &receipt.execution_ids {
-            let record = recovered
-                .executions
-                .iter()
-                .find(|record| record.execution_id() == *id)
+            let positions = execution_positions
+                .get_or_insert_with(|| first_execution_positions(&recovered.executions));
+            let record = positions
+                .get(id)
+                .map(|&index| &recovered.executions[index])
                 .ok_or_else(|| internal("pending receipt has no durable execution facts"))?;
             let origin = binding_origins
                 .get(&(
@@ -253,7 +265,7 @@ async fn restore_execution_bindings(
 }
 
 /// Complete exact, ledger-backed responses without repeating input or model submission.
-async fn finish_prepared_responses(
+pub(super) async fn finish_prepared_responses(
     orch: &ConversationOrchestrator,
     recovered: &mut lingxi_core::host::ToolJournalRecovery,
     session_id: SessionId,
@@ -275,6 +287,15 @@ async fn finish_prepared_responses(
         .filter(|r| r.stage == NativeReceiptStage::ResponsePrepared)
         .cloned()
         .collect::<Vec<_>>();
+    let mut receipt_positions: HashMap<String, Vec<usize>> =
+        HashMap::with_capacity(recovered.receipts.len());
+    for (index, record) in recovered.receipts.iter().enumerate() {
+        receipt_positions
+            .entry(record.receipt_id.clone())
+            .or_default()
+            .push(index);
+    }
+    let execution_positions = first_execution_positions(&recovered.executions);
     let mut processed = HashSet::new();
     for proof in proofs {
         let output = proof
@@ -325,13 +346,15 @@ async fn finish_prepared_responses(
             ));
         }
         let mut ids = HashSet::new();
+        let mut associated_positions = Vec::new();
         let mut acknowledged_calls = std::collections::BTreeSet::new();
         for association in &associations {
-            let record = recovered
-                .receipts
-                .iter()
-                .find(|r| r.receipt_id == association.receipt_id)
+            let positions = receipt_positions
+                .get(&association.receipt_id)
                 .ok_or_else(|| internal("successor references missing receipt"))?;
+            // Read the current Vec entry: an earlier proof may already have
+            // advanced this receipt's stage or attached its exact response.
+            let record = &recovered.receipts[positions[0]];
             if !ids.insert(association.receipt_id.clone())
                 || ReceiptAcknowledgement::from_record(record) != *association
                 || record.session_id != session_id
@@ -352,25 +375,25 @@ async fn finish_prepared_responses(
                 ));
             }
             for id in &record.execution_ids {
-                let execution = recovered
-                    .executions
-                    .iter()
-                    .find(|e| e.execution_id() == *id)
+                let execution = execution_positions
+                    .get(id)
+                    .map(|&index| &recovered.executions[index])
                     .ok_or_else(|| internal("acknowledged execution is missing"))?;
                 acknowledged_calls.insert(execution.identity.provider_call_id.clone());
             }
+            associated_positions.extend_from_slice(positions);
         }
         let call_ids: std::collections::BTreeSet<String> =
             decode_payload_field(ack[0], "/call_ids")?;
         if call_ids != acknowledged_calls {
             return Err(internal("successor acknowledged different computer calls"));
         }
+        // Lookup selects the first duplicate, but both mutation passes have
+        // always updated every matching receipt in the original Vec order.
+        associated_positions.sort_unstable();
         // All associated receipts reach ResponsePrepared before any row repair.
-        for record in recovered
-            .receipts
-            .iter_mut()
-            .filter(|r| ids.contains(&r.receipt_id))
-        {
+        for &index in &associated_positions {
+            let record = &mut recovered.receipts[index];
             if matches!(
                 record.stage,
                 NativeReceiptStage::Submitted | NativeReceiptStage::SubmissionUnknown
@@ -386,11 +409,8 @@ async fn finish_prepared_responses(
         }
         persist_stored_row(orch, &stored.row, &format!("native-response:{response_id}")).await?;
         restore_message(orch, stored.message).await;
-        for record in recovered
-            .receipts
-            .iter_mut()
-            .filter(|r| ids.contains(&r.receipt_id))
-        {
+        for &index in &associated_positions {
+            let record = &mut recovered.receipts[index];
             if record.stage == NativeReceiptStage::ResponsePrepared {
                 record.stage = NativeReceiptStage::ResponseReceived;
                 journal

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 fn ctx_minimal() -> SystemPromptContext {
     SystemPromptContext {
+        native_system_turns: None,
+        prompt_policy: None,
         cwd: PathBuf::from("/proj"),
         platform: "darwin".into(),
         model: "claude-opus-4-7".into(),
@@ -32,8 +34,8 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     let out = assemble_system_prompt(&ctx_minimal());
     // Must start with HEADER.
     assert!(out.starts_with("You are LingXi, an agentic command-line coding assistant."));
-    // Must contain the `# Environment` block (R-P1a: replaces the old `<env>`).
-    assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
+    assert!(out.contains("\n\n# Environment\n - The most recent Claude models"));
+    assert!(!out.contains("Primary working directory"));
     assert!(!out.contains("<env>"));
     // MUST NOT contain the memory section (R-P1c/d: LINGXI.md is a meta message
     // now), `<tools>`, or the `Notes:` FOOTER (R-P1b).
@@ -41,10 +43,9 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     assert!(!out.contains("Contents of "));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    // Context management follows the env block; the default act-don't-rederive
-    // slot is the final 2.1.220 section.
+    // Context management and model-selected tails follow the catalog.
     assert!(out.contains("# Context management"));
-    assert!(out.ends_with("give a recommendation, not an exhaustive survey"));
+    assert!(out.contains("give a recommendation, not an exhaustive survey"));
     // The `# Memory` section is OMITTED when memory_dir is None (default) —
     // byte-identical to a build without the memory feature.
     assert!(!out.contains("# Memory\n"));
@@ -53,7 +54,7 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
 
 #[test]
 fn memory_section_emitted_when_memory_dir_set() {
-    // The standard Claude profile receives the complete 2.1.220 auto-memory
+    // The standard Claude profile receives the complete 2.1.319 auto-memory
     // protocol when the memory feature is active.
     let mut c = ctx_minimal();
     c.memory_dir = Some(PathBuf::from("/home/u/.lingxi/memdir"));
@@ -63,7 +64,7 @@ fn memory_section_emitted_when_memory_dir_set() {
     ));
     assert!(out.contains("`MEMORY.md` is always loaded into your conversation context"));
     assert!(out.contains("Anything already documented in LINGXI.md files."));
-    // The 2.1.220 dynamic order is session guidance → memory → environment →
+    // The 2.1.319 dynamic order is session guidance → memory → environment →
     // context management.
     let i_env = out.find("# Environment").expect("env");
     let i_mem = out.find("# auto memory\n").expect("memory");
@@ -94,7 +95,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     assert!(!out.contains("Contents of /proj/LINGXI.md"));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    assert!(out.ends_with("give a recommendation, not an exhaustive survey"));
+    assert!(out.contains("give a recommendation, not an exhaustive survey"));
 }
 
 #[test]
@@ -102,7 +103,7 @@ fn section_order_locked_header_body_env() {
     let out = assemble_system_prompt(&ctx_minimal());
     let i_header = out.find("You are LingXi").expect("header present");
     let i_body = out
-        .find("You are an interactive agent that helps users with software engineering tasks.")
+        .find("You are an agent working with the user toward their goals, using your own judgment along the way.")
         .expect("static body present");
     let i_env = out.find("# Environment").expect("env present");
     assert!(i_header < i_body);
@@ -118,11 +119,11 @@ fn double_lf_between_each_section() {
     let header_end = "You are LingXi, an agentic command-line coding assistant.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
     assert!(after_header.starts_with(
-        "\n\n\nYou are an interactive agent that helps users with software engineering tasks."
+        "\n\n\nYou are an agent working with the user toward their goals, using your own judgment along the way."
     ));
     // The env section follows the body, on its own `\n\n` boundary, opening with
     // the `# Environment` heading.
-    assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
+    assert!(out.contains("\n\n# Environment\n - The most recent Claude models"));
 }
 
 #[test]
@@ -165,7 +166,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
         .find("You are LingXi, an agentic command-line coding assistant.")
         .unwrap();
     let i_open = out
-        .find("You are an interactive agent that helps users with software engineering tasks.")
+        .find("You are an agent working with the user toward their goals, using your own judgment along the way.")
         .expect("Pym opening present");
     let i_zho = out
         .find("IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges")
@@ -182,10 +183,10 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     let i_exec = out
         .find("\n# Executing actions with care\n\nCarefully consider the reversibility")
         .unwrap();
-    // DIV-2: posix+Bash → Glob/Grep EXCLUDED from the dedicated list.
+    // Embedded search is opt-in; registering Bash alone keeps Glob/Grep.
     let i_tools = out
-        .find("\n# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write) \u{2014} reserve Bash for shell-only operations.")
-        .expect("tools section with Read, Edit, Write (no Glob/Grep when Bash present)");
+        .find("\n# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write, Glob, Grep) \u{2014} reserve Bash for shell-only operations.")
+        .expect("dedicated tool list includes the available file and search tools");
     let i_tone = out
         .find("\n# Tone and style\n - Only use emojis if the user explicitly requests it.")
         .unwrap();

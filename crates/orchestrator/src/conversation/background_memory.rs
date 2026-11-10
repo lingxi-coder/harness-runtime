@@ -206,15 +206,17 @@ mod tests {
                 .memory_prompt_dirty
                 .load(std::sync::atomic::Ordering::Acquire));
             if enabled {
+                let policy = orch.current_prompt_policy().await.unwrap();
+                let lingxi_core::host::prompt_policy::MemoryPromptBinding::Template(template) =
+                    policy.memory
+                else {
+                    panic!("gpt-4o uses the generic memory protocol")
+                };
                 assert!(
-                    text.contains(&crate::prompt::memory_section::render_for_prompt(
-                        &memory::memdir::paths::memory_directory_prompt_path(&directory),
-                        lingxi_core::host::model_capabilities::PromptProfile::FullHarness,
-                        exclude,
-                    ))
+                    text.contains(&template.replace("{memory_path}", &directory.to_string_lossy()))
                 );
             } else {
-                assert!(!text.contains("# auto memory"));
+                assert!(!text.contains("# Memory\nThe host provides persistent memory files"));
             }
             if directory == second {
                 assert!(!text.contains(&first.to_string_lossy().to_string()));
@@ -247,7 +249,10 @@ mod tests {
             .unwrap();
         let cold = crate::resume::prompt_snapshot_from_messages(&rows).unwrap();
         assert_eq!(cold.tools, tools);
-        assert!(!cold.system_prompt.join("\n").contains("# auto memory"));
+        assert!(!cold
+            .system_prompt
+            .join("\n")
+            .contains("# Memory\nThe host provides persistent memory files"));
         *orch.prompt_runtime.prompt_snapshot.lock().await = None;
         preferences.lock().unwrap().enabled = Some(true);
         let next = orch.provider_system_prompt().await.unwrap();
@@ -303,7 +308,11 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::Release);
             let rebuilt = cold.provider_system_prompt().await.unwrap().display_text();
             assert!(!rebuilt.contains(&first.to_string_lossy().to_string()));
-            assert_eq!(rebuilt.contains("# auto memory"), enabled);
+            assert_eq!(
+                rebuilt.contains("# Memory\nThe host provides persistent memory files"),
+                enabled
+            );
+            assert_eq!(rebuilt.contains(second.to_string_lossy().as_ref()), enabled);
             let context = cold
                 .additional_context_message()
                 .await
@@ -311,9 +320,7 @@ mod tests {
                 .unwrap()
                 .text_content();
             assert!(!context.contains(&first.to_string_lossy().to_string()));
-            if enabled && exclude {
-                assert!(context.contains(&second.to_string_lossy().to_string()));
-            }
+            assert!(!context.contains(second.to_string_lossy().as_ref()));
             assert_eq!(
                 cold.prompt_runtime
                     .prompt_snapshot
@@ -346,30 +353,79 @@ mod tests {
                     Arc::new(NoBackgroundRuntime),
                     roots,
                 ));
-                let mut orch = orchestrator(prefetch);
+                let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+                let mut orch = orchestrator(prefetch).with_cache_safe_slot(slot);
                 orch.config.exclude_dynamic_system_prompt_sections = true;
                 orch.config.context_rendering = rendering;
-                orch.session.lock().await.model = "gpt-4o".into();
-                let system = orch.build_system_prompt().await.unwrap();
-                assert!(system.contains(&crate::prompt::memory_section::render_auto_static()));
-                assert!(!system.contains(&directory.to_string_lossy().to_string()));
-                systems.push(system);
+                orch.session.lock().await.model = "claude-sonnet-4-6".into();
+                let system = orch
+                    .provider_system_prompt_for_main_request()
+                    .await
+                    .unwrap();
+                assert!(system
+                    .display_text()
+                    .contains(&crate::prompt::memory_section::render_auto_static()));
+                assert!(!system
+                    .display_text()
+                    .contains(directory.to_string_lossy().as_ref()));
+                systems.push(system.display_text());
                 let expected = crate::prompt::memory_section::render_auto_directory(
-                    &memory::memdir::paths::memory_directory_prompt_path(&directory),
+                    &directory.to_string_lossy(),
                 );
-                let scalar = orch.additional_context_message().await.unwrap().unwrap();
-                assert!(scalar.text_content().contains(&expected));
-                let context = orch.instruction_context_snapshot().await;
+                let scalar = orch.additional_context_message().await.unwrap();
+                let mut messages = vec![ConversationMessage::user(
+                    MessageId::new(),
+                    "request".into(),
+                )];
+                orch.session.lock().await.history = messages.clone();
+                orch.project_dynamic_memory_context(&mut messages).await;
+                let row = messages
+                    .iter()
+                    .find(|message| message.text_content().contains(&expected))
+                    .unwrap()
+                    .clone();
                 assert_eq!(
-                    context.user_context_utf8("auto memory").as_deref(),
-                    expected.strip_prefix("# auto memory\n")
+                    messages
+                        .iter()
+                        .map(|message| message.text_content())
+                        .collect::<String>()
+                        .matches(directory.to_string_lossy().as_ref())
+                        .count(),
+                    1
                 );
-                if rendering == InstructionRendering::Announced {
-                    let announcements = orch.context_announcement_messages().await;
-                    assert!(announcements.iter().any(|message| message
-                        .text_content()
-                        .contains(&directory.to_string_lossy().to_string())));
-                }
+                assert!(orch
+                    .instruction_context_snapshot()
+                    .await
+                    .user_context_utf8("auto memory")
+                    .is_none());
+                orch.save_cache_safe_params_for_request(
+                    Some(&system),
+                    "claude-sonnet-4-6",
+                    &[],
+                    &messages,
+                    scalar.as_ref(),
+                )
+                .await
+                .unwrap();
+                let (fork, _, _, _) = orch.background_memory_snapshot().await.unwrap();
+                let prefix = fork.fork_context_messages.unwrap();
+                assert_eq!(
+                    prefix
+                        .iter()
+                        .filter(|message| message.id() == row.id())
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    prefix
+                        .iter()
+                        .map(|message| message.text_content())
+                        .collect::<String>()
+                        .matches(directory.to_string_lossy().as_ref())
+                        .count(),
+                    1
+                );
+                assert_eq!(fork.fork_prompt_policy.unwrap().bundle_id, "claude-code");
             }
             assert_eq!(systems[0], systems[1]);
         }
@@ -588,14 +644,18 @@ impl ConversationOrchestrator {
                 .await
                 .as_ref()
                 .is_some_and(|agent| agent.system_prompt.is_some());
+            let policy = self.current_prompt_policy().await.ok();
             if self.config.system_prompt_override.is_none()
                 && !custom_agent
                 && snapshot.as_ref().is_some_and(|snapshot| {
-                    !crate::prompt::memory_section::snapshot_matches_directory(
-                        snapshot,
-                        enabled.then_some(directory.as_path()),
-                        self.config.exclude_dynamic_system_prompt_sections,
-                    )
+                    policy.as_ref().is_none_or(|policy| {
+                        !crate::prompt::memory_section::snapshot_matches_directory(
+                            snapshot,
+                            enabled.then_some(directory.as_path()),
+                            self.config.exclude_dynamic_system_prompt_sections,
+                            policy,
+                        )
+                    })
                 })
             {
                 self.retire_memory_prompt_snapshot().await;
@@ -709,7 +769,20 @@ impl ConversationOrchestrator {
                     .and_then(|handle| handle.snapshot_tool_invoker()),
             )
         };
+        // Live history excludes request-transient context. Preserve the exact
+        // route-specific memory row from the committed physical request when
+        // extending its history, including its durable message identity.
+        let dynamic_memory = params.fork_context_messages.iter().find(|message| {
+            matches!(message, ConversationMessage::User { is_meta: true, origin: Some(origin), .. }
+                if origin.string_at("/type") == Some("dynamic_memory_context"))
+        }).cloned();
         extend_session_memory_fork_context(&mut params.fork_context_messages, &history);
+        if dynamic_memory.is_some() {
+            params.fork_context_messages.retain(|message| {
+                !matches!(message, ConversationMessage::User { is_meta: true, origin: Some(origin), .. }
+                    if origin.string_at("/type") == Some("dynamic_memory_context"))
+            });
+        }
         let transcript_directory = params
             .transcript_path
             .as_ref()
@@ -723,6 +796,9 @@ impl ConversationOrchestrator {
             prefix.push(context);
         }
         prefix.extend(params.fork_context_messages);
+        if let Some(memory) = dynamic_memory {
+            self.prepend_transient_leading_context(&mut prefix, memory);
+        }
         let model = (!params.tool_use_options.main_loop_model.is_empty())
             .then(|| params.tool_use_options.main_loop_model.clone())
             .unwrap_or(model);
@@ -740,6 +816,20 @@ impl ConversationOrchestrator {
             parent_model_profile_override: profile,
             parent_permission_mode: self.permission_mode(),
             fork_parent_system_prompt: Some((*params.system_prompt).clone()),
+            fork_prompt_policy: params
+                .tool_use_options
+                .prompt_policy
+                .as_ref()
+                .map(|policy| policy.metadata()),
+            fork_custom_system_prompt: self.config.system_prompt_override.clone(),
+            fork_append_system_prompt: self.effective_append_system_prompt(),
+            fork_role_system_prompt: self
+                .lifecycle_runtime
+                .main_thread_agent
+                .read()
+                .await
+                .as_ref()
+                .and_then(|agent| agent.system_prompt.clone()),
             fork_context_messages: Some(prefix),
             instruction_context: self.prompt_runtime.instruction_context.lock().await.clone(),
             effort: params.effort,

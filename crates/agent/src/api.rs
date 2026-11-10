@@ -142,6 +142,23 @@ impl ObserverEventSink {
 /// provide a scripted mock (see [`crate::runner`] tests).
 #[async_trait]
 pub trait SubagentApiClient: Send + Sync {
+    /// Resolve prompt identity from the same provider route used by `stream`.
+    fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        Ok(lingxi_core::host::prompt_policy::PromptTarget::unresolved(
+            model, profile, mode,
+        ))
+    }
+
+    /// Whether this route accepts Native mid-conversation system messages.
+    fn supports_system_turns(&self, model: &str, _profile: Option<&str>) -> bool {
+        lingxi_core::host::model_capabilities::prompt_system_turns_for(model)
+    }
+
     /// Resolve the already-captured Native refusal-text facts for a physical
     /// provider route. `None` means the host has not supplied those facts; the
     /// Agent must not infer them from its model allowlist or session mode.
@@ -273,6 +290,19 @@ impl WorkflowWatchdogApiClient {
 
 #[async_trait]
 impl SubagentApiClient for WorkflowWatchdogApiClient {
+    fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        self.inner.prompt_target(model, profile, mode)
+    }
+
+    fn supports_system_turns(&self, model: &str, profile: Option<&str>) -> bool {
+        self.inner.supports_system_turns(model, profile)
+    }
+
     fn refusal_api_text_snapshot(
         &self,
         model: &str,

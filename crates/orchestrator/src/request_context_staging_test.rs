@@ -259,6 +259,7 @@ fn mod_registry(host: Arc<hooks::mods::ModHost>) -> Arc<tokio::sync::RwLock<hook
 
 fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
     PromptContext {
+        prompt_policies: Default::default(),
         prompt_id: std::sync::Mutex::new(prompt_id),
         rows: context_rows(Vec::new(), None),
         turn_projection: std::sync::Mutex::new(None),
@@ -267,6 +268,8 @@ fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
         ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
         next_model_step_ingress_kind: std::sync::Mutex::new(None),
         deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
     }
 }
 
@@ -631,6 +634,7 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(first_prompt_id),
                     rows: context_rows(vec![reminder], Some(&fallback)),
                     turn_projection: std::sync::Mutex::new(None),
@@ -639,6 +643,8 @@ fn cancelled_prepare_keeps_input_sidecar_and_cold_resume_reuses_context() {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     persist_prompt_ingress_after_user(
@@ -1037,6 +1043,7 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: Vec::new(),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1050,6 +1057,8 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     orch.append_accepted_prompt_ingress_reminder(&environment)
@@ -1414,6 +1423,98 @@ fn complete_ingress_batch_is_selected_once_before_first_append_and_retried_by_id
 }
 
 #[test]
+fn disabled_closing_placement_caches_empty_selection_across_cancelled_retry() {
+    run_with_large_stack(|| async {
+        for (enabled, query_source) in [(false, "sdk"), (true, "test")] {
+            let root = tempfile::tempdir().unwrap();
+            let transcript = root.path().join("disabled-placement.jsonl");
+            let filesystem: Arc<dyn FileSystem> =
+                Arc::new(PosixFileSystem::new(root.path().to_owned()));
+            let api = Arc::new(MockApiClient::new(Vec::new()));
+            api.set_native_mid_system_supported(true);
+            let mut orch = orchestrator_with_api(root.path(), &transcript, filesystem.clone(), api);
+            orch.config.query_source = query_source.into();
+            let closing = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: Vec::new(),
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+                per_turn_effort: None,
+            };
+            let closing_id = closing.id();
+            let prompt = ConversationMessage::user(MessageId::new(), "current prompt".into());
+            let prompt_id = prompt.id();
+            {
+                let mut session = orch.session.lock().await;
+                session.history.extend([
+                    ConversationMessage::user(MessageId::new(), "x".repeat(1 << 20)),
+                    closing,
+                    prompt,
+                ]);
+                session
+                    .native_request_history
+                    .synthetic_closing_ids
+                    .insert(closing_id);
+            }
+            let environment = staged_system_attachment("environment", "environment");
+            let attachment_id = environment.message.id();
+            let context = request_prompt_context(prompt_id);
+            *context.staged_ingress_attachments.lock().unwrap() = Some(vec![environment]);
+            REQUEST_CONTEXT
+                .scope(context, async {
+                    mark_native_request_assembly_accepted();
+                    let cancel = CancellationToken::new();
+                    cancel.cancel();
+                    finalize_prompt_ingress_batch_with_enabled(&orch, enabled, Some(&cancel))
+                        .await
+                        .unwrap();
+                    REQUEST_CONTEXT.with(|context| {
+                        let batch = context.ingress_batch.lock().unwrap();
+                        assert_eq!(
+                            batch.selected_before_closing_line_ids,
+                            Some(std::collections::HashSet::new()),
+                            "disabled placement still seals the selection before append"
+                        );
+                        assert!(!batch.append_started);
+                        assert!(!batch.finalized);
+                    });
+
+                    // A retry must reuse the first empty decision even if its
+                    // gate and provider would now permit before-closing rows.
+                    orch.config.query_source = "sdk".into();
+                    finalize_prompt_ingress_batch_with_enabled(&orch, true, None)
+                        .await
+                        .unwrap();
+                    assert!(prompt_ingress_batch_finalized());
+                    let session = orch.session.lock().await;
+                    assert!(session
+                        .native_request_history
+                        .before_closing_line_ids
+                        .is_empty());
+                    assert_eq!(
+                        session
+                            .history
+                            .iter()
+                            .filter(|row| row.id() == attachment_id)
+                            .count(),
+                        1,
+                        "retry retains the accepted attachment identity"
+                    );
+                    drop(session);
+                    let rows = JsonlReader::new(transcript.clone(), filesystem.clone())
+                        .read_all()
+                        .await
+                        .unwrap();
+                    assert_eq!(attachment_types(&rows), vec!["environment".to_owned()]);
+                    assert_eq!(rows[0].uuid, attachment_id.as_uuid().to_string());
+                    assert_eq!(rows[0].extra.string_at("/placement"), None);
+                })
+                .await;
+        }
+    });
+}
+
+#[test]
 fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
     run_with_large_stack(|| async {
         let root = tempfile::tempdir().unwrap();
@@ -1440,6 +1541,7 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: Vec::new(),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1455,6 +1557,8 @@ fn multiple_staged_environment_rows_keep_their_source_order_in_the_request() {
                     }),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let prepared = orch
@@ -1510,6 +1614,7 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
         REQUEST_CONTEXT
             .scope(
                 PromptContext {
+                    prompt_policies: Default::default(),
                     prompt_id: std::sync::Mutex::new(prompt_id),
                     rows: context_rows(Vec::new(), Some(&fallback)),
                     turn_projection: std::sync::Mutex::new(None),
@@ -1518,6 +1623,8 @@ fn cancelled_fallback_append_finishes_before_catching_up_the_transcript_tip() {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+        system_prompt_policy: std::sync::Mutex::new(None),
+        pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let cancel = lingxi_core::host::CancellationToken::new();
@@ -1682,11 +1789,14 @@ fn prompt_ingress_mods_screen_request_copies_and_re_resolve_after_cold_resume() 
         .with_session_id(session_id)
         .with_jsonl_writer(Arc::clone(&writer))
         .with_hook_registry(mod_registry(host.clone()));
-        writer.initialize_fixed_session_mode(
-            &session_id.as_uuid().to_string(),
-            orch.conversation_profile().await.mode,
-            0,
-        ).await.unwrap();
+        writer
+            .initialize_fixed_session_mode(
+                &session_id.as_uuid().to_string(),
+                orch.conversation_profile().await.mode,
+                0,
+            )
+            .await
+            .unwrap();
 
         let fallback_text = "<system-reminder>\nUnknown slash fallback\n</system-reminder>";
         let fallback_context =

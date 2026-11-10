@@ -256,6 +256,97 @@ fn uses() -> Vec<(
     )]
 }
 
+#[tokio::test]
+async fn native_319_task_post_tool_use_replacements_keep_native_model_bytes() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/tests/fixtures/task_contract_319.json"
+    )))
+    .unwrap();
+    let echoed = fixture["executionCases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| {
+            matches!(
+                case["name"].as_str(),
+                Some("create-retains-saved-description" | "get-missing" | "list-empty")
+            )
+        });
+    for case in echoed.chain(fixture["replacementCases"].as_array().unwrap().iter()) {
+        let directory = tempfile::tempdir().unwrap();
+        let builtin = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![directory.path().to_path_buf()],
+        );
+        let name = case["tool"].as_str().unwrap();
+        let home = directory.path().to_path_buf();
+        let tool: Arc<dyn Tool> = match name {
+            "TaskCreate" => {
+                Arc::new(tool_task::TaskCreateTool::new(builtin).with_config_home(home))
+            }
+            "TaskGet" => Arc::new(tool_task::TaskGetTool::new(builtin).with_config_home(home)),
+            "TaskList" => Arc::new(tool_task::TaskListTool::new(builtin).with_config_home(home)),
+            _ => unreachable!(),
+        };
+        let replacement = Utf16JsonProjection::parse(case["dataJson"].as_str().unwrap()).unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(tool);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                model: "claude-sonnet-4-6".into(),
+                ..Default::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            post_hook_executor(HookResponse {
+                updated_tool_output: Some(replacement),
+                ..HookResponse::default()
+            }),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            directory.path().to_path_buf(),
+        );
+        let input = match case["inputJson"].as_str() {
+            Some(input) => Utf16JsonProjection::parse(input).unwrap(),
+            None => tool_api::tool_trait::generated_builtin_result(&match name {
+                "TaskCreate" => json!({"subject":"Original", "description":"Original body"}),
+                "TaskGet" => json!({"taskId":"missing"}),
+                _ => json!({}),
+            }),
+        };
+        let uses = vec![(ToolUseId::new(), name.to_owned(), input, None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!("expected task result");
+        };
+        assert_ne!(
+            *is_error,
+            Some(true),
+            "{}: {}",
+            case["name"],
+            content.to_json_string().unwrap()
+        );
+        let expected: Vec<u16> = case["modelUnits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+            .collect();
+        assert_eq!(content.string_units(""), Some(expected), "{}", case["name"]);
+    }
+}
+
 struct FailedAgentTool(
     Option<lingxi_core::types::AgentId>,
     &'static str,

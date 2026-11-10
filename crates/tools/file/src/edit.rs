@@ -46,26 +46,14 @@ pub const TOOL_NAME: &str = "Edit";
 ///     with `\n-` (so `Usage:` is immediately followed by the first bullet) and ends with
 ///     `...reading the file.` (v2.1.183 dropped the trailing space the older builds had —
 ///     the binary's `wBp()`/`RBp()` template literal closes immediately after the period).
-const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
-
-Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`.
-- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."#;
+const EDIT_DESCRIPTION: &str = include_str!("templates/claude-code-2.1.319/edit-long.md");
 
 /// The SHORT Edit prompt — byte-locked VERBATIM to claude-code `RBp(e)`'s
 /// `Dh(e)===true` branch (binary offset 202614310), served to current-gen
 /// default models. `${Ws}`=Read; the line-prefix slot uses `t=N$e()`
 /// (`tengu_tab_read_sep`, defaults false) ⇒ `"line number + tab"` (matching the
 /// LONG body's `${n}`). The "fails otherwise" em-dash is U+2014.
-const EDIT_PROMPT_SHORT: &str = r#"Performs exact string replacement in a file.
-
-- You must Read the file in this conversation before editing, or the call will fail.
-- `old_string` must match the file exactly, including indentation, and be unique — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.
-- `replace_all: true` replaces every occurrence instead."#;
+const EDIT_PROMPT_SHORT: &str = include_str!("templates/claude-code-2.1.319/edit-lean.md");
 
 /// Patch-preview truncation template — spec §7. `{N}` is a literal that the
 /// emitter substitutes with the elided-line count via `String::replace`.
@@ -457,7 +445,7 @@ impl Tool for FileEditTool {
         // editing files" (not model-gated, not this body); LingXi returns
         // EDIT_DESCRIPTION there — a pre-existing divergence left untouched
         // (out of scope for this prompt-gate fix).
-        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+        if tool_api::prompt_uses_lean(opts) {
             EDIT_PROMPT_SHORT.into()
         } else {
             EDIT_DESCRIPTION.into()

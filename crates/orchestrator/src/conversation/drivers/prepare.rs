@@ -16,6 +16,9 @@ use super::*;
 /// their history copies and restore their positions among transient reminders.
 #[derive(Clone)]
 pub(crate) struct PreparedTurnStep {
+    pub(crate) prompt_policy: Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+    pub(crate) effective_system_prompt:
+        Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     pub(crate) snapshot: Vec<ConversationMessage>,
     pub(crate) model: String,
     pub(crate) model_profile: Option<String>,
@@ -23,6 +26,9 @@ pub(crate) struct PreparedTurnStep {
     /// This step's full reminder suffix in request order, including the newly
     /// persisted MCP/total-token messages with their original identities.
     pub(crate) turn_reminders: Vec<ConversationMessage>,
+    /// Original engine text and kind, before bundle/Mod rendering. A changed
+    /// serving policy may render these again without consuming their producers.
+    pub(crate) engine_reminder_sources: std::collections::HashMap<MessageId, EngineReminderSource>,
     /// Optional Anthropic-only request suffix tied to this step's current tool
     /// result. It is applied to the API clone and never persisted in history.
     pub(crate) tool_result_reminder_suffixes:
@@ -55,6 +61,35 @@ pub(crate) struct PreparedTurnStep {
     pub(crate) skip_global_cache_for_system_prompt: bool,
     pub(crate) deferred_reminder: Option<ConversationMessage>,
     pub(crate) date_change_reminder: Option<ConversationMessage>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PreparedReminders {
+    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) engine_sources: std::collections::HashMap<MessageId, EngineReminderSource>,
+}
+
+impl PreparedReminders {
+    pub(crate) fn reproject(&self, snapshot: &mut Vec<ConversationMessage>, replacement: &Self) {
+        let prior_ids = self
+            .messages
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        let replacements = replacement
+            .messages
+            .iter()
+            .map(|message| (message.id(), message))
+            .collect::<std::collections::HashMap<_, _>>();
+        snapshot.retain_mut(|message| {
+            if let Some(replacement) = replacements.get(&message.id()) {
+                *message = (*replacement).clone();
+                true
+            } else {
+                !prior_ids.contains(&message.id())
+            }
+        });
+    }
 }
 
 fn classify_prompt_ingress_history(
@@ -116,62 +151,120 @@ impl ConversationOrchestrator {
         let call = self
             .prepare_model_call_snapshot(ModelCallPath::Streaming, system, cancel)
             .await?;
-        let mut snapshot = call.history_snapshot;
-        let mut turn_reminders = previous.turn_reminders.clone();
-        let mut guarded_async_hook_reminders = previous.guarded_async_hook_reminders.clone();
-        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
-            &mut snapshot,
-            &mut turn_reminders,
-            &mut guarded_async_hook_reminders,
-        );
-        self.reattach_outgoing_context(
-            &mut snapshot,
-            previous.deferred_reminder.as_ref(),
-            previous.date_change_reminder.as_ref(),
-            &mut turn_reminders,
-            &mut guarded_async_hook_reminders,
-            &previous.context_announcements,
-            false,
-        )
-        .await;
-        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
-            &mut snapshot,
-            &mut turn_reminders,
-            &mut guarded_async_hook_reminders,
-        );
-        let snapshot = self
-            .prepare_persistent_chat_request(
-                snapshot,
-                system,
-                &call.model,
-                call.model_profile.as_deref(),
-                &previous.wire_tools,
-                cancel,
-            )
-            .await?;
-        self.record_context_projection(system, &snapshot, &previous.wire_tools)
-            .await;
-        let tool_result_reminder_suffixes =
-            self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
-        Ok(PreparedTurnStep {
-            snapshot,
-            model: call.model,
-            model_profile: call.model_profile,
-            outgoing_history_rewriter: call.outgoing_history_rewriter,
-            turn_reminders,
-            tool_result_reminder_suffixes,
-            native_anthropic_request_context: previous.native_anthropic_request_context.clone(),
-            thinking_resumption_host_facts: previous.thinking_resumption_host_facts.clone(),
-            guarded_async_hook_reminders,
-            context_announcements: previous.context_announcements.clone(),
-            deferred_context_announcement_rows: Vec::new(),
-            deferred_system_prompt: None,
-            wire_tools: previous.wire_tools.clone(),
-            available_tool_names: previous.available_tool_names.clone(),
-            skip_global_cache_for_system_prompt: previous.skip_global_cache_for_system_prompt,
-            deferred_reminder: previous.deferred_reminder.clone(),
-            date_change_reminder: previous.date_change_reminder.clone(),
-        })
+        let route = crate::query_model::ModelRoute {
+            model: call.model.clone(),
+            profile: call.model_profile.clone(),
+        };
+        crate::query_model::ROUTE
+            .scope(Some(route), crate::turn_loop::boxed_turn_future(|| async {
+                let prompt_policy = self.current_prompt_policy().await?;
+                let route = crate::query_model::current().expect("prepared route is in scope");
+                super::super::prompt_selection::PROMPT_POLICY_OVERRIDE
+                    .scope((route, Arc::clone(&prompt_policy)), crate::turn_loop::boxed_turn_future(|| async {
+                        let effective_system_prompt = self
+                            .system_prompt_for_policy(&prompt_policy, system)
+                            .await?;
+                        let system = effective_system_prompt.as_ref();
+                        let (
+                            wire_tools,
+                            skip_global_cache_for_system_prompt,
+                            _,
+                            available_tool_names,
+                        ) = self.build_wire_tools_with_complete().await?;
+                        let mut snapshot = call.history_snapshot;
+                        let mut turn_reminders = if previous.prompt_policy.fingerprint()
+                            == prompt_policy.fingerprint()
+                        {
+                            previous.turn_reminders.clone()
+                        } else {
+                            // A dropped/replaced current-step reminder must not
+                            // survive through its copy in durable history.
+                            let prior_ids = previous.turn_reminders.iter()
+                                .map(ConversationMessage::id)
+                                .collect::<std::collections::HashSet<_>>();
+                            snapshot.retain(|message| !prior_ids.contains(&message.id()));
+                            self.rerender_prompt_reminders(
+                                &PreparedReminders {
+                                    messages: previous.turn_reminders.clone(),
+                                    engine_sources: previous.engine_reminder_sources.clone(),
+                                },
+                                &prompt_policy,
+                                &wire_tools,
+                            ).await.messages
+                        };
+                        let mut guarded_async_hook_reminders =
+                            previous.guarded_async_hook_reminders.clone();
+                        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                            &mut snapshot,
+                            &mut turn_reminders,
+                            &mut guarded_async_hook_reminders,
+                        );
+                        self.reattach_outgoing_context(
+                            &mut snapshot,
+                            previous.deferred_reminder.as_ref(),
+                            previous.date_change_reminder.as_ref(),
+                            &mut turn_reminders,
+                            &mut guarded_async_hook_reminders,
+                            &previous.context_announcements,
+                            false,
+                        )
+                        .await;
+                        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                            &mut snapshot,
+                            &mut turn_reminders,
+                            &mut guarded_async_hook_reminders,
+                        );
+                        let mut deferred_context_announcement_rows = Vec::new();
+                        if let Some(row) = self.project_model_prompt_ingress_for_snapshot(
+                            &call.model, call.model_profile.as_deref(), &mut snapshot,
+                            &deferred_context_announcement_rows,
+                        ).await {
+                            deferred_context_announcement_rows.push((row.message, row.payload));
+                        }
+                        let snapshot = self
+                            .prepare_persistent_chat_request(
+                                snapshot,
+                                system,
+                                &call.model,
+                                call.model_profile.as_deref(),
+                                &wire_tools,
+                                cancel,
+                            )
+                            .await?;
+                        self.record_context_projection(system, &snapshot, &wire_tools)
+                            .await;
+                        let tool_result_reminder_suffixes =
+                            self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
+                        Ok(PreparedTurnStep {
+                            prompt_policy,
+                            effective_system_prompt: effective_system_prompt.clone(),
+                            snapshot,
+                            model: call.model,
+                            model_profile: call.model_profile,
+                            outgoing_history_rewriter: call.outgoing_history_rewriter,
+                            turn_reminders,
+                            engine_reminder_sources: previous.engine_reminder_sources.clone(),
+                            tool_result_reminder_suffixes,
+                            native_anthropic_request_context: previous
+                                .native_anthropic_request_context
+                                .clone(),
+                            thinking_resumption_host_facts: previous
+                                .thinking_resumption_host_facts
+                                .clone(),
+                            guarded_async_hook_reminders,
+                            context_announcements: previous.context_announcements.clone(),
+                            deferred_context_announcement_rows,
+                            deferred_system_prompt: system.cloned(),
+                            wire_tools,
+                            available_tool_names: Some(available_tool_names),
+                            skip_global_cache_for_system_prompt,
+                            deferred_reminder: previous.deferred_reminder.clone(),
+                            date_change_reminder: previous.date_change_reminder.clone(),
+                        })
+                    }))
+                    .await
+            }))
+            .await
     }
 
     /// Capture the step's prompt origin before preparation can compact history
@@ -250,9 +343,14 @@ impl ConversationOrchestrator {
         is_regular_user_prompt: bool,
         user_cancel: Option<&CancellationToken>,
     ) -> Result<PreparedTurnStep, OrchestratorError> {
-        crate::prompt::skill_listing::scope_preparation_snapshot(
-            self.prepare_turn_step_inner(path, system, in_human_turn, is_regular_user_prompt, user_cancel),
-        ).await
+        crate::prompt::skill_listing::scope_preparation_snapshot(self.prepare_turn_step_inner(
+            path,
+            system,
+            in_human_turn,
+            is_regular_user_prompt,
+            user_cancel,
+        ))
+        .await
     }
 
     async fn prepare_turn_step_inner(
@@ -337,6 +435,16 @@ impl ConversationOrchestrator {
         let prepared_call = self
             .prepare_model_call_snapshot(path, system, user_cancel)
             .await?;
+        let route = crate::query_model::ModelRoute {
+            model: prepared_call.model.clone(),
+            profile: prepared_call.model_profile.clone(),
+        };
+        crate::query_model::ROUTE.scope(Some(route), crate::turn_loop::boxed_turn_future(|| async {
+        let prompt_policy = self.current_prompt_policy().await?;
+        let route = crate::query_model::current().expect("prepared route is in scope");
+        super::super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope((route, Arc::clone(&prompt_policy)), crate::turn_loop::boxed_turn_future(|| async {
+        let effective_system_prompt = self.system_prompt_for_policy(&prompt_policy, system).await?;
+        let system = effective_system_prompt.as_ref();
         let first_party_anthropic = self
             .api
             .is_first_party_route(&prepared_call.model, prepared_call.model_profile.as_deref());
@@ -379,7 +487,7 @@ impl ConversationOrchestrator {
         }
 
         let history = self.session.lock().await.model_context_history();
-        let deferred_context_announcement_rows = self
+        let mut deferred_context_announcement_rows = self
             .context_announcement_rows_for_history(&history, instruction_reason.as_str())
             .await;
         let collector_context_attachments = deferred_context_announcement_rows
@@ -468,6 +576,7 @@ impl ConversationOrchestrator {
             )
             .await?;
         let mut guarded_async_hook_reminders = reminders.guarded_async_hook_reminders;
+        let engine_reminder_sources = reminders.engine_reminder_sources;
         let transient_reminders = reminders.transient;
         // Durable completions first: they now live in history, so they belong
         // after the last real entry and before the transient reminders. The
@@ -1077,6 +1186,13 @@ impl ConversationOrchestrator {
             &mut guarded_async_hook_reminders,
         );
 
+        if let Some(row) = self.project_model_prompt_ingress_for_snapshot(
+            &prepared_call.model, prepared_call.model_profile.as_deref(), &mut snapshot,
+            &deferred_context_announcement_rows,
+        ).await {
+            deferred_context_announcement_rows.push((row.message, row.payload));
+        }
+        self.project_dynamic_memory_context(&mut snapshot).await;
         let snapshot = self
             .prepare_persistent_chat_request(
                 snapshot,
@@ -1091,11 +1207,14 @@ impl ConversationOrchestrator {
             .await;
 
         Ok(PreparedTurnStep {
+            prompt_policy,
+            effective_system_prompt: effective_system_prompt.clone(),
             snapshot,
             model: prepared_call.model,
             model_profile: prepared_call.model_profile,
             outgoing_history_rewriter: prepared_call.outgoing_history_rewriter,
             turn_reminders,
+            engine_reminder_sources,
             tool_result_reminder_suffixes,
             native_anthropic_request_context,
             thinking_resumption_host_facts,
@@ -1109,6 +1228,8 @@ impl ConversationOrchestrator {
             deferred_reminder,
             date_change_reminder,
         })
+        })).await
+        })).await
     }
 
     /// Persist later-prepared attachments only when the request has not been
@@ -1119,10 +1240,34 @@ impl ConversationOrchestrator {
         for (message, attachment) in
             std::mem::take(&mut prepared.deferred_context_announcement_rows)
         {
-            self.persist_model_reminder(message, attachment).await;
+            if attachment.string_at("/type") == Some("model") {
+                if let Some(rendered) = crate::request_context::rendered_system_message(&message) {
+                    self.persist_prompt_ingress_reminder(
+                        &crate::request_context::PromptIngressAttachment {
+                            message,
+                            payload: attachment,
+                            rendered,
+                        },
+                    )
+                    .await;
+                }
+            } else {
+                self.persist_model_reminder(message, attachment).await;
+            }
         }
         if let Some(system) = prepared.deferred_system_prompt.take() {
-            self.record_prompt_snapshot_if_needed(Some(&system), &prepared.wire_tools)
+            let route = crate::query_model::ModelRoute {
+                model: prepared.model.clone(),
+                profile: prepared.model_profile.clone(),
+            };
+            crate::query_model::ROUTE
+                .scope(
+                    Some(route.clone()),
+                    super::super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                        (route, Arc::clone(&prepared.prompt_policy)),
+                        self.record_prompt_snapshot_if_needed(Some(&system), &prepared.wire_tools),
+                    ),
+                )
                 .await;
         }
     }
@@ -1138,22 +1283,117 @@ impl ConversationOrchestrator {
 /// preparation merges them into the reusable ordered request suffix.
 pub(crate) struct TurnReminders {
     pub(crate) transient: Vec<ConversationMessage>,
+    pub(crate) engine_reminder_sources: std::collections::HashMap<MessageId, EngineReminderSource>,
     pub(crate) task_notifications: Vec<ConversationMessage>,
     pub(crate) model_reminders: Vec<(usize, ConversationMessage)>,
     pub(crate) guarded_async_hook_reminders:
         Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)>,
 }
 
+#[derive(Clone)]
+pub(crate) struct EngineReminderSource {
+    kind: &'static str,
+    message: ConversationMessage,
+    detail: Option<serde_json::Value>,
+    todo_mode: Option<tool_task::reminder::ReminderMode>,
+}
+
 impl ConversationOrchestrator {
+    async fn prepare_engine_attachment(
+        &self,
+        sources: &mut std::collections::HashMap<MessageId, EngineReminderSource>,
+        kind: &'static str,
+        message: ConversationMessage,
+        detail: Option<serde_json::Value>,
+    ) -> Option<ConversationMessage> {
+        let source = EngineReminderSource {
+            kind,
+            message: message.clone(),
+            detail: detail.clone(),
+            todo_mode: if kind == "todo_reminder" {
+                self.todo_reminder_mode().await
+            } else {
+                None
+            },
+        };
+        let rendered = self
+            .mod_prompt_attachment_with_detail(
+                kind,
+                message,
+                serde_json::json!({"kind":"engine"}),
+                detail,
+            )
+            .await?;
+        sources.insert(rendered.id(), source);
+        Some(rendered)
+    }
+
+    pub(crate) async fn rerender_prompt_reminders(
+        &self,
+        previous: &PreparedReminders,
+        policy: &lingxi_core::host::prompt_policy::ResolvedPromptPolicy,
+        tools: &[lingxi_core::host::SourceToolWireDefinition],
+    ) -> PreparedReminders {
+        let has_tool = |name: &str| tools.iter().any(|tool| tool.name == name);
+        let mut reminders = Vec::with_capacity(previous.messages.len());
+        for message in &previous.messages {
+            let Some(source) = previous.engine_sources.get(&message.id()) else {
+                // Durable notifications and guarded hook completions already
+                // belong to this logical step. Never drain their queues again.
+                reminders.push(message.clone());
+                continue;
+            };
+            let enabled = match source.kind {
+                "todo_reminder" => {
+                    source.todo_mode.is_some()
+                        && self.todo_reminder_mode().await == source.todo_mode
+                        && match source.todo_mode {
+                            Some(tool_task::reminder::ReminderMode::V1Todo) => {
+                                has_tool("TodoWrite")
+                            }
+                            Some(tool_task::reminder::ReminderMode::V2Task) => {
+                                has_tool("TaskCreate") && has_tool("TaskUpdate")
+                            }
+                            None => false,
+                        }
+                }
+                "silent_turn_reminder" => {
+                    policy.reminders.is_native()
+                        && crate::prompt::silent_turn::is_enabled(&policy.target.canonical_model)
+                }
+                "tool_search_usage_reminder" => has_tool("ToolSearch"),
+                _ => true,
+            };
+            if enabled {
+                if let Some(rendered) = self
+                    .mod_prompt_attachment_with_detail(
+                        source.kind,
+                        source.message.clone(),
+                        serde_json::json!({"kind":"engine"}),
+                        source.detail.clone(),
+                    )
+                    .await
+                {
+                    reminders.push(rendered);
+                }
+            }
+        }
+        PreparedReminders {
+            messages: reminders,
+            engine_sources: previous.engine_sources.clone(),
+        }
+    }
+
     fn push_engine_attachment<'a>(
         &'a self,
         output: &'a mut Vec<ConversationMessage>,
-        kind: &'a str,
+        sources: &'a mut std::collections::HashMap<MessageId, EngineReminderSource>,
+        kind: &'static str,
         message: ConversationMessage,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(message) = self
-                .mod_prompt_attachment(kind, message, serde_json::json!({"kind":"engine"}))
+                .prepare_engine_attachment(sources, kind, message, None)
                 .await
             {
                 output.push(message);
@@ -1205,6 +1445,7 @@ impl ConversationOrchestrator {
                 // Native reminders are outside the durable App Chat contract.
                 return Ok(TurnReminders {
                     transient: Vec::new(),
+                    engine_reminder_sources: Default::default(),
                     task_notifications: Vec::new(),
                     model_reminders: Vec::new(),
                     guarded_async_hook_reminders: Vec::new(),
@@ -1240,12 +1481,14 @@ impl ConversationOrchestrator {
                     .collect();
                 return Ok(TurnReminders {
                     transient: Vec::new(),
+                    engine_reminder_sources: Default::default(),
                     task_notifications,
                     model_reminders: Vec::new(),
                     guarded_async_hook_reminders: Vec::new(),
                 });
             }
             let mut transient = Vec::new();
+            let mut engine_reminder_sources = std::collections::HashMap::new();
             let mut model_reminders = Vec::new();
             let mut guarded_async_hook_reminders = Vec::new();
             // Pending NAr rows are request-local until the finalizer accepts
@@ -1301,8 +1544,13 @@ impl ConversationOrchestrator {
                 transient.push(reminder);
             } else if staged_ingress.is_none() {
                 if let Some(reminder) = self.agent_listing_reminder_message().await {
-                    self.push_engine_attachment(&mut transient, "agent_listing_delta", reminder)
-                        .await;
+                    self.push_engine_attachment(
+                        &mut transient,
+                        &mut engine_reminder_sources,
+                        "agent_listing_delta",
+                        reminder,
+                    )
+                    .await;
                 }
             }
             let changed_file_rows = crate::request_context::prompt_ingress_producer_rows_or_else(
@@ -1324,10 +1572,11 @@ impl ConversationOrchestrator {
                 .await
             {
                 if let Some(reminder) = self
-                    .mod_prompt_attachment(
+                    .prepare_engine_attachment(
+                        &mut engine_reminder_sources,
                         "nested_memory",
                         reminder,
-                        serde_json::json!({"kind":"engine"}),
+                        None,
                     )
                     .await
                 {
@@ -1335,15 +1584,25 @@ impl ConversationOrchestrator {
                 }
             }
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
-                self.push_engine_attachment(&mut transient, "skill_discovery", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "skill_discovery",
+                    reminder,
+                )
+                .await;
             }
             if let Some(reminder) = staged("skill_listing") {
                 transient.push(reminder);
             } else if staged_ingress.is_none() {
                 if let Some(reminder) = self.skill_listing_reminder_message().await? {
-                    self.push_engine_attachment(&mut transient, "skill_listing", reminder)
-                        .await;
+                    self.push_engine_attachment(
+                        &mut transient,
+                        &mut engine_reminder_sources,
+                        "skill_listing",
+                        reminder,
+                    )
+                    .await;
                 }
             }
             let mcp_instructions_position = transient.len();
@@ -1387,12 +1646,7 @@ impl ConversationOrchestrator {
                     }
                 });
                 if let Some(reminder) = self
-                    .mod_prompt_attachment_with_detail(
-                        kind,
-                        reminder,
-                        serde_json::json!({"kind":"engine"}),
-                        detail,
-                    )
+                    .prepare_engine_attachment(&mut engine_reminder_sources, kind, reminder, detail)
                     .await
                 {
                     transient.push(reminder);
@@ -1403,10 +1657,10 @@ impl ConversationOrchestrator {
                 let plan_file_path = self.session_plan_file_path(&session_id);
                 let has_plan = std::path::Path::new(&plan_file_path).exists();
                 if let Some(reminder) = self
-                    .mod_prompt_attachment_with_detail(
+                    .prepare_engine_attachment(
+                        &mut engine_reminder_sources,
                         "plan_mode_exit",
                         reminder,
-                        serde_json::json!({"kind":"engine"}),
                         Some(serde_json::json!({"planFilePath":plan_file_path,"hasPlan":has_plan})),
                     )
                     .await
@@ -1428,19 +1682,34 @@ impl ConversationOrchestrator {
             let todo_reminder = self.todo_reminder_message().await;
             let todo_reminder_fired = todo_reminder.is_some();
             if let Some(reminder) = todo_reminder {
-                self.push_engine_attachment(&mut transient, "todo_reminder", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "todo_reminder",
+                    reminder,
+                )
+                .await;
             }
             if let Some(reminder) = self
                 .tool_search_usage_reminder_message(todo_reminder_fired)
                 .await
             {
-                self.push_engine_attachment(&mut transient, "tool_search_usage_reminder", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "tool_search_usage_reminder",
+                    reminder,
+                )
+                .await;
             }
             if let Some(reminder) = self.silent_turn_reminder_message().await {
-                self.push_engine_attachment(&mut transient, "silent_turn_reminder", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "silent_turn_reminder",
+                    reminder,
+                )
+                .await;
             }
             let notification_rows = crate::request_context::prompt_ingress_producer_rows_or_else(
                 self,
@@ -1479,20 +1748,40 @@ impl ConversationOrchestrator {
             // Task completion can enqueue memory updates, so this must follow the
             // notification drain and persistence above.
             for reminder in self.memory_update_reminder_messages().await {
-                self.push_engine_attachment(&mut transient, "memory_update", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "memory_update",
+                    reminder,
+                )
+                .await;
             }
             for reminder in self.relevant_memory_reminder_messages().await {
-                self.push_engine_attachment(&mut transient, "relevant_memories", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "relevant_memories",
+                    reminder,
+                )
+                .await;
             }
             if let Some(reminder) = self.output_style_reminder_message().await {
-                self.push_engine_attachment(&mut transient, "output_style", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "output_style",
+                    reminder,
+                )
+                .await;
             }
             if let Some(reminder) = self.new_diagnostics_reminder_message().await {
-                self.push_engine_attachment(&mut transient, "diagnostics", reminder)
-                    .await;
+                self.push_engine_attachment(
+                    &mut transient,
+                    &mut engine_reminder_sources,
+                    "diagnostics",
+                    reminder,
+                )
+                .await;
             }
             let total_tokens = if staged_ingress.is_none() {
                 self.total_tokens_reminder_message(is_regular_user_prompt)
@@ -1595,6 +1884,7 @@ impl ConversationOrchestrator {
 
             Ok(TurnReminders {
                 transient,
+                engine_reminder_sources,
                 task_notifications,
                 model_reminders,
                 guarded_async_hook_reminders,

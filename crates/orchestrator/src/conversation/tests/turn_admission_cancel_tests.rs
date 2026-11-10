@@ -14,6 +14,40 @@ enum Entry {
     Streaming,
     QueuedBatch,
     Images,
+    ImagesWithMessageId,
+    ImagesWithRowToken,
+}
+
+fn image_admission<'a>(
+    entry: Entry,
+    orch: &'a ConversationOrchestrator,
+    image_paths: &'a [std::path::PathBuf],
+    cancel: CancellationToken,
+) -> Pin<Box<dyn Future<Output = Result<TurnOutcome, OrchestratorError>> + 'a>> {
+    match entry {
+        Entry::Images => Box::pin(orch.run_turn_streaming_with_cancel_images(
+            "queued".into(),
+            image_paths,
+            cancel,
+        )),
+        Entry::ImagesWithMessageId => {
+            Box::pin(orch.run_turn_streaming_with_cancel_images_and_message_id(
+                "queued",
+                image_paths,
+                cancel,
+                Some(lingxi_core::types::MessageId::new()),
+            ))
+        }
+        Entry::ImagesWithRowToken => {
+            Box::pin(orch.run_turn_streaming_with_cancel_images_and_row_token(
+                "queued".into(),
+                image_paths,
+                cancel,
+                "image-row".into(),
+            ))
+        }
+        _ => panic!("expected an image-path entry"),
+    }
 }
 
 async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
@@ -37,19 +71,24 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
         cancel.cancel();
     }
     let image_root = tempfile::tempdir().unwrap();
-    let image_paths = [image_root.path().join("missing.png")];
-    let queued_prompt: lingxi_core::types::utf16_json::Utf16JsonProjection = "queued".into();
+    let image_paths = [image_root.path().join("attachment.png")];
+    if !precancelled
+        && matches!(
+            entry,
+            Entry::Images | Entry::ImagesWithMessageId | Entry::ImagesWithRowToken
+        )
+    {
+        std::fs::write(&image_paths[0], b"\x89PNG").unwrap();
+    }
     let mut waiter: Pin<Box<dyn Future<Output = Result<TurnOutcome, OrchestratorError>> + '_>> =
         match entry {
             Entry::Batched => Box::pin(orch.run_turn_with_cancel("queued", cancel.clone())),
             Entry::Streaming => {
                 Box::pin(orch.run_turn_streaming_with_cancel("queued", cancel.clone()))
             }
-            Entry::Images => Box::pin(orch.run_turn_streaming_with_cancel_images(
-                queued_prompt,
-                &image_paths,
-                cancel.clone(),
-            )),
+            Entry::Images | Entry::ImagesWithMessageId | Entry::ImagesWithRowToken => {
+                image_admission(entry, &orch, &image_paths, cancel.clone())
+            }
             Entry::QueuedBatch => Box::pin(orch.run_queued_prompt_batch(
                 vec![crate::QueuedPromptInput {
                     goal_retry_id: None,
@@ -119,5 +158,66 @@ async fn cancelled_queued_batch_admission_does_not_wait_for_the_running_turn() {
 
 #[tokio::test]
 async fn cancelled_image_admission_does_not_read_attachments() {
-    assert_cancelled_admission(Entry::Images, true).await;
+    for entry in [
+        Entry::Images,
+        Entry::ImagesWithMessageId,
+        Entry::ImagesWithRowToken,
+    ] {
+        assert_cancelled_admission(entry, true).await;
+    }
+}
+
+#[tokio::test]
+async fn cancelled_image_admission_does_not_wait_for_the_running_turn() {
+    for entry in [
+        Entry::Images,
+        Entry::ImagesWithMessageId,
+        Entry::ImagesWithRowToken,
+    ] {
+        assert_cancelled_admission(entry, false).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_image_admission_does_not_append_or_call_the_api() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = [
+        root.path().join("first-missing.png"),
+        root.path().join("later-missing.png"),
+    ];
+    for entry in [
+        Entry::Images,
+        Entry::ImagesWithMessageId,
+        Entry::ImagesWithRowToken,
+    ] {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(Vec::new()));
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig::default(),
+                api.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            ));
+        let _owner = orch.turn_gate.lock().await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            image_admission(entry, &orch, &paths, CancellationToken::new()),
+        )
+        .await
+        .expect("a read failure must finish before waiting for turn admission")
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("first-missing.png"),
+            "{entry:?}: {error}"
+        );
+        assert!(orch.snapshot_history().await.is_empty());
+        assert!(api.captured_msgs().await.is_empty());
+        assert!(streaming.captured_calls().await.is_empty());
+    }
 }

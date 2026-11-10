@@ -734,6 +734,8 @@ mod tests {
             origin_session_id: None,
             instruction_context: None,
             fork_context: None,
+            session_interactive: None,
+            prompt_policy: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,

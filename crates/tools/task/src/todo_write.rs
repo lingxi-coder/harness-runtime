@@ -4,7 +4,7 @@
 //! are NOT accepted.
 
 use async_trait::async_trait;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use lingxi_core::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -39,7 +39,8 @@ pub const TOOL_NAME: &str = "TodoWrite";
 /// TodoWrite tool prompt selected by the `Dh` gate for new models
 /// (claude-opus-4-8 / claude-fable-5-1 / claude-mythos-5-1) and whenever
 /// `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy. Byte-exact.
-pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n- Send the full list each call; it replaces the previous one.\n- Keep one item `in_progress` at a time and mark it `completed` when done.";
+pub const TODO_WRITE_PROMPT_SIMPLE: &str =
+    include_str!("templates/claude-code-2.1.319/todo-write-lean.md");
 
 /// claude-code v2.1.183 `UWd` (binary offset 199292278): the long
 /// standard TodoWrite tool prompt selected by the `Dh` gate for classic
@@ -49,203 +50,21 @@ pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for th
 /// (`UWd=` at offset 199292273) ends with `...successfully.\n` — a trailing
 /// newline IS present (rendered length 9114 bytes), so the raw string closes
 /// (`"#`) on the following line.
-pub const TODO_WRITE_PROMPT_FULL: &str = r#"Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
-It also helps the user understand the progress of the task and overall progress of their requests.
+pub const TODO_WRITE_PROMPT_FULL: &str =
+    include_str!("templates/claude-code-2.1.319/todo-write-long.md");
 
-## When to Use This Tool
-Use this tool proactively in these scenarios:
-
-1. Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
-2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
-3. User explicitly requests todo list - When the user directly asks you to use the todo list
-4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
-5. After receiving new instructions - Immediately capture user requirements as todos
-6. When you start working on a task - Mark it as in_progress BEFORE beginning work. Ideally you should only have one todo as in_progress at a time
-7. After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
-
-## When NOT to Use This Tool
-
-Skip using this tool when:
-1. There is only a single, straightforward task
-2. The task is trivial and tracking it provides no organizational benefit
-3. The task can be completed in less than 3 trivial steps
-4. The task is purely conversational or informational
-
-NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
-
-## Examples of When to Use the Todo List
-
-<example>
-User: I want to add a dark mode toggle to the application settings. Make sure you run the tests and build when you're done!
-Assistant: *Creates todo list with the following items:*
-1. Creating dark mode toggle component in Settings page
-2. Adding dark mode state management (context/store)
-3. Implementing CSS-in-JS styles for dark theme
-4. Updating existing components to support theme switching
-5. Running tests and build process, addressing any failures or errors that occur
-*Begins working on the first task*
-
-<reasoning>
-The assistant used the todo list because:
-1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes
-2. The user explicitly requested tests and build be run afterward
-3. The assistant inferred that tests and build need to pass by adding "Ensure tests and build succeed" as the final task
-</reasoning>
-</example>
-
-<example>
-User: Help me rename the function getCwd to getCurrentWorkingDirectory across my project
-Assistant: *Uses grep or search tools to locate all instances of getCwd in the codebase*
-I've found 15 instances of 'getCwd' across 8 different files.
-*Creates todo list with specific items for each file that needs updating*
-
-<reasoning>
-The assistant used the todo list because:
-1. First, the assistant searched to understand the scope of the task
-2. Upon finding multiple occurrences across different files, it determined this was a complex task with multiple steps
-3. The todo list helps ensure every instance is tracked and updated systematically
-4. This approach prevents missing any occurrences and maintains code consistency
-</reasoning>
-</example>
-
-
-<example>
-User: I need to implement these features for my e-commerce site: user registration, product catalog, shopping cart, and checkout flow.
-Assistant: *Creates a todo list breaking down each feature into specific tasks based on the project architecture*
-Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms that integrate with your existing authentication system.
-
-<reasoning>
-The assistant used the todo list because:
-1. The user provided multiple complex features to implement in a comma separated list
-2. The todo list helps organize these large features into manageable tasks
-3. This approach allows for tracking progress across the entire implementation
-</reasoning>
-</example>
-
-<example>
-User: Can you help optimize my React application? It's rendering slowly and has performance issues.
-Assistant: *Reviews component structure, render patterns, state management, and data fetching*
-After analyzing your codebase, I've identified several performance issues.
-*Creates todo list with items like: 1) Implementing memoization for expensive calculations in ProductList, 2) Adding virtualization for long lists in Dashboard, 3) Optimizing image loading in Gallery component, 4) Fixing state update loops in ShoppingCart, 5) Reviewing bundle size and implementing code splitting*
-Let's start by implementing memoization for the expensive calculations in your ProductList component.
-
-<reasoning>
-The assistant used the todo list because:
-1. First, the assistant examined the codebase to identify specific performance issues
-2. Based on this analysis, it identified multiple optimization opportunities
-3. Performance optimization is a non-trivial task requiring multiple steps
-4. The todo list helps methodically track improvements across different components
-5. This systematic approach ensures all performance bottlenecks are addressed
-</reasoning>
-</example>
-
-## Examples of When NOT to Use the Todo List
-
-<example>
-User: How do I print 'Hello World' in Python?
-Assistant: In Python, you can print "Hello World" with this simple code:
-
-python
-print("Hello World")
-
-This will output the text "Hello World" to the console when executed.
-
-<reasoning>
-The assistant did not use the todo list because this is a single, trivial task that can be completed in one step. There's no need to track multiple tasks or steps for such a straightforward request.
-</reasoning>
-</example>
-
-<example>
-User: What does the git status command do?
-Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
-
-<reasoning>
-The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
-</reasoning>
-</example>
-
-<example>
-User: Can you add a comment to the calculateTotal function to explain what it does?
-Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
-* Uses the Edit tool to add a comment to the calculateTotal function *
-
-<reasoning>
-The assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.
-</reasoning>
-</example>
-
-<example>
-User: Run npm install for me and tell me what happens.
-Assistant: I'll run the npm install command for you.
-
-*Executes: npm install*
-
-The command completed successfully. Here's the output:
-[Output of npm install command]
-
-All dependencies have been installed according to your package.json file.
-
-<reasoning>
-The assistant did not use the todo list because this is a single command execution with immediate results. There are no multiple steps to track or organize, making the todo list unnecessary for this straightforward task.
-</reasoning>
-</example>
-
-## Task States and Management
-
-1. **Task States**: Use these states to track progress:
-   - pending: Task not yet started
-   - in_progress: Currently working on (limit to ONE task at a time)
-   - completed: Task finished successfully
-
-   **IMPORTANT**: Task descriptions must have two forms:
-   - content: The imperative form describing what needs to be done (e.g., "Run tests", "Build the project")
-   - activeForm: The present continuous form shown during execution (e.g., "Running tests", "Building the project")
-
-2. **Task Management**:
-   - Update task status in real-time as you work
-   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
-   - Exactly ONE task must be in_progress at any time (not less, not more)
-   - Complete current tasks before starting new ones
-   - Remove tasks that are no longer relevant from the list entirely
-
-3. **Task Completion Requirements**:
-   - ONLY mark a task as completed when you have FULLY accomplished it
-   - If you encounter errors, blockers, or cannot finish, keep the task as in_progress
-   - When blocked, create a new task describing what needs to be resolved
-   - Never mark a task as completed if:
-     - Tests are failing
-     - Implementation is partial
-     - You encountered unresolved errors
-     - You couldn't find necessary files or dependencies
-
-4. **Task Breakdown**:
-   - Create specific, actionable items
-   - Break complex tasks into smaller, manageable steps
-   - Use clear, descriptive task names
-   - Always provide both forms:
-     - content: "Fix authentication bug"
-     - activeForm: "Fixing authentication bug"
-
-When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
-"#;
-
-// The `Dh(model)` / `UWu(model)` / `dfe(model)` predicate triple is shared
-// verbatim with the file tools (Read/Write/Edit/Glob/Grep), so it lives in
-// `tool-api` as the single source of truth. See
-// `tool_api::model_prompt_gate::dh_simple_system_prompt` (port of binary offset
-// ~195159752); TodoWrite consumes it below.
-use tool_api::dh_simple_system_prompt;
-
-/// Port of claude-code `Xla(model)` = `Dh(model) ? FWd : UWd`
-/// (`prompt({model:e}){return Xla(e)}`). Selects the SHORT `FWd`
-/// ([`TODO_WRITE_PROMPT_SIMPLE`]) for new models (opus-4-8 / fable-5 /
-/// mythos-5) and whenever `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy, and
-/// the long `UWd` ([`TODO_WRITE_PROMPT_FULL`]) for classic models and whenever
-/// the env override is defined-falsy. The session/subagent model is threaded
-/// via [`PromptOptions::model`]; `None` mirrors `Dh(undefined)` → `UWd`.
+/// Compatibility entry point for standalone callers without request options.
+/// The builtin resolver selects Claude's native style or generic Lean.
 #[must_use]
 pub fn select_todo_write_prompt(model: Option<&str>) -> &'static str {
-    if dh_simple_system_prompt(model) {
+    todo_write_prompt(&PromptOptions {
+        model: model.map(str::to_owned),
+        ..PromptOptions::default()
+    })
+}
+
+fn todo_write_prompt(options: &PromptOptions) -> &'static str {
+    if tool_api::prompt_uses_lean(options) {
         TODO_WRITE_PROMPT_SIMPLE
     } else {
         TODO_WRITE_PROMPT_FULL
@@ -330,40 +149,33 @@ static SOURCE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
 fn parse_todos(input: &Utf16JsonProjection) -> Result<Vec<TodoItem>, ToolError> {
     let todos = input
         .get_property("todos")
-        .and_then(JsonValueView::array_len)
+        .filter(|todos| todos.array_len().is_some())
         .ok_or_else(|| invalid_tool_input("TodoWrite: missing or invalid 'todos' field"))?;
-    let mut parsed = Vec::with_capacity(todos);
-    for index in 0..todos {
-        let item = input
-            .at_pointer(&format!("/todos/{index}"))
+    let count = todos.array_len().expect("TodoWrite todos are an array");
+    let mut parsed = Vec::with_capacity(count);
+    for index in 0..count {
+        let item = todos
+            .get_index(index)
             .filter(|item| item.object_entries().is_some())
             .ok_or_else(|| {
                 invalid_tool_input(format!("TodoWrite: todos[{index}] must be an object"))
             })?;
-        if item
+        let content = item
             .get_property("content")
             .and_then(JsonValueView::code_units)
-            .is_none()
-        {
-            return Err(invalid_tool_input(format!(
-                "TodoWrite: todos[{index}].content must be a string"
-            )));
-        }
-        if item
+            .ok_or_else(|| {
+                invalid_tool_input(format!(
+                    "TodoWrite: todos[{index}].content must be a string"
+                ))
+            })?;
+        let active_form = item
             .get_property("activeForm")
             .and_then(JsonValueView::code_units)
-            .is_none()
-        {
-            return Err(invalid_tool_input(format!(
-                "TodoWrite: todos[{index}].activeForm must be a string"
-            )));
-        }
-        let content = input
-            .subprojection(&format!("/todos/{index}/content"))
-            .expect("string content subtree is present");
-        let active_form = input
-            .subprojection(&format!("/todos/{index}/activeForm"))
-            .expect("string activeForm subtree is present");
+            .ok_or_else(|| {
+                invalid_tool_input(format!(
+                    "TodoWrite: todos[{index}].activeForm must be a string"
+                ))
+            })?;
         let status = item
             .get_property("status")
             .and_then(JsonValueView::as_str)
@@ -382,27 +194,56 @@ fn parse_todos(input: &Utf16JsonProjection) -> Result<Vec<TodoItem>, ToolError> 
         };
         parsed.push(TodoItem {
             id: String::new(),
-            content,
+            content: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(content),
+                content.to_vec(),
+            )
+            .expect("string content retains exact UTF-16"),
             status,
-            active_form,
+            active_form: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(active_form),
+                active_form.to_vec(),
+            )
+            .expect("string activeForm retains exact UTF-16"),
         });
     }
     Ok(parsed)
 }
 
 fn todos_result_projection(input: &Utf16JsonProjection) -> Utf16JsonProjection {
-    let count = input
-        .array_len("/todos")
+    let todos = input
+        .get_property("todos")
         .expect("TodoWrite todos were validated");
-    let todos = (0..count)
+    let count = todos.array_len().expect("TodoWrite todos are an array");
+    let mut builder = Utf16JsonBuilder::new();
+    let rows = (0..count)
         .map(|index| {
-            input
-                .subprojection(&format!("/todos/{index}"))
-                .and_then(|item| item.pick_object_fields(&["content", "status", "activeForm"]))
-                .expect("TodoWrite todo has the schema fields")
+            let item = todos
+                .get_index(index)
+                .expect("TodoWrite todo was validated");
+            let fields = ["content", "status", "activeForm"]
+                .into_iter()
+                .map(|field| {
+                    let value = item
+                        .get_property(field)
+                        .expect("TodoWrite field was validated");
+                    let id = builder
+                        .import_view(value)
+                        .expect("TodoWrite field is valid JSON");
+                    (field.into(), id)
+                })
+                .collect();
+            builder
+                .push_object(fields)
+                .expect("TodoWrite row is valid JSON")
         })
         .collect();
-    Utf16JsonProjection::array(todos).expect("TodoWrite todo list is valid JSON")
+    let root = builder
+        .push_array(rows)
+        .expect("TodoWrite rows are valid JSON");
+    builder
+        .finish(root)
+        .expect("TodoWrite todo list is valid JSON")
 }
 
 fn todo_items_projection(todos: &[TodoItem]) -> Utf16JsonProjection {
@@ -533,13 +374,7 @@ impl Tool for TodoWriteTool {
         "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.".into()
     }
     async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
-        // claude-code v2.1.183 `prompt({model:e}){return Xla(e)}` where
-        // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh(model)` selects the SHORT
-        // `FWd` prompt for new models (opus-4-8 / fable-5 / mythos-5) and the
-        // long `UWd` for classic models, gated up front by the
-        // `LINGXI_SIMPLE_SYSTEM_PROMPT` env override. The session model is
-        // threaded via `opts.model`; absent ⇒ `Dh(undefined)` → `UWd`.
-        select_todo_write_prompt(opts.model.as_deref()).into()
+        todo_write_prompt(opts).into()
     }
 
     async fn call(
@@ -702,6 +537,91 @@ mod tests {
     fn source_text_units(units: &[u16]) -> Utf16JsonProjection {
         Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
             .expect("source test text is valid JSON")
+    }
+
+    #[test]
+    fn borrowed_todo_parser_preserves_validation_order_and_sparse_hole_errors() {
+        for (source, expected) in [
+            (r#"{}"#, "TodoWrite: missing or invalid 'todos' field"),
+            (
+                r#"{"todos":null}"#,
+                "TodoWrite: missing or invalid 'todos' field",
+            ),
+            (
+                r#"{"todos":[null]}"#,
+                "TodoWrite: todos[0] must be an object",
+            ),
+            (
+                r#"{"todos":[{"content":null,"activeForm":null,"status":null}]}"#,
+                "TodoWrite: todos[0].content must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":null,"status":null}]}"#,
+                "TodoWrite: todos[0].activeForm must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":"y","status":null}]}"#,
+                "TodoWrite: todos[0].status must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":"y","status":"done"}]}"#,
+                "TodoWrite: todos[0].status is invalid",
+            ),
+        ] {
+            let input = Utf16JsonProjection::parse(source).unwrap();
+            let ToolError::InvalidInput(message) = parse_todos(&input).unwrap_err() else {
+                panic!("expected TodoWrite input error");
+            };
+            assert_eq!(message.string_at(""), Some(expected), "{source}");
+        }
+        let input = Utf16JsonProjection::object(vec![(
+            "todos".into(),
+            Utf16JsonProjection::sparse_array(1, Vec::new()).unwrap(),
+        )])
+        .unwrap();
+        let ToolError::InvalidInput(message) = parse_todos(&input).unwrap_err() else {
+            panic!("expected TodoWrite hole error");
+        };
+        assert_eq!(
+            message.string_at(""),
+            Some("TodoWrite: todos[0] must be an object")
+        );
+    }
+
+    #[test]
+    fn borrowed_todo_rows_strip_unknown_subtrees_and_keep_exact_result_order() {
+        let input = Utf16JsonProjection::parse(&format!(
+            r#"{{"todos":[{{"activeForm":"\udc00","ignored":{}0{},"status":"pending","content":"\ud800","id":"ignored"}}]}}"#,
+            "[".repeat(2_000), "]".repeat(2_000),
+        )).unwrap();
+        let parsed = parse_todos(&input).unwrap();
+        assert_eq!(parsed[0].content.string_units(""), Some(vec![0xd800]));
+        assert_eq!(parsed[0].active_form.string_units(""), Some(vec![0xdc00]));
+        assert!(parsed[0].id.is_empty());
+        assert_eq!(
+            todos_result_projection(&input).to_json_string().unwrap(),
+            r#"[{"content":"\ud800","status":"pending","activeForm":"\udc00"}]"#
+        );
+    }
+
+    #[test]
+    fn borrowed_todo_rows_cover_large_flat_shapes_without_changing_result_bytes() {
+        let row = r#"{"content":"\ud800","status":"pending","activeForm":"\udc00"}"#;
+        for count in [0, 1, 256, 4_096] {
+            let rows = std::iter::repeat_n(row, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let input = Utf16JsonProjection::parse(&format!(r#"{{"todos":[{rows}]}}"#)).unwrap();
+            let parsed = parse_todos(&input).unwrap();
+            assert_eq!(parsed.len(), count);
+            assert!(parsed
+                .iter()
+                .all(|item| item.content.string_units("") == Some(vec![0xd800])));
+            assert_eq!(
+                todos_result_projection(&input).to_json_string().unwrap(),
+                format!("[{rows}]")
+            );
+        }
     }
 
     fn prompt_text(prompt: Utf16JsonProjection) -> String {
@@ -1287,10 +1207,11 @@ mod tests {
     // restores the prior value on drop. No other test module reads this var.
 
     #[tokio::test]
-    async fn prompt_selects_uwd_or_fwd_via_dh_env_gate() {
+    async fn prompt_selects_native_or_generic_lean_from_request_options() {
         let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
-        // No model threaded ⇒ `Dh(undefined)` is false ⇒ UWd (env override aside).
+        // Standalone callers without a model use the generic Lean bundle.
         let opts = PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             include_examples: false,
@@ -1299,6 +1220,7 @@ mod tests {
             ..Default::default()
         };
         let with_model = |m: &str| PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             include_examples: false,
@@ -1307,24 +1229,23 @@ mod tests {
             ..Default::default()
         };
 
-        // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒
-        // the long UWd prompt — NOT the old custom 3-sentence blurb.
+        // An unknown route uses the mode's generic Lean default. Known
+        // classic Claude models retain the native long template.
         {
             let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
-            let p = prompt_text(tool.prompt(&opts).await);
+            assert_eq!(
+                prompt_text(tool.prompt(&opts).await),
+                TODO_WRITE_PROMPT_SIMPLE
+            );
+            let p = prompt_text(tool.prompt(&with_model("claude-opus-4-7")).await);
             assert_eq!(p, TODO_WRITE_PROMPT_FULL);
-            // Binary-locked head + tail of UWd.
             assert!(p.starts_with(
                 "Use this tool to create and manage a structured task list for your current coding session."
             ));
-            // UWd ends with `...successfully.\n` — the binary template literal
-            // (UWd= @199292273) carries a trailing newline (rendered len 9114).
             assert!(p.ends_with(
                 "Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.\n"
             ));
-            // The `${Ua}` substitution renders the Edit tool name verbatim.
             assert!(p.contains("Uses the Edit tool to add a comment"));
-            // The stale blurb (and its false `id` claim) is gone.
             assert!(!p.contains("Use TodoWrite to track work-in-progress"));
         }
 
@@ -1359,12 +1280,12 @@ mod tests {
                     "new model {new_model:?} ⇒ FWd"
                 );
             }
-            // `dfe` early-access (`-eap`) is never the standard prompt ⇒ FWd.
+            // 2.1.319 applies the classic gate to recognized early-access aliases.
             for eap in ["claude-opus-4-7-eap", "claude-sonnet-4-5-eap[x]"] {
                 assert_eq!(
                     prompt_text(tool.prompt(&with_model(eap)).await),
-                    TODO_WRITE_PROMPT_SIMPLE,
-                    "early-access {eap:?} ⇒ FWd"
+                    TODO_WRITE_PROMPT_FULL,
+                    "classic early-access {eap:?} retains the native long prompt"
                 );
             }
         }
@@ -1390,18 +1311,17 @@ mod tests {
             assert_eq!(p, TODO_WRITE_PROMPT_FULL, "defined-falsy {falsy:?} ⇒ UWd");
         }
 
-        // `if(!e) return false`: even with the env truthy, a MISSING model still
-        // short-circuits to UWd (the binary's `Dh(undefined)` guard runs first).
+        // Generic Lean is independent of Claude-specific simple-prompt overrides.
         {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "1");
             assert_eq!(
                 prompt_text(tool.prompt(&opts).await),
-                TODO_WRITE_PROMPT_FULL
+                TODO_WRITE_PROMPT_SIMPLE
             );
         }
 
         // Any other (non-truthy, non-defined-falsy) value falls through to the
-        // model-class branch (here: classic ⇒ UWd; with no model ⇒ UWd).
+        // model-class branch for Claude; unknown routes remain generic Lean.
         {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "garbage");
             assert_eq!(
@@ -1414,7 +1334,7 @@ mod tests {
             );
             assert_eq!(
                 prompt_text(tool.prompt(&opts).await),
-                TODO_WRITE_PROMPT_FULL
+                TODO_WRITE_PROMPT_SIMPLE
             );
         }
 
@@ -1428,7 +1348,7 @@ mod tests {
         }
         {
             let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
-            assert_eq!(select_todo_write_prompt(None), TODO_WRITE_PROMPT_FULL);
+            assert_eq!(select_todo_write_prompt(None), TODO_WRITE_PROMPT_SIMPLE);
             assert_eq!(
                 select_todo_write_prompt(Some("claude-opus-4-8")),
                 TODO_WRITE_PROMPT_SIMPLE

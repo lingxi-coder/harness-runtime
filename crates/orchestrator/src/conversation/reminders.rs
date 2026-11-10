@@ -1683,6 +1683,37 @@ impl ConversationOrchestrator {
             .collect()
     }
 
+    /// Read the current reminder/tool gates without advancing its cadence.
+    pub(crate) async fn todo_reminder_mode(&self) -> Option<tool_task::reminder::ReminderMode> {
+        // (1) killswitch.
+        if tool_task::reminder::is_killswitched() {
+            return None;
+        }
+        // (2) Brief (`SendUserMessage`/`Brief`) present ⇒ skip (both variants).
+        if self.find_dispatchable_tool("SendUserMessage").is_some() {
+            return None;
+        }
+
+        // (2b) the `OO()` model gate. `select_mode` returns `None` when the
+        // todo/task tools have been withdrawn, porting BOTH oracle guards
+        // (`if(X_()||!OO())return[]` for V1, `if(!h3())return[]` for V2) — the
+        // reminder must not describe tools the model was never offered. The
+        // canonical main-loop model is the one the registry publishes, so this
+        // and `available_tools` cannot disagree.
+        let policy = self.current_prompt_policy().await.ok()?;
+        if policy.reminders.is_native() {
+            tool_task::reminder::select_mode(Some(&policy.target.canonical_model))
+        } else if self.find_dispatchable_tool("TaskCreate").is_some()
+            && self.find_dispatchable_tool("TaskUpdate").is_some()
+        {
+            Some(tool_task::reminder::ReminderMode::V2Task)
+        } else if self.find_dispatchable_tool("TodoWrite").is_some() {
+            Some(tool_task::reminder::ReminderMode::V1Todo)
+        } else {
+            None
+        }
+    }
+
     /// Finding #73: the per-turn `todo_reminder` (V1) / `task_reminder` (V2)
     /// meta user message, or `None` when not eligible this turn.
     ///
@@ -1713,25 +1744,7 @@ impl ConversationOrchestrator {
     /// per assistant turn (`bump_reminder_turn_counters`) and reset on the
     /// relevant tool call (`note_todo_reminder_tool_call`).
     pub(crate) async fn todo_reminder_message(&self) -> Option<ConversationMessage> {
-        // (1) killswitch.
-        if tool_task::reminder::is_killswitched() {
-            return None;
-        }
-        // (2) Brief (`SendUserMessage`/`Brief`) present ⇒ skip (both variants).
-        if self.find_dispatchable_tool("SendUserMessage").is_some() {
-            return None;
-        }
-
-        // (2b) the `OO()` model gate. `select_mode` returns `None` when the
-        // todo/task tools have been withdrawn, porting BOTH oracle guards
-        // (`if(X_()||!OO())return[]` for V1, `if(!h3())return[]` for V2) — the
-        // reminder must not describe tools the model was never offered. The
-        // canonical main-loop model is the one the registry publishes, so this
-        // and `available_tools` cannot disagree.
-        let Some(mode) = tool_task::reminder::select_mode(self.tools.main_loop_model().as_deref())
-        else {
-            return None;
-        };
+        let mode = self.todo_reminder_mode().await?;
 
         // (3) tool-presence gate + (4) non-empty history + (5) counters, all
         // read under one session lock so the snapshot is consistent. We reset
@@ -1890,11 +1903,16 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// reconstructed on later turns. Appended to THIS turn's OUTGOING snapshot
     /// only — never `session.history` / JSONL.
     pub(crate) async fn silent_turn_reminder_message(&self) -> Option<ConversationMessage> {
+        let policy = self.current_prompt_policy().await.ok()?;
+        let model = &policy.target.canonical_model;
+        if !policy.reminders.is_native() {
+            return None;
+        }
+        if !crate::prompt::silent_turn::is_enabled(&model) {
+            return None;
+        }
         let history = {
             let s = self.session.lock().await;
-            if !crate::prompt::silent_turn::is_enabled(&s.model) {
-                return None;
-            }
             s.history.clone()
         };
         if !Self::step_follows_tool_results(&history) {
@@ -1905,14 +1923,35 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .silent_turn_reminder_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stretch = crate::prompt::silent_turn::scan_silent_stretch(&history, marks.as_slice());
-        if !crate::prompt::silent_turn::should_emit(
-            stretch,
+        let now = chrono::Utc::now().timestamp_millis();
+        let timestamps = self
+            .prompt_runtime
+            .silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reminder_timestamps = self
+            .prompt_runtime
+            .silent_turn_reminder_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let timed = crate::prompt::silent_turn::scan_silent_stretch_with_timestamps(
+            &history,
+            marks.as_slice(),
+            &timestamps,
+            &reminder_timestamps,
+        );
+        if !crate::prompt::silent_turn::should_emit_with_elapsed(
+            timed.stretch,
             crate::prompt::silent_turn::turns_between_reminders(),
+            timed.silent_since_ms.map(|since| now.saturating_sub(since)),
+            crate::prompt::silent_turn::seconds_between_reminders(),
         ) {
             return None;
         }
         marks.push(history.len());
+        reminder_timestamps.insert(history.len(), now);
+        drop(reminder_timestamps);
+        drop(timestamps);
         drop(marks);
         let body = crate::prompt::silent_turn::reminder_text();
         let content = format!("<system-reminder>\n{body}\n</system-reminder>");
@@ -1950,11 +1989,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             return None;
         }
         use crate::prompt::total_tokens as tt;
-        let mode = tt::resolve_mode(None);
+        let policy = self.current_prompt_policy().await.ok()?;
+        let mode = tt::resolve_mode_for_model(&policy.target.canonical_model, None);
         if mode == tt::TotalTokensMode::Off {
             return None;
         }
-        let model = self.session.lock().await.model.clone();
         let reanchor = is_regular_user_prompt && tt::after_user_turn(None);
         if is_regular_user_prompt && !reanchor {
             return None;
@@ -1965,11 +2004,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
         .unwrap_or(i64::MAX);
-        let profile = self.session.lock().await.model_profile.clone();
         let context_window = total_tokens_reminder_context_window(
             self.api.as_ref(),
-            &model,
-            profile.as_deref(),
+            &policy.target.request_model,
+            policy.target.profile_name.as_deref(),
             mode,
         )?;
         let budget = tt::resolve_budget(None);
@@ -2292,7 +2330,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             // @5174317): the catalog lines are rendered for the MAIN-LOOP model,
             // so a non-lean session gets a definition's full `whenToUse` even
             // when it declares a lean variant.
-            let lean = tool_api::dh_simple_system_prompt(self.tools.main_loop_model().as_deref());
+            let lean = self.current_prompt_uses_lean().await;
             let lines = new_entries
                 .iter()
                 .map(|entry| agent::format_agent_line(entry, lean))
@@ -2342,15 +2380,11 @@ message with multiple tool uses so they run concurrently."
                 .collect(),
         )
         .ok()?;
+        let lean = self.current_prompt_uses_lean().await;
         let added_lines = Source::array(
             new_entries
                 .iter()
-                .map(|entry| {
-                    Source::from(agent::format_agent_line(
-                        entry,
-                        tool_api::dh_simple_system_prompt(self.tools.main_loop_model().as_deref()),
-                    ))
-                })
+                .map(|entry| Source::from(agent::format_agent_line(entry, lean)))
                 .collect(),
         )
         .ok()?;
@@ -3483,7 +3517,9 @@ message with multiple tool uses so they run concurrently."
                 }
             }
         }
-        let current_tool_name_set = current_tool_names.iter().collect::<std::collections::HashSet<_>>();
+        let current_tool_name_set = current_tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
         let revoked = prior_declared
             .as_deref()
             .unwrap_or_default()
@@ -4140,6 +4176,33 @@ impl ConversationOrchestrator {
         origin: serde_json::Value,
         detail: Option<serde_json::Value>,
     ) -> Option<ConversationMessage> {
+        // Bundle selection precedes user/plugin customization. A missing
+        // override leaves the exact native source (including UTF-16) intact.
+        if let Ok(policy) = self.current_prompt_policy().await {
+            if let Some(template) = policy.reminders.template_for(kind) {
+                if template.trim().is_empty() {
+                    return None;
+                }
+                if let ConversationMessage::User { content, .. } = &mut message {
+                    let wrapped = content.as_slice().first().is_some_and(|block| match block {
+                        lingxi_core::types::ContentBlock::Text { text, .. }
+                        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
+                            text.starts_with("<system-reminder>\n")
+                        }
+                        _ => false,
+                    });
+                    let text = if wrapped {
+                        format!("<system-reminder>\n{template}\n</system-reminder>")
+                    } else {
+                        template.to_owned()
+                    };
+                    *content = vec![lingxi_core::types::ContentBlock::Text {
+                        text,
+                        citations: None,
+                    }];
+                }
+            }
+        }
         let Some(host) = (if let Some(registry) = &self.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
         } else {

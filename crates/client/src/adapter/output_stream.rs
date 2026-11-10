@@ -551,6 +551,10 @@ impl AdapterOutputStream {
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_provider_account_routing(
         &self,
         event: &lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,

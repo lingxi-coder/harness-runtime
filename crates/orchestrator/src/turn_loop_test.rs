@@ -113,221 +113,47 @@ mod terminal_sequence_tests {
 }
 #[cfg(test)]
 mod terminal_api_error_tests {
-    use crate::turn_loop::{refusal_explanation_clause, terminal_api_error_text};
-    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use crate::turn_loop::terminal_api_error_text;
     use llm_runtime::HistoryStopDetails;
 
-    fn details(category: &str, explanation: Option<&str>) -> HistoryStopDetails {
-        let explanation = explanation.map(|text| {
-            Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
-                .unwrap()
-        });
-        HistoryStopDetails::from_parts(Some(category), explanation.as_ref()).unwrap()
+    fn text(request_id: Option<&str>, message_id: Option<&str>, details: Option<&HistoryStopDetails>) -> String {
+        terminal_api_error_text("claude-opus-4-8", true, "refusal", request_id, details, message_id)
+            .unwrap().string_at("").unwrap().to_owned()
     }
 
-    /// The refusal message appends `\n\nRequest ID: {id}` (double newline) when a
-    /// request id is present (binary `u = n ? `\n\nRequest ID: ${n}` : ""`), and
-    /// omits it otherwise. The suffix is REFUSAL-ONLY.
     #[test]
-    fn refusal_appends_request_id_suffix() {
-        let with = terminal_api_error_text(
-            "claude-opus-4-8",
-            true,
-            "refusal",
-            Some("req_011abc"),
-            None,
-            None,
-        )
-        .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-        .expect("refusal text");
-        assert!(
-            with.ends_with("\n\nRequest ID: req_011abc"),
-            "double newline; got: {with}"
-        );
-
-        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None, None)
-            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-            .expect("refusal text");
-        assert!(!without.contains("Request ID:"), "got: {without}");
-
-        // Empty id is treated as absent.
-        let empty =
-            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None, None)
-                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                .expect("refusal text");
-        assert!(!empty.contains("Request ID:"), "got: {empty}");
+    fn refusal_keeps_a_display_label_separate_from_unresolved_eligibility() {
+        assert_eq!(text(None, None, None),
+            "API Error: Opus 4.8 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup");
     }
 
-    /// The Request ID suffix is refusal-only: max_tokens / context-window
-    /// messages never carry it, even when a request id is available.
     #[test]
-    fn non_refusal_terminals_have_no_request_id() {
-        for sr in ["max_tokens", "model_context_window_exceeded"] {
-            let t = terminal_api_error_text(
-                "claude-opus-4-8",
-                true,
-                sr,
-                Some("req_011abc"),
-                None,
-                None,
-            )
-            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-            .unwrap_or_else(|| panic!("{sr} text"));
-            assert!(!t.contains("Request ID:"), "{sr}: {t}");
+    fn refusal_appends_both_validated_ids_after_sanitized_details() {
+        let details = HistoryStopDetails::parse(r#"{"category":"[bio]`","explanation":"provider explanation"}"#).unwrap();
+        let text = text(Some("req_319"), Some("msg_319"), Some(&details));
+        assert!(text.ends_with("\n\nDetails: `[bio]`\n\nRequest ID: req_319\n\nMessage ID: msg_319"));
+        assert!(!text.contains("provider explanation"));
+    }
+
+    #[test]
+    fn refusal_rejects_invalid_ids_independently() {
+        for id in ["", "bad id", "bad/id", "é"] {
+            let rendered = text(Some(id), Some("msg_ok"), None);
+            assert!(!rendered.contains("Request ID:"));
+            assert!(rendered.ends_with("\n\nMessage ID: msg_ok"));
+            let rendered = text(Some("req_ok"), Some(id), None);
+            assert!(rendered.ends_with("\n\nRequest ID: req_ok"));
+            assert!(!rendered.contains("Message ID:"));
         }
     }
 
-    /// No `stop_details` (the common refusal) → the generic label / Usage-Policy
-    /// text, byte-exact (no cyber/bio wording).
     #[test]
-    fn refusal_without_stop_details_is_generic() {
-        // opus-4-8 HAS a marketing name → the label branch.
-        let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None, None)
-            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-            .expect("refusal");
-        assert!(t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."), "got: {t}");
-        assert!(!t.contains("cybersecurity"), "got: {t}");
-    }
-
-    /// LABEL branch + cyber/bio category → the `Saa` variant: "… They may flag
-    /// safe, normal content as well. These measures let us bring you Mythos-level
-    /// capabilities sooner …" (binary `U2e` `Jct(cat)` path; `Saa`+`elp`).
-    #[test]
-    fn refusal_label_cyber_or_bio_variant() {
-        for cat in ["cyber", "bio"] {
-            let sd = details(cat, None);
-            let t =
-                terminal_api_error_text("claude-opus-4-8", true, "refusal", None, Some(&sd), None)
-                    .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                    .expect("refusal");
-            assert!(
-                t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well."),
-                "{cat}: {t}"
-            );
-            assert!(
-                t.contains("These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them."),
-                "{cat}: {t}"
-            );
-            assert!(
-                t.contains("LingXi can't respond to this request with"),
-                "{cat}: {t}"
-            );
+    fn non_refusal_terminals_have_no_identifier_suffix() {
+        for reason in ["max_tokens", "model_context_window_exceeded"] {
+            let text = terminal_api_error_text("claude-opus-4-8", true, reason,
+                Some("req_ok"), None, Some("msg_ok")).unwrap();
+            assert!(!text.string_at("").unwrap().contains("ID:"));
         }
-    }
-
-    /// NO-LABEL branch + cyber category → the 2.1.206 Cyber Verification Program
-    /// interstitial (replaced the pre-206 "apply for an exemption" message). The
-    /// help-center URL is fixed; the feedback tail is interactive-only; there is
-    /// no `\n\n{m}\n\n{f}` tail.
-    #[test]
-    fn refusal_nolabel_cyber_verification_program_206() {
-        // A model with NO marketing name → the no-label branch. Use a bare id
-        // that `marketing_name_for_model` does not resolve.
-        let sd = details("cyber", None);
-        // Interactive → includes the feedback tail.
-        let ti =
-            terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd), None)
-                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                .expect("refusal");
-        assert!(
-            ti.starts_with("API Error: This model has safety measures that flagged this message for a cybersecurity topic. To learn about the Cyber Verification Program and apply for access, visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude."),
-            "got: {ti}"
-        );
-        assert!(
-            ti.ends_with(
-                ".\n\nIf you were not engaging in a cybersecurity topic, please send feedback via /feedback."
-            ),
-            "interactive feedback tail; got: {ti}"
-        );
-        // 206 dropped the pre-206 exemption wording entirely.
-        assert!(!ti.contains("apply for an exemption"), "got: {ti}");
-        // Non-interactive → NO feedback tail; ends at the help-center URL.
-        let tn =
-            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
-                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                .expect("refusal");
-        assert!(
-            tn.ends_with("14604842-real-time-cyber-safeguards-on-claude."),
-            "non-interactive omits the feedback tail; got: {tn}"
-        );
-        assert!(!tn.contains("please send feedback"), "got: {tn}");
-    }
-
-    /// NO-LABEL branch + `military_weapons` category → 2.1.206 REMOVED the
-    /// dedicated weapons arm, so it now falls through to the generic
-    /// Usage-Policy message ('weapons-related content' = 0 hits in 206).
-    #[test]
-    fn refusal_nolabel_military_weapons_falls_through_to_generic_206() {
-        let sd = details("military_weapons", None);
-        let t =
-            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
-                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                .expect("refusal");
-        assert!(
-            t.contains("is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup)."),
-            "got: {t}"
-        );
-        assert!(
-            !t.contains("weapons-related content"),
-            "206 removed the weapons arm; got: {t}"
-        );
-        assert!(!t.contains("added safeguards for"), "got: {t}");
-    }
-
-    /// `U2e` explanation clause `${a}` — leading space + terminal-`.` when the
-    /// explanation lacks one; "" when absent; truncate (+ `…`) past 400 chars.
-    #[test]
-    fn refusal_explanation_clause_formats() {
-        assert_eq!(refusal_explanation_clause(None).string_at(""), Some(""));
-        for (input, expected) in [
-            ("", ""),
-            ("see policy X", " see policy X."),
-            ("denied.", " denied."),
-            ("why?", " why?"),
-            ("stop!", " stop!"),
-        ] {
-            assert_eq!(
-                refusal_explanation_clause(Some(&input.into())).string_at(""),
-                Some(expected)
-            );
-        }
-        let clause = refusal_explanation_clause(Some(&"x".repeat(450).into()));
-        let units = clause.string_units("").unwrap();
-        assert_eq!(units.first(), Some(&32));
-        assert_eq!(units.last(), Some(&0x2026));
-        assert_eq!(units.len(), 402);
-    }
-
-    /// NO-LABEL + non-cyber/non-weapons category + explanation → the generic
-    /// usage-policy message appends the explanation clause (binary `…aup).${a} `).
-    #[test]
-    fn refusal_nolabel_generic_appends_explanation() {
-        let sd = details("other", Some("This violates section 2"));
-        let t =
-            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
-                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-                .expect("refusal");
-        assert!(
-            t.contains("violate our Usage Policy (https://www.anthropic.com/legal/aup). This violates section 2."),
-            "got: {t}"
-        );
-        // No explanation → no clause (period-space-{m}, the prior output).
-        let sd2 = details("other", None);
-        let t2 = terminal_api_error_text(
-            "unknown-model-xyz",
-            false,
-            "refusal",
-            None,
-            Some(&sd2),
-            None,
-        )
-        .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
-        .expect("refusal");
-        assert!(
-            t2.contains("Usage Policy (https://www.anthropic.com/legal/aup). "),
-            "got: {t2}"
-        );
-        assert!(!t2.contains("section 2"), "got: {t2}");
     }
 }
 #[cfg(test)]
@@ -6289,7 +6115,8 @@ mod malformed_and_thinking_only_tests {
     use crate::turn_loop::{
         execute_one_turn_with_recovery_tracked, prior_assistant_used_structured_output,
         RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-        MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
+        MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, STRUCTURED_OUTPUT_TOOL_NAME,
+        THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
@@ -6384,6 +6211,40 @@ mod malformed_and_thinking_only_tests {
 
     // ---- #77 malformed-tool-use -------------------------------------------
 
+    #[tokio::test]
+    async fn malformed_retry_allowance_matches_evaluated_native_319_cases() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/malformed_tool_use_2_1_319.json"
+        ))
+        .unwrap();
+        for case in oracle["cases"].as_array().unwrap().iter().take(4) {
+            let retry_count = case["input"]["retryCount"].as_u64().unwrap() as u32;
+            let orch = orch_with_responses(vec![malformed_tool_use_response()]);
+            let mut state = RecoveryState {
+                malformed_tool_use_retry_count: retry_count,
+                // Native malformed retries have their own allowance.
+                output_recovery_actions: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                ..Default::default()
+            };
+            let outcome = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
+                .await
+                .unwrap()
+                .0;
+            if case["expected"]["outcome"] == "continue" {
+                assert!(matches!(outcome, TurnStepOutcome::Continue(_)));
+                assert_eq!(state.malformed_tool_use_retry_count, retry_count + 1);
+                let h = history(&orch).await;
+                assert_eq!(last_user_text(&h).as_deref(), Some(MALFORMED_TOOL_USE_RETRY_NUDGE));
+                assert!(matches!(h.last(), Some(ConversationMessage::User {
+                    is_meta: true, turn_companion: Some(Some(true)), ..
+                })));
+            } else {
+                assert!(matches!(outcome, TurnStepOutcome::Ended { stop_reason, .. }
+                    if stop_reason == case["expected"]["outcome"]["reason"].as_str().unwrap()));
+            }
+        }
+    }
+
     /// First malformed `tool_use` → Continue, byte-exact nudge appended as a
     /// user message, guard armed, recovery reset.
     #[tokio::test]
@@ -6401,14 +6262,14 @@ mod malformed_and_thinking_only_tests {
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert!(state.malformed_tool_use_retried, "guard armed");
+        assert_eq!(state.malformed_tool_use_retry_count, 1, "first retry counted");
         assert_eq!(
             state.max_output_tokens_recovery_count, 0,
             "recovery reset on retry transition"
         );
         assert_eq!(
-            state.output_recovery_actions, 3,
-            "malformed repair spends the shared turn recovery allowance"
+            state.output_recovery_actions, 2,
+            "malformed allowance is independent of output-limit recovery"
         );
 
         let h = history(&orch).await;
@@ -6429,7 +6290,7 @@ mod malformed_and_thinking_only_tests {
     }
 
     #[tokio::test]
-    async fn malformed_retry_is_rearmed_after_another_recovery_transition() {
+    async fn malformed_retry_count_survives_another_recovery_transition() {
         let orch = orch_with_responses(vec![
             malformed_tool_use_response(),
             mock_message_response(vec![], Some("max_tokens")),
@@ -6443,18 +6304,18 @@ mod malformed_and_thinking_only_tests {
                 .0;
             assert!(matches!(step, TurnStepOutcome::Continue(_)));
         }
-        assert!(state.malformed_tool_use_retried);
+        assert_eq!(state.malformed_tool_use_retry_count, 2);
     }
 
-    /// Second malformed `tool_use` (guard already armed) → Ended with
-    /// stop_reason `end_turn`, the non-meta terminal message appended as an
+    /// Third malformed `tool_use` → Ended with
+    /// stop_reason `malformed_tool_use_exhausted`, the terminal appended as an
     /// ASSISTANT api-error message (binary `ql`→`mcc`: stop_reason
     /// "stop_sequence"), NOT a user message.
     #[tokio::test]
-    async fn malformed_tool_use_second_failure_ends_turn() {
+    async fn malformed_tool_use_third_failure_ends_turn() {
         let orch = orch_with_responses(vec![malformed_tool_use_response()]);
         let mut state = RecoveryState {
-            malformed_tool_use_retried: true,
+            malformed_tool_use_retry_count: 2,
             ..Default::default()
         };
 
@@ -6468,10 +6329,10 @@ mod malformed_and_thinking_only_tests {
                 final_message_id,
                 ..
             } => {
-                assert_eq!(stop_reason, "end_turn");
+                assert_eq!(stop_reason, "malformed_tool_use_exhausted");
                 final_message_id
             }
-            TurnStepOutcome::Continue(_) => panic!("expected Ended on second failure"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended on third failure"),
         };
         let h = history(&orch).await;
         // Terminal message = ASSISTANT api-error message, stop_reason
@@ -6512,14 +6373,17 @@ mod malformed_and_thinking_only_tests {
             Some("tool_use"),
         );
         let orch = orch_with_responses(vec![resp]);
-        let mut state = RecoveryState::default();
+        let mut state = RecoveryState {
+            malformed_tool_use_retry_count: 2,
+            ..Default::default()
+        };
 
         let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
             .expect("step")
             .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        assert!(!state.malformed_tool_use_retried, "guard NOT armed");
+        assert_eq!(state.malformed_tool_use_retry_count, 0, "normal tools reset allowance");
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,

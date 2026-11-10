@@ -424,6 +424,10 @@ impl BoundedOutput {
 }
 #[async_trait::async_trait]
 impl OutputStream for BoundedOutput {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     fn note_model_error_kind(&self, _kind: &'static str) {
         self.failed.store(true, Ordering::Release);
     }

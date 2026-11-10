@@ -1340,11 +1340,64 @@ fn outgoing_instruction_prefix_preserves_the_mandatory_task_under_input_cap() {
         newest.clone(),
     ];
     let required =
-        instruction_request_messages(&[task.clone(), newest.clone()], &context, None).unwrap();
+        instruction_request_messages(&[task.clone(), newest.clone()], &context, None, None)
+            .unwrap();
     let cap = serde_json::to_vec(&required).unwrap().len() as u64;
-    let messages = instruction_request_messages(&history, &context, Some(cap)).unwrap();
+    let messages = instruction_request_messages(&history, &context, Some(cap), None).unwrap();
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1], task);
     assert_eq!(messages[2], newest);
     assert!(serde_json::to_vec(&messages).unwrap().len() as u64 <= cap);
+}
+
+#[test]
+fn prompt_environment_seed_is_mandatory_under_exact_input_cap() {
+    for inline in [false, true] {
+        for environment_at_end in [false, true] {
+            let mut context = InstructionContext::default();
+            if inline {
+                context.rendering = InstructionRendering::Inline;
+                context
+                    .set_user_context_text("instructions", "PROJECT POLICY")
+                    .unwrap();
+            }
+            let task = ConversationMessage::user(MessageId::new(), "TASK".into());
+            let mut history = vec![task.clone()];
+            let seed = crate::prompt_policy::inject_context(
+                &mut history,
+                &["# Environment\nCURRENT MODEL AND CWD".into()],
+                true,
+            );
+            let environment = history[1].clone();
+            let newest = ConversationMessage::user(MessageId::new(), "LATEST".into());
+            history.push(ConversationMessage::user(
+                MessageId::new(),
+                "old optional history".repeat(200),
+            ));
+            history.push(newest.clone());
+            if environment_at_end {
+                let environment = history.remove(1);
+                history.push(environment);
+            }
+            let mandatory = if environment_at_end {
+                vec![task, newest, environment]
+            } else {
+                vec![task, environment, newest]
+            };
+            let required =
+                instruction_request_messages(&mandatory, &context, None, Some(&seed)).unwrap();
+            let exact = serde_json::to_vec(&required).unwrap().len() as u64;
+            let actual =
+                instruction_request_messages(&history, &context, Some(exact), Some(&seed)).unwrap();
+            let start = usize::from(inline);
+            assert_eq!(actual[start..], required[start..]);
+            assert_eq!(actual[0].text_content(), required[0].text_content());
+            assert_eq!(serde_json::to_vec(&actual).unwrap().len() as u64, exact);
+            assert!(
+                instruction_request_messages(&history, &context, Some(exact - 1), Some(&seed))
+                    .unwrap_err()
+                    .contains("mandatory environment context")
+            );
+        }
+    }
 }

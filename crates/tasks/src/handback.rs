@@ -8,34 +8,9 @@ use lingxi_core::host::handback::{
 };
 use lingxi_core::types::AgentId;
 
-/// Recipient-owned journal. A queued report is durable before its sender gets
-/// an admission receipt; a wakeup is merely a hint to consume this queue.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(super) struct PeerInbox {
-    version: u32,
-    scope: HandbackSessionScope,
-    recipient: AgentId,
-    pending: Vec<HandbackEnvelope>,
-    consumed: Vec<HandbackReceipt>,
-}
-
-impl PeerInbox {
-    fn empty(scope: HandbackSessionScope, recipient: AgentId) -> Self {
-        Self {
-            version: 1,
-            scope,
-            recipient,
-            pending: Vec::new(),
-            consumed: Vec::new(),
-        }
-    }
-
-    fn valid_for(&self, scope: HandbackSessionScope, recipient: AgentId) -> bool {
-        self.version == 1 && self.scope.session_id == scope.session_id && self.recipient == recipient
-            && self.pending.iter().all(|report| report.validate() && report.receipt.run.scope.session_id == scope.session_id && matches!(report.receipt.recipient, HandbackRecipient::Agent { agent_id, .. } if agent_id == recipient))
-            && self.consumed.iter().all(|receipt| receipt.run.scope.session_id == scope.session_id && receipt.run.scope == receipt.recipient.scope() && matches!(receipt.recipient, HandbackRecipient::Agent { agent_id, .. } if agent_id == recipient))
-    }
-}
+#[path = "handback_inbox.rs"]
+mod inbox;
+pub(super) use inbox::PeerInbox;
 
 fn actor(state: &TaskState) -> Option<AgentId> {
     match state {
@@ -46,28 +21,6 @@ fn actor(state: &TaskState) -> Option<AgentId> {
 }
 
 impl TaskRegistry {
-    fn peer_inbox_path(scope: HandbackSessionScope, recipient: AgentId) -> std::path::PathBuf {
-        format!(
-            "{}-{}.handback-inbox.json",
-            scope.session_id.as_uuid().simple(),
-            recipient.as_uuid().simple()
-        )
-        .into()
-    }
-
-    async fn persist_peer_inbox(&self, inbox: &PeerInbox) -> Result<(), TaskError> {
-        let json =
-            serde_json::to_string(inbox).map_err(|error| TaskError::Internal(error.to_string()))?;
-        self.fs
-            .write_file_rooted_atomic(
-                self.output_manager.output_dir(),
-                &Self::peer_inbox_path(inbox.scope, inbox.recipient),
-                &json,
-            )
-            .await
-            .map_err(|error| TaskError::Io(error.to_string()))
-    }
-
     /// Only an intentional cold restoration may import an older activation's
     /// already admitted inbox. External tool submissions still require the
     /// exact live scope and run token. Stored receipts are never rewritten.
@@ -81,42 +34,102 @@ impl TaskRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&recipient)
-            .is_some_and(|inbox| inbox.scope == scope)
+            .is_some_and(|inbox| inbox.scope == scope && inbox.healthy())
         {
             return Ok(());
         }
-        let file = match self
+        let root_identity = self
             .fs
-            .read_file_rooted_no_follow(
-                self.output_manager.output_dir(),
-                &Self::peer_inbox_path(scope, recipient),
-            )
+            .root_identity_no_follow(self.output_manager.output_dir())
             .await
-        {
-            Ok(file) => file,
-            Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(()),
-            Err(error) => return Err(TaskError::Io(error.to_string())),
-        };
-        if file.content.is_empty() {
+            .map_err(|error| TaskError::Io(error.to_string()))?;
+        let Some(mut inbox) = PeerInbox::load(
+            self.fs.as_ref(),
+            self.output_manager.output_dir(),
+            root_identity,
+            scope,
+            recipient,
+        )
+        .await?
+        else {
             return Ok(());
-        }
-        let mut inbox: PeerInbox = serde_json::from_str(&file.content).map_err(|error| {
-            TaskError::Internal(format!("invalid retained peer inbox: {error}"))
-        })?;
-        if !inbox.valid_for(scope, recipient) {
-            return Err(TaskError::Internal(
-                "retained peer inbox has an invalid recipient or origin".into(),
-            ));
-        }
+        };
+        // Rebinding the owned activation does not retarget admitted receipts.
+        // It is process-local; later snapshots retain the current owner.
         inbox.scope = scope;
-        // Rebinding the journal's owned activation does not retarget any
-        // admitted receipt; it permits this explicit recovery to consume it.
-        self.persist_peer_inbox(&inbox).await?;
         self.peer_inboxes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(recipient, inbox);
         Ok(())
+    }
+
+    async fn peer_inbox_for_admission(
+        &self,
+        scope: HandbackSessionScope,
+        recipient: AgentId,
+    ) -> Result<PeerInbox, inbox::WriteError> {
+        if let Some(inbox) = self
+            .peer_inboxes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&recipient)
+            .filter(|inbox| inbox.scope == scope)
+            .cloned()
+        {
+            return Ok(inbox);
+        }
+        let root_identity = self
+            .fs
+            .root_identity_no_follow(self.output_manager.output_dir())
+            .await
+            .map_err(|error| inbox::WriteError {
+                error: TaskError::Io(error.to_string()),
+                uncertain: true,
+            })?;
+        let inbox = match PeerInbox::load(
+            self.fs.as_ref(),
+            self.output_manager.output_dir(),
+            root_identity,
+            scope,
+            recipient,
+        )
+        .await
+        .map_err(|error| inbox::WriteError {
+            error,
+            // Failed recovery may hide an already admitted copy. It cannot
+            // authorize delivering that same report to the main fallback.
+            uncertain: true,
+        })? {
+            Some(inbox) if inbox.scope == scope => inbox,
+            Some(_) => {
+                // Never overwrite an older activation's pending reports or
+                // replay protection as a side effect of ordinary admission.
+                return Err(inbox::WriteError {
+                    error: TaskError::Internal(
+                        "retained peer inbox requires explicit restoration".into(),
+                    ),
+                    // A newer WAL receipt may already belong to this live
+                    // scope even while its base snapshot names the old owner.
+                    uncertain: true,
+                });
+            }
+            None => {
+                PeerInbox::create(
+                    self.fs.as_ref(),
+                    self.output_manager.output_dir(),
+                    root_identity,
+                    scope,
+                    recipient,
+                )
+                .await?
+            }
+        };
+        self.peer_inboxes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(recipient, inbox.clone());
+        Ok(inbox)
     }
 
     pub async fn pending_handback_reports_for(&self, agent_id: AgentId) -> Vec<HandbackEnvelope> {
@@ -135,7 +148,7 @@ impl TaskRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&agent_id)
             .filter(|inbox| inbox.scope == scope)
-            .map(|inbox| inbox.pending.clone())
+            .map(PeerInbox::pending_reports)
             .unwrap_or_default()
     }
 
@@ -167,7 +180,7 @@ impl TaskRegistry {
         let Some(scope) = self.handback_scope().await else {
             return false;
         };
-        let mut inbox = match self
+        let inbox = match self
             .peer_inboxes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -177,58 +190,26 @@ impl TaskRegistry {
             Some(inbox) if inbox.scope == scope => inbox,
             _ => return false,
         };
-        if inbox.consumed.contains(receipt) {
-            return true;
-        }
-        let Some(index) = inbox
-            .pending
-            .iter()
-            .position(|pending| &pending.receipt == receipt)
-        else {
-            return false;
-        };
-        inbox.pending.remove(index);
-        inbox.consumed.push(receipt.clone());
-        if self.persist_peer_inbox(&inbox).await.is_err() {
-            return false;
-        }
-        self.peer_inboxes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(agent_id, inbox);
-        true
+        inbox
+            .consume(self.fs.as_ref(), self.output_manager.output_dir(), receipt)
+            .await
+            .unwrap_or(false)
     }
 
-    async fn admit_peer_inbox(&self, envelope: HandbackEnvelope) -> Result<(), TaskError> {
+    async fn admit_peer_inbox(&self, envelope: HandbackEnvelope) -> Result<(), inbox::WriteError> {
         let HandbackRecipient::Agent { scope, agent_id } = envelope.receipt.recipient else {
-            return Err(TaskError::Unsupported);
+            return Err(TaskError::Unsupported.into());
         };
         if !envelope.validate() {
-            return Err(TaskError::Internal("invalid peer report envelope".into()));
+            return Err(TaskError::Internal("invalid peer report envelope".into()).into());
         }
-        let mut inbox = self
-            .peer_inboxes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&agent_id)
-            .filter(|inbox| inbox.scope == scope)
-            .cloned()
-            .unwrap_or_else(|| PeerInbox::empty(scope, agent_id));
-        if inbox.consumed.contains(&envelope.receipt)
-            || inbox
-                .pending
-                .iter()
-                .any(|pending| pending.receipt == envelope.receipt)
+        let inbox = self.peer_inbox_for_admission(scope, agent_id).await?;
+        if inbox
+            .admit(self.fs.as_ref(), self.output_manager.output_dir(), envelope)
+            .await?
         {
-            return Ok(());
+            self.bump_notification_revision();
         }
-        inbox.pending.push(envelope);
-        self.persist_peer_inbox(&inbox).await?;
-        self.peer_inboxes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(agent_id, inbox);
-        self.bump_notification_revision();
         Ok(())
     }
     /// Bind the independently owned root without retaining its reverse link
@@ -621,8 +602,14 @@ impl TaskRegistry {
                                 }
                                 Ok(())
                             }
+                            Err(error) if error.uncertain => {
+                                // An unconfirmed journal write may already
+                                // own this receipt. Fallback would duplicate
+                                // delivery to a second recipient.
+                                return HandbackAdmissionOutcome::Rejected;
+                            }
                             Err(error) => Err(HandbackAdmissionError::Rejected {
-                                reason: error.to_string(),
+                                reason: error.error.to_string(),
                             }),
                         }
                     }
@@ -733,7 +720,9 @@ impl TaskRegistry {
         }) {
             return Err(TaskError::TerminatedTask);
         }
-        self.admit_peer_inbox(envelope.clone()).await?;
+        self.admit_peer_inbox(envelope.clone())
+            .await
+            .map_err(|error| error.error)?;
         if let Some(registry) = self.owned_self() {
             let task_id = task_id.to_owned();
             tokio::spawn(async move {

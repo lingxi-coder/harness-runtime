@@ -804,6 +804,8 @@ mod tests {
             transcript_fs: None,
             resumed_history: None,
             rendered_system_prompt: None,
+            prompt_policy: None,
+            prompt_state: None,
             mobile_runtime_environment_reminder: None,
             instruction_context: Default::default(),
             instruction_context_is_override: false,

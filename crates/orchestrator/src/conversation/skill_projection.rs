@@ -19,6 +19,29 @@ struct Aggregate {
     stale: bool,
 }
 
+struct SkillProjectionRow {
+    id: MessageId,
+    origin: Option<Utf16JsonProjection>,
+}
+
+fn skill_projection_history(history: &[ConversationMessage]) -> Vec<SkillProjectionRow> {
+    // Projection only depends on row identity and host skill origins. Do not
+    // copy unrelated user/tool/media bodies while taking the session snapshot.
+    history
+        .iter()
+        .map(|message| SkillProjectionRow {
+            id: message.id(),
+            origin: match message {
+                ConversationMessage::User {
+                    origin: Some(origin),
+                    ..
+                } if origin.string_at("/type") == Some("skill_activation") => Some(origin.clone()),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
 fn skill_names(origin: &Utf16JsonProjection) -> Option<Vec<Vec<u16>>> {
     let count = origin.array_len("/skills")?;
     if count == 0 {
@@ -100,24 +123,17 @@ impl ConversationOrchestrator {
             }
             (
                 session.session_id,
-                session.history.clone(),
+                skill_projection_history(&session.history),
                 session.model_context_excluded_messages.clone(),
             )
         };
         excluded.extend(retired.iter().copied());
         let mut aggregates = Vec::new();
-        for message in &history {
-            let ConversationMessage::User {
-                id,
-                origin: Some(origin),
-                ..
-            } = message
-            else {
+        for SkillProjectionRow { id, origin } in &history {
+            let Some(origin) = origin else {
                 continue;
             };
-            if origin.string_at("/type") != Some("skill_activation")
-                || origin.number_at("/context_epoch") != Some(epoch as f64)
-            {
+            if origin.number_at("/context_epoch") != Some(epoch as f64) {
                 continue;
             }
             let Some(names) = skill_names(origin) else {
@@ -161,8 +177,8 @@ impl ConversationOrchestrator {
         }
         let visible_ids = history
             .iter()
-            .filter(|row| !excluded.contains(&row.id()))
-            .map(ConversationMessage::id)
+            .filter(|row| !excluded.contains(&row.id))
+            .map(|row| row.id)
             .collect::<HashSet<_>>();
         let mut covered = aggregates
             .iter()
@@ -172,18 +188,10 @@ impl ConversationOrchestrator {
         let individuals = history
             .iter()
             .filter_map(|row| {
-                let ConversationMessage::User {
-                    id,
-                    origin: Some(origin),
-                    ..
-                } = row
-                else {
-                    return None;
-                };
-                if origin.string_at("/type") != Some("skill_activation") {
-                    return None;
-                }
-                origin.string_units("/skill_name").map(|skill| (*id, skill))
+                row.origin
+                    .as_ref()?
+                    .string_units("/skill_name")
+                    .map(|skill| (row.id, skill))
             })
             .collect::<HashSet<_>>();
         for entry in metadata.iter().filter(|entry| entry.effective) {
@@ -524,6 +532,87 @@ mod tests {
             assert!(model.iter().any(|row| row.id() == updated_b_id));
             assert!(model.contains(&quote));
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn skill_projection_preserves_exact_utf16_origins_with_large_unrelated_history() {
+        let _guard = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+        let orch = orchestrator();
+        let session_id = orch.current_session_id().await.to_string();
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+        let aggregate_id = MessageId::new();
+        let updated_id = MessageId::new();
+        let exact_name = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+        register(scope, aggregate_id, "a", "old a");
+        compaction::invoked_skills::register_activation_with_message(
+            &exact_name,
+            Path::new("/skills"),
+            &"retained body".into(),
+            None,
+            scope,
+            aggregate_id,
+        );
+        register(scope, updated_id, "a", "new a");
+        let skills = vec![
+            compaction::RestoredSkill {
+                name: "a".into(),
+                path: PathBuf::from("/skills"),
+                content: "old a".into(),
+            },
+            compaction::RestoredSkill {
+                name: exact_name,
+                path: PathBuf::from("/skills"),
+                content: "retained body".into(),
+            },
+        ];
+        orch.transcript
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap()
+            .insert(
+                aggregate_id,
+                skills.iter().map(|skill| skill.content.clone()).collect(),
+            );
+        let unrelated_id = MessageId::new();
+        orch.session.lock().await.history.extend([
+            ConversationMessage::user(unrelated_id, "x".repeat(1 << 20)),
+            aggregate(aggregate_id, &skills),
+            individual(updated_id, "a", "new a"),
+        ]);
+
+        orch.refresh_effective_skill_projection().await.unwrap();
+        let replacement_id = {
+            let session = orch.session.lock().await;
+            assert_eq!(session.history.len(), 4);
+            assert!(session
+                .model_context_excluded_messages
+                .contains(&aggregate_id));
+            let ConversationMessage::User {
+                id,
+                origin: Some(origin),
+                content,
+                ..
+            } = session.history.last().unwrap()
+            else {
+                panic!("the retained skill has a replacement attachment");
+            };
+            assert_eq!(origin.string_units("/skills/0/name"), Some(vec![0xd800]));
+            assert!(matches!(
+                &content[0],
+                lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                    if utf16_code_units.contains(&0xd800)
+            ));
+            assert_eq!(session.history[0].id(), unrelated_id);
+            *id
+        };
+        orch.refresh_effective_skill_projection().await.unwrap();
+        let session = orch.session.lock().await;
+        assert_eq!(session.history.len(), 4, "metadata refresh is stable");
+        assert_eq!(session.history.last().unwrap().id(), replacement_id);
     }
 
     #[tokio::test]

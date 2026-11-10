@@ -14,6 +14,7 @@
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
 use lingxi_core::host::OutputStream;
+use lingxi_core::host::orchestrator::PartialStreamEventMetadata;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ToolUseId};
 use lingxi_llm_client::protocol::JsonPayload;
@@ -100,10 +101,25 @@ pub async fn dispatch_event(
     suppress_live_text: bool,
     suppress_live_thinking: bool,
 ) -> Result<RouterAction, StreamingError> {
+    dispatch_event_with_metadata(
+        event, acc, output, suppress_live_text, suppress_live_thinking,
+        &PartialStreamEventMetadata::default(), false,
+    ).await
+}
+
+pub(crate) async fn dispatch_event_with_metadata(
+    event: HistoryEvent,
+    acc: &mut BlockAccumulator,
+    output: &Arc<dyn OutputStream>,
+    suppress_live_text: bool,
+    suppress_live_thinking: bool,
+    metadata: &PartialStreamEventMetadata,
+    authoritative_frames: bool,
+) -> Result<RouterAction, StreamingError> {
     match event {
         // Hosted search consumers inspect this semantic event separately. Main
         // conversation attribution remains in the terminal metadata snapshot.
-        HistoryEvent::WebSearch { .. } => Ok(RouterAction::Continue),
+        HistoryEvent::WebSearch { .. } | HistoryEvent::NativeStreamFrame { .. } => Ok(RouterAction::Continue),
         HistoryEvent::ServerFallback { .. }
         | HistoryEvent::ResponseObserved { .. }
         | HistoryEvent::CostQuoteObserved { .. } => Ok(RouterAction::Continue),
@@ -127,9 +143,9 @@ pub async fn dispatch_event(
             //
             // stream-json P4: emit the reconstructed SSE event for
             // --include-partial-messages BEFORE the normal handling.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = reconstruct_message_start_event_json(&response.id, &response.model, &response.usage);
-                output.emit_stream_event(&event_json, true).await;
+                output.emit_stream_event_with_metadata(&event_json, true, metadata).await;
             }
             output
                 .emit_message_start(&response.id, &response.model)
@@ -146,9 +162,9 @@ pub async fn dispatch_event(
                 std::time::Instant::now(),
             );
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = reconstruct_content_block_event_json(index, &content_block);
-                output.emit_stream_event(&event_json, false).await;
+                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
             }
             let kind = match &content_block {
                 LlmContentBlock::ProviderContent { protocol, value }
@@ -312,9 +328,9 @@ pub async fn dispatch_event(
                 std::time::Instant::now(),
             );
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 if let Some(event_json) = reconstruct_delta_event_json(index, &delta) {
-                    output.emit_stream_event(&event_json, false).await;
+                    output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
                 }
             }
             match delta {
@@ -394,9 +410,9 @@ pub async fn dispatch_event(
         }
         HistoryEvent::ContentBlockStop { index } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = format!("{{\"type\":\"content_block_stop\",\"index\":{index}}}");
-                output.emit_stream_event(&event_json, false).await;
+                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
             }
             let completed = acc.stop_block(index)?;
             if output.wants_model_output_progress() {
@@ -466,9 +482,9 @@ pub async fn dispatch_event(
         }
         HistoryEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = reconstruct_message_delta_event_json(delta.stop_reason.as_deref(), usage.as_ref());
-                output.emit_stream_event(&event_json, false).await;
+                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
             }
             // §0.7 "light up thinking/usage": `message_delta` carries the
             // final usage snapshot. Surface it to the output sink BEFORE
@@ -517,9 +533,9 @@ pub async fn dispatch_event(
         // in the response field but we forward the already-accumulated blocks).
         HistoryEvent::MessageStop | HistoryEvent::Completed { .. } => {
             // stream-json P4: emit message_stop for --include-partial-messages.
-            if output.wants_partial_stream_events() {
+            if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = r#"{"type":"message_stop"}"#;
-                output.emit_stream_event(event_json, false).await;
+                output.emit_stream_event_with_metadata(event_json, false, metadata).await;
             }
             Ok(RouterAction::EndOfStream)
         }

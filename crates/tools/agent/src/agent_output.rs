@@ -1,4 +1,4 @@
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use tool_api::tool_trait::ToolError;
 
 fn invalid(message: &str) -> ToolError {
@@ -35,18 +35,33 @@ fn strip_object(
 ) -> Result<Utf16JsonProjection, ToolError> {
     let root = output
         .at_pointer("")
-        .filter(|value| object(*value))
         .ok_or_else(|| invalid("Agent output must be an object"))?;
+    let mut builder = Utf16JsonBuilder::new();
+    let root = import_object_fields(&mut builder, root, fields)?;
+    builder
+        .finish(root)
+        .map_err(|_| invalid("Agent output object could not be parsed"))
+}
+
+fn import_object_fields(
+    builder: &mut Utf16JsonBuilder,
+    root: JsonValueView<'_>,
+    fields: &[&str],
+) -> Result<usize, ToolError> {
+    if !object(root) {
+        return Err(invalid("Agent output must be an object"));
+    }
     let mut parsed = Vec::new();
     for field in fields {
-        if root.get_property(field).is_some() {
-            let value = output
-                .subprojection(&format!("/{field}"))
+        if let Some(value) = root.get_property(field) {
+            let value = builder
+                .import_view(value)
                 .map_err(|_| invalid("Agent output object could not be parsed"))?;
             parsed.push(((*field).to_owned(), value));
         }
     }
-    Utf16JsonProjection::object(parsed)
+    builder
+        .push_object(parsed)
         .map_err(|_| invalid("Agent output object could not be parsed"))
 }
 
@@ -89,18 +104,15 @@ fn parse_usage(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, Tool
     )
 }
 
-fn parse_text_blocks(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
+fn parse_text_blocks(output: JsonValueView<'_>) -> Result<Utf16JsonProjection, ToolError> {
     let count = output
-        .at_pointer("")
-        .and_then(JsonValueView::array_len)
+        .array_len()
         .ok_or_else(|| invalid("Completed Agent output content must be an array"))?;
+    let mut builder = Utf16JsonBuilder::new();
     let mut parsed = Vec::with_capacity(count);
     for index in 0..count {
-        let block = output
-            .subprojection(&format!("/{index}"))
-            .map_err(|_| invalid("Completed Agent output has an invalid content block"))?;
-        let root = block
-            .at_pointer("")
+        let root = output
+            .get_index(index)
             .filter(|value| object(*value))
             .ok_or_else(|| invalid("Completed Agent output has an invalid content block"))?;
         if root.get_property("type").and_then(JsonValueView::as_str) != Some("text")
@@ -108,28 +120,37 @@ fn parse_text_blocks(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection
         {
             return Err(invalid("Completed Agent output requires text blocks"));
         }
-        parsed.push(strip_object(&block, &["type", "text"])?);
+        parsed.push(import_object_fields(&mut builder, root, &["type", "text"])?);
     }
-    Utf16JsonProjection::array(parsed)
+    builder
+        .push_array(parsed)
+        .and_then(|root| builder.finish(root))
         .map_err(|_| invalid("Completed Agent output content could not be parsed"))
 }
 
-fn parse_strings(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
+fn parse_strings(output: JsonValueView<'_>) -> Result<Utf16JsonProjection, ToolError> {
     let count = output
-        .at_pointer("")
-        .and_then(JsonValueView::array_len)
+        .array_len()
         .ok_or_else(|| invalid("Agent output model list must be an array"))?;
+    let mut builder = Utf16JsonBuilder::new();
     let mut parsed = Vec::with_capacity(count);
     for index in 0..count {
         let item = output
-            .subprojection(&format!("/{index}"))
-            .map_err(|_| invalid("Agent output model list is invalid"))?;
-        if !item.at_pointer("").is_some_and(string) {
+            .get_index(index)
+            .filter(|item| !item.is_undefined())
+            .ok_or_else(|| invalid("Agent output model list is invalid"))?;
+        if !string(item) {
             return Err(invalid("Agent output model list must contain strings"));
         }
-        parsed.push(item);
+        parsed.push(
+            builder
+                .import_view(item)
+                .map_err(|_| invalid("Agent output model list is invalid"))?,
+        );
     }
-    Utf16JsonProjection::array(parsed)
+    builder
+        .push_array(parsed)
+        .and_then(|root| builder.finish(root))
         .map_err(|_| invalid("Agent output model list could not be parsed"))
 }
 
@@ -139,6 +160,35 @@ fn optional_string(output: &Utf16JsonProjection, field: &str) -> bool {
 
 fn optional_number(output: &Utf16JsonProjection, field: &str) -> bool {
     optional(output, field, number)
+}
+
+fn parse_task_calls(output: JsonValueView<'_>) -> Result<Utf16JsonProjection, ToolError> {
+    let count = output
+        .array_len()
+        .ok_or_else(|| invalid("Agent output task calls must be an array"))?;
+    let mut builder = Utf16JsonBuilder::new();
+    let mut parsed = Vec::with_capacity(count);
+    for index in 0..count {
+        let row = output
+            .get_index(index)
+            .ok_or_else(|| invalid("Agent output has an invalid task call"))?;
+        if !matches!(
+            row.get_property("name").and_then(JsonValueView::as_str),
+            Some("TaskCreate" | "TaskUpdate")
+        ) || !row.get_property("result").is_some_and(string)
+        {
+            return Err(invalid("Agent output has an invalid task call"));
+        }
+        parsed.push(import_object_fields(
+            &mut builder,
+            row,
+            &["name", "input", "result"],
+        )?);
+    }
+    builder
+        .push_array(parsed)
+        .and_then(|root| builder.finish(root))
+        .map_err(|_| invalid("Agent output task calls could not be parsed"))
 }
 
 fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
@@ -172,19 +222,25 @@ fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, 
             ));
         }
     }
+    if !optional(output, "canContinueAgent", |value| {
+        value.as_bool().is_some()
+    }) {
+        return Err(invalid(
+            "Completed Agent output has an invalid continuation flag",
+        ));
+    }
 
     let content = output
-        .subprojection("/content")
-        .map_err(|_| invalid("Completed Agent output requires content"))?;
-    let content = parse_text_blocks(&content)?;
+        .get_property("content")
+        .ok_or_else(|| invalid("Completed Agent output requires content"))?;
+    let content = parse_text_blocks(content)?;
     let usage = output
         .subprojection("/usage")
         .map_err(|_| invalid("Completed Agent output requires usage"))?;
     let usage = parse_usage(&usage)?;
     let models = output
-        .subprojection("/modelsUsed")
-        .ok()
-        .map(|value| parse_strings(&value))
+        .get_property("modelsUsed")
+        .map(parse_strings)
         .transpose()?;
 
     let mut parsed = Vec::new();
@@ -212,6 +268,7 @@ fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, 
     for field in [
         "worktreePath",
         "worktreeBranch",
+        "canContinueAgent",
         "harnessNoteCount",
         "harnessTailCount",
         "harnessSectionHash",
@@ -219,6 +276,9 @@ fn parse_completed(output: &Utf16JsonProjection) -> Result<Utf16JsonProjection, 
         if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.into(), value));
         }
+    }
+    if let Some(calls) = output.get_property("taskCalls") {
+        parsed.push(("taskCalls".into(), parse_task_calls(calls)?));
     }
     Utf16JsonProjection::object(parsed)
         .map_err(|_| invalid("Completed Agent output could not be parsed"))
@@ -231,17 +291,20 @@ fn parse_async_launched(output: &Utf16JsonProjection) -> Result<Utf16JsonProject
         }
     }
     if !optional_string(output, "resolvedModel")
-        || !optional(output, "isAsync", |value| value.as_bool().is_some())
+        || !optional(output, "isAsync", |value| value.as_bool() == Some(true))
         || !optional(output, "canReadOutputFile", |value| {
             value.as_bool().is_some()
         })
+        || !optional(output, "canContinueAgent", |value| {
+            value.as_bool().is_some()
+        })
+        || !optional(output, "sharesCwd", |value| value.as_bool().is_some())
     {
         return Err(invalid("Async Agent output has an invalid optional field"));
     }
     let models = output
-        .subprojection("/modelsUsed")
-        .ok()
-        .map(|value| parse_strings(&value))
+        .get_property("modelsUsed")
+        .map(parse_strings)
         .transpose()?;
     let mut parsed = Vec::new();
     for field in [
@@ -258,7 +321,13 @@ fn parse_async_launched(output: &Utf16JsonProjection) -> Result<Utf16JsonProject
     if let Some(models) = models {
         parsed.push(("modelsUsed".into(), models));
     }
-    for field in ["prompt", "outputFile", "canReadOutputFile"] {
+    for field in [
+        "prompt",
+        "outputFile",
+        "canReadOutputFile",
+        "canContinueAgent",
+        "sharesCwd",
+    ] {
         if let Ok(value) = output.subprojection(&format!("/{field}")) {
             parsed.push((field.into(), value));
         }
@@ -527,5 +596,197 @@ pub(super) fn parse(
         Some("teammate_spawned") => parse_teammate_spawned(output),
         Some("analyzed" | "unanalyzed" | "failed") if allow_fusion => parse_fusion(output),
         _ => Err(invalid("Agent output status is invalid")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error(result: Result<Utf16JsonProjection, ToolError>) -> String {
+        let ToolError::InvalidInput(message) = result.unwrap_err() else {
+            panic!("expected Agent output input error");
+        };
+        message.string_at("").unwrap().to_owned()
+    }
+
+    #[test]
+    fn borrowed_array_parsers_keep_native_validation_errors() {
+        for (source, expected) in [
+            ("null", "Completed Agent output content must be an array"),
+            (
+                "[null]",
+                "Completed Agent output has an invalid content block",
+            ),
+            (
+                r#"[{"type":"image","text":"x"}]"#,
+                "Completed Agent output requires text blocks",
+            ),
+            (
+                r#"[{"type":"text","text":null}]"#,
+                "Completed Agent output requires text blocks",
+            ),
+        ] {
+            let input = Utf16JsonProjection::parse(source).unwrap();
+            assert_eq!(
+                error(parse_text_blocks(input.at_pointer("").unwrap())),
+                expected
+            );
+        }
+        for (source, expected) in [
+            ("null", "Agent output task calls must be an array"),
+            ("[null]", "Agent output has an invalid task call"),
+            (
+                r#"[{"name":"TaskDelete","result":"x"}]"#,
+                "Agent output has an invalid task call",
+            ),
+            (
+                r#"[{"name":"TaskCreate","result":null}]"#,
+                "Agent output has an invalid task call",
+            ),
+        ] {
+            let input = Utf16JsonProjection::parse(source).unwrap();
+            assert_eq!(
+                error(parse_task_calls(input.at_pointer("").unwrap())),
+                expected
+            );
+        }
+        let sparse = Utf16JsonProjection::sparse_array(1, Vec::new()).unwrap();
+        let root = sparse.at_pointer("").unwrap();
+        assert_eq!(
+            error(parse_text_blocks(root)),
+            "Completed Agent output has an invalid content block"
+        );
+        assert_eq!(
+            error(parse_task_calls(root)),
+            "Agent output has an invalid task call"
+        );
+        assert_eq!(
+            error(parse_strings(root)),
+            "Agent output model list is invalid"
+        );
+        let explicit_null = Utf16JsonProjection::parse("[null]").unwrap();
+        assert_eq!(
+            error(parse_strings(explicit_null.at_pointer("").unwrap())),
+            "Agent output model list must contain strings"
+        );
+
+        let named_row = Utf16JsonProjection::sparse_array_with_properties(
+            0,
+            Vec::new(),
+            vec![
+                ("name".encode_utf16().collect(), "TaskCreate".into()),
+                ("result".encode_utf16().collect(), "ok".into()),
+            ],
+        )
+        .unwrap();
+        let rows = Utf16JsonProjection::array(vec![named_row]).unwrap();
+        assert_eq!(
+            error(parse_task_calls(rows.at_pointer("").unwrap())),
+            "Agent output must be an object"
+        );
+    }
+
+    #[test]
+    fn borrowed_task_call_input_keeps_sparse_named_properties_and_exact_keys() {
+        let input = Utf16JsonProjection::sparse_array_with_properties(
+            u32::MAX,
+            vec![(
+                9,
+                Utf16JsonProjection::parse(r#"{"\ud800":"\udc00"}"#).unwrap(),
+            )],
+            vec![(
+                vec![0xdc00],
+                Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+            )],
+        )
+        .unwrap();
+        let row = Utf16JsonProjection::object(vec![
+            ("result".into(), "ok".into()),
+            ("ignored".into(), "extra".into()),
+            ("input".into(), input.clone()),
+            ("name".into(), "TaskUpdate".into()),
+        ])
+        .unwrap();
+        let rows = Utf16JsonProjection::array(vec![row]).unwrap();
+        let parsed = parse_task_calls(rows.at_pointer("").unwrap()).unwrap();
+        assert_eq!(parsed.subprojection("/0/input").unwrap(), input);
+        assert!(parsed.at_pointer("/0/ignored").is_none());
+        let row = parsed.at_pointer("/0").unwrap().object_entries().unwrap();
+        assert_eq!(
+            row.iter()
+                .map(|entry| entry.display_key)
+                .collect::<Vec<_>>(),
+            ["name", "input", "result"]
+        );
+    }
+
+    #[test]
+    fn borrowed_completed_arrays_preserve_large_shape_exact_bytes_and_stripping() {
+        let block = r#"{"text":"\ud800","ignored":{"nested":[1,2,3]},"type":"text"}"#;
+        let call =
+            r#"{"result":"\udc00","ignored":true,"input":{"\ud800":"\udc00"},"name":"TaskCreate"}"#;
+        for count in [0, 1, 256, 4_096] {
+            let blocks = std::iter::repeat_n(block, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let calls = std::iter::repeat_n(call, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let models = std::iter::repeat_n(r#""\ud800""#, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let output = Utf16JsonProjection::parse(&format!(r#"{{"status":"completed","agentId":"a","prompt":"p","content":[{blocks}],"modelsUsed":[{models}],"totalToolUseCount":1,"totalDurationMs":2,"totalTokens":3,"usage":{{"input_tokens":4,"output_tokens":5}},"taskCalls":[{calls}],"ignored":true}}"#)).unwrap();
+            let parsed = parse(&output, false).unwrap();
+            let clean_blocks = std::iter::repeat_n(r#"{"type":"text","text":"\ud800"}"#, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let clean_calls = std::iter::repeat_n(
+                r#"{"name":"TaskCreate","input":{"\ud800":"\udc00"},"result":"\udc00"}"#,
+                count,
+            )
+            .collect::<Vec<_>>()
+            .join(",");
+            assert_eq!(
+                parsed.to_json_string().unwrap(),
+                format!(
+                    r#"{{"status":"completed","agentId":"a","prompt":"p","content":[{clean_blocks}],"modelsUsed":[{models}],"totalToolUseCount":1,"totalDurationMs":2,"totalTokens":3,"usage":{{"input_tokens":4,"output_tokens":5}},"taskCalls":[{clean_calls}]}}"#
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_completed_arrays_preserve_cross_field_validation_order() {
+        let output = Utf16JsonProjection::parse(r#"{"status":"completed","agentId":"a","prompt":"p","content":[null],"totalToolUseCount":1,"totalDurationMs":2,"totalTokens":3,"usage":null,"modelsUsed":[null],"taskCalls":[null]}"#).unwrap();
+        assert_eq!(
+            error(parse(&output, false)),
+            "Completed Agent output has an invalid content block"
+        );
+        let mut output = output;
+        output
+            .set_field("content", Utf16JsonProjection::parse("[]").unwrap())
+            .unwrap();
+        assert_eq!(
+            error(parse(&output, false)),
+            "Agent output usage must be an object"
+        );
+        output
+            .set_field(
+                "usage",
+                Utf16JsonProjection::parse(r#"{"input_tokens":1,"output_tokens":2}"#).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            error(parse(&output, false)),
+            "Agent output model list must contain strings"
+        );
+        output
+            .set_field("modelsUsed", Utf16JsonProjection::parse("[]").unwrap())
+            .unwrap();
+        assert_eq!(
+            error(parse(&output, false)),
+            "Agent output has an invalid task call"
+        );
     }
 }

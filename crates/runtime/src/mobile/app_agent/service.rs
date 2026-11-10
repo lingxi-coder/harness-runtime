@@ -807,6 +807,10 @@ impl PermissionGate for Control {
 }
 #[async_trait::async_trait]
 impl OutputStream for Control {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     fn wants_model_output_progress(&self) -> bool {
         true
     }

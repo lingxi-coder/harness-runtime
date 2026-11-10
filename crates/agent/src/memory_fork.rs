@@ -35,6 +35,46 @@ pub struct MemoryForkProjection {
 }
 
 impl MemoryForkProjection {
+    /// Keep source bytes for the same selected prompt bundle. A route into a
+    /// different bundle must use its freshly rendered system and tool schemas.
+    pub(crate) fn rebind_for_route(
+        wire: &Arc<Self>,
+        route_changed: bool,
+        source_policy: Option<&lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+        target_policy: Option<&lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+        tools: &[SourceToolWireDefinition],
+    ) -> Arc<Self> {
+        if !route_changed {
+            return wire.clone();
+        }
+        let mut routed = (**wire).clone();
+        routed.model_source = None;
+        if source_policy
+            .zip(target_policy)
+            .is_some_and(|(source, target)| {
+                (
+                    source.bundle_id,
+                    source.bundle_version,
+                    source.system,
+                    source.tools,
+                    source.memory,
+                    source.reminders,
+                ) != (
+                    target.bundle_id,
+                    target.bundle_version,
+                    target.system,
+                    target.tools,
+                    target.memory,
+                    target.reminders,
+                )
+            })
+        {
+            routed.system_prompt_input = None;
+            routed.tools = tools.to_vec();
+        }
+        Arc::new(routed)
+    }
+
     /// Freeze the same parent inputs used by the existing side-query fork path.
     #[must_use]
     pub fn from_cache_params(params: &sidequery::CacheSafeParams) -> Self {

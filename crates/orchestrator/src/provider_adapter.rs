@@ -396,6 +396,14 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        self.service.prompt_target(model, profile, mode)
+    }
     fn set_tool_search_enabled(&self, enabled: bool) {
         self.service.set_tool_search_enabled(enabled);
     }
@@ -1332,6 +1340,19 @@ fn provider_label(profile_name: &str) -> &str {
 /// Subagent API seam — forwards every owned request field to the provider service.
 #[async_trait]
 impl agent::SubagentApiClient for ProviderApiAdapter {
+    fn prompt_target(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::prompt_policy::PromptTarget, LlmError> {
+        self.service.prompt_target(model, profile, mode)
+    }
+
+    fn supports_system_turns(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service
+            .supports_native_mid_conversation_system(model, profile)
+    }
     fn refusal_api_text_snapshot(
         &self,
         model: &str,

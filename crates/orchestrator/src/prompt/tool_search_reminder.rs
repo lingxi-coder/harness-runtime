@@ -187,6 +187,30 @@ pub fn count_turns(
 mod tests {
     use super::*;
 
+    #[test]
+    fn tool_search_bodies_match_319_native_renderer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        for case in fixture["toolSearchReminders"].as_array().unwrap() {
+            let names = case["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                render_reminder(
+                    &names,
+                    case["count"].as_u64().unwrap() as usize,
+                    "ToolSearch"
+                ),
+                case["body"].as_str().map(str::to_owned),
+            );
+        }
+    }
+
     fn names(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("Tool{i}")).collect()
     }

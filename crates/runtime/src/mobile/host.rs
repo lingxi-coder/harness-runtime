@@ -818,6 +818,10 @@ fn mobile_skill_listing_provider_with_settings(
                         },
                     )
                     .collect::<Vec<_>>();
+                let display_names =
+                    orchestrator::prompt::skill_listing::NativeDisplayNameResolver::new(
+                        &full_catalog,
+                    );
                 let touched = read_file_state.as_ref().map_or_else(Vec::new, |m| {
                     m.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -860,8 +864,8 @@ fn mobile_skill_listing_provider_with_settings(
                     })
                     .filter_map(|c| {
                         use orchestrator::prompt::skill_listing::{
-                            native_builtin_skill_gate_active, native_display_name,
-                            native_skill_listing_mode, native_skill_override, SkillListingEntry,
+                            native_builtin_skill_gate_active, native_skill_listing_mode,
+                            native_skill_override, SkillListingEntry,
                         };
                         let mut entry = SkillListingEntry {
                             name: c.name.clone(),
@@ -917,7 +921,7 @@ fn mobile_skill_listing_provider_with_settings(
                             return None;
                         }
                         entry.is_name_only = mode == lingxi_core::settings::SkillOverride::NameOnly;
-                        entry.display_name = native_display_name(&entry, &full_catalog);
+                        entry.display_name = display_names.display_name(&entry);
                         Some(entry)
                     })
                     .collect();

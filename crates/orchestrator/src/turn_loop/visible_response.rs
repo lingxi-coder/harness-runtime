@@ -731,20 +731,6 @@ pub(super) fn process_visible_response<'a>(
         // disposition match below.
         let end_conversation_requested = orch.take_end_conversation_request().await;
 
-        // Oer only exhausts two consecutive malformed attempts: every other
-        // transition replaces `malformed_tool_use_retry` in the oracle state.
-        if (response.stop_reason.as_deref() != Some("tool_use")
-            && response
-                .provider_metadata
-                .array_len("/tool_input_issues")
-                .is_none_or(|len| len == 0))
-            || !tool_uses.is_empty()
-        {
-            if let Some(state) = recovery.as_deref_mut() {
-                state.malformed_tool_use_retried = false;
-            }
-        }
-
         // 6. Decide loop disposition.
         let outcome = if end_conversation_requested {
             // The model confirmed (2nd EndConversation call) — end the query.
@@ -811,6 +797,9 @@ pub(super) fn process_visible_response<'a>(
                 // tools case (previously handled by the `_ => Continue` fallback) is
                 // unaffected.
                 _ if !tool_uses.is_empty() && !refusal_retry => {
+                    if let Some(state) = recovery.as_deref_mut() {
+                        state.malformed_tool_use_retry_count = 0;
+                    }
                     let issues = response
                         .provider_metadata
                         .array_len("/tool_input_issues")

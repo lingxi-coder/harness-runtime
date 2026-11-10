@@ -1,5 +1,32 @@
 //! Cohesive session-memory runtime state and bounded persistence helpers.
 
+#[cfg(test)]
+mod synthetic_api_error_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn synthetic_identity_is_atomic_and_cleared_on_session_reset() {
+        let store = Arc::new(TranscriptStore::new());
+        let outer = MessageId::new();
+        let identities = std::thread::scope(|scope| {
+            let threads = (0..8)
+                .map(|_| {
+                    let store = store.clone();
+                    scope.spawn(move || store.synthetic_api_error_identity(outer))
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+        assert_ne!(identities[0].0, outer.as_uuid());
+        store.reset_session_scoped().await;
+        assert_ne!(store.synthetic_api_error_identity(outer).0, identities[0].0);
+    }
+}
+
 use super::*;
 
 /// Session owner for tool-hook publication generations. A normal per-turn
@@ -77,6 +104,10 @@ impl Drop for SessionToolHookGeneration {
 
 /// Transcript persistence and the side tables consumed while serializing a turn.
 pub(crate) struct TranscriptStore {
+    /// One Native synthetic construction per outer UUID: independent inner
+    /// message id and creation time, reused by persistence/public projections.
+    synthetic_api_error_identities:
+        std::sync::Mutex<std::collections::HashMap<MessageId, (uuid::Uuid, String)>>,
     /// Per-session provider recovery ownership, replaced when switching sessions.
     pub(crate) thinking_recovery:
         std::sync::RwLock<llm_runtime::thinking_scope::ThinkingRecoveryScope>,
@@ -243,6 +274,7 @@ pub(crate) struct TranscriptStore {
 impl TranscriptStore {
     pub(crate) fn new() -> Self {
         Self {
+            synthetic_api_error_identities: std::sync::Mutex::new(std::collections::HashMap::new()),
             thinking_recovery: std::sync::RwLock::new(Default::default()),
             jsonl_writer: None,
             storage_pauses: Mutex::new(std::collections::HashMap::new()),
@@ -266,7 +298,27 @@ impl TranscriptStore {
         }
     }
 
+    pub(crate) fn synthetic_api_error_identity(&self, outer_id: MessageId) -> (uuid::Uuid, String) {
+        self.synthetic_api_error_identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(outer_id)
+            .or_insert_with(|| {
+                (
+                    uuid::Uuid::new_v4(),
+                    chrono::Utc::now()
+                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                        .to_string(),
+                )
+            })
+            .clone()
+    }
+
     pub(crate) async fn reset_session_scoped(&self) {
+        self.synthetic_api_error_identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         *self
             .thinking_recovery
             .write()
@@ -903,6 +955,10 @@ pub(crate) struct PromptRuntime {
     /// and spliced back into the walk by
     /// [`crate::prompt::silent_turn::scan_silent_stretch`].
     pub(crate) silent_turn_reminder_marks: std::sync::Mutex<Vec<usize>>,
+    pub(crate) silent_turn_message_timestamps:
+        std::sync::Mutex<std::collections::HashMap<lingxi_core::types::MessageId, i64>>,
+    pub(crate) silent_turn_reminder_timestamps:
+        std::sync::Mutex<std::collections::HashMap<usize, i64>>,
     /// REM-14 `pendingMemoryUpdates` — the oracle's app-state queue
     /// (`jzm(e)` @296554545: `let t=e.getAppState().pendingMemoryUpdates;
     /// if(t.length===0)return[]; e.setAppState(…clear…)`), drained
@@ -940,8 +996,12 @@ pub(crate) struct PromptRuntime {
     /// `AgentTool.tsx:622-623` `override.systemPrompt = forkParentSystemPrompt`).
     /// `None` until the first successful turn / when the turn ran with no system
     /// prompt. Read by the fork dispatch path ONLY; no non-fork tool touches it.
-    pub(crate) current_turn_system_prompt:
-        Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+    pub(crate) current_turn_system_prompt: Mutex<
+        Option<(
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            Option<lingxi_core::host::prompt_policy::PromptPolicyMetadata>,
+        )>,
+    >,
     /// The ONE per-session read-state registry (`path → {content, mtime_ms,
     /// offset, limit}`) — the 1:1 port of claude-code's single
     /// `context.readFileState` LRU (`FileReadTool.ts:1032`). This is the sole
@@ -1031,9 +1091,12 @@ pub(crate) struct PromptRuntime {
     /// `StaticMemoryProvider`'s role for the eager block. Set via
     /// [`Self::with_nested_memory_roots`].
     pub(crate) nested_memory_roots: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
-    /// Current advertised skill membership. Initial ingress emits a listing;
-    /// later additions and withdrawals append only their delta. Stable membership
-    /// emits nothing. Clear/resume/compaction reset this context-local baseline.
+    /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
+    /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
+    /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
+    /// attachments.ts:2607/2699). When no new skill appears,
+    /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
+    /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<Vec<u16>>>,
     /// `plan_mode` attachment cadence (2.1.238 `X4T` @296525982 + `txl`
     /// @296558044). See [`PlanReminderCadence`].
@@ -1115,6 +1178,11 @@ pub(crate) struct PromptRuntime {
     pub(crate) memory_prompt_generation: std::sync::atomic::AtomicU64,
     pub(crate) main_memory_prompt_generation: std::sync::atomic::AtomicU64,
     pub(crate) memory_resume_prompt_checked: std::sync::atomic::AtomicBool,
+    /// Typed additive source restored independently of a frozen prompt body.
+    /// A route or bundle migration may discard that body while keeping this
+    /// host-approved source; current configuration always has precedence.
+    pub(crate) restored_append_system_prompt:
+        std::sync::RwLock<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub(super) frozen_prompt_source_vector: Mutex<Option<Arc<FrozenPromptSourceVector>>>,
     /// Admitted conversation epoch that produced the static snapshot and
     /// its rendering hint. Legacy transcripts belong to epoch zero.
@@ -1191,6 +1259,8 @@ impl PromptRuntime {
             wire_tool_schema_cache: Mutex::new(None),
             deferred_tool_token_cache: Mutex::new(std::collections::HashMap::new()),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
+            silent_turn_message_timestamps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            silent_turn_reminder_timestamps: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_memory_updates: std::sync::Mutex::new(Vec::new()),
             tool_search_reminder_marks: std::sync::Mutex::new(Vec::new()),
             last_memory_scan_ms: std::sync::atomic::AtomicI64::new(
@@ -1233,6 +1303,7 @@ impl PromptRuntime {
             memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
             main_memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
             memory_resume_prompt_checked: std::sync::atomic::AtomicBool::new(false),
+            restored_append_system_prompt: std::sync::RwLock::new(None),
             frozen_prompt_source_vector: Mutex::new(None),
             prompt_snapshot_epoch: Mutex::new(None),
             pending_prompt_source_vector: Mutex::new(None),
@@ -1294,6 +1365,24 @@ impl PromptRuntime {
     /// Prepare prompt-owned conversation state before session activation.
     /// Gv authority and its date/cursor are retired only in the synchronous
     /// activation commit while the current session identity is locked.
+    pub(crate) fn install_silent_clocks(
+        &self,
+        clocks: crate::prompt::silent_turn::RestoredSilentClocks,
+    ) {
+        *self
+            .silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.message_timestamps;
+        *self
+            .silent_turn_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.reminder_marks;
+        *self
+            .silent_turn_reminder_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clocks.reminder_timestamps;
+    }
+
     pub(crate) async fn prepare_session_scoped_reset(&self) {
         *self.git_status_snapshot.lock().await = None;
         let mut sections = self.mod_prompt_sections.lock().await;
@@ -1310,6 +1399,14 @@ impl PromptRuntime {
         *self.current_prompt_id.lock().await = None;
         *self.pending_prompt_id.lock().await = None;
         self.silent_turn_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.silent_turn_reminder_timestamps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -1344,11 +1441,23 @@ impl PromptRuntime {
         self.memory_resume_prompt_checked
             .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_snapshot.lock().await = None;
+        self.restore_prompt_snapshot_append_source(None);
         *self.frozen_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot_epoch.lock().await = None;
         *self.context_rendering_hint.lock().await = None;
         self.prompt_snapshot_resume
             .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn restore_prompt_snapshot_append_source(
+        &self,
+        snapshot: Option<&lingxi_core::host::PromptSnapshot>,
+    ) {
+        *self
+            .restored_append_system_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            snapshot.and_then(|snapshot| snapshot.append_system_prompt.clone());
     }
     /// Retire the root's Gv/qb authority beside publication of the new session
     /// identity. The caller holds both the session and instruction cursor

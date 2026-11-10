@@ -1037,6 +1037,37 @@ impl FileSystem for InMemoryFs {
             .push_str(body);
         Ok(())
     }
+    async fn append_file_rooted_durable(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+        body: &str,
+    ) -> Result<(), FsError> {
+        let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+        self.append_file(&path.to_string_lossy(), body).await
+    }
+    async fn sync_file_rooted_no_follow(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+        Ok(())
+    }
+    async fn truncate_file_rooted_no_follow(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+        len: u64,
+    ) -> Result<(), FsError> {
+        let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+        let mut files = self.files.lock().await;
+        let body = files
+            .get_mut(path.to_string_lossy().as_ref())
+            .ok_or_else(|| FsError::NotFound(path.to_string_lossy().into_owned()))?;
+        body.truncate(len as usize);
+        Ok(())
+    }
     async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
         Ok(())
     }
@@ -1193,6 +1224,252 @@ struct ShutdownBarrierHandler {
     fail_first_drain: bool,
     entered: tokio::sync::Notify,
     release: Option<tokio::sync::Notify>,
+}
+
+struct ConcurrentShutdownHandler {
+    task_type: TaskType,
+    entered: tokio::sync::mpsc::UnboundedSender<String>,
+    release: tokio::sync::Semaphore,
+    started: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+#[async_trait]
+impl Task for ConcurrentShutdownHandler {
+    fn name(&self) -> &str {
+        "concurrent-shutdown"
+    }
+
+    fn task_type(&self) -> TaskType {
+        self.task_type
+    }
+
+    async fn spawn(&self, _: TaskSpawnInput, _: TaskContext) -> Result<TaskHandle, TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
+    async fn kill(&self, task_id: &str, _: TaskContext) -> Result<(), TaskError> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.entered.send(task_id.into()).unwrap();
+        self.release.acquire().await.unwrap().forget();
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+async fn assert_shutdown_starts_independent_stops(task_type: TaskType) {
+    let (_dir, mut registry) = make_registry();
+    let (entered, mut stops) = tokio::sync::mpsc::unbounded_channel();
+    let handler = Arc::new(ConcurrentShutdownHandler {
+        task_type,
+        entered,
+        release: tokio::sync::Semaphore::new(0),
+        started: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+    });
+    registry.register_handler(task_type, handler.clone());
+    for id in ["a-first", "z-later"] {
+        if task_type == TaskType::LocalBash {
+            registry
+                .register_background_bash(
+                    id.into(),
+                    "sleep 2".into(),
+                    "independent shutdown shell".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        registry.spawned.write().await.insert(id.into(), task_type);
+    }
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let caller = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown_background_tasks().await })
+    };
+    let mut started = vec![];
+    for _ in 0..2 {
+        started.push(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stops.recv())
+                .await
+                .expect("every captured task must receive Stop before the first grace ends")
+                .unwrap(),
+        );
+    }
+    started.sort();
+    assert_eq!(started, vec!["a-first", "z-later"]);
+    assert_eq!(handler.completed.load(Ordering::SeqCst), 0);
+    assert!(!registry.accepting_tasks.load(Ordering::Acquire));
+    let duplicate_shell_stop = if task_type == TaskType::LocalBash {
+        let registry = registry.clone();
+        let stop =
+            tokio::spawn(async move { registry.kill_with_reason("a-first", "system").await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            handler.started.load(Ordering::SeqCst),
+            2,
+            "same-shell teardown must wait for its existing owner"
+        );
+        Some(stop)
+    } else {
+        None
+    };
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(registry.handlers.read().await.len(), 1);
+    let retry = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown_background_tasks().await })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(handler.started.load(Ordering::SeqCst), 2);
+    handler.release.add_permits(2);
+    tokio::time::timeout(std::time::Duration::from_secs(1), retry)
+        .await
+        .expect("a retry joins and observes the owned drain")
+        .unwrap()
+        .unwrap();
+    assert_eq!(handler.completed.load(Ordering::SeqCst), 2);
+    assert!(registry.handlers.read().await.is_empty());
+    assert!(registry.spawned.read().await.is_empty());
+    if let Some(stop) = duplicate_shell_stop {
+        stop.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_starts_all_stops_and_survives_cancelled_caller_and_retry() {
+    assert_shutdown_starts_independent_stops(TaskType::LocalAgent).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_starts_all_shell_stops_and_survives_cancelled_caller_and_retry() {
+    assert_shutdown_starts_independent_stops(TaskType::LocalBash).await;
+}
+
+struct ConcurrentShutdownRuntime {
+    entered: tokio::sync::mpsc::UnboundedSender<u64>,
+    release: tokio::sync::Semaphore,
+    failures_remaining: AtomicUsize,
+}
+
+#[async_trait]
+impl RuntimeSpawner for ConcurrentShutdownRuntime {
+    async fn spawn(
+        &self,
+        _: &str,
+        _: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
+        Err(lingxi_core::host::RuntimeError::ShuttingDown)
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    async fn cancel(
+        &self,
+        handle: &BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
+        self.entered.send(handle.task_id).unwrap();
+        self.release.acquire().await.unwrap().forget();
+        if self
+            .failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(lingxi_core::host::RuntimeError::Internal(
+                "retry cancel".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_legacy_handle_stops_are_independent_and_keep_failed_owners_for_retry() {
+    let (_dir, mut registry) = make_registry();
+    let (entered, mut stops) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = Arc::new(ConcurrentShutdownRuntime {
+        entered,
+        release: tokio::sync::Semaphore::new(0),
+        failures_remaining: AtomicUsize::new(1),
+    });
+    registry.runtime = runtime.clone();
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    for (id, task_id) in [("legacy-first", 1), ("legacy-later", 2)] {
+        registry.handles.lock().await.insert(
+            id.into(),
+            BackgroundTaskHandle {
+                task_name: id.into(),
+                task_id,
+            },
+        );
+        let cleanups = cleanups.clone();
+        registry.cleanups.lock().await.insert(
+            id.into(),
+            Arc::new(move || {
+                cleanups.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+    }
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let caller = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown_background_tasks().await })
+    };
+    let mut started = vec![];
+    for _ in 0..2 {
+        started.push(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stops.recv())
+                .await
+                .expect("the handle map must not serialize cancellation acknowledgments")
+                .unwrap(),
+        );
+    }
+    started.sort();
+    assert_eq!(started, vec![1, 2]);
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(registry.handles.lock().await.len(), 2);
+    assert_eq!(registry.cleanups.lock().await.len(), 2);
+    runtime.release.add_permits(2);
+    assert!(registry.shutdown_background_tasks().await.is_err());
+    assert_eq!(registry.handles.lock().await.len(), 1);
+    assert_eq!(registry.cleanups.lock().await.len(), 1);
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    runtime.release.add_permits(1);
+    registry.shutdown_background_tasks().await.unwrap();
+    assert!(registry.handles.lock().await.is_empty());
+    assert!(registry.cleanups.lock().await.is_empty());
+    assert_eq!(cleanups.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn shutdown_failed_owned_attempt_keeps_routes_for_a_fresh_retry() {
+    let (_dir, mut registry) = make_registry();
+    let handler = RecordingHandler::new(TaskType::LocalAgent, "retry-worker");
+    handler.fail_next_kill();
+    registry.register_handler(TaskType::LocalAgent, handler.clone());
+    registry
+        .spawned
+        .write()
+        .await
+        .insert("retry-worker".into(), TaskType::LocalAgent);
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    assert!(registry.shutdown_background_tasks().await.is_err());
+    assert!(registry.spawned.read().await.contains_key("retry-worker"));
+    assert!(!registry.handlers.read().await.is_empty());
+    registry.shutdown_background_tasks().await.unwrap();
+    assert_eq!(handler.killed_ids(), vec!["retry-worker"]);
+    assert!(registry.handlers.read().await.is_empty());
 }
 
 #[async_trait]
@@ -9662,6 +9939,14 @@ async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
         "TaskOutput's actual registry read must remain waiting while source ownership is frozen"
     );
     assert_eq!(chunk.status.as_deref(), Some("running"));
+    assert_eq!(
+        TaskRegistryHandle::output_status(&registry, &record.task_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("running"),
+        "the lightweight poll must preserve the source transfer fence"
+    );
     assert_eq!(chunk.exit_code, None);
     registry.mark_notified(&record.task_id).await.unwrap();
     assert!(!registry.get(&record.task_id).await.unwrap().base().notified);
@@ -9691,6 +9976,13 @@ async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
             .await
             .unwrap()
             .done
+    );
+    assert_eq!(
+        TaskRegistryHandle::output_status(&registry, &record.task_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("completed")
     );
     assert!(registry.has_pending_task_notifications_for(None).await);
     assert_eq!(
@@ -11229,6 +11521,138 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
         agent.base.notified,
         "Native K3 claims the completion notification on first observation"
     );
+}
+
+#[tokio::test]
+async fn output_status_reads_paused_rows_and_aliases_without_a_spool() {
+    use lingxi_core::host::task_registry::{TaskRegistryError, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let mut row = agent_row("status-only");
+    row.base.status = TaskStatus::Paused;
+    row.base.output_file = PathBuf::from("/nonexistent/status-only.output");
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+    registry
+        .register_alias_for_test("status-alias", "status-only")
+        .await;
+    assert_eq!(
+        TaskRegistryHandle::output_status(&registry, "status-alias")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("paused")
+    );
+    assert!(matches!(
+        TaskRegistryHandle::output_status(&registry, "missing-status").await,
+        Err(TaskRegistryError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn terminal_agent_wait_selects_the_first_exact_duplicate_id_row() {
+    use lingxi_core::host::task_registry::{
+        AgentTerminalWaitOutcome, AgentTerminalWaitReason, TaskRegistryHandle,
+    };
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let agent_id = lingxi_core::types::AgentId::new();
+    for (id, status) in [
+        ("first-live", TaskStatus::Running),
+        ("second-completed", TaskStatus::Completed),
+    ] {
+        let mut row = agent_row(id);
+        row.agent_id = agent_id;
+        row.base.status = status;
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(row))
+            .await;
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        TaskRegistryHandle::wait_for_agent_terminal(
+            registry.as_ref(),
+            &agent_id.as_uuid().to_string(),
+            cancel,
+            None,
+        )
+        .await
+        .unwrap(),
+        AgentTerminalWaitOutcome::Interrupted {
+            reason: AgentTerminalWaitReason::Aborted,
+            observed_task_id: Some("first-live".into()),
+        }
+    );
+    assert!(
+        !registry
+            .get("second-completed")
+            .await
+            .unwrap()
+            .base()
+            .notified
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_agent_wait_eviction_preserves_the_latest_exact_transcript() {
+    use lingxi_core::host::task_registry::{AgentTerminalWaitOutcome, TaskRegistryHandle};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let row = agent_row("evicted-wait");
+    let agent_id = row.agent_id;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+    let waiter = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &agent_id.as_uuid().to_string(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(registry.get("evicted-wait").await.unwrap().base().notified);
+    registry
+        .replace_agent_transcript_messages(
+            "evicted-wait",
+            vec![ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xdc00],
+                    citations: None,
+                }],
+                stop_reason: None,
+                resumable: None,
+            }],
+        )
+        .await
+        .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    registry.tasks.write().await.remove("evicted-wait");
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    let AgentTerminalWaitOutcome::Evicted {
+        native_transcript_text: Some(text),
+    } = waiter.await.unwrap().unwrap()
+    else {
+        panic!("an observed then removed row returns its latest conversation snapshot")
+    };
+    assert_eq!(text.string_units(""), Some(vec![0xdc00]));
 }
 
 #[tokio::test]

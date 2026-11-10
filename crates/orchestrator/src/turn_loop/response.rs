@@ -1,8 +1,9 @@
 use super::error_reporting::surface_terminal_api_error;
 use super::{
     RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-    MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
-    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
+    MALFORMED_TOOL_USE_RETRY_LIMIT, MALFORMED_TOOL_USE_RETRY_NUDGE,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+    STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
 };
 use crate::conversation::{ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
@@ -141,31 +142,17 @@ pub(super) fn is_tool_result_carrier(msg: &ConversationMessage) -> bool {
     )
 }
 
-/// #77 (batched twin, claude-code `bin/claude.exe` offset ~202945837): handle a
-/// `stop_reason == "tool_use"` response that produced ZERO `tool_use` blocks. On
-/// the FIRST failure inject the byte-exact meta retry nudge, reset the
-/// max-output-tokens recovery bookkeeping, arm the per-turn guard, and Continue.
-/// On the SECOND, surface the non-meta terminal message and end the turn as
-/// completed (`stop_reason = "end_turn"`).
+/// Native 2.1.319 retries a `tool_use` response with no tool blocks twice.
+/// Each retry retracts the malformed response and resets output-limit recovery;
+/// the third malformed response ends with `malformed_tool_use_exhausted`.
 pub(super) async fn handle_malformed_tool_use(
     orch: &ConversationOrchestrator,
     assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    if state.malformed_tool_use_retried
-        || state.output_recovery_actions >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
-    {
-        // Second failure → terminal NON-meta message, complete the turn. The
-        // binary builds this via `ql(...)`→`mcc({isApiErrorMessage:!0})`, i.e. an
-        // ASSISTANT api-error message (`role:"assistant", stop_reason:
-        // "stop_sequence", stop_details:null`) appended AFTER the malformed
-        // assistant response — two assistant messages in a row, matching the
-        // binary. (The port previously persisted a USER message here.) Shape
-        // mirrors `surface_model_error`'s assistant-api-error message.
-        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
-            MALFORMED_TOOL_USE_RETRY_FAILED,
-        );
-        orch.output.emit_text(&message).await;
+    if state.malformed_tool_use_retry_count >= MALFORMED_TOOL_USE_RETRY_LIMIT {
+        // `Ys({content,apiError:"malformed_tool_use_exhausted"})` keeps the
+        // synthetic inner stop_sequence and omits the separate error category.
         let failed_msg = ConversationMessage::Assistant {
             per_turn_effort: None,
             id: MessageId::new(),
@@ -180,22 +167,34 @@ pub(super) async fn handle_malformed_tool_use(
             let mut s = orch.session.lock().await;
             s.history.push(failed_msg.clone());
         }
-        // claude-code builds the terminal via `ql({content})` with no `error:`
-        // arg → `isApiErrorMessage: true`, `error`/`apiErrorStatus` OMITTED,
-        // inner `stop_reason:"stop_sequence"`.
-        orch.persist_api_error_message_to_jsonl(&failed_msg, ApiErrorEnvelope::default())
+        let envelope = ApiErrorEnvelope {
+            api_error: Some("malformed_tool_use_exhausted"),
+            ..Default::default()
+        };
+        orch.persist_api_error_message_to_jsonl(&failed_msg, envelope.clone())
             .await;
+        orch.note_turn_api_error_terminal_reason("malformed_tool_use_exhausted");
+        orch.emit_synthetic_api_error_message(
+            &failed_msg,
+            &envelope,
+            "malformed_tool_use_exhausted",
+            true,
+        )
+        .await;
         return Ok(TurnStepOutcome::Ended {
             final_message_id: failed_msg.id(),
-            stop_reason: "end_turn".to_string(),
+            stop_reason: "malformed_tool_use_exhausted".to_string(),
             allow_budget_continuation: false,
             tool_requested_end: false,
         });
     }
-    let nudge_msg = ConversationMessage::user_meta(
+    let mut nudge_msg = ConversationMessage::user_meta(
         MessageId::new(),
         MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
     );
+    if let ConversationMessage::User { turn_companion, .. } = &mut nudge_msg {
+        *turn_companion = Some(Some(true));
+    }
     orch.discard_retry_attempt(assistant_id, &[]).await?;
     {
         let mut s = orch.session.lock().await;
@@ -205,8 +204,7 @@ pub(super) async fn handle_malformed_tool_use(
     orch.persist_message_to_jsonl(&nudge_msg).await;
     // TS resets the recovery counters on the retry transition.
     state.reset_max_output_tokens_recovery();
-    state.output_recovery_actions += 1;
-    state.malformed_tool_use_retried = true;
+    state.malformed_tool_use_retry_count += 1;
     Ok(TurnStepOutcome::Continue(
         super::NativeQueryTransition::InPlaceRetry,
     ))

@@ -467,6 +467,32 @@ fn estimate_hook_content(value: &serde_json::Value) -> usize {
     }
 }
 
+fn estimate_hook_blocks(content: &[CoreContentBlock]) -> usize {
+    // These variants serialize infallibly, and media payloads have a fixed
+    // charge. Check the entire vector before skipping its JSON conversion:
+    // source-sensitive blocks can make that conversion fail for all content.
+    if !content.iter().all(|block| {
+        matches!(
+            block,
+            CoreContentBlock::Text {
+                citations: None,
+                ..
+            } | CoreContentBlock::Image { .. }
+                | CoreContentBlock::Document { .. }
+        )
+    }) {
+        return estimate_hook_content(&serde_json::to_value(content).unwrap_or_default());
+    }
+    content
+        .iter()
+        .map(|block| match block {
+            CoreContentBlock::Text { text, .. } => (text.encode_utf16().count() + 2) / 4,
+            CoreContentBlock::Image { .. } | CoreContentBlock::Document { .. } => 2000,
+            _ => unreachable!("only ordinary text and media passed the content check"),
+        })
+        .sum()
+}
+
 /// Keep complete assistant turns, including their following tool results. The
 /// latest turn is always retained, even if it alone exceeds the budget (`Wps`).
 fn bound_hook_transcript(
@@ -500,9 +526,7 @@ fn bound_hook_transcript(
             .iter()
             .map(|m| match m {
                 ConversationMessage::User { content, .. }
-                | ConversationMessage::Assistant { content, .. } => {
-                    estimate_hook_content(&serde_json::to_value(content).unwrap_or_default())
-                }
+                | ConversationMessage::Assistant { content, .. } => estimate_hook_blocks(content),
                 _ => serde_json::to_string(m)
                     .map(|s| s.encode_utf16().count().div_ceil(4))
                     .unwrap_or(0),
@@ -818,6 +842,165 @@ mod tests {
         );
     }
 
+    fn legacy_hook_block_estimate(content: &[CoreContentBlock]) -> usize {
+        estimate_hook_content(&serde_json::to_value(content).unwrap_or_default())
+    }
+
+    #[test]
+    fn hook_block_estimator_matches_legacy_for_ordinary_text_and_media() {
+        use lingxi_core::types::{DocumentSource, ImageSource};
+
+        assert_eq!(estimate_hook_blocks(&[]), legacy_hook_block_estimate(&[]));
+        for text in [
+            "",
+            "a",
+            "ab",
+            "abc",
+            "abcd",
+            "abcde",
+            "😀",
+            "😀😀😀",
+            "中é\n\"\\\0",
+        ] {
+            let content = vec![CoreContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }];
+            assert_eq!(
+                estimate_hook_blocks(&content),
+                legacy_hook_block_estimate(&content),
+                "{text:?}"
+            );
+            assert_eq!(
+                estimate_hook_blocks(&content),
+                (text.encode_utf16().count() + 2) / 4
+            );
+        }
+
+        let content = vec![
+            CoreContentBlock::Text {
+                text: "😀😀😀".into(),
+                citations: None,
+            },
+            CoreContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(128 * 1024),
+                },
+            },
+            CoreContentBlock::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/image.png".into(),
+                },
+            },
+            CoreContentBlock::Document {
+                source: DocumentSource::Base64 {
+                    media_type: "application/pdf".into(),
+                    data: "B".repeat(128 * 1024),
+                },
+            },
+        ];
+        assert_eq!(estimate_hook_blocks(&content), 6002);
+        assert_eq!(
+            estimate_hook_blocks(&content),
+            legacy_hook_block_estimate(&content)
+        );
+    }
+
+    #[test]
+    fn hook_block_estimator_matches_legacy_for_mixed_source_sensitive_content() {
+        use lingxi_core::types::ImageSource;
+
+        let controls = vec![
+            CoreContentBlock::Text {
+                text: "cited text 😀".into(),
+                citations: Some(None),
+            },
+            CoreContentBlock::Text {
+                text: "cited text 😀".into(),
+                citations: Some(Some(
+                    Utf16JsonProjection::parse(r#"[{"source":"fixture"}]"#).unwrap(),
+                )),
+            },
+            CoreContentBlock::TextJsUtf16 {
+                text: "display �".into(),
+                utf16_code_units: vec![0xd800],
+                citations: None,
+            },
+            CoreContentBlock::ProviderContent {
+                protocol: "fixture".into(),
+                value: Utf16JsonProjection::parse(r#"{"text":"provider 😀","extra":true}"#)
+                    .unwrap(),
+            },
+            CoreContentBlock::ToolResult {
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
+                content: Utf16JsonProjection::parse(
+                    r#"[{"type":"image"},{"type":"text","text":"😀😀😀"}]"#,
+                )
+                .unwrap(),
+                is_error: None,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            },
+        ];
+        for control in controls {
+            let content = vec![
+                CoreContentBlock::Text {
+                    text: "ordinary prefix".into(),
+                    citations: None,
+                },
+                CoreContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    },
+                },
+                control,
+            ];
+            assert!(serde_json::to_value(&content).is_ok());
+            assert_eq!(
+                estimate_hook_blocks(&content),
+                legacy_hook_block_estimate(&content),
+                "{content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_block_estimator_preserves_whole_content_conversion_failure() {
+        use lingxi_core::types::ImageSource;
+
+        let lone_surrogate = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+        let controls = vec![
+            CoreContentBlock::Text {
+                text: "cited text".into(),
+                citations: Some(Some(lone_surrogate.clone())),
+            },
+            CoreContentBlock::ProviderContent {
+                protocol: "fixture".into(),
+                value: lone_surrogate,
+            },
+        ];
+        for control in controls {
+            let content = vec![
+                CoreContentBlock::Text {
+                    text: "ordinary prefix".into(),
+                    citations: None,
+                },
+                CoreContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    },
+                },
+                control,
+            ];
+            assert!(serde_json::to_value(&content).is_err());
+            assert_eq!(legacy_hook_block_estimate(&content), 1);
+            assert_eq!(estimate_hook_blocks(&content), 1);
+        }
+    }
+
     #[tokio::test]
     async fn transcript_reader_replays_host_path_and_usage() {
         let dir = tempfile::tempdir().unwrap();
@@ -874,6 +1057,55 @@ mod tests {
             matches!(&content[0], lingxi_core::types::ContentBlock::Text { text, .. } if text.contains("1 earlier messages omitted"))
         );
         assert!(bound_hook_transcript(&[], 1, &Default::default()).is_empty());
+    }
+
+    #[test]
+    fn transcript_budget_uses_fixed_media_cost_at_group_boundaries() {
+        use lingxi_core::types::{DocumentSource, ImageSource};
+
+        let messages = vec![
+            ConversationMessage::user(MessageId::new(), "old".repeat(100)),
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![
+                    CoreContentBlock::Text {
+                        text: "😀".into(),
+                        citations: None,
+                    },
+                    CoreContentBlock::Image {
+                        source: ImageSource::Base64 {
+                            media_type: "image/png".into(),
+                            data: "AAAA".into(),
+                        },
+                    },
+                    CoreContentBlock::Document {
+                        source: DocumentSource::Base64 {
+                            media_type: "application/pdf".into(),
+                            data: "BBBB".into(),
+                        },
+                    },
+                ],
+                stop_reason: None,
+                resumable: None,
+            },
+            ConversationMessage::user(MessageId::new(), "tool-result".into()),
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![CoreContentBlock::Text {
+                    text: "latest".into(),
+                    citations: None,
+                }],
+                stop_reason: None,
+                resumable: None,
+            },
+        ];
+
+        let kept = bound_hook_transcript(&messages, 4006, &Default::default());
+        assert_eq!(&kept[1..], &messages[1..]);
+        let kept = bound_hook_transcript(&messages, 4005, &Default::default());
+        assert_eq!(&kept[1..], &messages[3..]);
     }
 
     #[test]

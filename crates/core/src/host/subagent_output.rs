@@ -24,7 +24,19 @@ pub fn max_turns_harness_note(
     agent_type: &str,
     has_partial_output: bool,
 ) -> String {
-    let continuation = if matches!(agent_type, "Explore" | "Plan") {
+    max_turns_harness_note_with_continuation(max_turns, agent_type, has_partial_output, true)
+}
+
+/// Native 2.1.319 also suppresses continuation guidance when the caller has
+/// no messaging tool. The background caller without that fact keeps the
+/// existing default through [`max_turns_harness_note`].
+pub fn max_turns_harness_note_with_continuation(
+    max_turns: u64,
+    agent_type: &str,
+    has_partial_output: bool,
+    can_continue_agent: bool,
+) -> String {
+    let continuation = if !can_continue_agent || matches!(agent_type, "Explore" | "Plan") {
         ""
     } else {
         " Send the agent a message (SendMessage) to let it continue from where it stopped."

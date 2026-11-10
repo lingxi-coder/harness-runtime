@@ -200,6 +200,14 @@ pub struct SubagentForkContext {
     pub messages: Vec<crate::types::ConversationMessage>,
     /// The exact rendered parent system prompt, used by explicit forks.
     pub system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Dispatching parent's selected wire effort. Host-owned and never read
+    /// from model-authored tool input or inherited stale tool-context state.
+    pub parent_effort: Option<serde_json::Value>,
+    /// Explicit user system override, kept separate from the rendered template.
+    pub custom_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    pub append_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Original role instructions for a fork launched by a specialized agent.
+    pub role_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// Per-call invocation context handed to a [`ToolInvoker`].
@@ -210,6 +218,12 @@ pub struct SubagentForkContext {
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
+    /// Owning session's mode, unaffected by background execution. The nested
+    /// invoker refreshes this trusted fact even when reusing tool context state.
+    pub session_interactive: Option<bool>,
+    /// Prompt bundle resolved for this agent's actual request route. Nested
+    /// tools carry this value instead of borrowing the parent agent's model.
+    pub prompt_policy: Option<std::sync::Arc<crate::host::prompt_policy::ResolvedPromptPolicy>>,
     /// Cancellation scope for this physical tool call. A streamed Agent tool
     /// use owns a distinct token; receivers must copy it into the concrete
     /// `ToolUseContext` rather than reusing a previous call's token.
@@ -253,9 +267,8 @@ pub struct SubagentInvocationContext {
     /// async agent (else it inherits the parent's flag, default `false`) —
     /// `runAgent.ts:668-672`. Mapped into `ToolUseContext.is_non_interactive_session`.
     pub is_async: bool,
-    /// Effective owning-session mode for this dispatch. This is distinct from
-    /// `is_async`: a synchronous child of scheduled/headless work must still
-    /// keep every invoked tool non-interactive.
+    /// Effective permission-prompt mode for this dispatch: background execution
+    /// and a headless owning session both keep invoked tools non-interactive.
     pub is_non_interactive_session: bool,
     /// Whether the dispatching subagent may SURFACE permission prompts to the
     /// user (claude-code's permission-prompt eligibility). Threaded from
@@ -639,6 +652,12 @@ pub trait ToolInvoker: Send + Sync + Any {
     /// stateless invokers may leave this unsupported. Inherited reads are
     /// admitted only when the host freezes this state with its history.
     fn fork_for_memory(&self, _inherit_reads: bool) -> Option<Arc<dyn ToolInvoker>> {
+        None
+    }
+
+    /// Trusted host-owned session profile used to resolve a child request's
+    /// conversation mode. Tool input and API transport do not define it.
+    fn trusted_session_profile(&self) -> Option<crate::host::session_context::SessionModeSnapshot> {
         None
     }
 

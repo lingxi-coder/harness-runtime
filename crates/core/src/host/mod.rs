@@ -29,6 +29,7 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+pub mod prompt_policy;
 pub mod remote_ui;
 pub mod session_context;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};

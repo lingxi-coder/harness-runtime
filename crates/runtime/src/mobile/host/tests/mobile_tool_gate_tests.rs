@@ -263,22 +263,26 @@ fn mobile_subagent_env_renderer_uses_guest_paths_only() {
         provider,
     );
 
-    let base = renderer("claude-opus-4-8[1m]", None);
-    assert!(base.contains("Working directory: /home/lingxi/lingxi/app\n"));
+    let target =
+        agent::prompt_policy::resolve_target(None, "claude-opus-4-8[1m]", None, Default::default())
+            .unwrap();
+    let base = renderer(&target, None).additional_context.join("\n\n");
+    assert!(base.contains("Primary working directory: /home/lingxi/lingxi/app\n"));
     assert!(!base.contains("/private/var/mobile/Containers/Data/Application/secret"));
 
-    let mapped = renderer(
-        "claude-opus-4-8[1m]",
-        Some(std::path::Path::new("/native/workspace/src")),
-    );
-    assert!(mapped.contains("Working directory: /home/lingxi/lingxi/app/src\n"));
+    let mapped = renderer(&target, Some(std::path::Path::new("/native/workspace/src")))
+        .additional_context
+        .join("\n\n");
+    assert!(mapped.contains("Primary working directory: /home/lingxi/lingxi/app/src\n"));
     assert!(!mapped.contains("/native/workspace/src"));
 
     let unmapped = renderer(
-        "claude-opus-4-8[1m]",
+        &target,
         Some(std::path::Path::new("/private/var/mobile/worktree")),
-    );
-    assert!(unmapped.contains("Working directory: /home/lingxi/lingxi/app\n"));
+    )
+    .additional_context
+    .join("\n\n");
+    assert!(unmapped.contains("Primary working directory: /home/lingxi/lingxi/app\n"));
     assert!(!unmapped.contains("/private/var/mobile/worktree"));
 }
 

@@ -260,6 +260,8 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
         system_context: Default::default(),
         user_context_message: None,
         tool_use_options: ToolUseOptions {
+            session_interactive: None,
+            prompt_policy: None,
             output_style_is_default: None,
             debug: false,
             verbose: false,

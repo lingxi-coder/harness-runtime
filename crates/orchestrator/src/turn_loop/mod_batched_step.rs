@@ -14,6 +14,7 @@ use llm_runtime::{HistoryEvent, HistoryResponse};
 use serde_json::json;
 
 use super::{call_api_with_ptl_recovery, PtlCallOutcome};
+use crate::conversation::prompt_selection::{ReselectedPromptComponents, PROMPT_POLICY_OVERRIDE};
 use crate::conversation::{ConversationOrchestrator, OutgoingHistoryRewriter};
 use crate::error::OrchestratorError;
 use crate::mod_turn_step::{TurnStepDecoder, TurnStepEncoder};
@@ -27,10 +28,11 @@ pub(super) struct Request {
     pub history: Vec<ConversationMessage>,
     pub rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
     pub tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+    pub available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub max_tokens: Option<u32>,
     pub deferred: Option<ConversationMessage>,
     pub date_change: Option<ConversationMessage>,
-    pub reminders: Vec<ConversationMessage>,
+    pub reminders: crate::conversation::PreparedReminders,
     pub guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     pub context_announcements: crate::conversation::PreparedContextAnnouncements,
     pub cost_scope: Option<cost::CostSessionScope>,
@@ -72,6 +74,7 @@ pub(super) struct Answer {
     pub requested_model: bool,
     pub physical_responses: Vec<PhysicalStepResponse>,
     pub response_request_history_source: Option<RequestHistorySource>,
+    pub prompt_components: Option<ReselectedPromptComponents>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +95,7 @@ pub(super) struct PhysicalStepResponse {
     pub duration: Duration,
     pub retries: u32,
     pub request_id: Option<String>,
+    pub prompt_components: ReselectedPromptComponents,
 }
 
 impl PhysicalStepResponse {
@@ -103,6 +107,7 @@ impl PhysicalStepResponse {
         profile: Option<String>,
         duration: Duration,
         params: &PhysicalObservation,
+        mut prompt_components: ReselectedPromptComponents,
     ) -> Result<Self, lingxi_core::settings::SettingsError> {
         let retries = orch.api.last_retry_count();
         let request_id = orch.api.last_request_id();
@@ -238,6 +243,7 @@ impl PhysicalStepResponse {
         if let Some(error) = cache_safe_error {
             return Err(error);
         }
+        prompt_components.request_history = Some(request_history.clone());
         Ok(Self {
             response,
             request_history,
@@ -246,6 +252,7 @@ impl PhysicalStepResponse {
             duration,
             retries,
             request_id,
+            prompt_components,
         })
     }
 }
@@ -255,6 +262,19 @@ pub(super) async fn dispatch(
     host: Arc<hooks::mods::ModHost>,
     mut params: Request,
 ) -> Result<Answer, OrchestratorError> {
+    let captured_components = ReselectedPromptComponents {
+        route: crate::query_model::ModelRoute {
+            model: params.model.clone(),
+            profile: params.profile.clone(),
+        },
+        policy: orch.current_prompt_policy().await?,
+        system: params.system.clone(),
+        tools: params.tools.clone(),
+        available_tool_names: params.available_tool_names.clone(),
+        skip_global_cache: params.skip_global_cache_for_system_prompt,
+        request_history: Some(params.history.clone()),
+        reminders: params.reminders.clone(),
+    };
     let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
         "turnId":params.turn_id,
         "index":params.index,
@@ -279,92 +299,122 @@ pub(super) async fn dispatch(
     let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let physical_responses = Arc::new(Mutex::new(Vec::<PhysicalStepResponse>::new()));
     let source_params = params.clone();
+    let source_components = captured_components.clone();
     let source_wire = wire.clone();
     let source_effective = effective.clone();
     let source_unrecovered = unrecovered.clone();
     let source_error = call_error.clone();
     let source_requested = requested_model.clone();
     let source_physical = physical_responses.clone();
-    let source = move |forwarded: lingxi_core::types::utf16_json::Utf16JsonProjection| {
-        let mut params = source_params.clone();
-        let wire = source_wire.clone();
-        let effective = source_effective.clone();
-        let unrecovered = source_unrecovered.clone();
-        let call_error = source_error.clone();
-        let requested_model = source_requested.clone();
-        let physical_responses = source_physical.clone();
-        async move {
-            let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
-            let default_model = orch.config.model.as_str();
-            let default_sentinel = lingxi_core::host::effort::trim_js_whitespace(&requested)
-                .eq_ignore_ascii_case("default");
-            let route_model = if default_sentinel {
-                default_model
-            } else {
-                requested.as_str()
-            };
-            let route_profile = if default_sentinel {
-                None
-            } else {
-                params.profile.as_deref()
-            };
-            let resolved = orch
-                .api
-                .resolve_media_route(route_model, route_profile)
-                .or_else(|_| orch.api.resolve_media_route(route_model, None))
-                .ok();
-            let resolved_model = resolved
-                .as_ref()
-                .map_or(route_model, |route| route.main.request_model.as_str());
-            let is_explicit_model_override = requested.as_str() != params.model.as_str();
-            let native_catalog_route = resolved
-                .as_ref()
-                .is_some_and(crate::ConversationOrchestrator::route_uses_native_model_catalog);
-            let same_active_model = is_explicit_model_override
-                && crate::ConversationOrchestrator::same_native_model_identity(
-                    orch.api.as_ref(),
-                    route_model,
-                    route_profile,
-                    &params.model,
-                    params.profile.as_deref(),
-                );
-            let same_default_model = is_explicit_model_override
-                && crate::ConversationOrchestrator::matches_native_default_model_identity(
-                    orch.api.as_ref(),
-                    route_model,
-                    route_profile,
-                    default_model,
-                    None,
-                );
-            let denied = is_explicit_model_override
-                && native_catalog_route
-                && !same_active_model
-                && !same_default_model
-                && !orch.model_catalog_allows(resolved_model).await?;
-            let model = if denied {
-                tracing::warn!(
-                    requested,
-                    "turn.step batched model rewrite denied by policy"
-                );
-                params.model.clone()
-            } else if default_sentinel {
-                resolved_model.to_owned()
-            } else {
-                requested
-            };
-            let profile = if denied {
-                params.profile.clone()
-            } else {
-                resolved
-                    .map(|route| route.main.profile_name)
-                    .or(if default_sentinel {
-                        None
-                    } else {
-                        params.profile.clone()
-                    })
-            };
-            *effective.lock().unwrap() = Some((model.clone(), profile.clone()));
-            requested_model.store(true, std::sync::atomic::Ordering::Release);
+    let source =
+        move |forwarded: lingxi_core::types::utf16_json::Utf16JsonProjection| {
+            let mut params = source_params.clone();
+            let previous_components = source_components.clone();
+            let wire = source_wire.clone();
+            let effective = source_effective.clone();
+            let unrecovered = source_unrecovered.clone();
+            let call_error = source_error.clone();
+            let requested_model = source_requested.clone();
+            let physical_responses = source_physical.clone();
+            async move {
+                let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
+                let default_model = orch.config.model.as_str();
+                let default_sentinel = lingxi_core::host::effort::trim_js_whitespace(&requested)
+                    .eq_ignore_ascii_case("default");
+                let route_model = if default_sentinel {
+                    default_model
+                } else {
+                    requested.as_str()
+                };
+                let route_profile = if default_sentinel {
+                    None
+                } else {
+                    params.profile.as_deref()
+                };
+                let resolved = orch
+                    .api
+                    .resolve_media_route(route_model, route_profile)
+                    .or_else(|_| orch.api.resolve_media_route(route_model, None))
+                    .ok();
+                let resolved_model = resolved
+                    .as_ref()
+                    .map_or(route_model, |route| route.main.request_model.as_str());
+                let is_explicit_model_override = requested.as_str() != params.model.as_str();
+                let native_catalog_route = resolved
+                    .as_ref()
+                    .is_some_and(crate::ConversationOrchestrator::route_uses_native_model_catalog);
+                let same_active_model = is_explicit_model_override
+                    && crate::ConversationOrchestrator::same_native_model_identity(
+                        orch.api.as_ref(),
+                        route_model,
+                        route_profile,
+                        &params.model,
+                        params.profile.as_deref(),
+                    );
+                let same_default_model = is_explicit_model_override
+                    && crate::ConversationOrchestrator::matches_native_default_model_identity(
+                        orch.api.as_ref(),
+                        route_model,
+                        route_profile,
+                        default_model,
+                        None,
+                    );
+                let denied = is_explicit_model_override
+                    && native_catalog_route
+                    && !same_active_model
+                    && !same_default_model
+                    && !orch.model_catalog_allows(resolved_model).await?;
+                let model = if denied {
+                    tracing::warn!(
+                        requested,
+                        "turn.step batched model rewrite denied by policy"
+                    );
+                    params.model.clone()
+                } else if default_sentinel {
+                    resolved_model.to_owned()
+                } else {
+                    requested
+                };
+                let profile = if denied {
+                    params.profile.clone()
+                } else {
+                    resolved
+                        .map(|route| route.main.profile_name)
+                        .or(if default_sentinel {
+                            None
+                        } else {
+                            params.profile.clone()
+                        })
+                };
+                *effective.lock().unwrap() = Some((model.clone(), profile.clone()));
+                requested_model.store(true, std::sync::atomic::Ordering::Release);
+                let route = crate::query_model::ModelRoute {
+                    model: model.clone(),
+                    profile: profile.clone(),
+                };
+                let components = orch
+                    .reselect_prompt_components(previous_components, route.clone())
+                    .await
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        *call_error.lock().unwrap() = Some(OrchestratorError::Settings(error));
+                        hooks::mods::ModError::Hook(message)
+                    })?;
+                params.system = components.system.clone();
+                params.tools = components.tools.clone();
+                params.skip_global_cache_for_system_prompt = components.skip_global_cache;
+                params.reminders = components.reminders.clone();
+                if let Some(history) = &components.request_history {
+                    params.history = history.clone();
+                }
+                crate::query_model::ROUTE.scope(
+                Some(route.clone()),
+                PROMPT_POLICY_OVERRIDE.scope((route, Arc::clone(&components.policy)), async {
+            if let Some(row) = orch.project_model_prompt_ingress_for_snapshot(
+                &model, profile.as_deref(), &mut params.history, &[],
+            ).await {
+                orch.persist_prompt_ingress_reminder(&row).await;
+            }
             let effort_override = forwarded
                 .string_at("/effort")
                 .filter(|effort| Some(*effort) != params.effort.as_deref());
@@ -375,7 +425,7 @@ pub(super) async fn dispatch(
                     Some(context) => context,
                     None => crate::query_model::fallback_target_context(orch, &model, None).await,
                 };
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+            crate::server_fallback::record_request_route_with_refusal_text(orch, crate::query_model::ModelRoute {
                 model: model.clone(),
                 profile: profile.clone(),
             });
@@ -397,7 +447,7 @@ pub(super) async fn dispatch(
                         params.max_tokens,
                         params.deferred,
                         params.date_change,
-                        params.reminders.clone(),
+                        params.reminders.messages.clone(),
                         tool_result_reminder_suffixes,
                         &mut params.guarded_async_hook_reminders,
                         &params.context_announcements,
@@ -433,6 +483,7 @@ pub(super) async fn dispatch(
                 profile,
                 started.elapsed(),
                 &observation,
+                components,
             )
             .await
             .map_err(|error| {
@@ -473,8 +524,10 @@ pub(super) async fn dispatch(
                     Ok(result)
                 },
             ))
-        }
-    };
+                }),
+            ).await
+            }
+        };
     let output_wire = wire.clone();
     let output_decoder = decoder.clone();
     let output_events = emitted.clone();
@@ -509,6 +562,7 @@ pub(super) async fn dispatch(
                 requested_model: true,
                 physical_responses: std::mem::take(&mut *physical_responses.lock().unwrap()),
                 response_request_history_source: None,
+                prompt_components: None,
             });
         }
         if let Some(error) = call_error.lock().unwrap().take() {
@@ -524,7 +578,7 @@ pub(super) async fn dispatch(
                         crate::query_model::fallback_target_context(orch, &params.model, None).await
                     }
                 };
-            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+            crate::server_fallback::record_request_route_with_refusal_text(orch, crate::query_model::ModelRoute {
                 model: params.model.clone(),
                 profile: params.profile.clone(),
             });
@@ -544,7 +598,7 @@ pub(super) async fn dispatch(
                     params.max_tokens,
                     params.deferred,
                     params.date_change,
-                    params.reminders.clone(),
+                    params.reminders.messages.clone(),
                     tool_result_reminder_suffixes,
                     &mut params.guarded_async_hook_reminders,
                     &params.context_announcements,
@@ -567,6 +621,7 @@ pub(super) async fn dispatch(
                         profile.clone(),
                         started.elapsed(),
                         &observation,
+                        captured_components.clone(),
                     )
                     .await?,
                 ],
@@ -580,6 +635,7 @@ pub(super) async fn dispatch(
                 requested_model: true,
                 physical_responses: recovered_physical,
                 response_request_history_source: Some(RequestHistorySource::PhysicalRequest),
+                prompt_components: Some(captured_components),
             });
         }
         return Err(OrchestratorError::Internal(format!(
@@ -626,6 +682,11 @@ pub(super) async fn dispatch(
         .iter()
         .find(|physical| physical.response.id == response.id)
         .map(|physical| physical.request_history.clone());
+    let prompt_components = physical_responses
+        .iter()
+        .find(|physical| physical.response.id == response.id)
+        .or_else(|| physical_responses.last())
+        .map(|physical| physical.prompt_components.clone());
     let (request_history, response_request_history_source) = match matching_physical_history {
         Some(request_history) => (request_history, Some(RequestHistorySource::PhysicalRequest)),
         None => (
@@ -644,5 +705,6 @@ pub(super) async fn dispatch(
         requested_model: !physical_responses.is_empty(),
         physical_responses,
         response_request_history_source,
+        prompt_components,
     })
 }

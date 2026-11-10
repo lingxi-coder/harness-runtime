@@ -561,6 +561,11 @@ impl ToolInvoker for MemoryAgentToolInvoker {
     fn permission_mode(&self) -> Option<String> {
         self.inner.permission_mode()
     }
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.inner.trusted_session_profile()
+    }
     fn durable_origin_state(&self) -> Option<ToolInvocationContextState> {
         self.inner.durable_origin_state()
     }

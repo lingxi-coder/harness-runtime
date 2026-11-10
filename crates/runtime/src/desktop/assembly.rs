@@ -2474,10 +2474,12 @@ pub async fn build_with_credential_stack(
     )
     .map_err(|error| BuildError::ApiBase(format!("model alias resolution: {error}")))?;
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_forward_subagent_output(&output)
         .with_structured_output_validator(json_schema_validator.clone())
         .with_instruction_provider(instruction_provider.clone())
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_session_interactive(interactive_session)
+        .with_conversation_mode(construction_mode)
         .with_api_client(subagent_api)
         .with_usage_recorder(subagent_usage_recorder)
         .with_model_resolution_context_provider(model_resolution_context_provider.clone())
@@ -5933,7 +5935,6 @@ pub async fn build_with_credential_stack(
     // capability and SDK refusal latch are supplied by ApiService during
     // request preparation.
     let native_policy_host_facts_provider = {
-        let tools = tools.clone();
         let search_tools_opt_in = cfg.search_tools_opt_in
             || cfg.restricted_tools.as_ref().is_some_and(|names| {
                 names
@@ -5942,10 +5943,10 @@ pub async fn build_with_credential_stack(
                     .any(|name| matches!(name.trim(), "Glob" | "Grep"))
             });
         move || {
-            let model = tools.main_loop_model();
             orchestrator::conversation::NativePolicyHostFacts {
                 search_tools_opt_in: Some(search_tools_opt_in),
-                simple_system_prompt: Some(tool_api::dh_simple_system_prompt(model.as_deref())),
+                // Filled from the immutable selected prompt policy at request time.
+                simple_system_prompt: None,
                 thinking_resumption: orchestrator::conversation::NativeThinkingResumptionHostFacts {
                     disable_experimental_betas: Some(
                         llm_runtime::model::thinking_binding_controls::

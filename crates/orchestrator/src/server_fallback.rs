@@ -33,6 +33,10 @@ pub(crate) struct QueryState {
     /// Latest query-local server route (`ge`/`jn`) for this physical request.
     /// This advances for child queries too, independently of session state.
     applied_route: Option<crate::query_model::ModelRoute>,
+    /// Text policy is frozen before dispatch/model mutation, independently of
+    /// the provider response's event-specific refusal category and IDs.
+    request_refusal_text: Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
+    applied_refusal_text: Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
     /// Native `Q`: the latest queued model-refusal notice, flushed by `He()`
     /// at a terminal, decline, or catch boundary. The host-only notice
     /// metadata preserves Native's enqueue-time timestamp for the JSONL row.
@@ -87,6 +91,32 @@ pub(crate) fn record_request_route(route: crate::query_model::ModelRoute) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.request_route = Some(route);
         state.applied_route = None;
+        state.request_refusal_text = None;
+        state.applied_refusal_text = None;
+    });
+}
+
+/// Capture refusal presentation from the same route as the physical call.
+pub(crate) fn record_request_route_with_refusal_text(
+    orch: &ConversationOrchestrator,
+    route: crate::query_model::ModelRoute,
+) {
+    let text = resolve_refusal_text(orch, &route);
+    record_request_route_with_frozen_refusal_text(route, text);
+}
+
+/// Publish facts already captured by a physical call running in a spawned
+/// Mod worker. The query must never resolve that worker's route a second time.
+pub(crate) fn record_request_route_with_frozen_refusal_text(
+    route: crate::query_model::ModelRoute,
+    text: Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
+) {
+    record_request_route(route);
+    let _ = QUERY_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_refusal_text = text;
     });
 }
 
@@ -104,12 +134,63 @@ fn request_routes_for_fallback() -> (
         .unwrap_or_default()
 }
 
-fn record_applied_route(route: crate::query_model::ModelRoute) {
+pub(crate) fn resolve_refusal_text(
+    orch: &ConversationOrchestrator,
+    route: &crate::query_model::ModelRoute,
+) -> Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot> {
+    resolve_refusal_text_for_api(orch.api.as_ref(), route)
+}
+
+pub(crate) fn resolve_refusal_text_for_api(
+    api: &dyn crate::conversation::OrchestratorApiClient,
+    route: &crate::query_model::ModelRoute,
+) -> Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot> {
+    match api.refusal_api_text_snapshot(&route.model, route.profile.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(model = %route.model, %error, "could not freeze refusal text facts");
+            None
+        }
+    }
+}
+
+/// Preserve exact selected-model facts even after a server model transition.
+pub(crate) fn refusal_text_snapshot(
+    model: &str,
+) -> Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot> {
+    QUERY_STATE
+        .try_with(|state| {
+            let state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .applied_route
+                .as_ref()
+                .is_some_and(|route| route.model == model)
+            {
+                state.applied_refusal_text.clone()
+            } else if state
+                .request_route
+                .as_ref()
+                .is_some_and(|route| route.model == model)
+            {
+                state.request_refusal_text.clone()
+            } else {
+                None
+            }
+        })
+        .ok()
+        .flatten()
+}
+
+fn record_applied_route(orch: &ConversationOrchestrator, route: crate::query_model::ModelRoute) {
+    let text = resolve_refusal_text(orch, &route);
     let _ = QUERY_STATE.try_with(|state| {
-        state
+        let mut state = state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .applied_route = Some(route);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.applied_route = Some(route);
+        state.applied_refusal_text = text;
     });
 }
 
@@ -328,7 +409,7 @@ pub(crate) async fn handle(
                 .arm_header(info.event.request_id.clone());
         }
     }
-    record_applied_route(transition.to.clone());
+    record_applied_route(orch, transition.to.clone());
 
     // Native compares the query-local selected model (`ge`), not the app
     // state snapshot used to restore a session latch.
@@ -369,8 +450,7 @@ pub(crate) async fn surface_declined(
             Some(route) => route.model,
             None => orch.session.lock().await.model.clone(),
         };
-        // The shared current-Native refusal formatter is being pinned
-        // separately; preserve this existing text until that source audit lands.
+        // The query's selected-model facts were frozen before its provider call.
         let text = crate::turn_loop::terminal_api_error_text(
             &model,
             orch.prompt_is_interactive(),
@@ -393,6 +473,7 @@ pub(crate) async fn surface_declined(
         )
         .expect("generated refusal details are valid JSON");
         row.set_refusal(info.event.request_id.clone(), stop_details);
+        row.set_refused_message_id(response_message_id);
         let id = surface_declined_row(orch, &row).await;
         return (id, "refusal");
     }
@@ -416,10 +497,238 @@ async fn surface_declined_row(
     orch.session.lock().await.history.push(raw);
     orch.persist_preappended_server_fallback_api_error_row(&stored, row)
         .await;
-    for block in &row.message.content {
-        if let Some(text) = crate::streaming_loop::visible_text_projection(block) {
-            orch.output.emit_text(&text).await;
+    // Publish the original Native row, not the accepted storage projection or
+    // a second synthetic construction with a different inner id/time.
+    let message = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        &serde_json::to_string(&row.message)
+            .expect("host-created synthetic message serializes as source JSON"),
+    )
+    .expect("host-created synthetic message is source JSON");
+    orch.output
+        .emit_terminal_api_error_message(
+            &lingxi_core::host::orchestrator::TerminalApiErrorMessage {
+                uuid: row.uuid,
+                timestamp: row.timestamp.clone(),
+                message,
+                api_error: None,
+                error: Some(row.error.clone()),
+                api_error_status: None,
+                request_id: row.request_id.clone(),
+                refused_message_id: row.refused_message_id.clone(),
+                terminal_reason: "api_error".into(),
+                stop_reason: row.message.stop_reason.clone(),
+                notify_terminal_error: false,
+            },
+        )
+        .await;
+    row.uuid
+}
+
+#[cfg(test)]
+mod refusal_row_tests {
+    use super::*;
+    use lingxi_core::host::orchestrator::{CostSnapshot, OutputStream, TerminalApiErrorMessage};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use lingxi_core::types::ToolUseId;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct TypedOnlySink {
+        rows: tokio::sync::Mutex<Vec<TerminalApiErrorMessage>>,
+        text_callbacks: std::sync::atomic::AtomicUsize,
+        terminal_callbacks: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputStream for TypedOnlySink {
+        async fn emit_text(&self, _text: &Utf16JsonProjection) {
+            self.text_callbacks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &Utf16JsonProjection) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _id: &ToolUseId,
+            _tool: &str,
+            _text: &Utf16JsonProjection,
+            _result: &Utf16JsonProjection,
+            _meta: Option<&Utf16JsonProjection>,
+        ) {
+        }
+        async fn emit_end_turn(&self, _reason: &str, _cost: &CostSnapshot) {}
+        async fn emit_terminal_api_error(&self, _status: Option<u16>, _reason: &str, _stop: &str) {
+            self.terminal_callbacks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        async fn emit_terminal_api_error_message(&self, row: &TerminalApiErrorMessage) {
+            self.rows.lock().await.push(row.clone());
         }
     }
-    row.uuid
+
+    fn memory_orchestrator(output: Arc<dyn OutputStream>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            output,
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[tokio::test]
+    async fn declined_row_typed_publication_keeps_original_identity_body_and_time_once() {
+        let sink = Arc::new(TypedOnlySink::default());
+        let orch = memory_orchestrator(sink.clone());
+        let mut original = lingxi_core::host::ServerFallbackApiErrorRow::new(
+            &"original declined text".into(),
+            "2000-01-01T00:00:00.000Z".into(),
+        );
+        original.set_refusal(
+            Some("req_original".into()),
+            Utf16JsonProjection::parse(r#"{"category":"A\ud800B","explanation":null}"#).unwrap(),
+        );
+        original.set_refused_message_id(Some("msg_original"));
+        let id = surface_declined_row(&orch, &original).await;
+        let rows = sink.rows.lock().await;
+        assert_eq!(rows.len(), 1);
+        let public = &rows[0];
+        assert_eq!(id, original.uuid);
+        assert_eq!(public.uuid, original.uuid);
+        assert_eq!(public.timestamp, original.timestamp);
+        assert_ne!(original.uuid, original.message.id);
+        assert_eq!(
+            public.message.string_units("/id"),
+            Some(
+                original
+                    .message
+                    .id
+                    .as_uuid()
+                    .to_string()
+                    .encode_utf16()
+                    .collect()
+            )
+        );
+        let expected =
+            Utf16JsonProjection::parse(&serde_json::to_string(&original.message).unwrap()).unwrap();
+        assert_eq!(
+            public.message.to_json_string().unwrap(),
+            expected.to_json_string().unwrap()
+        );
+        assert_eq!(
+            public.message.string_units("/stop_details/category"),
+            Some(vec![65, 0xd800, 66])
+        );
+        assert_eq!(public.error.as_deref(), Some(original.error.as_str()));
+        assert_eq!(public.request_id, original.request_id);
+        assert_eq!(public.refused_message_id, original.refused_message_id);
+        assert_eq!(public.stop_reason, original.message.stop_reason);
+        assert_eq!(public.terminal_reason, "api_error");
+        assert!(public.api_error.is_none());
+        assert!(public.api_error_status.is_none());
+        assert!(!public.notify_terminal_error);
+        assert_eq!(
+            sink.text_callbacks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            sink.terminal_callbacks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_row_default_publication_preserves_text_only_legacy_policy() {
+        let sink = Arc::new(crate::test_support::MockOutputStream::new());
+        let orch = memory_orchestrator(sink.clone());
+        let original = lingxi_core::host::ServerFallbackApiErrorRow::new(
+            &"original declined text".into(),
+            "2000-01-01T00:00:00.000Z".into(),
+        );
+        surface_declined_row(&orch, &original).await;
+        let events = sink.snapshot().await;
+        let texts = events
+            .iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::Text { text } => {
+                    Some(text.string_units("").unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec!["original declined text".encode_utf16().collect::<Vec<_>>()]
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::TerminalApiError { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn declined_refusal_persists_only_a_native_validated_response_id() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = lingxi_core::types::SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", session_id.as_uuid()));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        ));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-opus-4-8".into(),
+                ..Default::default()
+            },
+            Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        )
+        .with_session_id(session_id)
+        .with_jsonl_writer(writer);
+        orch.initialize_conversation_mode()
+            .await
+            .expect("fixed Code session profile");
+        let info: llm_runtime::history::HistoryServerFallback = serde_json::from_value(serde_json::json!({
+            "event": {"fromModel":"claude-opus-4-8","toModel":"declined-model","reason":"refusal",
+                "apiRefusalCategory":"bio","midStream":false,"requestId":"req_declined",
+                "discardedBlocks":[],"retainedBlocks":[],"retainedText":"","finalStopReason":"end_turn"},
+            "profile":"first-party-anthropic",
+            "lane":{"forModel":"claude-opus-4-8","model":"declined-model","mode":"explicit"}
+        })).unwrap();
+        for (message_id, expected) in [("msg_declined", Some("msg_declined")), ("invalid/id", None)]
+        {
+            let (id, reason) = surface_declined(&orch, &info, Some(message_id)).await;
+            assert_eq!(reason, "refusal");
+            let encoded = std::fs::read_to_string(&path).unwrap();
+            let row = encoded
+                .lines()
+                .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+                .find(|row| {
+                    row.string_units("/uuid")
+                        == Some(id.as_uuid().to_string().encode_utf16().collect())
+                })
+                .expect("declined row reached the actual JSONL writer");
+            assert_eq!(
+                row.string_units("/refusedMessageId"),
+                expected.map(|id| id.encode_utf16().collect())
+            );
+            let text = row.string_units("/message/content/0/text").unwrap();
+            let suffix = format!("\n\nMessage ID: {message_id}")
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            assert_eq!(text.ends_with(&suffix), expected.is_some());
+        }
+    }
 }

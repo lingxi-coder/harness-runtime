@@ -1,5 +1,4 @@
-//! System prompt assembler for the model-specific Claude Code 2.1.220 prompt
-//! profiles and LingXi's complete non-Claude harness.
+//! Model-specific Claude Code 2.1.319 prompt assembly and LingXi behavior modes.
 //!
 //! Entry point: [`assemble_system_prompt`].
 #![forbid(unsafe_code)]
@@ -25,6 +24,7 @@ pub mod memory_update;
 pub mod mid_turn_input;
 pub mod nested_memory;
 pub mod plan_reminder;
+pub(crate) mod portable_background;
 pub mod sanitize;
 pub mod silent_turn;
 pub mod skill_listing;
@@ -53,7 +53,12 @@ pub use memory::lingxi_md::LingxiMdTier;
 // appends it (R-P1b). It remains exported from `locked_templates` for the
 // subagent path (`agent/handle.rs`) and is named fully-qualified in tests.
 use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
+use lingxi_core::host::prompt_policy::{
+    resolve_prompt_policy, MemoryPromptBinding, PromptTarget, ResolvedPromptPolicy,
+    SystemPromptBinding,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The active output-style section to inject into the system prompt.
 ///
@@ -160,9 +165,36 @@ pub(crate) fn prompt_section_slots(
     sections: Vec<PromptSection>,
     ctx: &SystemPromptContext,
 ) -> Vec<PromptSectionSlot> {
-    let lean = sections
-        .iter()
-        .any(|section| section.id_equals_ascii("lean_body"));
+    let mode = ctx.prompt_policy.as_ref().map_or_else(
+        || {
+            if sections.iter().any(|section| {
+                section.id_equals_ascii("header")
+                    && section.text
+                        == profile_header(
+                            lingxi_core::host::session_context::ConversationMode::Chat,
+                        )
+            }) {
+                lingxi_core::host::session_context::ConversationMode::Chat
+            } else {
+                lingxi_core::host::session_context::ConversationMode::Code
+            }
+        },
+        |policy| policy.target.mode,
+    );
+    let policy = resolve_context_prompt_policy(ctx, mode);
+    if matches!(policy.system, SystemPromptBinding::Template(_)) {
+        return sections
+            .into_iter()
+            .map(|section| PromptSectionSlot {
+                id: section.id,
+                text: Some(section.text),
+                scope: section.scope,
+                id_utf16_code_units: section.id_utf16_code_units,
+                text_utf16_code_units: section.text_utf16_code_units,
+            })
+            .collect();
+    }
+    let lean = prompt_policy_is_lean(&policy);
     let suffix = if lean { ":L" } else { "" };
     let mut shared = Vec::new();
     let mut available = Vec::new();
@@ -193,9 +225,11 @@ pub(crate) fn prompt_section_slots(
         "tool_param_json",
         "session_guidance",
         "memory",
+        "surface",
         "env_info",
         "bg-session",
         "context_management",
+        "system_messages",
         "brief",
         "focus_mode",
         "act_dont_rederive",
@@ -203,6 +237,7 @@ pub(crate) fn prompt_section_slots(
         "overcorrection",
         "subagent_steer_delegation",
         "opus5_reduced_delegation",
+        "original_games",
         "heron_brook",
         "brook_heron",
         "willow_tern",
@@ -361,7 +396,7 @@ pub(crate) fn render_prompt_sections_scoped(sections: &[PromptSection]) -> Rende
             );
         }
         if !text.is_empty() {
-            push_section_separator(&mut text);
+            text.push_str(SECTION_SEP);
         }
         text.push_str(&section.text);
     }
@@ -387,12 +422,12 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 /// Assemble a system prompt, optionally injecting an active output-style
 /// section.
 ///
-/// Section order is locked to the clean-room Claude Code 2.1.220 oracle:
+/// Claude section order is locked to the Claude Code 2.1.319 artifact oracle:
 ///
 /// 1. `HEADER`
 /// 2. model-selected body and session guidance
 /// 3. optional file-memory protocol
-/// 4. optional `# Environment` block
+/// 4. Claude model catalog (host facts travel through request ingress)
 /// 5. optional output style and background-session sections
 /// 6. context management and model-specific post-context sections
 ///
@@ -423,8 +458,107 @@ pub(crate) fn named_prompt_sections_with_style(
     named_prompt_sections_for_mode(
         ctx,
         output_style,
-        lingxi_core::host::session_context::ConversationMode::Code,
+        ctx.prompt_policy.as_ref().map_or(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            |policy| policy.target.mode,
+        ),
     )
+}
+
+#[must_use]
+pub(crate) fn resolve_context_prompt_policy(
+    ctx: &SystemPromptContext,
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> Arc<ResolvedPromptPolicy> {
+    match &ctx.prompt_policy {
+        Some(policy) => {
+            assert_eq!(
+                policy.target.mode, mode,
+                "prompt policy must belong to the request mode"
+            );
+            Arc::clone(policy)
+        }
+        None => Arc::new(resolve_prompt_policy(PromptTarget::for_model(
+            mode, &ctx.model,
+        ))),
+    }
+}
+
+#[must_use]
+pub(crate) fn dynamic_memory_section(ctx: &SystemPromptContext) -> Option<String> {
+    if !ctx.exclude_dynamic_sections {
+        return None;
+    }
+    let directory = ctx.memory_dir.as_ref()?;
+    let policy = resolve_context_prompt_policy(
+        ctx,
+        ctx.prompt_policy.as_ref().map_or(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            |policy| policy.target.mode,
+        ),
+    );
+    dynamic_memory_section_for_policy(directory, &policy)
+}
+
+pub(crate) fn dynamic_memory_section_for_policy(
+    directory: &std::path::Path,
+    policy: &ResolvedPromptPolicy,
+) -> Option<String> {
+    if !matches!(policy.memory, MemoryPromptBinding::ClaudeNative) {
+        return None;
+    }
+    let model = &policy.target.canonical_model;
+    Some(
+        if lingxi_core::host::model_capabilities::claude_lean_prompt_for(model) {
+            memory_section::render_with_hygiene(
+                &directory.to_string_lossy(),
+                lingxi_core::host::model_capabilities::lean_rewrite_for(model),
+            )
+        } else {
+            memory_section::render_auto_directory(&directory.to_string_lossy())
+        },
+    )
+}
+
+#[must_use]
+pub(crate) fn prompt_policy_is_lean(policy: &ResolvedPromptPolicy) -> bool {
+    match policy.system {
+        SystemPromptBinding::Template(_) => true,
+        SystemPromptBinding::ClaudeCode | SystemPromptBinding::ClaudeChat => {
+            lingxi_core::host::model_capabilities::claude_lean_prompt_for(
+                &policy.target.canonical_model,
+            )
+        }
+    }
+}
+
+#[must_use]
+pub(crate) fn body_render_options(
+    ctx: &SystemPromptContext,
+    policy: &ResolvedPromptPolicy,
+) -> body_sections::BodyRenderOptions {
+    let mut options = body_sections::BodyRenderOptions::for_policy(policy);
+    options.fork_runs_in_background =
+        lingxi_core::host::fork_subagent::is_fork_subagent_background_enabled(
+            false,
+            !ctx.is_interactive,
+        );
+    if matches!(
+        policy.system,
+        SystemPromptBinding::ClaudeCode | SystemPromptBinding::ClaudeChat
+    ) {
+        if let Some(available) = ctx.native_system_turns {
+            options.explains_system_turns = available
+                && !matches!(
+                    lingxi_core::host::model_capabilities::normalize_model_id(
+                        &policy.target.canonical_model
+                    )
+                    .as_str(),
+                    "claude-sonnet-5" | "claude-opus-4-8"
+                );
+        }
+    }
+    options
 }
 
 pub(crate) fn named_prompt_sections_for_mode(
@@ -433,94 +567,119 @@ pub(crate) fn named_prompt_sections_for_mode(
     mode: lingxi_core::host::session_context::ConversationMode,
 ) -> Vec<PromptSection> {
     use lingxi_core::host::session_context::ConversationMode;
+    let mode = ctx
+        .prompt_policy
+        .as_ref()
+        .map_or(mode, |policy| policy.target.mode);
+    let policy = resolve_context_prompt_policy(ctx, mode);
+    let model = policy.target.canonical_model.as_str();
+    let native_system = matches!(
+        policy.system,
+        SystemPromptBinding::ClaudeCode | SystemPromptBinding::ClaudeChat
+    );
     let mut sections = vec![PromptSection::new(
         "header",
         profile_header(mode).to_owned(),
         PromptSectionScope::Shared,
     )];
-
-    // Static system-prompt BODY (claude-code `J0` statics: opening / `# System`
-    // / `# Doing tasks` / `# Executing actions with care` / `# Using your tools`
-    // / `# Tone and style`), spliced between the HEADER and the env block. In
-    // the binary these six statics precede the dynamic env/memory group, so
-    // emitting them here keeps the statics-before-env relative order. The
-    // `Pym` opening clause toggles on whether an output style is active; the
-    // `# Doing tasks` (`Lym`) section is gated on the active style's
-    // `keepCodingInstructions` (default true ⇒ no-style and builtins stay
-    // byte-identical to before).
-    let keep_coding = output_style.is_none_or(|s| s.keep_coding_instructions);
-    // Session guidance differs between the interactive TUI and print/SDK
-    // paths. Keep that signal explicit in the context rather than assuming
-    // every caller is interactive.
-    let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
-    // 2.1.232 `SPe()`: fork session-guidance is ON by default for interactive
-    // main-thread prompts. Coordinator sessions use a separate prompt builder.
-    let fork_mode = lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
-        /* is_coordinator */ false,
-        /* is_non_interactive */ !ctx.is_interactive,
-    );
-    if mode == ConversationMode::Chat {
-        sections.extend(body_sections::named_chat_sections(&ctx.tool_names));
-    } else {
-        sections.extend(body_sections::named_sections(
-            output_style.is_some(),
-            keep_coding,
-            &ctx.tool_names,
-            /* is_interactive = */ ctx.is_interactive,
-            /* has_agent_tool = */ has_agent,
-            /* fork_mode_enabled = */ fork_mode,
-            /* model = */ &ctx.model,
-            /* skills_available = */ ctx.skills_available,
-            /* exclude_dynamic_sections = */ ctx.exclude_dynamic_sections,
-        ));
-    }
-
-    // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
-    // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
-    // context `<system-reminder>` meta user message (the `instructions` key of
-    // `A6n(re, userContext)`), prepended to each turn's messages — NOT a system-
-    // prompt section. The orchestrator builds that message from
-    // `memory_block::format` (see `conversation.rs::additional_context_message`).
-    // `ctx.memory_files` is retained on the context for that path / callers.
-
-    // NO `<tools>` block: claude-code passes tools to the model via the wire
-    // `tools:` API array, NOT a system-prompt text list (`<tools>` / `</tools>`
-    // are 0 hits in the v2.1.181 binary). `ctx.tool_names` is kept on the context
-    // for callers but is no longer rendered into the prompt.
-
-    // File-based-memory WRITE instructions. The pinned 2.1.220 order is
-    // session guidance → memory → environment. Lean Claude profiles use the
-    // compact `# Memory` protocol; standard Claude and non-Claude FullHarness
-    // profiles keep the complete `# auto memory` protocol.
-    if let Some(dir) = &ctx.memory_dir {
-        let memory_id = if sections.iter().any(|section| section.id == "lean_body") {
-            "memory:L"
-        } else {
-            "memory"
-        };
-        sections.push(PromptSection::new(
-            memory_id,
-            memory_section::render_for_prompt(
-                &memory::memdir::paths::memory_directory_prompt_path(dir),
-                lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model),
+    let body_options = body_render_options(ctx, &policy);
+    match policy.system {
+        SystemPromptBinding::ClaudeCode => {
+            let has_agent = ctx.tool_names.iter().any(|tool| tool == "Agent");
+            let fork_mode = lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
+                false,
+                !ctx.is_interactive,
+            );
+            sections.extend(body_sections::named_sections_with_options(
+                output_style.is_some(),
+                output_style.is_none_or(|style| style.keep_coding_instructions),
+                &ctx.tool_names,
+                ctx.is_interactive,
+                has_agent,
+                fork_mode,
+                model,
+                ctx.skills_available,
                 ctx.exclude_dynamic_sections,
-            ),
-            PromptSectionScope::Session,
-        ));
+                body_options,
+            ));
+        }
+        SystemPromptBinding::ClaudeChat => {
+            sections.extend(body_sections::named_chat_sections(&ctx.tool_names));
+        }
+        SystemPromptBinding::Template(template) => {
+            if !template.is_empty() {
+                sections.push(PromptSection::new(
+                    "lean_body",
+                    template.to_owned(),
+                    PromptSectionScope::Shared,
+                ));
+            }
+        }
     }
 
-    // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
-    // block (cwd / env / git / OS / shell) from the system prompt so the static
-    // prompt is identical across machines (prompt-cache reuse). The conversation
-    // re-emits the same env block in the first-user-message context reminder.
-    if !ctx.exclude_dynamic_sections {
+    if let Some(directory) = &ctx.memory_dir {
+        match policy.memory {
+            MemoryPromptBinding::Template(template) => {
+                sections.push(PromptSection::new(
+                    "memory:L",
+                    template.replace("{memory_path}", &directory.to_string_lossy()),
+                    PromptSectionScope::Session,
+                ));
+            }
+            MemoryPromptBinding::ClaudeNative => {
+                let profile = lingxi_core::host::model_capabilities::prompt_profile_for(model);
+                let lean_memory =
+                    lingxi_core::host::model_capabilities::claude_lean_prompt_for(model);
+                let rewrite_memory = lingxi_core::host::model_capabilities::lean_rewrite_for(model);
+                if ctx.exclude_dynamic_sections {
+                    if !lean_memory {
+                        let index = sections
+                            .iter()
+                            .position(|section| section.scope == PromptSectionScope::Session)
+                            .unwrap_or(sections.len());
+                        sections.insert(
+                            index,
+                            PromptSection::new(
+                                "memory_static",
+                                memory_section::render_auto_static(),
+                                PromptSectionScope::Shared,
+                            ),
+                        );
+                    }
+                } else {
+                    sections.push(PromptSection::new(
+                        if lean_memory { "memory:L" } else { "memory" },
+                        if lean_memory {
+                            memory_section::render_with_hygiene(
+                                &directory.to_string_lossy(),
+                                rewrite_memory,
+                            )
+                        } else {
+                            memory_section::render_for_profile(
+                                &directory.to_string_lossy(),
+                                profile,
+                            )
+                        },
+                        PromptSectionScope::Session,
+                    ));
+                }
+            }
+        }
+    }
+
+    if native_system {
+        let mut canonical_context = ctx.clone();
+        canonical_context.model = model.to_owned();
         sections.push(PromptSection::new(
-            "env_info_simple",
-            env_block::format(ctx),
+            if ctx.exclude_dynamic_sections {
+                "env_info_static"
+            } else {
+                "env_info_simple"
+            },
+            env_block::format_catalog(&canonical_context, false, body_options.rewrite),
             PromptSectionScope::Session,
         ));
     }
-
     if let Some(style) = output_style {
         sections.push(PromptSection::new(
             "output_style",
@@ -529,46 +688,73 @@ pub(crate) fn named_prompt_sections_for_mode(
         ));
     }
 
-    // (M8 cc2.1.198) `# Background Session` (`_ff()` @219583413) — bg jobs
-    // only (`LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`); binary position is
-    // after output style and before context management.
-    if let Some(bg) = bg_session::from_env() {
+    if policy.reminders.is_native() {
+        let native_options = if native_system {
+            body_options
+        } else {
+            body_sections::BodyRenderOptions::for_model(model)
+        };
+        if let Some(background) = bg_session::from_env_with_rewrite(native_options.rewrite) {
+            sections.push(PromptSection::new(
+                "bg-session",
+                background,
+                PromptSectionScope::Session,
+            ));
+        }
         sections.push(PromptSection::new(
-            "bg-session",
-            bg,
+            "context_management",
+            body_sections::context_management_for(native_options),
             PromptSectionScope::Session,
         ));
+        if mode == ConversationMode::Code {
+            sections.extend(body_sections::post_context_named_sections_with_options(
+                model,
+                output_style.is_some(),
+                native_options,
+            ));
+            if let Some(text) = total_tokens::system_prompt_section(model) {
+                sections.push(PromptSection::new(
+                    "total_tokens",
+                    text,
+                    PromptSectionScope::Session,
+                ));
+            }
+        }
+    } else {
+        if let Some(template) = policy.reminders.template_for("context_management") {
+            sections.push(PromptSection::new(
+                "context_management",
+                template.to_owned(),
+                PromptSectionScope::Session,
+            ));
+        }
+        if let Some(background) =
+            portable_background::portable_from_env(policy.reminders, &ctx.tool_names)
+        {
+            sections.push(PromptSection::new(
+                "bg-session",
+                background,
+                PromptSectionScope::Session,
+            ));
+        }
     }
-
-    // GAP-2: `# Context management` (iIm) — always, unconditional.
-    // Binary cx() position: after env_info_simple + language + output_style +
-    // bg-session + scratchpad. Model-specific post-context sections may follow.
-    sections.push(PromptSection::new(
-        "context_management",
-        body_sections::CONTEXT_MANAGEMENT_SECTION.to_string(),
-        PromptSectionScope::Session,
-    ));
-
-    // Model-specific 2.1.220 tail: act-don't-rederive for every profile,
-    // Opus-5 delivery/correction restrictions, or Fable/Mythos autonomous
-    // mitigation. These are after context management in the oracle.
-    if mode == ConversationMode::Code {
-        sections.extend(body_sections::post_context_named_sections(
-            &ctx.model,
-            output_style.is_some(),
-        ));
-    }
-
-    // R-P1b: NO `Notes:` FOOTER on the MAIN prompt.
     sections
 }
+
+#[cfg(test)]
+mod native_baseline_tests;
+
+#[cfg(test)]
+mod policy_dispatch_tests;
 
 pub(crate) fn profile_header(
     mode: lingxi_core::host::session_context::ConversationMode,
 ) -> &'static str {
     match mode {
         lingxi_core::host::session_context::ConversationMode::Code => HEADER,
-        lingxi_core::host::session_context::ConversationMode::Chat => "You are LingXi, a capable assistant for research, writing, learning and getting work done.",
+        lingxi_core::host::session_context::ConversationMode::Chat => {
+            "You are LingXi, a capable assistant for research, writing, learning and getting work done."
+        }
     }
 }
 
@@ -580,18 +766,9 @@ fn output_style_section(style: ActiveOutputStyle<'_>) -> String {
     format!("# Output Style: {}\n{}", style.name, style.prompt)
 }
 
-/// Append a section separator that produces exactly one blank line
-/// between two adjacent sections, regardless of whether the previous
-/// section already ended with a single `\n` (`tools_block`, `env_block`'s
-/// cutoff line) or not (`HEADER`, and `memory_block`, which after the GAP-3
-/// rewrite ends with the last file's trimmed body — no trailing `\n`). One
-/// blank line = two LFs total at the boundary.
+/// Append the literal upstream section separator, preserving section whitespace.
 fn push_section_separator(s: &mut String) {
-    if s.ends_with('\n') {
-        s.push('\n');
-    } else {
-        s.push_str(SECTION_SEP);
-    }
+    s.push_str(SECTION_SEP);
 }
 
 /// Runtime context required to assemble a system prompt.
@@ -605,6 +782,11 @@ fn push_section_separator(s: &mut String) {
 /// "Critical 1:1 fidelity items".
 #[derive(Debug, Clone)]
 pub struct SystemPromptContext {
+    /// One request's selected prompt bundle. Preview callers resolve from mode and model.
+    pub prompt_policy:
+        Option<std::sync::Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
+    /// Actual route support; preview callers leave this absent.
+    pub native_system_turns: Option<bool>,
     /// Current working directory — emitted as the first `<env>` line.
     pub cwd: PathBuf,
     /// `std::env::consts::OS` (`macos` / `linux` / `windows` …).
@@ -651,11 +833,9 @@ pub struct SystemPromptContext {
     /// OFF). `Some(path)` emits the `# Memory` write-instructions section;
     /// `None` (the default) omits it — byte-identical to a build without memory.
     pub memory_dir: Option<PathBuf>,
-    /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
-    /// per-machine `env_block` is OMITTED from the assembled system prompt (it
-    /// is emitted in the first-user-message context reminder instead). `false`
-    /// (the default) keeps the env block in the prompt — byte-identical to
-    /// before this field existed.
+    /// CLI `--exclude-dynamic-system-prompt-sections`. Selects native SDK
+    /// section names and memory/guidance projection. Host environment facts
+    /// travel through ingress; the static Claude model catalog remains here.
     pub exclude_dynamic_sections: bool,
 }
 
@@ -754,6 +934,8 @@ mod tests {
     #[test]
     fn context_constructs_from_minimal_inputs() {
         let ctx = SystemPromptContext {
+            native_system_turns: None,
+            prompt_policy: None,
             cwd: PathBuf::from("/tmp"),
             platform: "macos".into(),
             model: "claude-opus-4-7".into(),
@@ -813,6 +995,8 @@ mod tests {
 
     fn ctx_minimal() -> SystemPromptContext {
         SystemPromptContext {
+            native_system_turns: None,
+            prompt_policy: None,
             cwd: PathBuf::from("/proj"),
             platform: "macos".into(),
             model: "claude-opus-4-7".into(),
@@ -833,21 +1017,15 @@ mod tests {
     }
 
     #[test]
-    fn exclude_dynamic_sections_omits_env_block() {
-        // `--exclude-dynamic-system-prompt-sections`: the per-machine env block
-        // (whose signature line is "Primary working directory:") is in the
-        // system prompt by default, and OMITTED when the flag is set (the
-        // conversation re-emits it in the first user message instead).
+    fn dynamic_projection_keeps_catalog_and_leaves_host_facts_to_ingress() {
         let mut ctx = ctx_minimal();
-        assert!(
-            assemble_system_prompt(&ctx).contains("Primary working directory"),
-            "env block must be present by default"
-        );
-        ctx.exclude_dynamic_sections = true;
-        assert!(
-            !assemble_system_prompt(&ctx).contains("Primary working directory"),
-            "env block must be OMITTED when exclude_dynamic_sections is set"
-        );
+        for (exclude, id) in [(false, "env_info_simple"), (true, "env_info_static")] {
+            ctx.exclude_dynamic_sections = exclude;
+            let sections = named_prompt_sections_with_style(&ctx, None);
+            let catalog = sections.iter().find(|section| section.id == id).unwrap();
+            assert!(catalog.text.contains("The most recent Claude models"));
+            assert!(!render_prompt_sections(&sections).contains("Primary working directory"));
+        }
     }
 
     #[test]
@@ -859,11 +1037,10 @@ mod tests {
         let none = assemble_system_prompt_with_style(&ctx, None);
         assert_eq!(default, none);
         assert!(!default.contains("# Output Style:"));
-        // Spot-check the locked envelope: opens with HEADER and ends with the
-        // post-context act-don't-rederive slot (no `Notes:` footer).
+        // The native post-context instruction precedes the optional budget.
         assert!(default.starts_with("You are LingXi, an agentic command-line coding assistant."));
         assert!(!default.contains("Notes:"));
-        assert!(default.ends_with("give a recommendation, not an exhaustive survey"));
+        assert!(default.contains("give a recommendation, not an exhaustive survey"));
     }
 
     #[test]
@@ -937,7 +1114,7 @@ mod tests {
             .map(|section| section.id.as_str())
             .collect::<Vec<_>>();
         assert!(ids.contains(&"lean_body"));
-        assert!(ids.contains(&"communication:L"));
+        assert!(!ids.contains(&"communication:L"));
         assert!(ids.contains(&"action_caution:L"));
         assert!(ids.contains(&"session_guidance:L:sdk:false"));
     }
@@ -990,16 +1167,12 @@ mod tests {
         // Heading + body are present, exactly per getOutputStyleSection.
         assert!(out.contains("# Output Style: Explanatory\nBODY LINE 1\nBODY LINE 2"));
 
-        // Placement: after the `# Environment` block, on a `\n\n` boundary, and
-        // it is the LAST section (no `<tools>` block, no `Notes:` FOOTER). The
-        // prompt now ends with the style body.
+        // Output styles follow the catalog and precede context/tail sections.
         assert!(!out.contains("<tools>"));
         assert!(!out.contains("Notes:"));
         let i_env = out.find("# Environment").expect("env present");
         let i_style = out.find("# Output Style:").expect("style present");
         assert!(i_env < i_style, "env must come before style");
-        assert!(i_env < i_style, "env must come before style");
-        // GAP-2: context management is now the LAST section, after output-style.
         let i_ctx = out
             .find("# Context management")
             .expect("context management present");
@@ -1007,9 +1180,10 @@ mod tests {
             i_style < i_ctx,
             "context management must come AFTER output-style"
         );
-        // An explicit style suppresses the default act-don't-rederive slot.
-        // Opus 4.7 has no other model tail, so context management is terminal.
-        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
+        let i_action = out
+            .find("When you have enough information to act, act.")
+            .unwrap();
+        assert!(i_ctx < i_action);
     }
 
     #[test]
@@ -1028,7 +1202,12 @@ mod tests {
         assert!(!out.contains("<tools>"));
         // The style is NOT the last section — context management follows.
         assert!(out.contains("# Output Style: Learning\nP"));
-        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
+        let i_style = out.find("# Output Style:").unwrap();
+        let i_context = out.find("# Context management").unwrap();
+        let i_action = out
+            .find("When you have enough information to act, act.")
+            .unwrap();
+        assert!(i_style < i_context && i_context < i_action);
     }
 
     // ---- SDK-owned system-prompt cache projection ----

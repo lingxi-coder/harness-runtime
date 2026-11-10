@@ -727,13 +727,15 @@ impl TodoStore {
         if task.status == TodoState::Completed {
             return ClaimResult::AlreadyResolved { task };
         }
-        let all = self.list().await;
-        let blocked_by_tasks = Self::open_blockers(&task, &all);
-        if !blocked_by_tasks.is_empty() {
-            return ClaimResult::Blocked {
-                task,
-                blocked_by_tasks,
-            };
+        if !task.blocked_by.is_empty() {
+            let all = self.list().await;
+            let blocked_by_tasks = Self::open_blockers(&task, &all);
+            if !blocked_by_tasks.is_empty() {
+                return ClaimResult::Blocked {
+                    task,
+                    blocked_by_tasks,
+                };
+            }
         }
         match self.xod_merge_owner(task_id, owner).await {
             Some(task) => ClaimResult::Success { task },

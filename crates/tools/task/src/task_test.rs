@@ -47,6 +47,256 @@ mod tests {
     /// throwaway config dir (→ spurious "Task not found").
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn native_task_contract_319() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/task_contract_319.json"
+        ))
+        .expect("artifact-derived task contract fixture")
+    }
+
+    fn contract_units(value: &Value) -> Vec<u16> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn native_319_task_declared_surfaces_match_artifact() {
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+        let context = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(TaskCreateTool::new(context.clone())),
+            Box::new(TaskGetTool::new(context.clone())),
+            Box::new(TaskListTool::new(context.clone())),
+            Box::new(TaskUpdateTool::new(context.clone())),
+            Box::new(TaskStopTool::new(context)),
+        ];
+        let fixture = native_task_contract_319();
+        for tool in tools {
+            let expected = &fixture["surfaces"][tool.name()];
+            let schema: Value =
+                serde_json::from_str(&tool.input_schema().to_json_string().unwrap()).unwrap();
+            assert_eq!(
+                schema,
+                expected["inputSchema"],
+                "{} schema declarations",
+                tool.name()
+            );
+            assert_eq!(
+                tool.description(
+                    &source_value(&json!({})),
+                    &DescriptionOptions {
+                        is_non_interactive_session: false,
+                    }
+                )
+                .await,
+                expected["description"].as_str().unwrap(),
+                "{} description",
+                tool.name()
+            );
+            assert_eq!(
+                tool.search_hint().unwrap().string_at(""),
+                expected["searchHint"].as_str(),
+                "{} search hint",
+                tool.name()
+            );
+            assert_eq!(
+                tool.is_concurrency_safe(&source_value(&json!({}))),
+                expected["concurrencySafe"].as_bool().unwrap(),
+                "{} concurrency",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn native_319_task_coercion_preserves_utf16_and_javascript_string_rules() {
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+        let context = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let create = TaskCreateTool::new(context.clone());
+        let update = TaskUpdateTool::new(context);
+        for case in native_task_contract_319()["coercionCases"]
+            .as_array()
+            .unwrap()
+        {
+            let raw = case["inputJson"].as_str().unwrap();
+            let input = Utf16JsonProjection::parse(raw).unwrap();
+            for (tool, key) in [
+                (&create as &dyn Tool, "createJson"),
+                (&update as &dyn Tool, "updateJson"),
+            ] {
+                let actual = tool.coerce_input(&input);
+                let expected = Utf16JsonProjection::parse(case[key].as_str().unwrap()).unwrap();
+                if expected.at_pointer("").unwrap().is_null() {
+                    assert!(actual.is_none(), "{} {raw}", tool.name());
+                } else {
+                    let actual = actual.unwrap_or_else(|| panic!("{} {raw}", tool.name()));
+                    assert_eq!(
+                        actual.input.to_json_string().unwrap(),
+                        expected
+                            .subprojection("/input")
+                            .unwrap()
+                            .to_json_string()
+                            .unwrap(),
+                        "{} {raw}",
+                        tool.name(),
+                    );
+                    assert_eq!(
+                        actual.shape_class,
+                        expected.string_at("/shapeClass").unwrap(),
+                        "{} {raw}",
+                        tool.name()
+                    );
+                }
+            }
+            assert_eq!(
+                source_task_create_steer(&input),
+                case["steer"].as_str(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_319_task_contract_matches_data_and_model_bytes() {
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+        struct Guard {
+            directory: std::path::PathBuf,
+            previous_swarms: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match &self.previous_swarms {
+                    Some(value) => std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", value),
+                    None => std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
+                }
+                let _ = std::fs::remove_dir_all(&self.directory);
+            }
+        }
+        let guard = Guard {
+            _lock: ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            directory: std::env::temp_dir().join(format!(
+                "lingxi-task-contract-319-{}-{}",
+                std::process::id(),
+                fresh_invocation_id()
+            )),
+            previous_swarms: std::env::var_os("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
+        };
+        let fixture = native_task_contract_319();
+        for case in fixture["executionCases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let home = guard.directory.join(name);
+            std::env::set_var(
+                "LINGXI_EXPERIMENTAL_AGENT_TEAMS",
+                if case["options"]["swarms"].as_bool().unwrap_or(false) {
+                    "1"
+                } else {
+                    "0"
+                },
+            );
+            let mut context = fresh_ctx();
+            context.agent_name = case["options"]["agentName"].as_str().map(str::to_owned);
+            let list_id = resolve_task_list_id(&context).await;
+            let store = TodoStore::for_list_at(&home, &list_id);
+            let seed: Vec<TodoTask> =
+                serde_json::from_str(case["seedJson"].as_str().unwrap()).unwrap();
+            for task in seed {
+                store.create(task).await.unwrap();
+            }
+            let builtin = ctx_for_file_tools(
+                make_dummy_fs(),
+                Arc::new(AnalyticsBus::new()),
+                vec![home.clone()],
+            );
+            let tool: Box<dyn Tool> = match case["tool"].as_str().unwrap() {
+                "TaskCreate" => Box::new(TaskCreateTool::new(builtin).with_config_home(home)),
+                "TaskGet" => Box::new(TaskGetTool::new(builtin).with_config_home(home)),
+                "TaskList" => Box::new(TaskListTool::new(builtin).with_config_home(home)),
+                "TaskUpdate" => Box::new(TaskUpdateTool::new(builtin).with_config_home(home)),
+                other => panic!("unexpected fixture tool {other}"),
+            };
+            let input = Utf16JsonProjection::parse(case["inputJson"].as_str().unwrap()).unwrap();
+            let result = tool
+                .call(input, context, fresh_tx())
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                result.data.to_json_string().unwrap(),
+                case["dataJson"].as_str().unwrap(),
+                "{name}: exact data projection"
+            );
+            assert_eq!(
+                result
+                    .model_content
+                    .as_ref()
+                    .and_then(|content| content.string_units("")),
+                Some(contract_units(&case["modelUnits"])),
+                "{name}: exact model text"
+            );
+            assert!(!result.is_error, "{name}");
+            if matches!(tool.name(), "TaskCreate" | "TaskGet" | "TaskList") {
+                assert_eq!(
+                    tool.map_result_text(&result.data)
+                        .and_then(|text| text.string_units("")),
+                    Some(contract_units(&case["modelUnits"])),
+                    "{name}: echoed PostToolUse output retains model text"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_319_task_hook_replacements_match_native_model_bytes() {
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+        let context = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(TaskCreateTool::new(context.clone())),
+            Box::new(TaskGetTool::new(context.clone())),
+            Box::new(TaskListTool::new(context)),
+        ];
+        let fixture = native_task_contract_319();
+        for case in fixture["replacementCases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let tool = tools
+                .iter()
+                .find(|tool| Some(tool.name()) == case["tool"].as_str())
+                .unwrap();
+            let replacement = Utf16JsonProjection::parse(case["dataJson"].as_str().unwrap())
+                .expect("hook replacement retains source strings");
+            assert_eq!(
+                tool.map_result_text(&replacement)
+                    .and_then(|text| text.string_units("")),
+                Some(contract_units(&case["modelUnits"])),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn six_tool_name_constants_locked() {
         assert_eq!(TASK_CREATE_TOOL_NAME, "TaskCreate");
@@ -716,42 +966,43 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
     #[test]
     fn render_task_get_missing_and_present() {
-        assert_eq!(render_task_get(None).string_at(""), Some("Task not found"));
-        let mut t = mk_task("1", "Do thing", TodoState::InProgress);
-        t.blocked_by = vec!["2".into(), "3".into()];
-        t.blocks = vec!["4".into()];
         assert_eq!(
-            render_task_get(Some(&t)).string_at(""),
+            render_task_get(&source_value(&json!({"task": null})))
+                .unwrap()
+                .string_at(""),
+            Some("Task not found")
+        );
+        assert_eq!(
+            render_task_get(&source_value(&json!({"task": {
+                "id": "1", "subject": "Do thing", "description": "desc",
+                "status": "in_progress", "blockedBy": ["2", "3"], "blocks": ["4"]
+            }}))).unwrap().string_at(""),
             Some("Task #1: Do thing\nStatus: in_progress\nDescription: desc\nBlocked by: #2, #3\nBlocks: #4")
         );
-        let bare = mk_task("5", "Bare", TodoState::Pending);
         assert_eq!(
-            render_task_get(Some(&bare)).string_at(""),
+            render_task_get(&source_value(&json!({"task": {
+                "id": "5", "subject": "Bare", "description": "desc",
+                "status": "pending", "blockedBy": [], "blocks": []
+            }})))
+            .unwrap()
+            .string_at(""),
             Some("Task #5: Bare\nStatus: pending\nDescription: desc")
         );
     }
 
     #[test]
     fn render_task_list_empty_and_rows() {
-        assert_eq!(render_task_list(&[]).string_at(""), Some("No tasks found"));
-        let rows = vec![
-            TaskListRow {
-                id: "1".into(),
-                subject: source_text("First"),
-                status: TodoState::Pending,
-                owner: Some("alice".into()),
-                blocked_by: vec!["2".into()],
-            },
-            TaskListRow {
-                id: "2".into(),
-                subject: source_text("Second"),
-                status: TodoState::Completed,
-                owner: None,
-                blocked_by: Vec::new(),
-            },
-        ];
         assert_eq!(
-            render_task_list(&rows).string_at(""),
+            render_task_list(&source_value(&json!({"tasks": []})))
+                .unwrap()
+                .string_at(""),
+            Some("No tasks found")
+        );
+        assert_eq!(
+            render_task_list(&source_value(&json!({"tasks": [
+                {"id": "1", "subject": "First", "status": "pending", "owner": "alice", "blockedBy": ["2"]},
+                {"id": "2", "subject": "Second", "status": "completed", "blockedBy": []}
+            ]}))).unwrap().string_at(""),
             Some("#1 [pending] First (alice) [blocked by #2]\n#2 [completed] Second")
         );
     }
@@ -1377,6 +1628,42 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         #[tokio::test]
+        async fn native_319_clearing_owner_does_not_send_assignment() {
+            let (_guard, list, router) = setup(true);
+            let fixture = native_task_contract_319();
+            let case = fixture["executionCases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == "update-clear-owner")
+                .unwrap();
+            let seed: Vec<TodoTask> =
+                serde_json::from_str(case["seedJson"].as_str().unwrap()).unwrap();
+            let store = TodoStore::for_list(&list);
+            for task in seed {
+                store.create(task).await.unwrap();
+            }
+            let tool = TaskUpdateTool::new(bctx(router.clone()));
+            let result = Tool::call(
+                &tool,
+                Utf16JsonProjection::parse(case["inputJson"].as_str().unwrap()).unwrap(),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.data.to_json_string().unwrap(),
+                case["dataJson"].as_str().unwrap()
+            );
+            assert_eq!(store.get("1").await.unwrap().owner.as_deref(), Some(""));
+            assert_eq!(
+                router.sent.lock().unwrap().len(),
+                case["mailboxCount"].as_u64().unwrap() as usize
+            );
+        }
+
+        #[tokio::test]
         async fn no_notification_when_owner_unchanged() {
             let (_g, list, router) = setup(true);
             let store = TodoStore::for_list(&list);
@@ -1812,6 +2099,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskListTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -1834,6 +2122,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskListTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -1858,6 +2147,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskCreateTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -1880,6 +2170,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskCreateTool::new(bctx());
             let p = tool
                 .prompt(&PromptOptions {
+                    prompt_policy: None,
                     is_scheduled_turn: false,
                     session_id: None,
                     include_examples: false,
@@ -2435,6 +2726,60 @@ Running background agents: a1b2c3d4e (survey the crate)"
     }
 
     #[test]
+    fn metadata_merge_preserves_exact_keys_values_and_insertion_positions() {
+        let old =
+            Utf16JsonProjection::parse(r#"{"first":1,"\ud800":{"v":"\udfff"},"drop":2,"last":3}"#)
+                .unwrap();
+        let new = Utf16JsonProjection::parse(
+            r#"{"last":4,"drop":null,"\ud800":{"v":"\ud800"},"added":["\udfff"]}"#,
+        )
+        .unwrap();
+        let merged = merge_task_metadata(Some(&old), &new).unwrap();
+        let expected = Utf16JsonProjection::parse(
+            r#"{"first":1,"\ud800":{"v":"\ud800"},"last":4,"added":["\udfff"]}"#,
+        )
+        .unwrap();
+        assert_eq!(merged, expected);
+        let keys = merged
+            .object_entries()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.code_units.to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "first".encode_utf16().collect::<Vec<_>>(),
+                vec![0xd800],
+                "last".encode_utf16().collect(),
+                "added".encode_utf16().collect()
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_merge_handles_wide_objects_in_one_destination_arena() {
+        let old_fields = (0..8192)
+            .map(|i| format!("\"k{i}\":{{\"value\":{i}}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let new_fields = (0..8192)
+            .map(|i| format!("\"k{i}\":{}", if i % 2 == 0 { "null" } else { "[1,2,3]" }))
+            .collect::<Vec<_>>()
+            .join(",");
+        let old = Utf16JsonProjection::parse(&format!("{{{old_fields}}}")).unwrap();
+        let new = Utf16JsonProjection::parse(&format!("{{{new_fields},\"extra\":true}}")).unwrap();
+        let merged = merge_task_metadata(Some(&old), &new).unwrap();
+        assert_eq!(merged.object_entries().unwrap().len(), 4097);
+        assert!(merged.get_property("k0").is_none());
+        assert_eq!(merged.number_at("/k8191/2"), Some(3.0));
+        assert_eq!(
+            merged.object_entries().unwrap().last().unwrap().display_key,
+            "extra"
+        );
+    }
+
+    #[test]
     fn metadata_internal_truthiness_follows_js() {
         let mut m = Map::new();
         assert!(!metadata_internal_truthy(Some(&source_value(
@@ -2530,6 +2875,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
             pending_departure: StdMutex<bool>,
             departure_failures: StdMutex<u32>,
             output_calls: StdMutex<u32>,
+            status_calls: StdMutex<u32>,
+            status_overrides: StdMutex<VecDeque<Option<String>>>,
             evict_after_first_read: bool,
             live_loop: bool,
             /// Ids passed to `mark_notified`, in call order (T9).
@@ -2631,6 +2978,25 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     Err(TaskRegistryError::NotFound(id.into()))
                 }
             }
+            async fn output_status(&self, id: &str) -> Result<Option<String>, TaskRegistryError> {
+                *self.status_calls.lock().unwrap() += 1;
+                if let Some(status) = self.status_overrides.lock().unwrap().pop_front() {
+                    return Ok(status);
+                }
+                if self.evict_after_first_read && *self.output_calls.lock().unwrap() > 0 {
+                    return Ok(None);
+                }
+                let mut q = self.chunks.lock().unwrap();
+                let current = q
+                    .front()
+                    .ok_or_else(|| TaskRegistryError::NotFound(id.into()))?;
+                let status = current.status.clone();
+                if q.len() > 1 {
+                    q.pop_front();
+                }
+                Ok(status)
+            }
+
             async fn mark_notified(&self, id: &str) -> Result<(), TaskRegistryError> {
                 self.notified_ids.lock().unwrap().push(id.to_string());
                 Ok(())
@@ -2791,6 +3157,54 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         // ── TaskStop ─────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn native_319_task_stop_projects_complete_json_and_utf16() {
+            for case in native_task_contract_319()["stopCases"].as_array().unwrap() {
+                let name = case["name"].as_str().unwrap();
+                let expected =
+                    Utf16JsonProjection::parse(case["dataJson"].as_str().unwrap()).unwrap();
+                let ended = name == "ended-live-loop";
+                let command = expected.subprojection("/command").unwrap();
+                let task_type = expected.string_at("/task_type").unwrap().to_owned();
+                let record = TaskRecord {
+                    task_id: expected.string_at("/task_id").unwrap().to_owned(),
+                    task_type: task_type.clone(),
+                    status: if ended { "completed" } else { "running" }.into(),
+                    description: command.clone(),
+                    command: (task_type == "local_bash").then_some(command),
+                    ..Default::default()
+                };
+                let registry = Arc::new(MockRegistry {
+                    record: StdMutex::new(Some(record)),
+                    live_loop: ended,
+                    ..Default::default()
+                });
+                let input = source_object(vec![(
+                    "task_id".into(),
+                    expected.subprojection("/task_id").unwrap(),
+                )]);
+                let result = Tool::call(
+                    &TaskStopTool::new(bctx(registry)),
+                    input,
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+                let json = result.data.to_json_string().unwrap();
+                assert_eq!(json, case["dataJson"].as_str().unwrap(), "{name}");
+                assert_eq!(
+                    json.encode_utf16().collect::<Vec<_>>(),
+                    contract_units(&case["modelUnits"]),
+                    "{name}"
+                );
+                assert!(
+                    result.model_content.is_none(),
+                    "TaskStop uses the shared JSON mapper"
+                );
+            }
+        }
 
         #[tokio::test]
         async fn task_stop_success_result_shape() {
@@ -3108,7 +3522,32 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert_eq!(res.data["retrieval_status"], "success");
             assert_eq!(res.data["task"]["status"], "completed");
             assert_eq!(res.data["task"]["output"], "final\n");
-            assert!(*reg.output_calls.lock().unwrap() >= 3);
+            assert_eq!(*reg.output_calls.lock().unwrap(), 2);
+            assert!(*reg.status_calls.lock().unwrap() >= 2);
+        }
+
+        #[tokio::test]
+        async fn task_output_keeps_waiting_when_settled_agent_resumes_before_output_read() {
+            let reg = MockRegistry::with_record(Some(agent_rec("running")));
+            reg.push_chunk(chunk("running", false, None, "initial"));
+            reg.push_chunk(chunk("running", false, None, "resumed"));
+            reg.push_chunk(chunk("completed", true, Some(0), "final"));
+            reg.status_overrides
+                .lock()
+                .unwrap()
+                .push_back(Some("paused".into()));
+            let res = TaskOutputTool::new(bctx(reg.clone()))
+                .call(
+                    json!({"task_id":"b12345678", "block":true, "timeout":600_000}),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(res.data["task"]["output"], "final");
+            assert_eq!(*reg.status_calls.lock().unwrap(), 2);
+            assert_eq!(*reg.output_calls.lock().unwrap(), 3);
         }
 
         #[tokio::test]
@@ -3464,7 +3903,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .await
                 .unwrap();
             assert_eq!(*processes.0.lock().unwrap(), ["the-real-child"]);
-            assert!(result.data["note"]
+            assert!(result.data["message"]
                 .as_str()
                 .unwrap()
                 .contains("killed 2 process group(s)"));
@@ -3485,7 +3924,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .await
                 .unwrap();
             assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
-            assert_eq!(result.data["note"], "had already ended (completed) but its loop had not exited; re-signalled it and killed 0 process group(s). The record remains listed while the loop is still live.");
+            assert_eq!(result.data["message"], "Task b12345678 had already ended (completed) but its loop had not exited; re-signalled it and killed 0 process group(s). The record remains listed while the loop is still live.");
+            assert!(result.data.get("note").is_none());
         }
 
         #[tokio::test]
@@ -3621,7 +4061,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .expect("ok");
             assert_eq!(res.data["retrieval_status"], "success");
             assert_eq!(res.data["task"]["status"], "completed");
-            assert!(*reg.output_calls.lock().unwrap() >= 3);
+            assert_eq!(*reg.output_calls.lock().unwrap(), 2);
+            assert!(*reg.status_calls.lock().unwrap() >= 2);
         }
 
         // ── TO-04: TaskStop's ownership guard ────────────────────────────────

@@ -1485,6 +1485,94 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
     assert_eq!(status_sink.calls(), vec!["status", "outcome", "status"]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn canceled_fusion_shutdown_drain_retries_every_finalizing_worker() {
+    struct GatedTerminalSink {
+        inner: RecordingSink,
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        release: tokio::sync::Semaphore,
+    }
+    #[async_trait]
+    impl TaskStatusSink for GatedTerminalSink {
+        async fn set_status(&self, task_id: &str, status: TaskStatus) {
+            self.inner.set_status(task_id, status).await;
+        }
+        async fn finish_fusion_terminal(
+            &self,
+            task_id: &str,
+            _run_id: String,
+            _final_text: String,
+            status: TaskStatus,
+        ) {
+            let _ = self.entered.send(());
+            self.release.acquire().await.unwrap().forget();
+            self.inner.set_status(task_id, status).await;
+        }
+    }
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output) = make_output_manager(fs.clone());
+    let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(GatedTerminalSink {
+        inner: RecordingSink::default(),
+        entered,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let handler = make_handler(ImmediateExecutor::new(), output, sink.clone());
+    let ctx = make_ctx(fs);
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        handles.push(
+            handler
+                .spawn(
+                    TaskSpawnInput::LocalFusion {
+                        request: dummy_request(),
+                        conversation_id: TEST_CONVERSATION_ID.into(),
+                    },
+                    ctx.clone(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    for _ in 0..2 {
+        entered_rx
+            .recv()
+            .await
+            .expect("each worker enters natural finalization");
+    }
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        handler.drain_shutdown(),
+    )
+    .await
+    .is_err());
+    assert!(
+        handler.drain_shutdown().await.is_err(),
+        "the handler's own timeout also keeps the barrier"
+    );
+
+    let retry = handler.drain_shutdown();
+    tokio::pin!(retry);
+    assert!(futures::poll!(&mut retry).is_pending());
+    for handle in &handles {
+        handler.kill(&handle.task_id, ctx.clone()).await.unwrap();
+    }
+    assert_eq!(handler.workers.lock().await.len(), 2);
+    sink.release.add_permits(1);
+    while handler.workers.lock().await.len() != 1 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        futures::poll!(&mut retry).is_pending(),
+        "the other worker is still live"
+    );
+    sink.release.add_permits(1);
+    retry.await.unwrap();
+    assert!(handler.workers.lock().await.is_empty());
+    handler.drain_shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());

@@ -444,6 +444,7 @@ async fn prompt_schema(tool: &MediaTool, profile: &str) -> Value {
     let wire = tool_api::wire::tool_to_wire(
         tool,
         &PromptOptions {
+            prompt_policy: None,
             session_id: Some(lingxi_core::types::SessionId::new()),
             is_scheduled_turn: false,
             model: Some("model-before-switch".into()),

@@ -274,8 +274,14 @@ fn mod_prompt_compose_facts(
     style: Option<crate::prompt::ActiveOutputStyle<'_>>,
     surfaces: &[&str],
 ) -> Utf16JsonProjection {
-    let lean = lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model)
-        == lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean;
+    let policy = crate::prompt::resolve_context_prompt_policy(
+        ctx,
+        ctx.prompt_policy.as_ref().map_or(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            |policy| policy.target.mode,
+        ),
+    );
+    let lean = crate::prompt::prompt_policy_is_lean(&policy);
     let mut traits = Vec::new();
     if lean {
         traits.push("lean");
@@ -457,6 +463,134 @@ impl ConversationOrchestrator {
         Ok(prompt_parts_source_text(
             &self.build_system_prompt_parts().await?,
         ))
+    }
+
+    pub async fn assemble_default_system_prompt_for_target_preview(
+        &self,
+        target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        let policy = Arc::new(lingxi_core::host::prompt_policy::resolve_prompt_policy(
+            target.clone(),
+        ));
+        let route = crate::query_model::ModelRoute {
+            model: target.request_model.clone(),
+            profile: target.profile_name.clone(),
+        };
+        crate::query_model::ROUTE
+            .scope(
+                Some(route.clone()),
+                super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                    (route, policy),
+                    self.assemble_default_system_prompt_preview(),
+                ),
+            )
+            .await
+    }
+
+    /// Render the environment messages accompanying a host-rendered child body.
+    pub async fn assemble_subagent_prompt_context_for_target_preview(
+        &self,
+        target: &agent::handle::SubagentPromptTarget,
+    ) -> Result<agent::handle::SubagentPromptContext, lingxi_core::settings::SettingsError> {
+        let route = crate::query_model::ModelRoute {
+            model: target.model.clone(),
+            profile: target.model_profile.clone(),
+        };
+        crate::query_model::ROUTE
+            .scope(
+                Some(route.clone()),
+                super::prompt_selection::PROMPT_POLICY_OVERRIDE.scope(
+                    (route, target.policy.clone()),
+                    async {
+                        let context = self.build_prompt_context_from_files(Vec::new()).await?;
+                        let (_, directories) = self.session_cwd.snapshot();
+                        let directories = directories
+                            .into_iter()
+                            .filter(|path| *path != context.cwd)
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>();
+                        let mut rendered =
+                            crate::prompt::subagent_env::subagent_env_block_for_target(
+                                target,
+                                &context.cwd,
+                                context.git_status.is_some(),
+                                &context.platform,
+                                &context.shell,
+                                &context.os_version,
+                                &directories,
+                                context.in_worktree,
+                            );
+                        // The host's default body already includes its native budget tail.
+                        rendered.system_suffix = None;
+                        if self.prompt_runtime.host_environment_probes_disabled {
+                            rendered.additional_context.remove(0);
+                        }
+                        if let Some(memory) = crate::prompt::dynamic_memory_section(&context) {
+                            rendered.additional_context.push(memory);
+                        }
+                        Ok(rendered)
+                    },
+                ),
+            )
+            .await
+    }
+
+    /// Keep machine-specific memory outside the cached body and the once-only
+    /// userContext announcement. This projection also works after cold resume,
+    /// compaction and route changes without overwriting plugin context keys.
+    pub(crate) async fn project_dynamic_memory_context(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+    ) {
+        let mut previous = None;
+        messages.retain(|message| {
+            if matches!(message, ConversationMessage::User { is_meta: true, origin: Some(origin), .. }
+                if origin.string_at("/type") == Some("dynamic_memory_context"))
+            {
+                previous = Some(message.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if self.config.bare
+            || self.is_persistent_app_chat()
+            || !self.config.exclude_dynamic_system_prompt_sections
+            || self.config.system_prompt_override.is_some()
+        {
+            return;
+        }
+        // The route has already passed system/tool preparation. Any settings
+        // failure is reported there; this outgoing projection has no producers.
+        let Ok(policy) = self.current_prompt_policy().await else {
+            return;
+        };
+        let Some(directory) = self
+            .prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .and_then(|prefetch| prefetch.user_memdir())
+        else {
+            return;
+        };
+        let Some(section) = crate::prompt::dynamic_memory_section_for_policy(&directory, &policy)
+        else {
+            return;
+        };
+        let text = format!("<system-reminder>\n{section}\n</system-reminder>");
+        let reminder = previous
+            .filter(|message| message.text_content() == text)
+            .unwrap_or_else(|| {
+                let mut reminder = ConversationMessage::user_meta(MessageId::new(), text);
+                if let ConversationMessage::User { origin, .. } = &mut reminder {
+                    *origin = Some(projection_object(vec![(
+                        "type".into(),
+                        "dynamic_memory_context".into(),
+                    )]));
+                }
+                reminder
+            });
+        self.prepend_transient_leading_context(messages, reminder);
     }
 
     /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
@@ -775,6 +909,8 @@ impl ConversationOrchestrator {
         self.refresh_memory_activation().await;
         let _lifecycle = self.prompt_runtime.background_memory_lifecycle.lock().await;
         let prompt = self.provider_system_prompt_inner(true).await?;
+        let policy = self.current_prompt_policy().await?;
+        crate::request_context::set_system_prompt_policy(policy.fingerprint());
         if main_request {
             self.prompt_runtime.main_memory_prompt_generation.store(
                 self.prompt_runtime
@@ -806,6 +942,7 @@ impl ConversationOrchestrator {
     > {
         if let Some(custom) = &self.config.system_prompt_override {
             if record_pending_snapshot {
+                crate::request_context::set_pending_prompt_source_vector(None);
                 *self
                     .prompt_runtime
                     .pending_prompt_source_vector
@@ -816,9 +953,7 @@ impl ConversationOrchestrator {
                 .string_units("")
                 .expect("system prompt override must be a JSON string");
             if let Some(append) = self
-                .config
-                .append_system_prompt
-                .as_ref()
+                .effective_append_system_prompt()
                 .and_then(|source| source.string_units(""))
                 .filter(|units| !units.is_empty())
             {
@@ -839,6 +974,9 @@ impl ConversationOrchestrator {
                 lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string,
             );
             if record_pending_snapshot {
+                crate::request_context::set_pending_prompt_source_vector(Some(
+                    frozen.elements.clone(),
+                ));
                 *self
                     .prompt_runtime
                     .pending_prompt_source_vector
@@ -898,6 +1036,7 @@ impl ConversationOrchestrator {
             .then_some(system_prompt)
             .filter(|vector| !vector.is_empty());
         if record_pending_snapshot {
+            crate::request_context::set_pending_prompt_source_vector(pending.clone());
             *self
                 .prompt_runtime
                 .pending_prompt_source_vector
@@ -907,12 +1046,12 @@ impl ConversationOrchestrator {
         Ok(input)
     }
 
-    pub(super) async fn current_prompt_route(&self) -> (String, Option<String>) {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            return (settings.model, Some(settings.provider));
-        }
+    pub(crate) async fn current_prompt_route(&self) -> (String, Option<String>) {
         if let Some(route) = crate::query_model::current() {
             return (route.model, route.profile);
+        }
+        if let Some(settings) = crate::scheduled_turn::current() {
+            return (settings.model, Some(settings.provider));
         }
         let session = self.session.lock().await;
         (session.model.clone(), session.model_profile.clone())
@@ -922,10 +1061,12 @@ impl ConversationOrchestrator {
         if !self.prompt_snapshot_eligible() {
             return None;
         }
+        let policy = self.current_prompt_policy().await.ok()?;
         let snapshot_guard = self.prompt_runtime.prompt_snapshot.lock().await;
-        let snapshot = snapshot_guard
-            .as_ref()
-            .filter(|snapshot| valid_prompt_snapshot(snapshot))?;
+        let snapshot = snapshot_guard.as_ref().filter(|snapshot| {
+            valid_prompt_snapshot(snapshot)
+                && snapshot.prompt_policy.as_ref() == Some(&policy.metadata())
+        })?;
         let mut cache = self.prompt_runtime.frozen_prompt_source_vector.lock().await;
         if let Some(cached) = cache.as_ref().filter(|cached| {
             cached.source == snapshot.system_prompt && cached.utf16 == snapshot.system_prompt_utf16
@@ -1054,10 +1195,20 @@ impl ConversationOrchestrator {
         &self,
         prompt: &mut crate::prompt::RenderedPromptSections,
     ) {
-        let Some(source) = self.config.append_system_prompt.as_ref() else {
+        let Some(source) = self.effective_append_system_prompt() else {
             return;
         };
-        append_source_system_prompt(prompt, source);
+        append_source_system_prompt(prompt, &source);
+    }
+
+    pub(crate) fn effective_append_system_prompt(&self) -> Option<Utf16JsonProjection> {
+        self.config.append_system_prompt.clone().or_else(|| {
+            self.prompt_runtime
+                .restored_append_system_prompt
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
     }
 
     /// Oracle `lje(e)` (`src_169588164.js`) — whether the static-system-prompt
@@ -1170,6 +1321,12 @@ impl ConversationOrchestrator {
         let Some(mut snapshot) = pending.as_ref().cloned() else {
             return;
         };
+        snapshot.prompt_policy = self
+            .current_prompt_policy()
+            .await
+            .ok()
+            .map(|policy| policy.metadata());
+        snapshot.append_system_prompt = self.effective_append_system_prompt();
         snapshot.system_prompt = system
             .iter()
             .map(|text| text.display_text().to_owned())
@@ -1201,14 +1358,16 @@ impl ConversationOrchestrator {
         {
             return;
         }
-        let Some(system_prompt) = self
-            .prompt_runtime
-            .pending_prompt_source_vector
-            .lock()
-            .await
-            .take()
-            .filter(|vector| !vector.is_empty())
-        else {
+        let pending = match crate::request_context::take_pending_prompt_source_vector() {
+            Some(pending) => pending,
+            None => self
+                .prompt_runtime
+                .pending_prompt_source_vector
+                .lock()
+                .await
+                .take(),
+        };
+        let Some(system_prompt) = pending.filter(|vector| !vector.is_empty()) else {
             return;
         };
         let system_prompt_utf16 = system_prompt
@@ -1223,6 +1382,12 @@ impl ConversationOrchestrator {
             .map(|text| text.display_text().to_owned())
             .collect::<Vec<_>>();
         let snapshot = lingxi_core::host::PromptSnapshot {
+            prompt_policy: self
+                .current_prompt_policy()
+                .await
+                .ok()
+                .map(|policy| policy.metadata()),
+            append_system_prompt: self.effective_append_system_prompt(),
             system_prompt,
             system_prompt_utf16,
             tools: prompt_tool_descriptions(wire_tools),
@@ -1327,6 +1492,19 @@ impl ConversationOrchestrator {
                     "contextRendering".to_string(),
                     Utf16JsonProjection::from_serde_value(&rendering)?,
                 ));
+            }
+            if let Some(policy) = &snapshot.prompt_policy {
+                fields.push((
+                    "promptPolicy".to_owned(),
+                    Utf16JsonProjection::from_serde_value(&serde_json::to_value(policy).map_err(
+                        lingxi_core::types::utf16_json::Utf16JsonProjectionError::Serialize,
+                    )?)?,
+                ));
+            }
+            if let Some(source) = &snapshot.append_system_prompt {
+                if source.string_units("").is_some() {
+                    fields.push(("appendSystemPrompt".to_owned(), source.clone()));
+                }
             }
             Utf16JsonProjection::object(fields)
         });
@@ -1741,6 +1919,7 @@ impl ConversationOrchestrator {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
         self.screen_mod_persisted_attachments(messages).await;
+        self.project_dynamic_memory_context(messages).await;
     }
 
     /// Read-only test/host preview of the fixed runtime reminder.
@@ -1830,7 +2009,8 @@ impl ConversationOrchestrator {
         // prompt identity with it. Locked briefly and released — every
         // `build_system_prompt` caller builds the prompt BEFORE taking the
         // session lock, so there is no reentrancy.
-        let model = self.session.lock().await.model.clone();
+        let prompt_policy = self.current_prompt_policy().await?;
+        let model = prompt_policy.target.request_model.clone();
 
         let skills = async {
             match &self.prompt_runtime.skill_listing {
@@ -1843,12 +2023,13 @@ impl ConversationOrchestrator {
         let ((git, _), skills_available) = tokio::join!(self.cached_git_status(&probe_cwd), skills);
         let skills_available = skills_available?;
 
-        // Tool name extraction: ToolRegistry's `all_names()` is the
-        // unfiltered set (builtin + plugin + MCP). M5-03 uses the
-        // unfiltered list because the registry's enable-filter requires
-        // a `ToolStaticContext` that's only meaningful at dispatch time.
-        // tools_block::format sorts alphabetically inside.
-        let tool_names: Vec<String> = self.tools.all_names();
+        // Prompt guidance may only advertise tools in this request's live pool.
+        let tool_names = self
+            .filtered_available_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
 
         let private_environment = self.prompt_runtime.host_environment_probes_disabled;
         let shell = if private_environment {
@@ -1864,6 +2045,11 @@ impl ConversationOrchestrator {
         let in_worktree = !private_environment && probe_cwd.join(".git").is_file();
 
         Ok(SystemPromptContext {
+            native_system_turns: Some(self.api.supports_native_mid_conversation_system(
+                &model,
+                prompt_policy.target.profile_name.as_deref(),
+            )),
+            prompt_policy: Some(prompt_policy),
             cwd,
             // `Platform: ${je.platform}` — claude-code emits the node
             // `process.platform` value (`darwin`/`linux`/`win32`), NOT Rust's
@@ -2061,7 +2247,14 @@ impl ConversationOrchestrator {
         {
             let mut cache = self.prompt_runtime.mod_prompt_sections.lock().await;
             let context = (
-                ctx.model.clone(),
+                format!(
+                    "{}:{}",
+                    ctx.model,
+                    ctx.prompt_policy
+                        .as_ref()
+                        .map(|policy| policy.fingerprint())
+                        .unwrap_or_default()
+                ),
                 ctx.cwd.clone(),
                 host.as_ref().map(|host| host.registration_identity()),
             );
@@ -2071,7 +2264,11 @@ impl ConversationOrchestrator {
                 cache.answers.clear();
             }
         }
-        let mode = self.conversation_profile().await.mode;
+        let mode = ctx
+            .prompt_policy
+            .as_ref()
+            .map(|policy| policy.target.mode)
+            .unwrap_or(self.conversation_profile().await.mode);
         let mut sections = named_prompt_sections_for_mode(&ctx, style, mode);
         let epoch = self.profile_epoch().await;
         if epoch > 0 {
@@ -2431,6 +2628,21 @@ impl ConversationOrchestrator {
         })?;
         if ctx.model != model {
             ctx.model = model.clone();
+            let mode = self.conversation_profile().await.mode;
+            let (_, profile) = self.current_prompt_route().await;
+            let target = self
+                .api
+                .prompt_target(&model, profile.as_deref(), mode)
+                .unwrap_or_else(|_| {
+                    lingxi_core::host::prompt_policy::PromptTarget::unresolved(
+                        &model,
+                        profile.as_deref(),
+                        mode,
+                    )
+                });
+            ctx.prompt_policy = Some(Arc::new(
+                lingxi_core::host::prompt_policy::resolve_prompt_policy(target),
+            ));
             ctx.model_marketing_name = crate::prompt::env_meta::marketing_name_for_model(&model)
                 .map(String::from)
                 .or_else(|| {
@@ -2867,37 +3079,6 @@ impl ConversationOrchestrator {
                 ]));
             }
         }
-        // Native qwi appends Aji's directory announcement after the frozen
-        // user context. The stable system protocol contains no machine path.
-        let dynamic_memory = if exclude_env {
-            let model = self.session.lock().await.model.clone();
-            (lingxi_core::host::model_capabilities::prompt_profile_for(&model)
-                != lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean)
-                .then(|| {
-                    self.prompt_runtime
-                        .memory_prefetch
-                        .as_ref()
-                        .and_then(|prefetch| prefetch.user_memdir())
-                })
-                .flatten()
-                .map(|directory| {
-                    let rendered = crate::prompt::memory_section::render_auto_directory(
-                        &memory::memdir::paths::memory_directory_prompt_path(&directory),
-                    );
-                    rendered
-                        .strip_prefix("# auto memory\n")
-                        .expect("native directory heading")
-                        .to_owned()
-                })
-        } else {
-            None
-        };
-        if let Some(directory) = &dynamic_memory {
-            blocks.push(projection_object(vec![
-                ("name".into(), "auto memory".into()),
-                ("text".into(), directory.clone().into()),
-            ]));
-        }
         // Forks inherit the exact parent user-context envelope, including its
         // non-instruction keys. omitClaudeMd replaces only claudeMd later.
         let session = self.session.lock().await;
@@ -2926,11 +3107,6 @@ impl ConversationOrchestrator {
                         .set_user_context_value(&name, value)
                         .expect("resolved Mod userContext remains an ordered object");
                 }
-            }
-            if let Some(directory) = dynamic_memory {
-                context
-                    .set_user_context_text("auto memory", directory)
-                    .expect("native memory directory is a userContext string");
             }
             context.eager_instructions = resolved
                 .at_pointer("/instructionFiles")

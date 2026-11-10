@@ -613,6 +613,12 @@ fn exact_string_at(
 
 #[async_trait]
 impl ToolInvoker for WorktreeScopedInvoker {
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.inner.trusted_session_profile()
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
@@ -746,6 +752,8 @@ mod tests {
 
     fn ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

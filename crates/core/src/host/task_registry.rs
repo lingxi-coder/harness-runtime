@@ -2088,6 +2088,17 @@ pub trait TaskRegistryHandle: Send + Sync {
         offset: Option<u64>,
     ) -> Result<TaskOutputChunk, TaskRegistryError>;
 
+    /// Read status for output polling. The compatibility default reads a chunk;
+    /// production registries should read only the task's fenced state. Paused
+    /// tasks are settled for output retrieval. Preserve transfer fences that
+    /// temporarily keep output running.
+    async fn output_status(&self, id: &str) -> Result<Option<String>, TaskRegistryError> {
+        let output = self.output(id, None).await?;
+        Ok(Some(output.status.unwrap_or_else(|| {
+            if output.done { "completed" } else { "running" }.into()
+        })))
+    }
+
     /// Mark a task as having had its terminal output consumed by a reader,
     /// suppressing a later duplicate `<task-notification>`. Mirrors claude-code
     /// `TaskOutputTool`'s `updateTaskState(task_id, t => ({ ...t, notified: true

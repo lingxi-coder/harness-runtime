@@ -666,6 +666,11 @@ pub struct BashPrecommitSkills {
 /// Options controlling [`Tool::prompt`] output.
 #[derive(Debug, Clone, Default)]
 pub struct PromptOptions {
+    /// Versioned prompt policy resolved for this request's actual model route.
+    /// All tool descriptions in a request share this value. Standalone callers
+    /// may omit it and use the builtin model-based resolver.
+    pub prompt_policy:
+        Option<std::sync::Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>>,
     /// Whether to include illustrative examples in the prompt.
     pub include_examples: bool,
     /// Trusted session whose current model route is producing this tool
@@ -675,14 +680,9 @@ pub struct PromptOptions {
     /// Whether this definition is for a host-scheduled turn. Interactive-only
     /// capabilities use this to avoid advertising unsupported continuations.
     pub is_scheduled_turn: bool,
-    /// The session (or subagent) model id the wire `tools` array is being
-    /// built for. claude-code calls `prompt({model})` per tool, and some
-    /// prompts are model-gated — TodoWrite selects the short `FWd` vs. long
-    /// `UWd` variant via the `Dh(model)` "simple system prompt" gate
-    /// (`Xla(e)=Dh(e)?FWd:UWd`). `None` mirrors the binary's `Dh(undefined)`
-    /// (returns `false` → the long prompt). Thread the real model from the
-    /// turn-loop / subagent build sites so new models (e.g. `claude-opus-4-8`,
-    /// which is outside `UWu`'s classic list) correctly pick `FWd`.
+    /// Model used by the session or subagent. The resolved prompt policy is
+    /// authoritative when present; this is the fallback identity for older
+    /// callers and remains available to capability-aware tool renderers.
     pub model: Option<String>,
     /// Active provider profile for [`Self::model`] (e.g. `github-copilot`).
     /// Tool prompts that need provider-specific wording should use this instead

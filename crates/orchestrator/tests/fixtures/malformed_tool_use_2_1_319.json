@@ -1,0 +1,602 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "sourceByteRanges": [
+    {
+      "name": "malformed retry allowance and outcome classifier",
+      "start": 279049941,
+      "endExclusive": 279050135,
+      "sha256": "1efaa9811d904b8b9e3437c119304b8a52c2601358ad1b32961ab0d78853cf81"
+    },
+    {
+      "name": "initial recovery guards",
+      "start": 279044680,
+      "endExclusive": 279044895,
+      "sha256": "d66a0212a1cefe1d52c9d4b4a482d9e6fc92b9ea5583bbd463e226b3449c17c9"
+    },
+    {
+      "name": "native assistant message builders",
+      "start": 274523190,
+      "endExclusive": 274524732,
+      "sha256": "38166d4038c0101fefd74314e87dc14493718021c00072c41668a41db1604065"
+    },
+    {
+      "name": "native user message builder",
+      "start": 274527076,
+      "endExclusive": 274529181,
+      "sha256": "cabd6331f56a50dae7faa97782b440e49c8f8d416d1015acb6714c7cd74237b2"
+    },
+    {
+      "name": "malformed retry nudge",
+      "start": 261527641,
+      "endExclusive": 261527737,
+      "sha256": "b8e52212dbcf3a809212f4e595a1a46dd91be4b0d15840a335c7427b96b51621"
+    },
+    {
+      "name": "complete malformed tool-use branch",
+      "start": 279121550,
+      "endExclusive": 279122374,
+      "sha256": "e9ab407a629750c803cad61b182ee00ca16fa768a243b2c222d7992955e90f50"
+    },
+    {
+      "name": "output-limit transition preserves malformed count",
+      "start": 279120579,
+      "endExclusive": 279120625,
+      "sha256": "dab48cc74c06b8e203781ba7a768f6bead6cc9d686f414663ff422dab9cabd00"
+    },
+    {
+      "name": "thinking-only transition preserves malformed count",
+      "start": 279122760,
+      "endExclusive": 279122796,
+      "sha256": "d539efe07b14d9a7a9f0dbea983627bc1790f89543ace1a9591cac0ed11df5c9"
+    },
+    {
+      "name": "next tool round resets malformed count",
+      "start": 279137319,
+      "endExclusive": 279137392,
+      "sha256": "56ccdab47ac7015a3adb1e2441f0ff96aefc40596c134d2b1eaeae4befeb8c17"
+    },
+    {
+      "name": "stop-hook continuation resets malformed count",
+      "start": 279125502,
+      "endExclusive": 279125606,
+      "sha256": "3824aafd82473eeb2a9a0cbd01ee04ee11ad7a7af64ea37bb10d6f9a0a7dd14e"
+    }
+  ],
+  "scope": "Verbatim retry allowance, malformed-tool-use generator branch, recovery guard expressions and native user/assistant message builders. Analytics, host context, ancillary classifier metadata and deterministic ids/clocks are controlled. This is source evaluation, not a live CLI/API execution.",
+  "cases": [
+    {
+      "name": "malformed-retry-count-0",
+      "input": {
+        "retryCount": 0,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [
+          {
+            "type": "tombstone",
+            "message": {
+              "type": "assistant",
+              "uuid": "malformed-attempt",
+              "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I will call the tool"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+            },
+            "isMeta": true,
+            "turnCompanion": true,
+            "uuid": "fixture-1",
+            "timestamp": "2000-01-01T00:00:00.000Z",
+            "retractedMessageUuids": [
+              "malformed-attempt"
+            ]
+          }
+        ],
+        "state": {
+          "guards": {
+            "maxOutputTokensRecoveryCount": 0,
+            "hasAttemptedReactiveCompact": false,
+            "reactiveCompactDeeperPass": "none",
+            "thinkingOnlyNudged": false,
+            "emptyCompletionResent": false,
+            "malformedToolUseRetryCount": 1,
+            "stopHookBlockingCount": 0
+          },
+          "messages": [
+            {
+              "type": "user",
+              "uuid": "prompt",
+              "message": {
+                "role": "user",
+                "content": "work"
+              }
+            },
+            {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+              },
+              "isMeta": true,
+              "turnCompanion": true,
+              "uuid": "fixture-1",
+              "timestamp": "2000-01-01T00:00:00.000Z",
+              "retractedMessageUuids": [
+                "malformed-attempt"
+              ]
+            }
+          ],
+          "toolUseContext": {},
+          "transition": {
+            "reason": "malformed_tool_use_retry"
+          }
+        },
+        "outcome": "continue"
+      }
+    },
+    {
+      "name": "malformed-retry-count-1",
+      "input": {
+        "retryCount": 1,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [
+          {
+            "type": "tombstone",
+            "message": {
+              "type": "assistant",
+              "uuid": "malformed-attempt",
+              "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I will call the tool"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+            },
+            "isMeta": true,
+            "turnCompanion": true,
+            "uuid": "fixture-1",
+            "timestamp": "2000-01-01T00:00:00.000Z",
+            "retractedMessageUuids": [
+              "malformed-attempt"
+            ]
+          }
+        ],
+        "state": {
+          "guards": {
+            "maxOutputTokensRecoveryCount": 0,
+            "hasAttemptedReactiveCompact": false,
+            "reactiveCompactDeeperPass": "none",
+            "thinkingOnlyNudged": false,
+            "emptyCompletionResent": false,
+            "malformedToolUseRetryCount": 2,
+            "stopHookBlockingCount": 0
+          },
+          "messages": [
+            {
+              "type": "user",
+              "uuid": "prompt",
+              "message": {
+                "role": "user",
+                "content": "work"
+              }
+            },
+            {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+              },
+              "isMeta": true,
+              "turnCompanion": true,
+              "uuid": "fixture-1",
+              "timestamp": "2000-01-01T00:00:00.000Z",
+              "retractedMessageUuids": [
+                "malformed-attempt"
+              ]
+            }
+          ],
+          "toolUseContext": {},
+          "transition": {
+            "reason": "malformed_tool_use_retry"
+          }
+        },
+        "outcome": "continue"
+      }
+    },
+    {
+      "name": "malformed-retry-count-2",
+      "input": {
+        "retryCount": 2,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [
+          {
+            "type": "assistant",
+            "uuid": "fixture-1",
+            "timestamp": "2000-01-01T00:00:00.000Z",
+            "message": {
+              "diagnostics": null,
+              "id": "fixture-2",
+              "container": null,
+              "model": "<synthetic>",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "stop_sequence",
+              "stop_sequence": "",
+              "type": "message",
+              "usage": {
+                "output_tokens_details": null,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": null,
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": null,
+                "iterations": null,
+                "speed": null,
+                "fallback_credit": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The model's tool call could not be parsed (retry also failed)."
+                }
+              ],
+              "context_management": null
+            },
+            "apiError": "malformed_tool_use_exhausted",
+            "isApiErrorMessage": true,
+            "retractedMessageUuids": []
+          }
+        ],
+        "outcome": {
+          "reason": "malformed_tool_use_exhausted"
+        }
+      }
+    },
+    {
+      "name": "malformed-retry-count-3",
+      "input": {
+        "retryCount": 3,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [
+          {
+            "type": "assistant",
+            "uuid": "fixture-1",
+            "timestamp": "2000-01-01T00:00:00.000Z",
+            "message": {
+              "diagnostics": null,
+              "id": "fixture-2",
+              "container": null,
+              "model": "<synthetic>",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "stop_sequence",
+              "stop_sequence": "",
+              "type": "message",
+              "usage": {
+                "output_tokens_details": null,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": null,
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": null,
+                "iterations": null,
+                "speed": null,
+                "fallback_credit": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The model's tool call could not be parsed (retry also failed)."
+                }
+              ],
+              "context_management": null
+            },
+            "apiError": "malformed_tool_use_exhausted",
+            "isApiErrorMessage": true,
+            "retractedMessageUuids": []
+          }
+        ],
+        "outcome": {
+          "reason": "malformed_tool_use_exhausted"
+        }
+      }
+    },
+    {
+      "name": "valid-tool-does-not-enter-malformed-branch",
+      "input": {
+        "retryCount": 1,
+        "toolCount": 1,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [],
+        "outcome": "no_retry"
+      }
+    },
+    {
+      "name": "api-error-does-not-enter-malformed-branch",
+      "input": {
+        "retryCount": 1,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "tool_use",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          },
+          "isApiErrorMessage": true
+        }
+      },
+      "expected": {
+        "events": [],
+        "outcome": "no_retry"
+      }
+    },
+    {
+      "name": "end-turn-does-not-enter-malformed-branch",
+      "input": {
+        "retryCount": 1,
+        "toolCount": 0,
+        "response": {
+          "type": "assistant",
+          "uuid": "malformed-attempt",
+          "message": {
+            "stop_reason": "end_turn",
+            "content": [
+              {
+                "type": "text",
+                "text": "I will call the tool"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "events": [],
+        "outcome": "no_retry"
+      }
+    },
+    {
+      "name": "fallback-stop-reason-with-no-assistant-row",
+      "input": {
+        "retryCount": 1,
+        "toolCount": 0,
+        "stopReason": "tool_use"
+      },
+      "expected": {
+        "events": [
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+            },
+            "isMeta": true,
+            "turnCompanion": true,
+            "uuid": "fixture-1",
+            "timestamp": "2000-01-01T00:00:00.000Z",
+            "retractedMessageUuids": []
+          }
+        ],
+        "state": {
+          "guards": {
+            "maxOutputTokensRecoveryCount": 0,
+            "hasAttemptedReactiveCompact": false,
+            "reactiveCompactDeeperPass": "none",
+            "thinkingOnlyNudged": false,
+            "emptyCompletionResent": false,
+            "malformedToolUseRetryCount": 2,
+            "stopHookBlockingCount": 0
+          },
+          "messages": [
+            {
+              "type": "user",
+              "uuid": "prompt",
+              "message": {
+                "role": "user",
+                "content": "work"
+              }
+            },
+            {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "The previous response failed to produce a valid tool call. Please retry the tool call now."
+              },
+              "isMeta": true,
+              "turnCompanion": true,
+              "uuid": "fixture-1",
+              "timestamp": "2000-01-01T00:00:00.000Z",
+              "retractedMessageUuids": []
+            }
+          ],
+          "toolUseContext": {},
+          "transition": {
+            "reason": "malformed_tool_use_retry"
+          }
+        },
+        "outcome": "continue"
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "retryCount": 0,
+      "expected": {
+        "max_tokens": 0,
+        "thinking_only": 0,
+        "next_turn": 0,
+        "stop_hook_blocking": 0
+      }
+    },
+    {
+      "retryCount": 1,
+      "expected": {
+        "max_tokens": 1,
+        "thinking_only": 1,
+        "next_turn": 0,
+        "stop_hook_blocking": 0
+      }
+    },
+    {
+      "retryCount": 2,
+      "expected": {
+        "max_tokens": 2,
+        "thinking_only": 2,
+        "next_turn": 0,
+        "stop_hook_blocking": 0
+      }
+    },
+    {
+      "retryCount": 3,
+      "expected": {
+        "max_tokens": 3,
+        "thinking_only": 3,
+        "next_turn": 0,
+        "stop_hook_blocking": 0
+      }
+    }
+  ],
+  "outcomes": [
+    {
+      "retryCount": 0,
+      "retryAllowed": true,
+      "malformed": "malformed_again",
+      "success": "succeeded"
+    },
+    {
+      "retryCount": 1,
+      "retryAllowed": true,
+      "malformed": "malformed_again",
+      "success": "succeeded"
+    },
+    {
+      "retryCount": 2,
+      "retryAllowed": false,
+      "malformed": "gave_up",
+      "success": "succeeded"
+    },
+    {
+      "retryCount": 3,
+      "retryAllowed": false,
+      "malformed": "gave_up",
+      "success": "succeeded"
+    }
+  ]
+}

@@ -130,6 +130,7 @@ pub struct PoolSubagentSpawner {
     api_client: Option<Arc<dyn SubagentApiClient>>,
     structured_output_validator:
         Option<Arc<dyn lingxi_core::host::json_schema_validator::JsonSchemaValidator>>,
+    forward_subagent_output: Option<std::sync::Weak<dyn lingxi_core::host::OutputStream>>,
     instruction_provider:
         Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
     /// The refusal-fallback chain handed to every child runner. Empty (the
@@ -197,6 +198,10 @@ pub struct PoolSubagentSpawner {
     persistent_agent_mcp_cleanups: Arc<
         tokio::sync::Mutex<HashMap<AgentId, Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>>>,
     >,
+    /// Serialize retries for one persistent stop through runner release and
+    /// MCP teardown. Weak entries keep completed transactions unowned.
+    persistent_stop_transactions:
+        Arc<std::sync::Mutex<HashMap<AgentId, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
     /// File-loaded user/project agent catalog (set-once, mirrors the registry
     /// cycle-break). When set it takes PRECEDENCE over [`Self::builtins`] on an
     /// `agent_type` collision — matching claude-code's later-wins ordering
@@ -395,6 +400,7 @@ pub struct PoolSubagentSpawner {
         Option<lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
+    conversation_mode: lingxi_core::host::session_context::ConversationMode,
     spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
     usage_recorder: Option<Arc<dyn SubagentUsageRecorder>>,
 }
@@ -403,10 +409,24 @@ pub struct PoolSubagentSpawner {
 pub type MobileWorkspaceCwdProvider =
     Arc<dyn Fn(Option<&std::path::Path>) -> Option<String> + Send + Sync>;
 
-/// Renders the subagent `<env>` block for a resolved model id (claude-code
-/// `tIm`). The static environment is captured by the closure at the composition
-/// root; only the resolved model id varies per spawn.
-pub type SubagentEnvRenderer = Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentPromptContext {
+    pub additional_context: Vec<String>,
+    pub system_suffix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentPromptTarget {
+    pub model: String,
+    pub model_profile: Option<String>,
+    pub policy: Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+    pub supports_system_turns: bool,
+}
+
+/// The composition root renders host context for the child's resolved route.
+pub type SubagentEnvRenderer = Arc<
+    dyn Fn(&SubagentPromptTarget, Option<&std::path::Path>) -> SubagentPromptContext + Send + Sync,
+>;
 
 /// Reads the LIVE default parent / main-loop model at spawn time (claude-code
 /// `getMainLoopModel()` off the current session). Returns `None` when the live
@@ -482,6 +502,7 @@ impl PoolSubagentSpawner {
             api_client: None,
             structured_output_validator: None,
             instruction_provider: None,
+            forward_subagent_output: None,
             tool_registry: Arc::new(RuntimeLink::new()),
             native_settings_prompt_provider: Arc::new(RuntimeLink::new()),
             refusal_fallback_chain: Vec::new(),
@@ -489,6 +510,7 @@ impl PoolSubagentSpawner {
             new_diagnostics_source_factory: None,
             builtins: Arc::new(builtins),
             persistent_agent_mcp_cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            persistent_stop_transactions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
             default_model: None,
             default_model_provider: Arc::new(std::sync::OnceLock::new()),
@@ -516,6 +538,7 @@ impl PoolSubagentSpawner {
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
+            conversation_mode: Default::default(),
             spawn_observer: None,
             usage_recorder: None,
         }
@@ -573,11 +596,40 @@ impl PoolSubagentSpawner {
         self
     }
 
+    /// Query the live sink capability before materializing nested messages.
+    #[must_use]
+    pub fn with_forward_subagent_output(
+        mut self,
+        output: &Arc<dyn lingxi_core::host::OutputStream>,
+    ) -> Self {
+        self.forward_subagent_output = Some(Arc::downgrade(output));
+        self
+    }
+
+    fn should_forward_subagent_text(&self) -> bool {
+        self.forward_subagent_output
+            .as_ref()
+            .map_or(true, |output| {
+                output
+                    .upgrade()
+                    .is_some_and(|sink| sink.wants_forwarded_subagent_messages())
+            })
+    }
+
     /// Attach the parent session mode so independently spawned child runners
     /// do not depend on a process-global interactivity flag.
     #[must_use]
     pub fn with_session_interactive(mut self, interactive: bool) -> Self {
         self.session_interactive = Some(interactive);
+        self
+    }
+
+    #[must_use]
+    pub fn with_conversation_mode(
+        mut self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Self {
+        self.conversation_mode = mode;
         self
     }
 
@@ -1051,6 +1103,10 @@ impl PoolSubagentSpawner {
         observer_request.creator_team_name = None;
         observer_request.fork_context_messages = None;
         observer_request.fork_parent_system_prompt = None;
+        observer_request.fork_prompt_policy = None;
+        observer_request.fork_custom_system_prompt = None;
+        observer_request.fork_append_system_prompt = None;
+        observer_request.fork_role_system_prompt = None;
         observer_request.forked_skill_name = None;
         observer_request.forked_skill_attribution = None;
         observer_request.resumed_history = None;
@@ -1168,6 +1224,20 @@ impl PoolSubagentSpawner {
 - For clear communication with the user the assistant MUST avoid using emojis.\n\
 - Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n\
 - Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create. (Files written as input to another tool are fine; this note is about report files.)";
+
+    pub(crate) fn subagent_prompt_appendix(rewrite: bool) -> (&'static str, &'static str) {
+        if rewrite {
+            (
+                include_str!("templates/subagent_consent_rewritten.md"),
+                include_str!("templates/subagent_notes_rewritten.md"),
+            )
+        } else {
+            (
+                Self::SUBAGENT_CONSENT_PARAGRAPH,
+                Self::SUBAGENT_NOTES_TRAILER,
+            )
+        }
+    }
 }
 
 /// The persistent / resumable subagent seam (claude-code `run_in_background` +
@@ -1401,45 +1471,72 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
     }
 
     async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
-        // Close the spawn gate throughout cooperative cancellation and teardown.
-        let _stop_pending =
+        // Close the gate before spawning or awaiting anything, including when
+        // another caller already owns this agent's stop transaction.
+        let stop_pending =
             lingxi_core::host::agent_processes::mark_stop_pending(&agent_id.to_string());
-        // Cooperative exit first: a parked runner wakes on `UserExit` and emits
-        // a clean `Killed` before the hard cancel. A send failure means the slot
-        // is already gone (runner dropped its receiver) — non-fatal, proceed to
-        // `deallocate`, which is itself idempotent (missing slot ⇒ Ok).
-        let _ = self
-            .pool
-            .send_event(agent_id, lingxi_core::Event::UserExit)
-            .await;
-        // Sending an exit is not its acknowledgement: immediate deallocation
-        // aborts the runner before it can flush `cancelled` and emit `Killed`.
-        // Claude 2.1.269's EM requests cancellation; the async loop settles its
-        // cancelled result and cleanup. Give this detached Rust runner the same
-        // opportunity, bounded by the existing hard-cancel grace.
-        let _ = tokio::time::timeout(SPAWN_CANCEL_GRACE, async {
-            while !self.pool.agent_runner_finished(agent_id).await {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let transaction = {
+            let mut transactions = self
+                .persistent_stop_transactions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = transactions.entry(*agent_id).or_default();
+            entry.upgrade().unwrap_or_else(|| {
+                let transaction = Arc::new(tokio::sync::Mutex::new(()));
+                *entry = Arc::downgrade(&transaction);
+                transaction
+            })
+        };
+        let pool = self.pool.clone();
+        let mcp_cleanups = self.persistent_agent_mcp_cleanups.clone();
+        let transactions = self.persistent_stop_transactions.clone();
+        let agent_id = *agent_id;
+        // The transaction owns cancellation, slot release, and every cleanup
+        // await. Dropping this caller detaches its JoinHandle, so no teardown
+        // future or stop-pending guard is lost while a disconnect is pending.
+        tokio::spawn(async move {
+            let _stop_pending = stop_pending;
+            let serial = transaction.lock().await;
+            let result = async {
+                // Sending exit is not its acknowledgement: preserve the
+                // cooperative grace for transcript flush and Killed emission.
+                let _ = pool
+                    .send_event(&agent_id, lingxi_core::Event::UserExit)
+                    .await;
+                let _ = tokio::time::timeout(SPAWN_CANCEL_GRACE, async {
+                    while !pool.agent_runner_finished(&agent_id).await {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                })
+                .await;
+                // Release capacity before any slow disconnect. On a pool
+                // error retain the cleanup entry so the stop can be retried.
+                pool.deallocate(&agent_id)
+                    .await
+                    .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+                let owed = mcp_cleanups.lock().await.remove(&agent_id);
+                if let Some(cleanups) = owed {
+                    let label = agent_id.to_string();
+                    crate::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &label).await;
+                }
+                Ok(())
             }
+            .await;
+            drop(serial);
+            let mut active = transactions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if active.get(&agent_id).is_some_and(|entry| {
+                entry.ptr_eq(&Arc::downgrade(&transaction)) && entry.strong_count() == 1
+            }) {
+                active.remove(&agent_id);
+            }
+            result
         })
-        .await;
-        // §24b: settle any agent-scoped MCP teardown this persistent spawn
-        // parked. Runs BEFORE `deallocate` so a teardown failure cannot leave
-        // the slot held, and is idempotent — the entry is removed, so a second
-        // `stop` finds nothing owed.
-        let owed = self
-            .persistent_agent_mcp_cleanups
-            .lock()
-            .await
-            .remove(agent_id);
-        if let Some(cleanups) = owed {
-            let label = agent_id.to_string();
-            crate::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &label).await;
-        }
-        self.pool
-            .deallocate(agent_id)
-            .await
-            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
+        .await
+        .map_err(|e| {
+            SubagentSpawnError::Runtime(format!("persistent agent stop task failed: {e}"))
+        })?
     }
 }
 
@@ -1823,19 +1920,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         for line in subagent_tool_call_lines(&message) {
                             let _ = sink.try_send(line);
                         }
-                        // (2.1.212 `--forward-subagent-text`) Also forward the
-                        // raw ASSISTANT message so the Agent tool can re-emit its
-                        // text/thinking blocks onto the parent stream-json output
-                        // with `parent_tool_use_id` set. The gate lives at the
-                        // stream-json sink, so this ships the message
-                        // unconditionally (a no-op sink drops it) but only for
-                        // assistant turns — tool_use/tool_result rides the
-                        // activity path above. Encoded as a sentinel JSON line on
-                        // the `String` progress channel (`traits` cannot carry a
-                        // richer type without a channel-type change); the Agent
-                        // tool decodes it back into a structured `ToolProgress`.
-                        if let Some(line) = forward_subagent_message_line(&message) {
-                            let _ = sink.try_send(line);
+                        if self.should_forward_subagent_text() {
+                            if let Some(line) = forward_subagent_message_line(&message) {
+                                let _ = sink.try_send(line);
+                            }
                         }
                     }
                 }
@@ -1868,7 +1956,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         row: row.clone(),
                         message_index,
                     });
-                    if let Some(sink) = progress.as_ref() {
+                    if let Some(sink) = progress
+                        .as_ref()
+                        .filter(|_| self.should_forward_subagent_text())
+                    {
                         let source = serde_json::to_string(&message)
                             .expect("host API-error query message serializes");
                         let projection =
@@ -2706,3 +2797,7 @@ mod agent_spawn_hook_tests;
 #[cfg(test)]
 #[path = "handle/tests/agent_spawn_deny_recheck_tests.rs"]
 mod agent_spawn_deny_recheck_tests;
+
+#[cfg(test)]
+#[path = "handle/forwarding_capability_test.rs"]
+mod forwarding_capability_test;

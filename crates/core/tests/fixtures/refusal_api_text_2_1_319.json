@@ -1,0 +1,2025 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "sourceByteRanges": [
+    {
+      "name": "baked native catalog",
+      "start": 260742015,
+      "endExclusive": 260762295,
+      "sha256": "01b4e542e4f1fe6628d108757a1e510a89645abd1620c6af888f6c50922cee82"
+    },
+    {
+      "name": "fmt and complete Xp gate",
+      "start": 264940259,
+      "endExclusive": 264940922,
+      "sha256": "3b16daa36742d3677f2eea3f2f6ca7c8efa93e1ff0dbd820a61e6e3833b74dd9"
+    },
+    {
+      "name": "category copy, sanitization and first-time model copy",
+      "start": 264944138,
+      "endExclusive": 264946687,
+      "sha256": "5c50d674bec0da7761b766f60021f13c9ddd80bd04a71961c8c5a51b58810824"
+    },
+    {
+      "name": "no-fallback cyber copy",
+      "start": 264943651,
+      "endExclusive": 264943791,
+      "sha256": "c1d7d5512b7f1c50769ab7cc72404dda92f3880acdde62d58d9758fc47b29581"
+    },
+    {
+      "name": "complete terminal refusal builder e9t",
+      "start": 271104667,
+      "endExclusive": 271106513,
+      "sha256": "f2f2fcc0d7cf2376af6db14aef9a3425cb350bc0f2c75599905f976affaff3ad"
+    },
+    {
+      "name": "Nln request/message identifier filter",
+      "start": 271108547,
+      "endExclusive": 271108621,
+      "sha256": "335ca7b1712b6598e4155d93876d28b8a8f1aa5e3d869055d77b8e72bb35281b"
+    },
+    {
+      "name": "native assistant message builders",
+      "start": 274523190,
+      "endExclusive": 274524732,
+      "sha256": "38166d4038c0101fefd74314e87dc14493718021c00072c41668a41db1604065"
+    },
+    {
+      "name": "Q code-unit cap and surrogate-safe boundary",
+      "start": 259201128,
+      "endExclusive": 259201271,
+      "sha256": "7be1af4bcce5b6d8dcc6fa8e505b4b0a4199df63e8eb388a8b5ceb97308a928d"
+    },
+    {
+      "name": "native removal of lone surrogates",
+      "start": 259201848,
+      "endExclusive": 259202409,
+      "sha256": "1e688b365c4b7eb839aed60857a1b1ea36cf1b3c1a34622959e29d11d031370e"
+    },
+    {
+      "name": "native Unicode control class",
+      "start": 259215048,
+      "endExclusive": 259215470,
+      "sha256": "187bcccf78ccff4b4c065776a25c825dd2a3df67253758ecaa995b48742c91e2"
+    },
+    {
+      "name": "native control sanitizer regex",
+      "start": 259215579,
+      "endExclusive": 259215613,
+      "sha256": "56879dd00f7e25b28d017bc6805e6af159a01bed2acb22fda19e178ce325dbdb"
+    },
+    {
+      "name": "vme/Si native details sanitizer",
+      "start": 259219298,
+      "endExclusive": 259219508,
+      "sha256": "eef743534c85ad84035f1fe6414f540a990e5a05cb5b098488c06e9c6b38e4e8"
+    },
+    {
+      "name": "cyber verification copy and schema",
+      "start": 271043687,
+      "endExclusive": 271044996,
+      "sha256": "73ba1b0dbdaf669d094b362a2b4591aa285bc2e6860a2093add29fddf26f04d8"
+    }
+  ],
+  "scope": "Actual-source e9t, fmt/Xp, first-time/category text, Si/Q, BQe, Nln and native assistant message constructors. Canonical identity, served capability observations, provider/default fallback, help URL, feedback, diskless and Life Sciences suffix are controlled host inputs. Node ANSI stripping is used only for the retained standard SGR vector. Schema primitives mirror literal/object/union validation. No live account, provider response, Life Sciences lookup, or Claude CLI execution is asserted.",
+  "cases": [
+    {
+      "name": "known display label without fallback capability uses the generic branch",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "req_319",
+        "messageId": "msg_319",
+        "details": null
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nRequest ID: req_319\n\nMessage ID: msg_319",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "req_319",
+        "refusedMessageId": "msg_319",
+        "stopDetails": null
+      }
+    },
+    {
+      "name": "no fallback cyber branch drops obsolete Apply clause",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "req_cyber",
+        "messageId": "msg_cyber",
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`\n\nRequest ID: req_cyber\n\nMessage ID: msg_cyber",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "req_cyber",
+        "refusedMessageId": "msg_cyber",
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "no fallback cyber feedback action",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Send feedback with /feedback or learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "no fallback cyber disabled feedback",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": false,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "labelled eligible bio copy",
+      "input": {
+        "model": "claude-opus-5",
+        "label": "Opus 5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/16049681",
+        "requestId": "req_bio",
+        "messageId": "msg_bio",
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. Claude Code can't respond to this message with Opus 5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/16049681\n\nDetails: `[bio]`\n\nRequest ID: req_bio\n\nMessage ID: msg_bio",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "req_bio",
+        "refusedMessageId": "msg_bio",
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "labelled eligible generic copy",
+      "input": {
+        "model": "claude-opus-5",
+        "label": "Opus 5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/16049681",
+        "requestId": null,
+        "messageId": null,
+        "details": null
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this message with Opus 5.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nSend feedback with /feedback or learn more: https://support.claude.com/en/articles/16049681",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": null
+      }
+    },
+    {
+      "name": "first-time sonnet cyber copy",
+      "input": {
+        "model": "claude-sonnet-5-5",
+        "label": "Sonnet 5.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Sonnet 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). You may be seeing this for the first time on a Sonnet model: Sonnet 5.5 is more capable and has stronger safeguards as a result, which can sometimes flag non-cybersecurity work. We're improving these safeguards to reduce the amount of incorrectly flagged messages. Claude Code can't respond to your last message with Sonnet 5.5.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nSend feedback with /feedback or learn more: https://support.claude.com/en/articles/8106465\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "sonnet bio uses ordinary category copy",
+      "input": {
+        "model": "claude-sonnet-5-5",
+        "label": "Sonnet 5.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Sonnet 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. Claude Code can't respond to this message with Sonnet 5.5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/8106465\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "first-time opus55 cyber copy",
+      "input": {
+        "model": "claude-opus-5-5",
+        "label": "Opus 5.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/16049681",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). You may be seeing this for the first time: Opus 5.5 is more capable and has stronger safeguards as a result, which can sometimes flag non-cybersecurity work. We're improving these safeguards to reduce the amount of incorrectly flagged messages. Claude Code can't respond to your last message with Opus 5.5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/16049681\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "first-time opus55 bio copy",
+      "input": {
+        "model": "claude-opus-5-5",
+        "label": "Opus 5.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/16049681",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). You may be seeing this for the first time: Opus 5.5 is more capable and has stronger safeguards as a result, which can sometimes flag biology-research-adjacent work. We're improving these safeguards to reduce the amount of incorrectly flagged messages. Claude Code can't respond to your last message with Opus 5.5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/16049681\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "first-time opus55 frontier_llm copy",
+      "input": {
+        "model": "claude-opus-5-5",
+        "label": "Opus 5.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/16049681",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "frontier_llm"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). You may be seeing this for the first time: Opus 5.5 is more capable and has stronger safeguards as a result. We're improving these safeguards to reduce the amount of incorrectly flagged messages. Claude Code can't respond to your last message with Opus 5.5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/16049681\n\nDetails: `[frontier_llm]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "frontier_llm"
+        }
+      }
+    },
+    {
+      "name": "Fable first-time suppression",
+      "input": {
+        "model": "claude-fable-5-1",
+        "label": "Fable 5.1",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": false,
+        "fableCopySuppressed": true,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/15363606",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": true,
+      "expected": {
+        "content": "API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. Claude Code can't respond to this message with Fable 5.1.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nYou can learn more: https://support.claude.com/en/articles/15363606\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "explicit refusal fallback denial overrides baked model flag",
+      "input": {
+        "model": "claude-opus-5",
+        "label": "Opus 5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": false,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Opus 5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "non first-party provider needs resolved fallback",
+      "input": {
+        "model": "claude-opus-5",
+        "label": "Opus 5",
+        "provider": "Bedrock",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Opus 5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber"
+        }
+      }
+    },
+    {
+      "name": "no serving model uses native generic label",
+      "input": {
+        "model": null,
+        "label": null,
+        "provider": "Bedrock",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Claude can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      }
+    },
+    {
+      "name": "terminal explanations stay out of display text",
+      "input": {
+        "model": "private-vendor-model",
+        "label": "Private Vendor Model",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": false,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "other",
+          "explanation": "provider detail"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Private Vendor Model can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[other]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "other",
+          "explanation": "provider detail"
+        }
+      }
+    },
+    {
+      "name": "details removes ANSI controls delimiters and whitespace",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "bad id",
+        "messageId": "bad/id",
+        "details": {
+          "category": "﻿\u001b[31m[bio]`\u001b[0m\t x⠀"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[bio x]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "bad id",
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "﻿\u001b[31m[bio]`\u001b[0m\t x⠀"
+        }
+      }
+    },
+    {
+      "name": "details category cap preserves a complete surrogate pair",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
+        }
+      }
+    },
+    {
+      "name": "details category cap drops a split high surrogate",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
+        }
+      }
+    },
+    {
+      "name": "identifier upper bound is accepted",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "messageId": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "details": null
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nRequest ID: rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\n\nMessage ID: mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "refusedMessageId": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "stopDetails": null
+      }
+    },
+    {
+      "name": "oversized identifiers are omitted independently",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "messageId": "msg_ok",
+        "details": null
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nMessage ID: msg_ok",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "refusedMessageId": "msg_ok",
+        "stopDetails": null
+      }
+    },
+    {
+      "name": "empty request and unicode message identifier are omitted",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": "",
+        "messageId": "msg_é",
+        "details": null
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": "",
+        "refusedMessageId": null,
+        "stopDetails": null
+      }
+    },
+    {
+      "name": "active cyber verification a",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "a"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. You have Specialized Access in the Cyber Verification Program, and your last message was still flagged. If it's legitimate security work, send feedback with /feedback so we can improve. It won't unblock your last message. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "active cyber verification b",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "b"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. You have Red Team Access in the Cyber Verification Program, and your last message was still flagged. If it's legitimate security work, send feedback with /feedback so we can improve. It won't unblock your last message. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "b"
+          }
+        }
+      }
+    },
+    {
+      "name": "active cyber verification c",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": true,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. You have Defense Access in the Cyber Verification Program, and your last message was still flagged. If it's legitimate security work, send feedback with /feedback so we can improve. It won't unblock your last message. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      }
+    },
+    {
+      "name": "active cyber verification noninteractive retains action",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. You have Defense Access in the Cyber Verification Program, and your last message was still flagged. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      }
+    },
+    {
+      "name": "inactive cyber verification not_assigned_but_organization_approved",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "inactive",
+            "reason": "not_assigned_but_organization_approved"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Ask your admin for Defense Access in the Cyber Verification Program to reduce these interruptions. An admin can check your role in Organization settings. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "inactive",
+            "reason": "not_assigned_but_organization_approved"
+          }
+        }
+      }
+    },
+    {
+      "name": "inactive cyber verification organization_not_approved",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "inactive",
+            "reason": "organization_not_approved"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Your organization doesn't have Cyber Verification Program access in effect for this model. Your admin can check your organization's status in the Verification Portal (https://portal.anthropic.com). Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "inactive",
+            "reason": "organization_not_approved"
+          }
+        }
+      }
+    },
+    {
+      "name": "verification data on other categories is ignored",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "bio",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[bio]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "bio",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "c"
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid verification tier is ignored",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "unknown"
+          }
+        }
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetails": {
+          "category": "cyber",
+          "cyber_verification": {
+            "type": "active",
+            "tier": "unknown"
+          }
+        }
+      }
+    },
+    {
+      "name": "source lone high surrogate is removed from Details",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": null,
+        "categoryUtf16": [
+          55296
+        ],
+        "sourceStopDetails": "{\"category\":\"\\ud800\"}"
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetailsSource": "{\"category\":\"\\ud800\"}",
+        "contentUtf16": [
+          65,
+          80,
+          73,
+          32,
+          69,
+          114,
+          114,
+          111,
+          114,
+          58,
+          32,
+          83,
+          111,
+          110,
+          110,
+          101,
+          116,
+          32,
+          52,
+          46,
+          53,
+          32,
+          99,
+          97,
+          110,
+          39,
+          116,
+          32,
+          104,
+          101,
+          108,
+          112,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          105,
+          115,
+          46,
+          32,
+          83,
+          116,
+          97,
+          114,
+          116,
+          32,
+          97,
+          32,
+          110,
+          101,
+          119,
+          32,
+          115,
+          101,
+          115,
+          115,
+          105,
+          111,
+          110,
+          32,
+          116,
+          111,
+          32,
+          99,
+          111,
+          110,
+          116,
+          105,
+          110,
+          117,
+          101,
+          46,
+          10,
+          10,
+          76,
+          101,
+          97,
+          114,
+          110,
+          32,
+          109,
+          111,
+          114,
+          101,
+          58,
+          32,
+          104,
+          116,
+          116,
+          112,
+          115,
+          58,
+          47,
+          47,
+          119,
+          119,
+          119,
+          46,
+          97,
+          110,
+          116,
+          104,
+          114,
+          111,
+          112,
+          105,
+          99,
+          46,
+          99,
+          111,
+          109,
+          47,
+          108,
+          101,
+          103,
+          97,
+          108,
+          47,
+          97,
+          117,
+          112
+        ]
+      }
+    },
+    {
+      "name": "source lone low surrogate is removed from Details",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": null,
+        "categoryUtf16": [
+          56320
+        ],
+        "sourceStopDetails": "{\"category\":\"\\udc00\"}"
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetailsSource": "{\"category\":\"\\udc00\"}",
+        "contentUtf16": [
+          65,
+          80,
+          73,
+          32,
+          69,
+          114,
+          114,
+          111,
+          114,
+          58,
+          32,
+          83,
+          111,
+          110,
+          110,
+          101,
+          116,
+          32,
+          52,
+          46,
+          53,
+          32,
+          99,
+          97,
+          110,
+          39,
+          116,
+          32,
+          104,
+          101,
+          108,
+          112,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          105,
+          115,
+          46,
+          32,
+          83,
+          116,
+          97,
+          114,
+          116,
+          32,
+          97,
+          32,
+          110,
+          101,
+          119,
+          32,
+          115,
+          101,
+          115,
+          115,
+          105,
+          111,
+          110,
+          32,
+          116,
+          111,
+          32,
+          99,
+          111,
+          110,
+          116,
+          105,
+          110,
+          117,
+          101,
+          46,
+          10,
+          10,
+          76,
+          101,
+          97,
+          114,
+          110,
+          32,
+          109,
+          111,
+          114,
+          101,
+          58,
+          32,
+          104,
+          116,
+          116,
+          112,
+          115,
+          58,
+          47,
+          47,
+          119,
+          119,
+          119,
+          46,
+          97,
+          110,
+          116,
+          104,
+          114,
+          111,
+          112,
+          105,
+          99,
+          46,
+          99,
+          111,
+          109,
+          47,
+          108,
+          101,
+          103,
+          97,
+          108,
+          47,
+          97,
+          117,
+          112
+        ]
+      }
+    },
+    {
+      "name": "malformed category never becomes the cyber discriminator",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": null,
+        "categoryUtf16": [
+          99,
+          121,
+          98,
+          101,
+          114,
+          55296
+        ],
+        "sourceStopDetails": "{\"category\":\"cyber\\ud800\"}"
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[cyber]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetailsSource": "{\"category\":\"cyber\\ud800\"}",
+        "contentUtf16": [
+          65,
+          80,
+          73,
+          32,
+          69,
+          114,
+          114,
+          111,
+          114,
+          58,
+          32,
+          83,
+          111,
+          110,
+          110,
+          101,
+          116,
+          32,
+          52,
+          46,
+          53,
+          32,
+          99,
+          97,
+          110,
+          39,
+          116,
+          32,
+          104,
+          101,
+          108,
+          112,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          105,
+          115,
+          46,
+          32,
+          83,
+          116,
+          97,
+          114,
+          116,
+          32,
+          97,
+          32,
+          110,
+          101,
+          119,
+          32,
+          115,
+          101,
+          115,
+          115,
+          105,
+          111,
+          110,
+          32,
+          116,
+          111,
+          32,
+          99,
+          111,
+          110,
+          116,
+          105,
+          110,
+          117,
+          101,
+          46,
+          10,
+          10,
+          76,
+          101,
+          97,
+          114,
+          110,
+          32,
+          109,
+          111,
+          114,
+          101,
+          58,
+          32,
+          104,
+          116,
+          116,
+          112,
+          115,
+          58,
+          47,
+          47,
+          119,
+          119,
+          119,
+          46,
+          97,
+          110,
+          116,
+          104,
+          114,
+          111,
+          112,
+          105,
+          99,
+          46,
+          99,
+          111,
+          109,
+          47,
+          108,
+          101,
+          103,
+          97,
+          108,
+          47,
+          97,
+          117,
+          112,
+          10,
+          10,
+          68,
+          101,
+          116,
+          97,
+          105,
+          108,
+          115,
+          58,
+          32,
+          96,
+          91,
+          99,
+          121,
+          98,
+          101,
+          114,
+          93,
+          96
+        ]
+      }
+    },
+    {
+      "name": "source replacement character stays distinct from lone units",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": "msg_source",
+        "details": null,
+        "categoryUtf16": [
+          65,
+          55296,
+          65533,
+          56320,
+          66
+        ],
+        "sourceStopDetails": "{\"category\":\"A\\ud800�\\udc00B\"}"
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[A�B]`\n\nMessage ID: msg_source",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": "msg_source",
+        "stopDetailsSource": "{\"category\":\"A\\ud800�\\udc00B\"}",
+        "contentUtf16": [
+          65,
+          80,
+          73,
+          32,
+          69,
+          114,
+          114,
+          111,
+          114,
+          58,
+          32,
+          83,
+          111,
+          110,
+          110,
+          101,
+          116,
+          32,
+          52,
+          46,
+          53,
+          32,
+          99,
+          97,
+          110,
+          39,
+          116,
+          32,
+          104,
+          101,
+          108,
+          112,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          105,
+          115,
+          46,
+          32,
+          83,
+          116,
+          97,
+          114,
+          116,
+          32,
+          97,
+          32,
+          110,
+          101,
+          119,
+          32,
+          115,
+          101,
+          115,
+          115,
+          105,
+          111,
+          110,
+          32,
+          116,
+          111,
+          32,
+          99,
+          111,
+          110,
+          116,
+          105,
+          110,
+          117,
+          101,
+          46,
+          10,
+          10,
+          76,
+          101,
+          97,
+          114,
+          110,
+          32,
+          109,
+          111,
+          114,
+          101,
+          58,
+          32,
+          104,
+          116,
+          116,
+          112,
+          115,
+          58,
+          47,
+          47,
+          119,
+          119,
+          119,
+          46,
+          97,
+          110,
+          116,
+          104,
+          114,
+          111,
+          112,
+          105,
+          99,
+          46,
+          99,
+          111,
+          109,
+          47,
+          108,
+          101,
+          103,
+          97,
+          108,
+          47,
+          97,
+          117,
+          112,
+          10,
+          10,
+          68,
+          101,
+          116,
+          97,
+          105,
+          108,
+          115,
+          58,
+          32,
+          96,
+          91,
+          65,
+          65533,
+          66,
+          93,
+          96,
+          10,
+          10,
+          77,
+          101,
+          115,
+          115,
+          97,
+          103,
+          101,
+          32,
+          73,
+          68,
+          58,
+          32,
+          109,
+          115,
+          103,
+          95,
+          115,
+          111,
+          117,
+          114,
+          99,
+          101
+        ]
+      }
+    },
+    {
+      "name": "source ANSI category keeps exact source until after stripping",
+      "input": {
+        "model": "claude-sonnet-4-5",
+        "label": "Sonnet 4.5",
+        "provider": "FirstParty",
+        "interactive": false,
+        "feedbackEligible": true,
+        "fableCopySuppressed": false,
+        "capability": null,
+        "noRefusalFallback": false,
+        "nonFirstPartyFallback": false,
+        "diskless": false,
+        "helpUrl": "https://support.claude.com/en/articles/8106465",
+        "requestId": null,
+        "messageId": null,
+        "details": null,
+        "categoryUtf16": [
+          27,
+          91,
+          51,
+          49,
+          109,
+          65,
+          55296,
+          66,
+          27,
+          91,
+          48,
+          109
+        ],
+        "sourceStopDetails": "{\"category\":\"\\u001b[31mA\\ud800B\\u001b[0m\"}"
+      },
+      "modelEligible": false,
+      "expected": {
+        "content": "API Error: Sonnet 4.5 can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[AB]`",
+        "error": "invalid_request",
+        "stopReason": "refusal",
+        "requestId": null,
+        "refusedMessageId": null,
+        "stopDetailsSource": "{\"category\":\"\\u001b[31mA\\ud800B\\u001b[0m\"}",
+        "contentUtf16": [
+          65,
+          80,
+          73,
+          32,
+          69,
+          114,
+          114,
+          111,
+          114,
+          58,
+          32,
+          83,
+          111,
+          110,
+          110,
+          101,
+          116,
+          32,
+          52,
+          46,
+          53,
+          32,
+          99,
+          97,
+          110,
+          39,
+          116,
+          32,
+          104,
+          101,
+          108,
+          112,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          105,
+          115,
+          46,
+          32,
+          83,
+          116,
+          97,
+          114,
+          116,
+          32,
+          97,
+          32,
+          110,
+          101,
+          119,
+          32,
+          115,
+          101,
+          115,
+          115,
+          105,
+          111,
+          110,
+          32,
+          116,
+          111,
+          32,
+          99,
+          111,
+          110,
+          116,
+          105,
+          110,
+          117,
+          101,
+          46,
+          10,
+          10,
+          76,
+          101,
+          97,
+          114,
+          110,
+          32,
+          109,
+          111,
+          114,
+          101,
+          58,
+          32,
+          104,
+          116,
+          116,
+          112,
+          115,
+          58,
+          47,
+          47,
+          119,
+          119,
+          119,
+          46,
+          97,
+          110,
+          116,
+          104,
+          114,
+          111,
+          112,
+          105,
+          99,
+          46,
+          99,
+          111,
+          109,
+          47,
+          108,
+          101,
+          103,
+          97,
+          108,
+          47,
+          97,
+          117,
+          112,
+          10,
+          10,
+          68,
+          101,
+          116,
+          97,
+          105,
+          108,
+          115,
+          58,
+          32,
+          96,
+          91,
+          65,
+          66,
+          93,
+          96
+        ]
+      }
+    }
+  ],
+  "gateCases": [
+    {
+      "model": "claude-sonnet-4-5",
+      "eligible": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "eligible": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "eligible": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "eligible": false
+    },
+    {
+      "model": "claude-opus-5",
+      "eligible": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "eligible": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "eligible": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "eligible": false
+    },
+    {
+      "model": "unknown-model",
+      "eligible": true
+    }
+  ]
+}

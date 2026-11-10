@@ -163,8 +163,13 @@ impl ClientCache {
             .first()
             .copied()
             .unwrap_or(wire::Region::International);
+        // Preserve the built-in codec/capability table and the original Arc
+        // cache key. The delegating wrapper observes only an admitted attempt.
+        let observed_transport = Arc::new(crate::native_stream_capture::CaptureTransport::new(
+            transport.clone(),
+        ));
         let client =
-            sdk::LlmClientBuilder::with_transport(transport.clone(), std::slice::from_ref(profile))
+            sdk::LlmClientBuilder::with_transport(observed_transport, std::slice::from_ref(profile))
                 .with_region(region)
                 .build()
                 .map_err(|error| LlmError::InvalidRequest {
@@ -665,9 +670,19 @@ pub(crate) fn classifier_attempt_bound<'a, T: Send + 'a>(
 pub(crate) async fn next_batch(
     stream: &mut sdk::ModelStream,
 ) -> Result<Option<sdk::StreamBatch>, LlmError> {
+    next_batch_with_capture(stream, None).await
+}
+
+pub(crate) async fn next_batch_with_capture(
+    stream: &mut sdk::ModelStream,
+    capture: Option<&crate::native_stream_capture::AttemptCapture>,
+) -> Result<Option<sdk::StreamBatch>, LlmError> {
     let prior_usage = stream.usage_report();
     let prior_inference = stream.inference_report();
-    while let Some(batch) = stream.next_batch().await {
+    while let Some(mut batch) = stream.next_batch().await {
+        if let Some(capture) = capture {
+            capture.prepend_to(&mut batch);
+        }
         if batch.finished
             || batch.usage != prior_usage
             || batch.inference != prior_inference

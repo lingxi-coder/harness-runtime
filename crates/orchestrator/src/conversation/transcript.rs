@@ -2395,6 +2395,11 @@ impl ConversationOrchestrator {
         // (every non-api-error line) leaves the shape exactly as before.
         api_error: Option<&ApiErrorEnvelope>,
     ) -> session::JsonlMessage {
+        let synthetic_identity = (matches!(msg, ConversationMessage::Assistant { .. })
+            && assistant_model.is_none()
+            && api_error.is_some()
+            && inner_message_id.is_none())
+        .then(|| self.transcript.synthetic_api_error_identity(msg.id()));
         let (mut kind, mut inner_message) = match msg {
             ConversationMessage::User { .. } => {
                 ("user", serde_json::json!({ "role": "user", "content": [] }))
@@ -2460,10 +2465,15 @@ impl ConversationOrchestrator {
                     m.insert("diagnostics".to_string(), serde_json::Value::Null);
                     m.insert(
                         "id".to_string(),
-                        serde_json::Value::String(
-                            inner_message_id
-                                .map_or_else(|| msg.id().as_uuid().to_string(), str::to_string),
-                        ),
+                        serde_json::Value::String(inner_message_id.map_or_else(
+                            || {
+                                synthetic_identity.as_ref().map_or_else(
+                                    || msg.id().as_uuid().to_string(),
+                                    |(inner_id, _)| inner_id.to_string(),
+                                )
+                            },
+                            str::to_string,
+                        )),
                     );
                     m.insert("container".to_string(), serde_json::Value::Null);
                     m.insert(
@@ -2517,7 +2527,8 @@ impl ConversationOrchestrator {
                             },
                             "inference_geo": serde_json::Value::Null,
                             "iterations": serde_json::Value::Null,
-                            "speed": serde_json::Value::Null
+                            "speed": serde_json::Value::Null,
+                            "fallback_credit": serde_json::Value::Null
                         }),
                     );
                     m.insert("content".to_string(), serde_json::json!([]));
@@ -2694,6 +2705,18 @@ impl ConversationOrchestrator {
         // apiErrorStatus?) — presence + values + ORDER are 1:1. See
         // [`ApiErrorEnvelope`].
         if let Some(ae) = api_error {
+            if let Some(request_id) = &ae.request_id {
+                extra.insert(
+                    "requestId".to_owned(),
+                    serde_json::Value::String(request_id.clone()),
+                );
+            }
+            if let Some(kind) = ae.api_error {
+                extra.insert(
+                    "apiError".to_string(),
+                    serde_json::Value::String(kind.to_string()),
+                );
+            }
             if let Some(cat) = ae.error {
                 extra.insert(
                     "error".to_string(),
@@ -2937,6 +2960,11 @@ impl ConversationOrchestrator {
                 } => metadata.notice_timestamp.clone(),
                 _ => None,
             }
+            .or_else(|| {
+                synthetic_identity
+                    .as_ref()
+                    .map(|(_, timestamp)| timestamp.clone())
+            })
             .unwrap_or_else(|| {
                 chrono::Utc::now()
                     .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -3029,11 +3057,10 @@ impl ConversationOrchestrator {
     /// `insertMessageChain` and stamped on every line. We resolve lazily on the
     /// first append and memoize, so subsequent appends pay nothing.
     ///
-    /// Reuses the loader's shell-git pattern (`std::process::Command`, no new
-    /// dependency): `git rev-parse --abbrev-ref HEAD` in `self.cwd`. Returns
-    /// `None` on ANY failure (git missing, not a repo, non-zero exit, detached
-    /// HEAD reporting `"HEAD"`), matching TS's `try { getBranch() } catch {
-    /// undefined }` — a `None` is then omitted from the JSONL line.
+    /// Runs `git rev-parse --abbrev-ref HEAD` asynchronously in `self.cwd`.
+    /// Returns `None` on any failure (git missing, not a repo, non-zero exit),
+    /// matching TS's `try { getBranch() } catch { undefined }` — a `None` is
+    /// then omitted from the JSONL line. Detached HEAD remains `"HEAD"`.
     pub(super) async fn resolve_git_branch(&self) -> Option<String> {
         if self.prompt_runtime.host_environment_probes_disabled {
             return None;
@@ -3044,7 +3071,7 @@ impl ConversationOrchestrator {
                 return resolved.clone();
             }
         }
-        let resolved = git_branch_for_cwd(&self.cwd);
+        let resolved = git_branch_for_cwd(&self.cwd).await;
         *self.transcript.git_branch_cache.lock().await = Some(resolved.clone());
         resolved
     }
@@ -3752,6 +3779,56 @@ impl ConversationOrchestrator {
         env: ApiErrorEnvelope,
     ) {
         self.persist_message_to_jsonl_inner(msg, None, Some(env), false)
+            .await;
+    }
+
+    /// Publish the same native synthetic message body used by durable history.
+    pub(crate) async fn emit_synthetic_api_error_message(
+        &self,
+        msg: &ConversationMessage,
+        env: &ApiErrorEnvelope,
+        terminal_reason: &str,
+        notify_terminal_error: bool,
+    ) {
+        let session_id = self.session.lock().await.session_id.to_string();
+        let mut row = self.to_jsonl_message_with_inner_id(
+            msg,
+            &session_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(env),
+        );
+        if let Some(details) = &env.inner_stop_details {
+            row.message
+                .set_field(
+                    "stop_details",
+                    Source::parse(details.source().as_json_source())
+                        .expect("refusal stop details are source JSON"),
+                )
+                .expect("synthetic API-error message is an object");
+        }
+        self.output
+            .emit_terminal_api_error_message(
+                &lingxi_core::host::orchestrator::TerminalApiErrorMessage {
+                    uuid: msg.id(),
+                    timestamp: row.timestamp,
+                    message: row.message,
+                    api_error: env.api_error.map(str::to_owned),
+                    error: env.error.map(str::to_owned),
+                    api_error_status: env.api_error_status,
+                    request_id: env.request_id.clone(),
+                    refused_message_id: env.refused_message_id.clone(),
+                    terminal_reason: terminal_reason.to_owned(),
+                    stop_reason: env.inner_stop_reason.unwrap_or("stop_sequence").to_owned(),
+                    notify_terminal_error,
+                },
+            )
             .await;
     }
 
@@ -4580,6 +4657,19 @@ impl ConversationOrchestrator {
         let compact_summary_content =
             compact_summary_content_source_if_unmodified(msg, &rewritten, compact_summary);
         let msg = &rewritten;
+        let committed_at = preappended
+            .as_ref()
+            .and_then(|metadata| chrono::DateTime::parse_from_rfc3339(metadata.timestamp).ok())
+            .map_or_else(
+                || chrono::Utc::now().timestamp_millis(),
+                |time| time.timestamp_millis(),
+            );
+        self.prompt_runtime
+            .silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(msg.id())
+            .or_insert(committed_at);
         self.note_assistant_commit(msg).await;
         if matches!(msg, ConversationMessage::Assistant { .. }) {
             if api_error.is_some()
@@ -4777,6 +4867,14 @@ impl ConversationOrchestrator {
                             Source::from_serde_value(&serde_json::Value::from(request_id.clone()))
                                 .expect("generated transcript metadata is valid JSON"),
                         )
+                        .expect("extra metadata is an object");
+                }
+                jmsg.extra
+                    .remove_field("refusedMessageId")
+                    .expect("extra metadata is an object");
+                if let Some(message_id) = &row.refused_message_id {
+                    jmsg.extra
+                        .set_field("refusedMessageId", Source::from(message_id.as_str()))
                         .expect("extra metadata is an object");
                 }
             }
@@ -6238,6 +6336,12 @@ impl ConversationOrchestrator {
     /// persistence seams, including writer-less runtimes.
     pub(crate) async fn note_assistant_commit(&self, msg: &ConversationMessage) {
         if matches!(msg, ConversationMessage::Assistant { .. }) {
+            self.prompt_runtime
+                .silent_turn_message_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(msg.id())
+                .or_insert_with(|| chrono::Utc::now().timestamp_millis());
             // An ordinary later assistant replaces a recoverable API-error row.
             // API persistence stamps its explicit marker after this common seam.
             self.note_turn_api_error_stop_reason(None);
