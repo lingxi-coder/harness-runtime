@@ -40,6 +40,8 @@ pub fn compact_active_goal_from_engine(
         origin: match goal.origin {
             lingxi_core::session::GoalOrigin::User => CompactGoalOrigin::User,
             lingxi_core::session::GoalOrigin::Restored => CompactGoalOrigin::Restored,
+            lingxi_core::session::GoalOrigin::ProposalDirect => CompactGoalOrigin::ProposalDirect,
+            lingxi_core::session::GoalOrigin::ProposalApproved => CompactGoalOrigin::ProposalApproved,
         },
     }
 }
@@ -58,6 +60,8 @@ pub fn compact_active_goal_into_engine(
         origin: match goal.origin {
             CompactGoalOrigin::User => lingxi_core::session::GoalOrigin::User,
             CompactGoalOrigin::Restored => lingxi_core::session::GoalOrigin::Restored,
+            CompactGoalOrigin::ProposalDirect => lingxi_core::session::GoalOrigin::ProposalDirect,
+            CompactGoalOrigin::ProposalApproved => lingxi_core::session::GoalOrigin::ProposalApproved,
         },
     }
 }

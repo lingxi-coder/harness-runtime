@@ -22,8 +22,8 @@
 //! This module owns the two tiers 2.1.269 added, so the existing clear path is
 //! untouched.
 //!
-//! Every string here is byte-exact against the 2.1.270 binary
-//! (`src_169588164.js`: `qps`, `Vps`, `$St`, `zps`, `FSt`). The separator is
+//! The messages and classifiers follow the 2.1.322 binary
+//! (`chunk-280402177.js`: `Yf`, `zf`, `Xf`, `Jf`). The separator is
 //! U+00B7 MIDDLE DOT, which the binary spells `\xB7`.
 
 /// Why a failed turn is worth retrying — oracle `qps`, the phrase interpolated
@@ -81,6 +81,8 @@ pub enum PauseCause {
     GoalCheckCapped,
     /// `rate_limited`
     RateLimited,
+    /// `daily_cap` — organization usage is paused without a reset promise.
+    DailyCap,
     /// `usage_limit` — the user must come back after the reset.
     UsageLimit,
     /// `usage_limit_waiting` — something is already waiting out the reset, so
@@ -112,6 +114,7 @@ impl PauseCause {
             Self::RateLimited => {
                 "Goal paused \u{b7} the request was rate limited \u{b7} send a message to retry"
             }
+            Self::DailyCap => "Goal paused \u{b7} usage is paused for your organization",
             Self::UsageLimit => {
                 "Goal paused \u{b7} usage limit reached \u{b7} send a message after it resets to continue"
             }
@@ -132,6 +135,7 @@ impl PauseCause {
             Self::GoalCheckTimeout => "goal_check_timeout",
             Self::GoalCheckCapped => "goal_check_capped",
             Self::RateLimited => "rate_limited",
+            Self::DailyCap => "daily_cap",
             Self::UsageLimit => "usage_limit",
             Self::UsageLimitWaiting => "usage_limit_waiting",
         }
@@ -199,6 +203,22 @@ pub enum GoalInterruption {
     Pause(PauseCause),
 }
 
+/// Trusted facts attached to the terminal error and its owning host. These
+/// cannot be recovered from rendered error text or warning-only limit headers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApiErrorInterruptionFacts {
+    /// Native `quotaLimits.dailyCapPaused === true`.
+    pub daily_cap_paused: bool,
+    /// Native `quotaLimits !== undefined && EA(quotaLimits)`.
+    pub quota_exhausted: bool,
+    /// Native host reset-wait owner already has an intent.
+    pub host_waits_for_reset: bool,
+    /// Native remote/host authentication path owns sign-in refresh.
+    pub host_handles_auth: bool,
+    /// Native `oauthRefreshDiskFull`, which is classified as authentication.
+    pub oauth_refresh_disk_full: bool,
+}
+
 /// Classify this port's `model_error` turn arm (which IS the oracle's
 /// `api_error` reason — see the naming note on `GoalClearBucket`) into the
 /// retry/pause tiers.
@@ -218,12 +238,33 @@ pub fn classify_api_error_interruption(
     quota_exhausted: bool,
     host_waits_for_reset: bool,
 ) -> Option<GoalInterruption> {
+    classify_api_error_interruption_with_facts(
+        error_kind,
+        is_transient,
+        ApiErrorInterruptionFacts {
+            quota_exhausted,
+            host_waits_for_reset,
+            ..Default::default()
+        },
+    )
+}
+
+/// Claude Code 2.1.322 `Xf` API-error branch, preserving its ordering. The
+/// existing clear classifier owns every terminal auth/billing/context result.
+#[must_use]
+pub fn classify_api_error_interruption_with_facts(
+    error_kind: Option<&str>,
+    is_transient: bool,
+    facts: ApiErrorInterruptionFacts,
+) -> Option<GoalInterruption> {
     // `if(e.errorKind==="rate_limit")` comes FIRST upstream, ahead of the
     // `isTransient` shortcut, so a rate limit always pauses rather than being
     // retried as a transient blip.
     if error_kind == Some("rate_limit") {
-        return Some(GoalInterruption::Pause(if quota_exhausted {
-            if host_waits_for_reset {
+        return Some(GoalInterruption::Pause(if facts.daily_cap_paused {
+            PauseCause::DailyCap
+        } else if facts.quota_exhausted {
+            if facts.host_waits_for_reset {
                 PauseCause::UsageLimitWaiting
             } else {
                 PauseCause::UsageLimit
@@ -232,12 +273,21 @@ pub fn classify_api_error_interruption(
             PauseCause::RateLimited
         }));
     }
-    match error_kind {
-        Some("max_output_tokens") => Some(GoalInterruption::Retry(RetryCause::OutputLimit)),
-        Some("cloud_credential_error") => {
-            Some(GoalInterruption::Retry(RetryCause::CloudCredentials))
-        }
-        _ if is_transient => Some(GoalInterruption::Retry(RetryCause::ApiUnavailable)),
+    if error_kind == Some("max_output_tokens") {
+        return Some(GoalInterruption::Retry(RetryCause::OutputLimit));
+    }
+    if error_kind == Some("cloud_credential_error") {
+        return Some(GoalInterruption::Retry(RetryCause::CloudCredentials));
+    }
+    if is_transient {
+        return Some(GoalInterruption::Retry(RetryCause::ApiUnavailable));
+    }
+    let effective_kind = if facts.oauth_refresh_disk_full {
+        Some("authentication_failed")
+    } else {
+        error_kind
+    };
+    match effective_kind {
         Some("overloaded" | "server_error") => {
             Some(GoalInterruption::Retry(RetryCause::ApiUnavailable))
         }
@@ -245,6 +295,9 @@ pub fn classify_api_error_interruption(
         // worth one more try, rather than silently stalling the goal.
         Some("unknown") | None => Some(GoalInterruption::Retry(RetryCause::Unclassified)),
         Some("invalid_request") => Some(GoalInterruption::Pause(PauseCause::RequestRejected)),
+        Some("authentication_failed" | "oauth_org_not_allowed") if facts.host_handles_auth => {
+            Some(GoalInterruption::Retry(RetryCause::HostAuth))
+        }
         // `authentication_failed` / `oauth_org_not_allowed` / `account_on_hold` /
         // `verification_required` / `billing_error` / `model_not_found` all end
         // in the CLEAR tier, which `goal_clear_bucket` already owns.
@@ -259,21 +312,11 @@ pub fn retry_body(
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-    let mut units = "Goal check-in: «".encode_utf16().collect::<Vec<_>>();
-    let condition_units = condition
+    let mut units = super::goal_checkin::goal_checkin_heading(condition)
         .string_units("")
-        .expect("active goal condition must be a JSON string");
-    for unit in condition_units {
-        units.extend_from_slice(match unit {
-            0x0026 => &[0x0026, 0x0061, 0x006d, 0x0070, 0x003b], // &amp;
-            0x003c => &[0x0026, 0x006c, 0x0074, 0x003b],         // &lt;
-            0x003e => &[0x0026, 0x0067, 0x0074, 0x003b],         // &gt;
-            _ => std::slice::from_ref(&unit),
-        });
-    }
+        .unwrap_or_default();
     units.extend(
-        "» is still active. The last turn ended before the goal could be evaluated: "
-            .encode_utf16(),
+        " is still active. The last turn ended before the goal could be evaluated: ".encode_utf16(),
     );
     units.extend(cause.text().encode_utf16());
     units.extend(". Continue toward the goal.".encode_utf16());
@@ -285,6 +328,142 @@ pub fn retry_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn latest_oracle() -> serde_json::Value {
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(include_str!(
+            "../../../command-api/tests/fixtures/goal_2_1_322.json"
+        ))
+        .unwrap();
+        let interruption = source
+            .at_pointer("/interruption")
+            .unwrap()
+            .to_projection()
+            .unwrap();
+        serde_json::json!({"interruption": serde_json::from_str::<serde_json::Value>(&interruption.to_json_string().unwrap()).unwrap()})
+    }
+
+    const RETRY_CAUSES: &[(&str, RetryCause)] = &[
+        ("api_unavailable", RetryCause::ApiUnavailable),
+        ("unclassified", RetryCause::Unclassified),
+        ("output_limit", RetryCause::OutputLimit),
+        ("cloud_credentials", RetryCause::CloudCredentials),
+        ("host_auth", RetryCause::HostAuth),
+        ("image", RetryCause::Image),
+        ("unreadable_tool_call", RetryCause::UnreadableToolCall),
+        ("goal_check", RetryCause::GoalCheck),
+    ];
+
+    const PAUSE_CAUSES: &[PauseCause] = &[
+        PauseCause::RequestRejected,
+        PauseCause::TurnError,
+        PauseCause::HookStopped,
+        PauseCause::GoalCheckTimeout,
+        PauseCause::GoalCheckCapped,
+        PauseCause::RateLimited,
+        PauseCause::DailyCap,
+        PauseCause::UsageLimit,
+        PauseCause::UsageLimitWaiting,
+    ];
+
+    #[test]
+    fn interruption_messages_and_backoff_match_2_1_322_native_bytes() {
+        let fixture = latest_oracle();
+        let oracle = &fixture["interruption"];
+        assert_eq!(
+            oracle["retryCauses"].as_object().unwrap().len(),
+            RETRY_CAUSES.len()
+        );
+        for &(key, cause) in RETRY_CAUSES {
+            assert_eq!(
+                Some(cause.text()),
+                oracle["retryCauses"][key].as_str(),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            oracle["pauseMessages"].as_object().unwrap().len(),
+            PAUSE_CAUSES.len()
+        );
+        for &cause in PAUSE_CAUSES {
+            assert_eq!(
+                Some(cause.text()),
+                oracle["pauseMessages"][cause.key()].as_str(),
+                "{}",
+                cause.key(),
+            );
+        }
+        assert_eq!(
+            RETRY_BACKOFF_MS.to_vec(),
+            oracle["backoffs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_i64().unwrap())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(Some(RETRY_JITTER), oracle["jitter"].as_f64());
+        assert_eq!(Some(u64::from(MAX_RETRIES)), oracle["maxRetries"].as_u64());
+    }
+
+    #[test]
+    fn api_retry_and_pause_tiers_match_2_1_322_native_cases() {
+        let fixture = latest_oracle();
+        for case in fixture["interruption"]["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            if input["reason"].as_str() != Some("api_error") {
+                continue;
+            }
+            let context = &case["context"];
+            let actual = classify_api_error_interruption_with_facts(
+                input["errorKind"].as_str(),
+                input["isTransient"].as_bool().unwrap_or(false),
+                ApiErrorInterruptionFacts {
+                    daily_cap_paused: input["quotaLimits"]["dailyCapPaused"] == true,
+                    quota_exhausted: input.get("quotaLimits").is_some()
+                        && context["quotaExhausted"] == true,
+                    host_waits_for_reset: false,
+                    host_handles_auth: [
+                        "envRemote",
+                        "remoteHost",
+                        "workspaceHost",
+                        "inProcessRemote",
+                    ]
+                    .iter()
+                    .any(|key| context[*key] == true),
+                    oauth_refresh_disk_full: input["oauthRefreshDiskFull"] == true,
+                },
+            );
+            let expected = &case["expected"];
+            match expected["kind"].as_str().unwrap() {
+                "stop" | "none" => assert_eq!(actual, None, "{}", case["name"]),
+                "pause" => {
+                    let expected_cause = PAUSE_CAUSES
+                        .iter()
+                        .find(|cause| Some(cause.key()) == expected["cause"].as_str())
+                        .unwrap();
+                    assert_eq!(
+                        actual,
+                        Some(GoalInterruption::Pause(*expected_cause)),
+                        "{}",
+                        case["name"],
+                    );
+                }
+                "retry" => {
+                    let &(_, expected_cause) = RETRY_CAUSES
+                        .iter()
+                        .find(|(key, _)| Some(*key) == expected["cause"].as_str())
+                        .unwrap();
+                    assert_eq!(
+                        actual,
+                        Some(GoalInterruption::Retry(expected_cause)),
+                        "{}",
+                        case["name"],
+                    );
+                }
+                other => panic!("unsupported oracle disposition {other}"),
+            }
+        }
+    }
 
     /// Every `Vps` message, byte-exact. These are the sentences a stalled goal
     /// shows instead of nothing, so a drifted one is the whole bug returning in
@@ -314,6 +493,10 @@ mod tests {
         assert_eq!(
             PauseCause::RateLimited.text(),
             "Goal paused · the request was rate limited · send a message to retry"
+        );
+        assert_eq!(
+            PauseCause::DailyCap.text(),
+            "Goal paused · usage is paused for your organization"
         );
         assert_eq!(
             PauseCause::UsageLimit.text(),
@@ -416,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_body_preserves_goal_utf16_source_units() {
+    fn retry_body_drops_lone_surrogates_before_display() {
         let condition = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
             "fix � now".to_string(),
             vec![
@@ -426,9 +609,8 @@ mod tests {
         .unwrap();
         let body = retry_body(&condition, RetryCause::ApiUnavailable);
         let units = body.string_units("").unwrap();
-        assert!(units
-            .windows(3)
-            .any(|part| part == [0x0020, 0xd800, 0x0020]));
+        assert!(!units.contains(&0xd800));
+        assert!(body.string_at("").unwrap().contains("«fix now»"));
     }
 
     /// A rate limit PAUSES; it is never retried as a transient blip. Upstream
@@ -453,6 +635,71 @@ mod tests {
         assert_eq!(
             classify_api_error_interruption(Some("rate_limit"), false, true, true),
             Some(GoalInterruption::Pause(PauseCause::UsageLimitWaiting))
+        );
+    }
+
+    #[test]
+    fn a_daily_cap_precedes_usage_reset_waiting_and_transient_retries() {
+        assert_eq!(
+            classify_api_error_interruption_with_facts(
+                Some("rate_limit"),
+                true,
+                ApiErrorInterruptionFacts {
+                    daily_cap_paused: true,
+                    quota_exhausted: true,
+                    host_waits_for_reset: true,
+                    ..Default::default()
+                },
+            ),
+            Some(GoalInterruption::Pause(PauseCause::DailyCap)),
+        );
+        assert_eq!(PauseCause::DailyCap.key(), "daily_cap");
+    }
+
+    #[test]
+    fn host_auth_and_disk_full_facts_preserve_native_classification_order() {
+        for kind in [Some("authentication_failed"), Some("oauth_org_not_allowed")] {
+            assert_eq!(
+                classify_api_error_interruption_with_facts(
+                    kind,
+                    false,
+                    ApiErrorInterruptionFacts {
+                        host_handles_auth: true,
+                        ..Default::default()
+                    },
+                ),
+                Some(GoalInterruption::Retry(RetryCause::HostAuth)),
+            );
+        }
+        let disk_full = ApiErrorInterruptionFacts {
+            oauth_refresh_disk_full: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_api_error_interruption_with_facts(Some("server_error"), false, disk_full),
+            None,
+            "local disk-full auth remains in the clear tier",
+        );
+        assert_eq!(
+            classify_api_error_interruption_with_facts(Some("server_error"), true, disk_full),
+            Some(GoalInterruption::Retry(RetryCause::ApiUnavailable)),
+            "transient errors precede disk-full normalization",
+        );
+        assert_eq!(
+            classify_api_error_interruption_with_facts(Some("max_output_tokens"), false, disk_full,),
+            Some(GoalInterruption::Retry(RetryCause::OutputLimit)),
+            "output-limit errors precede disk-full normalization",
+        );
+        assert_eq!(
+            classify_api_error_interruption_with_facts(
+                Some("invalid_request"),
+                false,
+                ApiErrorInterruptionFacts {
+                    host_handles_auth: true,
+                    ..disk_full
+                },
+            ),
+            Some(GoalInterruption::Retry(RetryCause::HostAuth)),
         );
     }
 

@@ -396,6 +396,9 @@ pub struct BuiltinToolContext {
     /// `None` at every non-live / test construction site (frozen `never`
     /// behavior).
     pub ask_user_question_timeout: Option<String>,
+    /// Nonblocking model-goal proposal transport, supplied by the owning host.
+    /// Absent hosts omit `ProposeGoal` from the advertised catalog.
+    pub goal_proposal_host: Option<Arc<dyn lingxi_core::host::goal::GoalProposalHost>>,
 }
 
 impl BuiltinToolContext {

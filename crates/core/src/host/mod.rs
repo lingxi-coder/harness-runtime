@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod prompt_policy;
+pub mod goal;
 pub mod remote_ui;
 pub mod session_context;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};

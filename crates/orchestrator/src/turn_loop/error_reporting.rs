@@ -279,7 +279,9 @@ pub(super) async fn announce_goal_interruption(
     orch: &ConversationOrchestrator,
     reason: GoalClearReason<'_>,
 ) {
-    use crate::prompt::goal_interruption::classify_api_error_interruption;
+    use crate::prompt::goal_interruption::{
+        classify_api_error_interruption_with_facts, ApiErrorInterruptionFacts,
+    };
     let GoalClearReason::ApiError {
         error_kind,
         is_transient,
@@ -290,9 +292,15 @@ pub(super) async fn announce_goal_interruption(
     // `quotaLimits` (the account's usage cap) and the host's `hasIntent()` wait
     // have no port analogue yet, so a rate limit reports the burst-limit
     // sentence. Both refinements only change WHICH pause sentence is shown.
-    let Some(interruption) =
-        classify_api_error_interruption(error_kind, is_transient, false, false)
-    else {
+    let Some(interruption) = classify_api_error_interruption_with_facts(
+        error_kind,
+        is_transient,
+        ApiErrorInterruptionFacts {
+            host_handles_auth: std::env::var("CLAUDE_CODE_REMOTE")
+                .is_ok_and(|value| !value.is_empty()),
+            ..ApiErrorInterruptionFacts::default()
+        },
+    ) else {
         return;
     };
     orch.handle_goal_interruption(interruption).await;

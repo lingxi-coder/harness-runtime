@@ -58,37 +58,25 @@
 /// bracket/slash lookalikes. It does not normalize or fold ordinary letters.
 #[cfg(test)]
 fn sanitize_checkin_text(text: &str) -> String {
-    static INVISIBLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let invisible = INVISIBLE.get_or_init(|| {
-        regex::Regex::new(
-            r"[\p{Cf}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\x00-\x08\x0E-\x1F\x7F-\x9F]",
-        )
-        .expect("valid oracle Unicode sanitation pattern")
-    });
-    let stripped = invisible.replace_all(text, "");
-    let mut out = String::new();
-    let mut pending_space = false;
-    for ch in stripped.chars() {
-        if (ch.is_whitespace() && ch != '\u{85}') || ch == '\u{feff}' {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(match ch {
-            '\u{ff1c}' | '\u{fe64}' | '\u{2329}' | '\u{27e8}' | '\u{3008}' | '\u{2039}'
-            | '\u{02c2}' | '\u{1438}' | '\u{276c}' | '\u{276e}' | '\u{2770}' | '\u{29fc}'
-            | '\u{226e}' | '\u{227a}' | '\u{22d6}' => '<',
-            '\u{ff1e}' | '\u{fe65}' | '\u{232a}' | '\u{27e9}' | '\u{3009}' | '\u{203a}'
-            | '\u{02c3}' | '\u{1433}' | '\u{276d}' | '\u{276f}' | '\u{2771}' | '\u{29fd}'
-            | '\u{226f}' | '\u{227b}' | '\u{22d7}' => '>',
-            '\u{ff0f}' | '\u{2215}' | '\u{2044}' => '/',
-            other => other,
-        });
+    sanitize_checkin_text_source(&text.into())
+        .string_at("")
+        .unwrap()
+        .to_owned()
+}
+
+fn fold_checkin_markup(character: char) -> char {
+    match character {
+        '\u{2c2}' | '\u{1438}' | '\u{16b2}' | '\u{2039}' | '\u{226e}' | '\u{227a}' | '\u{2280}'
+        | '\u{22d6}' | '\u{2329}' | '\u{276c}' | '\u{276e}' | '\u{2770}' | '\u{27e8}'
+        | '\u{2991}' | '\u{2993}' | '\u{29fc}' | '\u{2a79}' | '\u{2aa6}' | '\u{3008}'
+        | '\u{fe3f}' | '\u{fe64}' | '\u{ff1c}' | '\u{1d236}' | '\u{226a}' | '\u{22d8}'
+        | '\u{2aa1}' | '\u{2af7}' | '\u{27ea}' | '\u{fe3d}' => '<',
+        '\u{2c3}' | '\u{1433}' | '\u{203a}' | '\u{226f}' | '\u{227b}' | '\u{2281}' | '\u{22d7}'
+        | '\u{232a}' | '\u{276d}' | '\u{276f}' | '\u{2771}' | '\u{27e9}' | '\u{29fd}'
+        | '\u{3009}' | '\u{fe40}' | '\u{fe65}' | '\u{ff1e}' | '\u{16f3f}' | '\u{1d237}' => '>',
+        '\u{ff0f}' | '\u{2215}' | '\u{2044}' => '/',
+        other => other,
     }
-    out
 }
 
 fn sanitize_checkin_text_source(
@@ -125,16 +113,8 @@ fn sanitize_checkin_text_source(
         };
         index += consumed;
         let Some(character) = character else {
-            // JavaScript's check-in sanitizer does not classify unpaired UTF-16
-            // surrogates as invisible text; keep the original code unit.
-            if pending_space {
-                out.push(0x0020);
-                pending_space = false;
-            }
-            out.push(first);
-            if consumed == 2 {
-                out.push(source_units[index - 1]);
-            }
+            // Native 2.1.322 Xm first calls Lh/fg, which drops lone
+            // surrogates before invisible filtering and whitespace folding.
             continue;
         };
         let mut encoded_character = [0; 4];
@@ -149,16 +129,7 @@ fn sanitize_checkin_text_source(
             out.push(0x0020);
             pending_space = false;
         }
-        let normalized = match character {
-            '\u{ff1c}' | '\u{fe64}' | '\u{2329}' | '\u{27e8}' | '\u{3008}' | '\u{2039}'
-            | '\u{02c2}' | '\u{1438}' | '\u{276c}' | '\u{276e}' | '\u{2770}' | '\u{29fc}'
-            | '\u{226e}' | '\u{227a}' | '\u{22d6}' => '<',
-            '\u{ff1e}' | '\u{fe65}' | '\u{232a}' | '\u{27e9}' | '\u{3009}' | '\u{203a}'
-            | '\u{02c3}' | '\u{1433}' | '\u{276d}' | '\u{276f}' | '\u{2771}' | '\u{29fd}'
-            | '\u{226f}' | '\u{227b}' | '\u{22d7}' => '>',
-            '\u{ff0f}' | '\u{2215}' | '\u{2044}' => '/',
-            other => other,
-        };
+        let normalized = fold_checkin_markup(character);
         let mut encoded = [0; 2];
         out.extend_from_slice(normalized.encode_utf16(&mut encoded));
     }
@@ -313,6 +284,18 @@ pub struct DeferringTask {
     pub detail: lingxi_core::types::utf16_json::Utf16JsonProjection,
 }
 
+/// Native Za: sanitized, confusable-folded and escaped Goal heading shared by
+/// background check-ins and interruption retries.
+pub(crate) fn goal_checkin_heading(
+    condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let goal = escape_checkin_html_source(&sanitize_checkin_text_source(condition));
+    let mut units = "Goal check-in: «".encode_utf16().collect::<Vec<_>>();
+    append_source_string(&mut units, &goal);
+    units.push(0x00bb);
+    source_string_from_units(units)
+}
+
 /// `Szf(e, t, r).body` @292038578 — the check-in text.
 ///
 /// ```js
@@ -336,13 +319,13 @@ pub fn build_checkin_body(
     // (JS rounds `.5` toward +Infinity), with no float cast.
     let minutes = deferred_ms.max(0).saturating_add(30_000) / 60_000;
     let minutes = minutes.max(1);
-    let goal = escape_checkin_html_source(&sanitize_checkin_text_source(condition));
-    let mut body = "Goal check-in: \u{ab}".encode_utf16().collect::<Vec<_>>();
-    append_source_string(&mut body, &goal);
+    let mut body = goal_checkin_heading(condition)
+        .string_units("")
+        .unwrap_or_default();
     if tasks.is_empty() {
         body.extend(
             format!(
-                "\u{bb} is still active. Its evaluation was deferred for {minutes} min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+                " is still active. Its evaluation was deferred for {minutes} min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
             )
             .encode_utf16(),
         );
@@ -367,7 +350,7 @@ pub fn build_checkin_body(
         );
     }
     body.extend(
-        format!("\u{bb} is still active, and evaluation has been deferred for {minutes} min because background work is still running:\n")
+        format!(" is still active, and evaluation has been deferred for {minutes} min because background work is still running:\n")
             .encode_utf16(),
     );
     body.extend(lines);
@@ -382,17 +365,37 @@ pub fn build_checkin_body(
 ///
 /// `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` overrides [`DEFAULT_CHECKIN_MINUTES`];
 /// setting it to `0` disables the feature, exactly like the oracle's
-/// `if(n===0)return{nextGoal:e,checkinText:void 0}`. There is no GrowthBook in
-/// the port and `tengu_saffron_wren` defaults to TRUE upstream, so the feature
-/// is ON by default here too.
+/// `if(n===0)return{nextGoal:e,checkinText:void 0}`. The live
+/// `tengu_saffron_wren` gate defaults to true and takes precedence over the
+/// interval override. Native 2.1.322 reads a typed environment field:
+/// `H.int({min:0,max:10080,digitsOnly:true})`, with invalid values falling back
+/// to the default rather than reaching timer arithmetic.
 #[must_use]
 pub fn checkin_interval_ms() -> i64 {
-    let minutes = std::env::var("CLAUDE_CODE_GOAL_CHECKIN_MINUTES")
-        .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|m| *m >= 0)
+    let enabled = telemetry::flag_bool("tengu_saffron_wren", true);
+    let raw_minutes = std::env::var("CLAUDE_CODE_GOAL_CHECKIN_MINUTES").ok();
+    checkin_interval_ms_from_config(enabled, raw_minutes.as_deref())
+}
+
+fn checkin_interval_ms_from_config(enabled: bool, raw_minutes: Option<&str>) -> i64 {
+    if !enabled {
+        return 0;
+    }
+    let minutes = raw_minutes
+        .and_then(|raw| {
+            let value = lingxi_core::host::effort::trim_js_whitespace(raw);
+            let digits = value
+                .strip_prefix('+')
+                .or_else(|| value.strip_prefix('-'))
+                .unwrap_or(value);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let parsed = lingxi_core::host::env::parse_int_env(value);
+            (parsed.is_finite() && (0.0..=10080.0).contains(&parsed)).then_some(parsed as i64)
+        })
         .unwrap_or(DEFAULT_CHECKIN_MINUTES);
-    minutes.saturating_mul(60_000)
+    minutes * 60_000
 }
 
 /// Claude Code 2.1.241 backoff: first check-in after `base`, then `2x base`,
@@ -433,7 +436,7 @@ pub const IDLE_PAUSED_SUMMARY_SUFFIX: &str =
 
 /// `Pns` — appended to the check-in BODY once the idle cap is reached
 /// (`Mns(e)` = `{summary: e.summary+Rns, body: e.body+Pns}`).
-pub const IDLE_PAUSED_BODY_SUFFIX: &str = " The agent won't wake this session for another check-in until the user sends a message, so say clearly where things stand.";
+pub const IDLE_PAUSED_BODY_SUFFIX: &str = " Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand.";
 
 /// `RUe(e)` — `(e.idleCheckinCount ?? 0) >= xns`.
 #[must_use]
@@ -598,6 +601,36 @@ impl GoalDeferralState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_322_heading_checkin_and_retry_payloads_match() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let fixture = Utf16JsonProjection::parse(include_str!(
+            "../../tests/fixtures/goal_heading_2_1_322.json"
+        ))
+        .unwrap();
+        let cases = fixture.at_pointer("/cases").unwrap();
+        for index in 0..cases.array_len().unwrap() {
+            let case = cases.get_index(index).unwrap().to_projection().unwrap();
+            let input = case.at_pointer("/input").unwrap().to_projection().unwrap();
+            let expected = |path| case.at_pointer(path).unwrap().to_projection().unwrap();
+            let name = case.string_at("/name").unwrap();
+            assert_eq!(goal_checkin_heading(&input), expected("/heading"), "{name}");
+            assert_eq!(
+                build_checkin_body(&input, 90_000, &[]),
+                expected("/checkin/body"),
+                "{name}"
+            );
+            assert_eq!(
+                crate::prompt::goal_interruption::retry_body(
+                    &input,
+                    crate::prompt::goal_interruption::RetryCause::ApiUnavailable,
+                ),
+                expected("/retry/body"),
+                "{name}",
+            );
+        }
+    }
+
     fn source(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         text.into()
     }
@@ -678,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_condition_keeps_unpaired_utf16_units_through_checkin_rendering() {
+    fn goal_condition_drops_lone_surrogates_before_checkin_display() {
         let condition = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
             "ship � safely".to_string(),
             vec![
@@ -689,13 +722,12 @@ mod tests {
         .unwrap();
         let body = build_checkin_body(&condition, 0, &[]);
         let units = body.string_units("").unwrap();
-        assert!(units
-            .windows(3)
-            .any(|part| part == [0x0020, 0xd800, 0x0020]));
+        assert!(!units.contains(&0xd800));
+        assert!(body.string_at("").unwrap().contains("«ship safely»"));
     }
 
     #[test]
-    fn task_detail_keeps_unpaired_utf16_units_through_checkin_rendering() {
+    fn task_detail_drops_lone_surrogates_before_checkin_display() {
         let detail = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
             "before � after".into(),
             vec![
@@ -714,11 +746,8 @@ mod tests {
                 detail,
             }],
         );
-        assert!(body
-            .string_units("")
-            .unwrap()
-            .windows(3)
-            .any(|part| part == [0x0020, 0xd800, 0x0020]));
+        assert!(!body.string_units("").unwrap().contains(&0xd800));
+        assert!(body.string_at("").unwrap().contains("before after"));
     }
 
     /// `Ma(w5(line, dUv))` — the LINE is capped at 120 units, then escaped.
@@ -749,6 +778,73 @@ mod tests {
     fn the_interval_defaults_to_thirty_minutes() {
         // No env var set in this process by default.
         assert_eq!(checkin_interval_ms(), 30 * 60_000);
+    }
+
+    #[test]
+    fn typed_intervals_and_idle_pause_suffixes_match_2_1_322_native_bytes() {
+        let fixture = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(include_str!(
+            "../../../command-api/tests/fixtures/goal_2_1_322.json"
+        ))
+        .unwrap();
+        let checkin = fixture
+            .at_pointer("/checkin")
+            .unwrap()
+            .to_projection()
+            .unwrap();
+        let oracle: serde_json::Value =
+            serde_json::from_str(&checkin.to_json_string().unwrap()).unwrap();
+        assert_eq!(
+            Some(DEFAULT_CHECKIN_MINUTES),
+            oracle["defaultMinutes"].as_i64()
+        );
+        assert_eq!(
+            Some(IDLE_PAUSED_SUMMARY_SUFFIX),
+            oracle["idlePausedSuffix"].as_str()
+        );
+        assert_eq!(
+            Some(IDLE_PAUSED_BODY_SUFFIX),
+            oracle["idlePausedInstruction"].as_str()
+        );
+        assert_eq!(
+            Some(u64::from(IDLE_CHECKIN_CAP)),
+            oracle["consecutiveCheckinLimit"].as_u64(),
+        );
+        assert_eq!(
+            Some(TASK_LINE_CHAR_CAP as u64),
+            oracle["idleTaskInterval"].as_u64(),
+        );
+        let backoff_cap = oracle["concurrentCheckLimit"].as_u64().unwrap() as u32;
+        assert_eq!(
+            next_checkin_interval_ms(1, backoff_cap + 1),
+            2_i64.pow(backoff_cap),
+        );
+        for case in oracle["intervalCases"].as_array().unwrap() {
+            assert_eq!(
+                checkin_interval_ms_from_config(
+                    case["flag"].as_bool().unwrap(),
+                    case["raw"].as_str(),
+                ),
+                case["expected"].as_i64().unwrap(),
+                "{}",
+                case["name"],
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_gate_disables_checkins_and_reenabling_restores_the_interval() {
+        struct ClearFlag;
+        impl Drop for ClearFlag {
+            fn drop(&mut self) {
+                telemetry::test_clear_flag("tengu_saffron_wren");
+            }
+        }
+        let _clear = ClearFlag;
+        let enabled_interval = checkin_interval_ms();
+        telemetry::test_set_flag("tengu_saffron_wren", false);
+        assert_eq!(checkin_interval_ms(), 0);
+        telemetry::test_set_flag("tengu_saffron_wren", true);
+        assert_eq!(checkin_interval_ms(), enabled_interval);
     }
 
     #[test]
@@ -968,7 +1064,7 @@ mod tests {
     fn the_pause_suffix_is_byte_exact() {
         assert_eq!(
             display(&with_idle_pause_suffix(&source("Goal check-in: body."))),
-            "Goal check-in: body. The agent won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
+            "Goal check-in: body. Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
         );
     }
 

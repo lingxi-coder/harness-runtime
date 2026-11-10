@@ -9039,6 +9039,7 @@ fn submit_pause_cancels_only_owned_ask_user_question() {
         handle
             .ask_user_question_tx
             .send(tool_ui::AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx: owned_tx,
@@ -9056,6 +9057,7 @@ fn submit_pause_cancels_only_owned_ask_user_question() {
         handle
             .ask_user_question_tx
             .send(tool_ui::AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx: unrelated_tx,
@@ -9143,6 +9145,7 @@ fn submit_cancel_cancels_only_owned_ask_user_question() {
         handle
             .ask_user_question_tx
             .send(tool_ui::AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx: owned_tx,
@@ -9160,6 +9163,7 @@ fn submit_cancel_cancels_only_owned_ask_user_question() {
         handle
             .ask_user_question_tx
             .send(tool_ui::AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx: unrelated_tx,
@@ -9391,6 +9395,7 @@ async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions()
                 request_id: 7,
                 questions: Vec::new(),
                 timeout_secs: None,
+                session_owned: false,
             },
         })
         .await;
@@ -9439,6 +9444,7 @@ async fn late_connection_question_does_not_undo_a_paused_checkpoint() {
                     request_id: 7,
                     questions: vec![],
                     timeout_secs: None,
+                    session_owned: false,
                 },
             })
             .await;
@@ -10723,6 +10729,7 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
                 request_id: 5,
                 questions: Vec::new(),
                 timeout_secs: None,
+                session_owned: false,
             },
         })
         .await;
@@ -10893,6 +10900,7 @@ fn submit_question_answer_bypasses_a_held_transition_lock() {
         handle
             .ask_user_question_tx
             .send(tool_ui::AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx: response_tx,

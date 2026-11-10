@@ -71,7 +71,9 @@ use telemetry::tengu::tool::{
     ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
 };
 use telemetry::AnalyticsBus;
-use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
+use tool_api::ask_user_question::{
+    AskOption, AskQuestion, AskUserQuestionExchange, AskUserQuestionLifetime,
+};
 
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use tokio::sync::mpsc;
@@ -348,6 +350,7 @@ impl DefaultTimeoutResolver {
 pub struct TuiBridgeResolver {
     event_tx: mpsc::Sender<AskUserQuestionExchange>,
     timeout_secs: Option<u64>,
+    session_goal_proposal: bool,
 }
 
 impl TuiBridgeResolver {
@@ -361,7 +364,27 @@ impl TuiBridgeResolver {
         Self {
             event_tx,
             timeout_secs: timeout.idle_window().map(|window| window.as_secs()),
+            session_goal_proposal: false,
         }
+    }
+
+    /// A Goal decision belongs to the live session, remains pending after a
+    /// model turn ends, and never auto-approves through an idle timeout.
+    #[must_use]
+    pub fn for_goal_proposal(event_tx: mpsc::Sender<AskUserQuestionExchange>) -> Self {
+        Self {
+            event_tx,
+            timeout_secs: None,
+            session_goal_proposal: true,
+        }
+    }
+}
+
+struct GoalQuestionLifetime(lingxi_core::host::CancellationToken);
+
+impl Drop for GoalQuestionLifetime {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -393,7 +416,15 @@ impl AskUserQuestionResolver for TuiBridgeResolver {
         }
 
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let goal_lifetime = self
+            .session_goal_proposal
+            .then(|| GoalQuestionLifetime(lingxi_core::host::CancellationToken::new()));
         let exchange = AskUserQuestionExchange {
+            lifetime: goal_lifetime
+                .as_ref()
+                .map_or(AskUserQuestionLifetime::Turn, |goal| {
+                    AskUserQuestionLifetime::SessionGoalProposal(goal.0.clone())
+                }),
             questions: to_bridge_questions(questions),
             timeout_secs: self.timeout_secs,
             resp_tx,
@@ -1172,6 +1203,39 @@ fn invalid_tool_input(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn goal_proposal_bridge_lifetime_ends_with_its_resolver_future() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let resolver = TuiBridgeResolver::for_goal_proposal(tx);
+        let task = tokio::spawn(async move {
+            resolver
+                .resolve(
+                    &[Question {
+                        question: "tests pass".into(),
+                        header: "Goal".into(),
+                        options: vec![QuestionOption {
+                            label: "Approve".into(),
+                            description: "Set the goal".into(),
+                            preview: None,
+                        }],
+                        multi_select: false,
+                    }],
+                    false,
+                )
+                .await
+        });
+        let exchange = rx.recv().await.unwrap();
+        assert_eq!(exchange.timeout_secs, None);
+        let AskUserQuestionLifetime::SessionGoalProposal(cancel) = exchange.lifetime else {
+            panic!("Goal resolver must preserve its session lifetime");
+        };
+        assert!(!cancel.is_cancelled());
+        task.abort();
+        let _ = task.await;
+        assert!(cancel.is_cancelled());
+        assert!(exchange.resp_tx.is_closed());
+    }
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {

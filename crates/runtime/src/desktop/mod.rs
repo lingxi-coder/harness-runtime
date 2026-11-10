@@ -45,6 +45,7 @@ mod background_agent;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
+mod goal_proposal;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]

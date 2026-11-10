@@ -18,6 +18,21 @@ pub struct NativeUserMessageSource {
 
 tokio::task_local! {
     static NATIVE_USER_MESSAGE_SOURCE: NativeUserMessageSource;
+    static QUEUED_TURN_AUTHORITY: bool;
+}
+
+/// Scope the host's human-input authority independently of transcript
+/// visibility. Model-generated visible kickoffs must not acquire human-only
+/// lifecycle effects merely because their user row is not meta.
+pub async fn with_queued_turn_authority<F: Future>(in_human_turn: bool, future: F) -> F::Output {
+    QUEUED_TURN_AUTHORITY.scope(in_human_turn, future).await
+}
+
+/// Read a trusted queued-turn authority supplied by the owning ingress. This
+/// value is never inferred from model text or persisted row provenance.
+#[must_use]
+pub fn queued_turn_authority() -> Option<bool> {
+    QUEUED_TURN_AUTHORITY.try_with(|human| *human).ok()
 }
 
 /// Scope Native row provenance to one explicit user-input dispatch.
@@ -87,5 +102,26 @@ mod tests {
             current().is_none(),
             "scoped provenance never leaks between turns"
         );
+    }
+
+    #[tokio::test]
+    async fn queued_turn_authority_is_explicit_nested_and_task_local() {
+        assert_eq!(queued_turn_authority(), None);
+        with_queued_turn_authority(false, async {
+            assert_eq!(queued_turn_authority(), Some(false));
+            with_queued_turn_authority(true, async {
+                assert_eq!(queued_turn_authority(), Some(true));
+            })
+            .await;
+            assert_eq!(queued_turn_authority(), Some(false));
+            assert_eq!(
+                tokio::spawn(async { queued_turn_authority() })
+                    .await
+                    .unwrap(),
+                None
+            );
+        })
+        .await;
+        assert_eq!(queued_turn_authority(), None);
     }
 }

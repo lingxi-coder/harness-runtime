@@ -275,6 +275,40 @@ impl GoalEvalOutcome {
     }
 }
 
+/// A goal verdict is consumed only by its identity-checked goal path. Keeping
+/// it in the generic Stop fallback would revive a cleared or replaced goal.
+fn ordinary_stop_block_reason(
+    aggregate: &hooks::AggregateHookResult,
+    goal_hook_id: Option<HookId>,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    if goal_hook_id.is_none() {
+        return matches!(aggregate.decision, Some(hooks::HookDecision::Block)).then(|| {
+            aggregate
+                .reason
+                .as_ref()
+                .map(|reason| reason.clone().into_projection())
+                .unwrap_or_else(|| source_string_projection("Blocked by hook"))
+        });
+    }
+    let mut reason = None;
+    for (_, result) in aggregate
+        .all_results
+        .iter()
+        .filter(|(hook_id, _)| Some(*hook_id) != goal_hook_id)
+    {
+        let Some(response) = &result.response else {
+            continue;
+        };
+        if let Some(response_reason) = &response.reason {
+            reason = Some(response_reason.clone().into_projection());
+        }
+        if matches!(response.decision, Some(hooks::HookDecision::Block)) {
+            return Some(reason.unwrap_or_else(|| source_string_projection("Blocked by hook")));
+        }
+    }
+    None
+}
+
 fn accumulate_mod_turn_usage(
     facts: &mut ModTurnFacts,
     usage: &llm_runtime::ExecutionUsage,
@@ -1541,6 +1575,16 @@ impl ConversationOrchestrator {
         self.sync_goal_checkin_idle_task().await;
     }
 
+    /// Deferral timing belongs to one goal, including its owned idle timer.
+    pub(crate) async fn reset_goal_deferral(&self) {
+        self.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.sync_goal_checkin_idle_task().await;
+    }
+
     /// Tear the active goal down, reporting `reason` on `tengu_goal_cleared`.
     ///
     /// The reason is a parameter because upstream's is: `kB(goal, reason)`
@@ -1578,6 +1622,7 @@ impl ConversationOrchestrator {
                 });
             (s.session_id, goal, cleared)
         };
+        self.reset_goal_deferral().await;
         if let Some(goal) = goal.as_ref() {
             self.persist_goal_status_attachment(status, Some(goal))
                 .await;
@@ -2001,6 +2046,11 @@ impl ConversationOrchestrator {
             task.start_time_ms = start_times.get(&task.id).copied();
         }
         let (goal_deferred, checkin_emitted) = self.goal_checkin_pass_tasks(&deferring_tasks).await;
+        // Native 2.1.322 `jPs` gives the goal prompt an eligibility predicate
+        // `()=>!p()`: live hook restrictions suppress evaluation without
+        // removing the goal or suppressing independent Stop hooks.
+        let goal_evaluator_restricted = goal_hook_id.is_some()
+            && lingxi_core::host::OrchestratorHandle::hooks_restricted(self).await;
         let agg = self
             .hooks
             .execute_excluding_hook(
@@ -2008,7 +2058,7 @@ impl ConversationOrchestrator {
                     reason: reason.to_string(),
                 },
                 ctx,
-                goal_hook_id.filter(|_| goal_deferred),
+                goal_hook_id.filter(|_| goal_deferred || goal_evaluator_restricted),
             )
             .await;
         let (goal_disposition, goal_outcome) = if goal_deferred {
@@ -2018,8 +2068,12 @@ impl ConversationOrchestrator {
                 GoalEvalOutcome::Deferred,
             )
         } else {
-            self.goal_stop_hook_disposition(goal_hook_id, &agg, parent_aborted)
-                .await
+            self.goal_stop_hook_disposition(
+                goal_hook_id.filter(|_| !goal_evaluator_restricted),
+                &agg,
+                parent_aborted,
+            )
+            .await
         };
         if matches!(
             goal_outcome,
@@ -2054,7 +2108,7 @@ impl ConversationOrchestrator {
             StopHookDisposition::Prevent(reason)
         } else if let Some(disposition) = goal_disposition {
             disposition
-        } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
+        } else if let Some(reason) = ordinary_stop_block_reason(&agg, goal_hook_id) {
             // #2: ANY Block yields Continue — the consecutive-block CAP is no
             // longer the old `!stop_hook_active` boolean (which let a blocking
             // hook drive exactly ONE extra turn). The binary carries a
@@ -2069,11 +2123,6 @@ impl ConversationOrchestrator {
             // `system_messages`. `agg.reason` is `None` when the hook omits a
             // reason, so apply claude-code's default (`utils/hooks.ts:533`,
             // `json.reason || 'Blocked by hook'`).
-            let reason = agg
-                .reason
-                .as_ref()
-                .map(|reason| reason.clone().into_projection())
-                .unwrap_or_else(|| source_string_projection("Blocked by hook"));
             StopHookDisposition::Continue(reason)
         } else {
             StopHookDisposition::Pass

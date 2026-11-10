@@ -96,10 +96,8 @@ pub enum TodoState {
 ///
 /// Upstream 2.1.267 resolves it in `y(e,t)` (`src_161508826.js`), which reads a
 /// `queuedGoalOrigin` staged by `ProposeGoal` and otherwise returns the literal
-/// `"user"`, so the value is never absent. `ProposeGoal`'s two spellings
-/// (`proposal_direct` / `proposal_approved`) are unreachable here — LingXi does
-/// not ship that tool (see the accepted-divergence register) — which leaves the
-/// two values below.
+/// `"user"`, so the value is never absent. Model proposals stage their origin
+/// with the queued kickoff; activation still follows the ordinary `/goal` path.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalOrigin {
@@ -108,6 +106,10 @@ pub enum GoalOrigin {
     User,
     /// `mon` (`src_182607998.js`) — the goal came back with a resumed session.
     Restored,
+    /// The model directly queued a condition explicitly requested by the user.
+    ProposalDirect,
+    /// The user approved a model-proposed condition.
+    ProposalApproved,
 }
 
 /// Origin of the raw model-setting value that drives Native main-loop model
@@ -131,6 +133,8 @@ impl GoalOrigin {
         match self {
             Self::User => "user",
             Self::Restored => "restored",
+            Self::ProposalDirect => "proposal_direct",
+            Self::ProposalApproved => "proposal_approved",
         }
     }
 }

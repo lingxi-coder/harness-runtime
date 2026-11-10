@@ -1807,6 +1807,7 @@ mod total_tokens_lifecycle_tests;
 
 /// State owned by lifecycle hooks, goal checks, and main-thread agents.
 pub(crate) struct LifecycleRuntime {
+    pub(crate) goal_proposal: super::goal_proposal_impl::GoalProposalRuntime,
     pub(crate) goal_retry: std::sync::Mutex<super::goal_retry_impl::GoalRetryState>,
     pub(crate) goal_retry_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
     /// Parent cancellation/commit scope shared by every streaming executor in
@@ -1892,6 +1893,7 @@ impl LifecycleRuntime {
             main_thread_agent_hook_id: Mutex::new(None),
             goal_retry: std::sync::Mutex::new(super::goal_retry_impl::GoalRetryState::default()),
             goal_retry_owner: std::sync::OnceLock::new(),
+            goal_proposal: super::goal_proposal_impl::GoalProposalRuntime::default(),
             session_tool_hook_generation: SessionToolHookGeneration::new(),
             goal_checkin: Arc::new(std::sync::Mutex::new(
                 crate::prompt::goal_checkin::GoalDeferralState::default(),

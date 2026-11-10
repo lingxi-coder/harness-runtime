@@ -5071,7 +5071,17 @@ pub async fn build_with_credential_stack(
         .map(|handoffs| handoffs.clone() as Arc<dyn tool_api::MediaAgentHandoffHandle>);
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
+    let goal_proposal_resolver = cfg.ask_user_question_tx.clone().map(|tx| {
+        Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::for_goal_proposal(tx))
+            as Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>
+    });
+    let goal_proposal_host = Arc::new(super::goal_proposal::DesktopGoalProposalHost::new(
+        cfg.clone(),
+        goal_proposal_resolver,
+        analytics_bus.clone(),
+    ));
     let tool_ctx = BuiltinToolContext {
+        goal_proposal_host: Some(goal_proposal_host.clone()),
         skill_read_roots: Some(Arc::new(super::skill_loader::RegisteredSkillReadRoots(
             shared_command_registry.clone(),
         ))),
@@ -6854,6 +6864,7 @@ pub async fn build_with_credential_stack(
         orch_builder
     };
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
+    goal_proposal_host.bind(&orch);
     let native_settings_prompt_provider: Arc<
         dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider,
     > = orch.clone();

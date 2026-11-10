@@ -777,6 +777,8 @@ mod tests {
         );
         let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs));
         let (orch, api, queue) = fixture_config(true, true, Some((id, writer)));
+        // Live composition initializes the fixed-mode header before slash commands.
+        orch.initialize_conversation_mode().await.unwrap();
         orch.set_active_goal(&source_text("finish")).await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(orch.queue_goal_checkin("continue".into(), &goal).await);

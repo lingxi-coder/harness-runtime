@@ -3,6 +3,7 @@ use crate::test_support::{
 };
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
+use lingxi_core::host::OrchestratorHandle;
 use std::path::PathBuf;
 use std::sync::{atomic::Ordering, Arc};
 use tool_api::registry::ToolRegistry;
@@ -382,4 +383,351 @@ async fn turn_end_checkin_drives_another_round_without_duplicate_feedback() {
     let history = orch.session.lock().await.history.clone();
     assert_eq!(history.len(), 1);
     assert!(history[0].text_content().starts_with("Goal check-in:"));
+}
+
+struct HeldGoalEvaluator {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+fn stop_evaluator_condition(request: &hooks::PromptHookRequest) -> &str {
+    let prompt = request.prompt.string_at("").expect("Stop evaluator text");
+    let condition_and_arguments = prompt
+        .strip_prefix(
+            "Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: ",
+        )
+        .expect("the real Stop pipeline wraps the condition for transcript evaluation");
+    let (condition, arguments) = condition_and_arguments
+        .split_once("\n\nARGUMENTS: ")
+        .expect("the real Stop pipeline appends its event payload");
+    let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(arguments)
+        .expect("the Stop event payload is valid JSON");
+    assert_eq!(payload.string_at("/hook_event_name"), Some("Stop"));
+    condition
+}
+
+#[async_trait::async_trait]
+impl hooks::HookPromptRunner for HeldGoalEvaluator {
+    async fn run(
+        &self,
+        request: hooks::PromptHookRequest,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::PromptHookError> {
+        if stop_evaluator_condition(&request) == "old condition" {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(r#"{"ok":false,"reason":"retired goal feedback"}"#.into())
+        } else {
+            assert_eq!(
+                stop_evaluator_condition(&request),
+                "independent ordinary condition",
+            );
+            Ok(r#"{"ok":false,"reason":"ordinary stop feedback"}"#.into())
+        }
+    }
+}
+
+#[tokio::test]
+async fn retired_goal_results_cannot_drive_stop_but_independent_blocks_survive() {
+    use crate::conversation::{StopHookFlow, GOAL_STOP_HOOK_NAME};
+    use lingxi_core::types::{HookId, MessageId};
+
+    for replacement in [None, Some("replacement condition"), Some("old condition")] {
+        for ordinary_block in [false, true] {
+            let evaluator = Arc::new(HeldGoalEvaluator {
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let hooks = Arc::new(
+                Arc::try_unwrap(noop_hook_executor())
+                    .ok()
+                    .unwrap()
+                    .with_prompt_runner(evaluator.clone()),
+            );
+            let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(ToolRegistry::new()),
+                hooks,
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+            orch.set_active_goal(&"old condition".into()).await;
+            if ordinary_block {
+                let session_id = orch.session.lock().await.session_id;
+                let mut ordinary = orch
+                    .hooks
+                    .get_session_named_hook(session_id, GOAL_STOP_HOOK_NAME)
+                    .await
+                    .unwrap();
+                ordinary.id = HookId::new();
+                ordinary.name = "ordinary-stop".into();
+                ordinary.executor = hooks::HookExecutor::Prompt {
+                    prompt: "independent ordinary condition".into(),
+                    model: None,
+                    continue_on_block: true,
+                };
+                orch.hooks
+                    .upsert_session_named_hook(session_id, ordinary.name.clone(), ordinary)
+                    .await;
+            }
+            let running = orch.clone();
+            let stop = tokio::spawn(async move {
+                let mut active = false;
+                let mut blocks = 0;
+                running
+                    .handle_stop_at_end(
+                        "end_turn",
+                        &mut active,
+                        &mut blocks,
+                        1,
+                        MessageId::new(),
+                        false,
+                    )
+                    .await
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                evaluator.started.notified(),
+            )
+            .await
+            .unwrap();
+            if let Some(condition) = replacement {
+                orch.set_active_goal(&condition.into()).await;
+            } else {
+                orch.clear_active_goal().await;
+            }
+            evaluator.release.notify_one();
+            let disposition = tokio::time::timeout(std::time::Duration::from_secs(2), stop)
+                .await
+                .unwrap()
+                .unwrap();
+            if ordinary_block {
+                assert!(matches!(disposition, StopHookFlow::LoopAgain));
+                assert!(orch
+                    .session
+                    .lock()
+                    .await
+                    .history
+                    .iter()
+                    .any(|message| message.text_content().contains("ordinary stop feedback")));
+            } else {
+                assert!(matches!(disposition, StopHookFlow::FallThrough));
+            }
+            assert!(!orch
+                .session
+                .lock()
+                .await
+                .history
+                .iter()
+                .any(|message| message.text_content().contains("retired goal feedback")));
+            let active = orch.get_active_goal().await;
+            assert_eq!(
+                active
+                    .as_ref()
+                    .and_then(|goal| goal.condition.string_at("")),
+                replacement,
+            );
+            assert!(active.is_none_or(|goal| goal.iterations == 0));
+        }
+    }
+}
+
+#[tokio::test]
+async fn clear_and_replacement_retire_deferral_timing_and_idle_timer() {
+    for clear_first in [false, true] {
+        let orch = orch().with_stop_hook_snapshot(Arc::new(GoalStopSnapshot));
+        orch.set_active_goal(&"old condition".into()).await;
+        assert!(orch.goal_checkin_pass(&[task("b1", "shell", None)]).await);
+        {
+            let mut state = orch.lifecycle_runtime.goal_checkin.lock().unwrap();
+            state.deferred_since = Some(1);
+            state.checkin_count = 7;
+            state.idle_checkin_count = 3;
+            state.last_deferral_pass_at = Some(2);
+            state.last_deferring_ids = vec!["old-shell".into()];
+        }
+        assert!(orch
+            .lifecycle_runtime
+            .goal_checkin_idle_running
+            .load(Ordering::Acquire));
+        if clear_first {
+            orch.clear_active_goal().await;
+        }
+        orch.set_active_goal(&"replacement condition".into()).await;
+        assert_eq!(
+            *orch.lifecycle_runtime.goal_checkin.lock().unwrap(),
+            crate::prompt::goal_checkin::GoalDeferralState::default(),
+        );
+        assert!(!orch
+            .lifecycle_runtime
+            .goal_checkin_idle_running
+            .load(Ordering::Acquire));
+        assert!(orch
+            .lifecycle_runtime
+            .goal_checkin_idle_task
+            .lock()
+            .unwrap()
+            .is_none());
+        assert!(orch.goal_checkin_pass(&[task("b1", "shell", None)]).await);
+        assert_eq!(
+            orch.lifecycle_runtime
+                .goal_checkin
+                .lock()
+                .unwrap()
+                .checkin_count,
+            0,
+        );
+    }
+}
+
+struct LiveGoalHookPolicy {
+    key: &'static str,
+    restricted: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl hooks::mods::ModSettingsReader for LiveGoalHookPolicy {
+    async fn read(
+        &self,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+        Ok(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&format!(
+                "{{\"{}\":{}}}",
+                self.key,
+                self.restricted.load(Ordering::Acquire),
+            ))
+            .expect("fixed hook-policy key and boolean produce valid JSON"),
+        )
+    }
+}
+
+#[derive(Default)]
+struct CountingGoalEvaluator(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl hooks::HookPromptRunner for CountingGoalEvaluator {
+    async fn run(
+        &self,
+        request: hooks::PromptHookRequest,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::PromptHookError> {
+        let condition = stop_evaluator_condition(&request).to_owned();
+        self.0.lock().unwrap().push(condition);
+        Ok(r#"{"ok":false,"reason":"condition is not yet met"}"#.into())
+    }
+}
+
+#[tokio::test]
+async fn live_hook_restrictions_skip_only_goal_evaluation_and_reenable_without_reset() {
+    use crate::conversation::{StopHookFlow, GOAL_STOP_HOOK_NAME};
+    use lingxi_core::types::{HookId, MessageId};
+
+    for key in ["disableAllHooks", "allowManagedHooksOnly"] {
+        for ordinary_hook in [false, true] {
+            let policy = Arc::new(LiveGoalHookPolicy {
+                key,
+                restricted: std::sync::atomic::AtomicBool::new(false),
+            });
+            let evaluator = Arc::new(CountingGoalEvaluator::default());
+            let hooks = Arc::new(
+                Arc::try_unwrap(noop_hook_executor())
+                    .ok()
+                    .unwrap()
+                    .with_prompt_runner(evaluator.clone()),
+            );
+            let orch = ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(ToolRegistry::new()),
+                hooks,
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+            .with_mod_settings_reader(policy.clone());
+            orch.set_active_goal(&"existing condition".into()).await;
+            let session_id = orch.session.lock().await.session_id;
+            let goal_hook = orch
+                .hooks
+                .get_session_named_hook(session_id, GOAL_STOP_HOOK_NAME)
+                .await
+                .unwrap();
+            if ordinary_hook {
+                let mut ordinary = goal_hook.clone();
+                ordinary.id = HookId::new();
+                ordinary.name = "ordinary-stop".into();
+                ordinary.executor = hooks::HookExecutor::Prompt {
+                    prompt: "ordinary condition".into(),
+                    model: None,
+                    continue_on_block: true,
+                };
+                orch.hooks
+                    .upsert_session_named_hook(session_id, ordinary.name.clone(), ordinary)
+                    .await;
+            }
+            policy.restricted.store(true, Ordering::Release);
+            let mut active = false;
+            let mut blocks = 0;
+            let flow = orch
+                .handle_stop_at_end(
+                    "end_turn",
+                    &mut active,
+                    &mut blocks,
+                    1,
+                    MessageId::new(),
+                    false,
+                )
+                .await;
+            if ordinary_hook {
+                assert!(matches!(flow, StopHookFlow::LoopAgain));
+            } else {
+                assert!(matches!(flow, StopHookFlow::FallThrough));
+            }
+            {
+                let requests = evaluator.0.lock().unwrap();
+                assert_eq!(requests.len(), usize::from(ordinary_hook));
+                assert!(requests
+                    .iter()
+                    .all(|prompt| prompt.starts_with("ordinary condition")));
+            }
+            let goal = orch.get_active_goal().await.unwrap();
+            assert_eq!(goal.condition.string_at(""), Some("existing condition"));
+            assert_eq!(goal.iterations, 0);
+            assert!(goal.last_reason.is_none());
+            assert_eq!(
+                orch.hooks
+                    .get_session_named_hook(session_id, GOAL_STOP_HOOK_NAME)
+                    .await
+                    .unwrap()
+                    .id,
+                goal_hook.id,
+            );
+            policy.restricted.store(false, Ordering::Release);
+            let flow = orch
+                .handle_stop_at_end(
+                    "end_turn",
+                    &mut active,
+                    &mut blocks,
+                    2,
+                    MessageId::new(),
+                    false,
+                )
+                .await;
+            assert!(matches!(flow, StopHookFlow::LoopAgain));
+            assert_eq!(orch.get_active_goal().await.unwrap().iterations, 1);
+            assert_eq!(
+                evaluator
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|prompt| prompt.starts_with("existing condition"))
+                    .count(),
+                1,
+            );
+        }
+    }
 }

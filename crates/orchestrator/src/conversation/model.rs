@@ -2953,6 +2953,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Revoke both foreground launch and startup-prewarm admission before the
     /// host awaits teardown. Existing Arc holders cannot reopen either owner.
     pub fn close_background_producer_admission(&self) {
+        self.close_goal_proposal_admission();
         if let Some(forker) = &self.bg_session_forker {
             forker.lifecycle().close();
         }

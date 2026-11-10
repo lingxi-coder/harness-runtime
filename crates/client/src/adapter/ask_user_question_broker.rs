@@ -13,7 +13,9 @@ use crate::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
-use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
+use tool_api::ask_user_question::{
+    AskOption, AskQuestion, AskUserQuestionExchange, AskUserQuestionLifetime,
+};
 
 use crate::adapter::ClientEventSink;
 
@@ -42,6 +44,8 @@ const PUBLICATION_REMOVED: u8 = 3;
 struct PendingAskUserQuestion {
     resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
     timeout_task: Option<JoinHandle<()>>,
+    cancellation_task: Option<JoinHandle<()>>,
+    lifetime: AskUserQuestionLifetime,
     publication_state: AtomicU8,
     publication_complete: Arc<Notify>,
     /// The emitted request, retained verbatim so a reconnecting client can
@@ -55,10 +59,13 @@ impl PendingAskUserQuestion {
     fn new(
         resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
         request: AskUserQuestionRequestDto,
+        lifetime: AskUserQuestionLifetime,
     ) -> Self {
         Self {
             resp_tx,
             timeout_task: None,
+            cancellation_task: None,
+            lifetime,
             publication_state: AtomicU8::new(PUBLICATION_QUEUED),
             publication_complete: Arc::new(Notify::new()),
             request,
@@ -158,14 +165,20 @@ impl AskUserQuestionBroker {
         while let Some(exchange) = rx.recv().await {
             let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let AskUserQuestionExchange {
+                lifetime,
                 questions,
                 timeout_secs,
                 resp_tx,
             } = exchange;
+            let session_cancel = match &lifetime {
+                AskUserQuestionLifetime::SessionGoalProposal(cancel) => Some(cancel.clone()),
+                AskUserQuestionLifetime::Turn => None,
+            };
             let request = AskUserQuestionRequestDto {
                 request_id,
                 questions: questions.into_iter().map(lower_question).collect(),
                 timeout_secs,
+                session_owned: lifetime.is_live_goal_proposal(),
             };
             // The turn can be cancelled after enqueueing the exchange but
             // before this broker task gets scheduled. In that window the
@@ -188,7 +201,7 @@ impl AskUserQuestionBroker {
                 }
                 pending.insert(
                     request_id,
-                    PendingAskUserQuestion::new(resp_tx, request.clone()),
+                    PendingAskUserQuestion::new(resp_tx, request.clone(), lifetime),
                 );
                 pending
                     .get(&request_id)
@@ -205,6 +218,31 @@ impl AskUserQuestionBroker {
                 .await;
             if let Some(entry) = self.pending.lock().await.get(&request_id) {
                 entry.mark_publication_complete();
+            }
+            if let Some(cancel) = session_cancel {
+                let pending = Arc::clone(&self.pending);
+                let sink = Arc::clone(&self.sink);
+                let cancellation_task = tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    let Some(entry) =
+                        AskUserQuestionBroker::take_after_publication_from(&pending, request_id)
+                            .await
+                    else {
+                        return;
+                    };
+                    if let Some(task) = entry.timeout_task {
+                        task.abort();
+                    }
+                    drop(entry.resp_tx);
+                    sink.emit(ClientEvent::AskUserQuestionResolved { request_id })
+                        .await;
+                });
+                let mut pending = self.pending.lock().await;
+                if let Some(entry) = pending.get_mut(&request_id) {
+                    entry.cancellation_task = Some(cancellation_task);
+                } else {
+                    cancellation_task.abort();
+                }
             }
             if let Some(timeout_secs) = timeout_secs {
                 let pending = Arc::clone(&self.pending);
@@ -253,6 +291,9 @@ impl AskUserQuestionBroker {
         if let Some(task) = entry.timeout_task {
             task.abort();
         }
+        if let Some(task) = entry.cancellation_task {
+            task.abort();
+        }
         let resolved = entry.resp_tx.send(answers).is_ok();
         self.sink
             .emit(ClientEvent::AskUserQuestionResolved { request_id })
@@ -266,6 +307,9 @@ impl AskUserQuestionBroker {
             return false;
         };
         if let Some(task) = entry.timeout_task {
+            task.abort();
+        }
+        if let Some(task) = entry.cancellation_task {
             task.abort();
         }
         drop(entry.resp_tx);
@@ -327,6 +371,9 @@ impl AskUserQuestionBroker {
         let count = closed.len();
         for (request_id, entry) in closed {
             if let Some(task) = entry.timeout_task {
+                task.abort();
+            }
+            if let Some(task) = entry.cancellation_task {
                 task.abort();
             }
             drop(entry.resp_tx);
@@ -403,11 +450,25 @@ impl AskUserQuestionBroker {
 
     /// Fail closed on disconnect/session teardown.
     pub async fn drain(&self) -> usize {
+        self.drain_selected(true).await
+    }
+
+    /// Retire foreground questions while preserving live, session-owned Goal
+    /// proposals. The latter are cancelled by their resolver/session owner.
+    pub async fn drain_turn(&self) -> usize {
+        self.drain_selected(false).await
+    }
+
+    async fn drain_selected(&self, include_session_goals: bool) -> usize {
+        let selected = |entry: &PendingAskUserQuestion| {
+            include_session_goals || !entry.lifetime.is_live_goal_proposal()
+        };
         let drained = loop {
             let (waiters, drained) = {
                 let pending = self.pending.lock().await;
                 let waiters = pending
                     .values()
+                    .filter(|entry| selected(entry))
                     .filter(|entry| {
                         entry.publication_state.load(Ordering::Acquire) == PUBLICATION_IN_FLIGHT
                     })
@@ -418,7 +479,7 @@ impl AskUserQuestionBroker {
                         waiter
                     })
                     .collect::<Vec<_>>();
-                (waiters, pending.is_empty())
+                (waiters, !pending.values().any(selected))
             };
             if !waiters.is_empty() {
                 for waiter in waiters {
@@ -431,15 +492,21 @@ impl AskUserQuestionBroker {
             }
             let mut pending = self.pending.lock().await;
             if pending.values().any(|entry| {
-                entry.publication_state.load(Ordering::Acquire) == PUBLICATION_IN_FLIGHT
+                selected(entry)
+                    && entry.publication_state.load(Ordering::Acquire) == PUBLICATION_IN_FLIGHT
             }) {
                 continue;
             }
-            let drained = pending
-                .drain()
-                .map(|(request_id, entry)| {
+            let ids = pending
+                .iter()
+                .filter_map(|(id, entry)| selected(entry).then_some(*id))
+                .collect::<Vec<_>>();
+            let drained = ids
+                .into_iter()
+                .filter_map(|request_id| {
+                    let entry = pending.remove(&request_id)?;
                     entry.mark_removed();
-                    (request_id, entry)
+                    Some((request_id, entry))
                 })
                 .collect::<Vec<_>>();
             break drained;
@@ -447,6 +514,9 @@ impl AskUserQuestionBroker {
         let count = drained.len();
         for (request_id, entry) in drained {
             if let Some(task) = entry.timeout_task {
+                task.abort();
+            }
+            if let Some(task) = entry.cancellation_task {
                 task.abort();
             }
             // Drop the response sender before notifying the client so the
@@ -457,6 +527,18 @@ impl AskUserQuestionBroker {
                 .await;
         }
         count
+    }
+
+    /// Host-only proof that this request may remain answerable while no
+    /// foreground turn is active. Client payloads cannot create this marker.
+    pub async fn is_live_goal_proposal(&self, request_id: u64) -> bool {
+        self.pending
+            .lock()
+            .await
+            .get(&request_id)
+            .is_some_and(|entry| {
+                entry.lifetime.is_live_goal_proposal() && !entry.resp_tx.is_closed()
+            })
     }
 
     /// Number of currently parked requests.
@@ -515,6 +597,7 @@ mod tests {
         resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
     ) -> AskUserQuestionExchange {
         AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: vec![AskQuestion {
                 question: "Choose?".into(),
                 header: "Choice".into(),
@@ -538,6 +621,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_proposal_survives_turn_cleanup_and_drains_on_session_teardown() {
+        let sink = Arc::new(MockSink::default());
+        let broker = Arc::new(AskUserQuestionBroker::new(sink.clone()));
+        let (tx, rx) = mpsc::channel(2);
+        let running = broker.clone();
+        let task = tokio::spawn(async move { running.run(rx).await });
+        let cancel = lingxi_core::host::CancellationToken::new();
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        let mut exchange = an_exchange(resp_tx);
+        exchange.lifetime = AskUserQuestionLifetime::SessionGoalProposal(cancel);
+        tx.send(exchange).await.unwrap();
+        let id = first_request_id(&sink).await;
+        assert!(sink.events().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::AskUserQuestion { request }
+                if request.request_id == id && request.session_owned
+        )));
+        assert!(broker.is_live_goal_proposal(id).await);
+        assert_eq!(broker.drain_turn().await, 0);
+        assert_eq!(broker.pending_count().await, 1);
+        assert!(matches!(
+            resp_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(broker.drain().await, 1);
+        assert!(resp_rx.await.is_err());
+        assert!(!broker.is_live_goal_proposal(id).await);
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_goal_owner_retires_the_broker_request_without_an_answer() {
+        let sink = Arc::new(MockSink::default());
+        let broker = Arc::new(AskUserQuestionBroker::new(sink.clone()));
+        let (tx, rx) = mpsc::channel(1);
+        let running = broker.clone();
+        let task = tokio::spawn(async move { running.run(rx).await });
+        let cancel = lingxi_core::host::CancellationToken::new();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let mut exchange = an_exchange(resp_tx);
+        exchange.lifetime = AskUserQuestionLifetime::SessionGoalProposal(cancel.clone());
+        tx.send(exchange).await.unwrap();
+        let id = first_request_id(&sink).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while broker.pending_count().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(resp_rx.await.is_err());
+        assert!(!broker.is_live_goal_proposal(id).await);
+        assert!(sink.events().await.iter().any(|event| {
+            matches!(event, ClientEvent::AskUserQuestionResolved { request_id } if *request_id == id)
+        }));
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn emits_and_resolves_correlated_questionnaire() {
         let sink = MockSink::arc();
         let broker = Arc::new(AskUserQuestionBroker::new(sink.clone()));
@@ -548,6 +693,11 @@ mod tests {
         tx.send(an_exchange(resp_tx)).await.unwrap();
 
         let request_id = first_request_id(&sink).await;
+        assert!(sink.events().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::AskUserQuestion { request }
+                if request.request_id == request_id && !request.session_owned
+        )));
         assert!(
             broker
                 .resolve(
@@ -644,6 +794,7 @@ mod tests {
         let task = tokio::spawn(async move { runner.run(rx).await });
         let (resp_tx, resp_rx) = oneshot::channel();
         tx.send(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: vec![AskQuestion {
                 question: "Choose?".into(),
                 header: "Choice".into(),
@@ -755,6 +906,7 @@ mod tests {
         tokio::spawn(async move { runner.run(rx).await });
         let (resp_tx, resp_rx) = oneshot::channel();
         tx.send(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: Vec::new(),
             timeout_secs: None,
             resp_tx,
@@ -811,6 +963,7 @@ mod tests {
         tokio::spawn(async move { runner.run(rx).await });
         let (resp_tx, resp_rx) = oneshot::channel();
         tx.send(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: vec![AskQuestion {
                 question: "Choose?".into(),
                 header: "Choice".into(),
