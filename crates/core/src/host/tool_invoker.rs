@@ -200,6 +200,9 @@ pub struct SubagentForkContext {
     pub messages: Vec<crate::types::ConversationMessage>,
     /// The exact rendered parent system prompt, used by explicit forks.
     pub system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Dispatching parent's selected wire effort. Host-owned and never read
+    /// from model-authored tool input or inherited stale tool-context state.
+    pub parent_effort: Option<serde_json::Value>,
 }
 
 /// Per-call invocation context handed to a [`ToolInvoker`].
@@ -210,6 +213,9 @@ pub struct SubagentForkContext {
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
+    /// Owning session's mode, unaffected by background execution. The nested
+    /// invoker refreshes this trusted fact even when reusing tool context state.
+    pub session_interactive: Option<bool>,
     /// Cancellation scope for this physical tool call. A streamed Agent tool
     /// use owns a distinct token; receivers must copy it into the concrete
     /// `ToolUseContext` rather than reusing a previous call's token.
@@ -253,9 +259,8 @@ pub struct SubagentInvocationContext {
     /// async agent (else it inherits the parent's flag, default `false`) —
     /// `runAgent.ts:668-672`. Mapped into `ToolUseContext.is_non_interactive_session`.
     pub is_async: bool,
-    /// Effective owning-session mode for this dispatch. This is distinct from
-    /// `is_async`: a synchronous child of scheduled/headless work must still
-    /// keep every invoked tool non-interactive.
+    /// Effective permission-prompt mode for this dispatch: background execution
+    /// and a headless owning session both keep invoked tools non-interactive.
     pub is_non_interactive_session: bool,
     /// Whether the dispatching subagent may SURFACE permission prompts to the
     /// user (claude-code's permission-prompt eligibility). Threaded from

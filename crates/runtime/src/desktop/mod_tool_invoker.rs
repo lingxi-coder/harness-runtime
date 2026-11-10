@@ -652,6 +652,7 @@ mod tests {
 
     fn child_context(agent_id: AgentId) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

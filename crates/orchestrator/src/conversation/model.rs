@@ -1786,6 +1786,7 @@ impl ConversationOrchestrator {
             system_context: Default::default(),
             user_context_message: None,
             tool_use_options: tool_api::ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
@@ -2256,6 +2257,7 @@ impl ConversationOrchestrator {
             system_context: std::collections::HashMap::new(),
             user_context_message,
             tool_use_options: tool_api::ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
@@ -2592,9 +2594,10 @@ impl ConversationOrchestrator {
                     cache_read_input_tokens: row.cache_read_input_tokens,
                     cache_creation_input_tokens: row.cache_creation_input_tokens,
                     reasoning_tokens: row.usage.tokens.reasoning_output,
-                    web_search_requests: row.usage.server_tool_use.map_or(0, |tools| {
-                        u64::from(tools.web_search_requests)
-                    }),
+                    web_search_requests: row
+                        .usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
                     request_count: row.request_count,
                 })
                 .collect(),
@@ -2840,10 +2843,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             return (snap.probe.clone(), snap.block.clone());
         }
         let cwd = cwd.to_owned();
-        let (probe, block) = tokio::task::spawn_blocking(move || {
-            crate::prompt::git_status::snapshot(&cwd)
-        }).await.unwrap_or_default();
-        *cache = Some(GitStatusSnapshot { probe: probe.clone(), block: block.clone() });
+        let (probe, block) =
+            tokio::task::spawn_blocking(move || crate::prompt::git_status::snapshot(&cwd))
+                .await
+                .unwrap_or_default();
+        *cache = Some(GitStatusSnapshot {
+            probe: probe.clone(),
+            block: block.clone(),
+        });
         (probe, block)
     }
 

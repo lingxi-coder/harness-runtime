@@ -98,8 +98,8 @@ pub(super) fn subagent_tool_call_lines(message: &Utf16JsonProjection) -> Vec<Str
 /// always-on activity path). The Agent tool decodes the returned line via
 /// [`lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`] and forwards
 /// the inner message to the stream-json sink, which re-emits its text/thinking
-/// blocks with `parent_tool_use_id` set. The final text/thinking gate lives at
-/// the sink, so this stays cheap and unconditional for assistant turns.
+/// blocks with `parent_tool_use_id` set. The caller checks the live sink
+/// capability before serializing the envelope.
 pub(super) fn forward_subagent_message_line(message: &Utf16JsonProjection) -> Option<String> {
     if message.string_at("/role") != Some("assistant") {
         return None;

@@ -18,7 +18,7 @@
 //! world with channels:
 //!
 //! * the script thread's batch runner sends the batch's prompts over an mpsc
-//!   channel and blocks (`blocking_recv`) on a per-batch oneshot reply;
+//!   channel and waits on a per-batch oneshot reply;
 //! * an async worker loop (driven on the caller's runtime) receives each batch,
 //!   spawns its subagents concurrently — bounded by [`concurrency_cap`], in the
 //!   prompts' order — and sends the ordered results back over the reply channel.
@@ -47,7 +47,7 @@ use lingxi_core::host::{
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -59,6 +59,13 @@ use telemetry::AnalyticsBus;
 // Reuse the status-sink seam defined once in the bash handler (single impl wired
 // across handlers), exactly as `local_agent` does.
 pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
+
+#[path = "local_workflow_progress.rs"]
+mod progress_transport;
+use progress_transport::{ProgressBudget, ProgressSender};
+
+const PROGRESS_CHANNEL_CAPACITY: usize = 32;
+const PROGRESS_BYTE_BUDGET: u32 = 256 * 1024;
 
 /// Structured workflow progress payload routed alongside the existing
 /// human-readable task spool.
@@ -88,6 +95,34 @@ pub struct WorkflowProgressUpdate {
     pub last_tool_name: Option<String>,
     pub last_tool_summary: Option<String>,
     pub prompt_preview: Option<String>,
+}
+
+impl WorkflowProgressUpdate {
+    fn queued_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.kind.len()
+            + [
+                &self.title,
+                &self.message,
+                &self.label,
+                &self.phase_title,
+                &self.agent_id,
+                &self.agent_type,
+                &self.model,
+                &self.fallback_model,
+                &self.state,
+                &self.error,
+                &self.tool_use_id,
+                &self.last_attempt_reason,
+                &self.last_tool_name,
+                &self.last_tool_summary,
+                &self.prompt_preview,
+            ]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .map(String::len)
+            .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -453,18 +488,29 @@ fn format_workflow_agent_snapshot(progress: &WorkflowProgressUpdate) -> Option<S
     ))
 }
 
-fn emit_workflow_agent_snapshot(
-    progress_tx: Option<&mpsc::UnboundedSender<String>>,
-    progress: &WorkflowProgressUpdate,
+async fn emit_workflow_agent_snapshot(
+    progress_tx: Option<&ProgressSender<String>>,
+    live_progress_tx: Option<&ProgressSender<WorkflowProgressUpdate>>,
+    progress: WorkflowProgressUpdate,
 ) {
-    if let (Some(tx), Some(line)) = (progress_tx, format_workflow_agent_snapshot(progress)) {
-        let _ = tx.send(line);
+    let order = progress_tx
+        .and_then(ProgressSender::order)
+        .or_else(|| live_progress_tx.and_then(ProgressSender::order));
+    let _order = match &order {
+        Some(order) => Some(order.lock().await),
+        None => None,
+    };
+    if let (Some(tx), Some(line)) = (progress_tx, format_workflow_agent_snapshot(&progress)) {
+        let _ = tx.send(line).await;
+    }
+    if let Some(tx) = live_progress_tx {
+        let _ = tx.send(progress).await;
     }
 }
 
-fn emit_workflow_agent_queued(
-    progress_tx: Option<&mpsc::UnboundedSender<String>>,
-    live_progress_tx: Option<&mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+async fn emit_workflow_agent_queued(
+    progress_tx: Option<&ProgressSender<String>>,
+    live_progress_tx: Option<&ProgressSender<WorkflowProgressUpdate>>,
     call_index: u64,
     label: &str,
     prompt: &str,
@@ -499,10 +545,7 @@ fn emit_workflow_agent_queued(
         last_tool_summary: None,
         prompt_preview: Some(prompt.chars().take(120).collect()),
     };
-    emit_workflow_agent_snapshot(progress_tx, &update);
-    if let Some(tx) = live_progress_tx {
-        let _ = tx.send(update);
-    }
+    emit_workflow_agent_snapshot(progress_tx, live_progress_tx, update).await;
 }
 
 #[async_trait]
@@ -779,50 +822,62 @@ pub struct WorkerCancel {
     /// Worker completion signal. `kill` waits briefly on this after flipping
     /// the cooperative cancel flag so an in-flight batch can unwind before the
     /// runtime fallback aborts the task.
-    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
+    completion_rx: watch::Receiver<bool>,
     /// Natural completion owns the terminal transition once this flips. Kill
     /// and cleanup must not abort the outcome/status commit window.
     finalizing: bool,
 }
 
-struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+/// A repeatable completion barrier: each drain owns only a cloned observer.
+/// Dropping a timed-out/canceled observer cannot consume another drain's wait.
+struct WorkerCompletionSignal(watch::Sender<bool>);
 
 impl WorkerCompletionSignal {
-    fn new(tx: oneshot::Sender<()>) -> Self {
-        Self(Some(tx))
+    fn new(tx: watch::Sender<bool>) -> Self {
+        Self(tx)
     }
 }
 
 impl Drop for WorkerCompletionSignal {
     fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            let _ = tx.send(());
+        self.0.send_replace(true);
+    }
+}
+
+async fn wait_for_worker_completion(mut completion: watch::Receiver<bool>) {
+    while !*completion.borrow_and_update() {
+        if completion.changed().await.is_err() {
+            // The worker's signal was dropped before it was first polled.
+            break;
+        }
+    }
+}
+
+/// A dropped async bridge must also unblock a script waiting for bounded
+/// progress capacity, even when its caller did not go through `Task::kill`.
+struct ScriptCancelOnDrop(Option<Arc<std::sync::atomic::AtomicBool>>);
+
+impl Drop for ScriptCancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.0 {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut completion_rx = rec
-        .completion_rx
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
-        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx)
-            .await
-            .is_ok()
-    } else {
-        false
-    };
+    let completion = wait_for_worker_completion(rec.completion_rx.clone());
+    tokio::pin!(completion);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), &mut completion)
+        .await
+        .is_ok();
     if !completed {
         rec.runtime
             .cancel(&rec.handle)
             .await
             .map_err(|error| TaskError::Io(error.to_string()))?;
-        if let Some(completion_rx) = completion_rx {
-            let _ = completion_rx.await;
-        }
+        completion.await;
     }
     Ok(())
 }
@@ -1790,8 +1845,8 @@ fn workflow_progress_update(progress: &workflow::Progress) -> WorkflowProgressUp
 
 #[derive(Clone)]
 struct WorkflowAgentLiveObserver {
-    progress_tx: Option<mpsc::UnboundedSender<String>>,
-    tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    progress_tx: Option<ProgressSender<String>>,
+    tx: Option<ProgressSender<WorkflowProgressUpdate>>,
     state: Arc<tokio::sync::Mutex<WorkflowProgressUpdate>>,
     journal: Option<(WorkflowJournalWriter, String)>,
     metrics: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
@@ -1800,8 +1855,8 @@ struct WorkflowAgentLiveObserver {
 
 impl WorkflowAgentLiveObserver {
     fn new_with_metrics(
-        progress_tx: Option<mpsc::UnboundedSender<String>>,
-        tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+        progress_tx: Option<ProgressSender<String>>,
+        tx: Option<ProgressSender<WorkflowProgressUpdate>>,
         base: WorkflowProgressUpdate,
         journal: Option<(WorkflowJournalWriter, String)>,
         metrics: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
@@ -1837,10 +1892,7 @@ impl WorkflowAgentLiveObserver {
                 snapshot.tool_calls,
             );
         }
-        emit_workflow_agent_snapshot(self.progress_tx.as_ref(), &snapshot);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(snapshot);
-        }
+        emit_workflow_agent_snapshot(self.progress_tx.as_ref(), self.tx.as_ref(), snapshot).await;
     }
 
     async fn snapshot(&self) -> WorkflowProgressUpdate {
@@ -2245,6 +2297,7 @@ mod captured_output_tests {
                 None,
                 None,
                 Some(scope.clone()),
+                false,
             )
             .await
             .unwrap();
@@ -2365,6 +2418,7 @@ mod captured_output_tests {
                     None,
                     None,
                     scoped.then(|| scope.clone()),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2409,7 +2463,7 @@ mod captured_output_tests {
             "try { await agent('overflow'); } catch (e) {} try { await agent('must not dispatch'); } catch (e) {} return 'done';",
             DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
             None, None, None, None, Some(100), None, 0, NestedConfig::default(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()), None, None, Some(scope.clone()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()), None, None, Some(scope.clone()), false,
         ).await.unwrap();
         assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2810,8 +2864,8 @@ async fn run_workflow_script_with_live_updates_full(
         spawner,
         tool_invoker,
         budget,
-        progress_tx,
-        live_progress_tx,
+        progress_tx.map(Into::into),
+        live_progress_tx.map(Into::into),
         journal,
         journal_writer,
         token_budget_total,
@@ -2823,6 +2877,7 @@ async fn run_workflow_script_with_live_updates_full(
         phase_telemetry_ctx,
         workflow_metrics_out,
         None,
+        true,
     )
     .await
 }
@@ -2835,8 +2890,8 @@ async fn run_workflow_script_with_live_updates_recorded(
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
-    progress_tx: Option<mpsc::UnboundedSender<String>>,
-    live_progress_tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    progress_tx: Option<ProgressSender<String>>,
+    live_progress_tx: Option<ProgressSender<WorkflowProgressUpdate>>,
     journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
     journal_writer: Option<WorkflowJournalWriter>,
     token_budget_total: Option<u64>,
@@ -2848,7 +2903,9 @@ async fn run_workflow_script_with_live_updates_recorded(
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
     output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
+    collect_progress: bool,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+    let mut cancel_on_drop = ScriptCancelOnDrop(Some(cancel.clone()));
     let NestedConfig {
         allow_nested,
         args: nested_args,
@@ -2896,9 +2953,9 @@ async fn run_workflow_script_with_live_updates_recorded(
     let live_progress_tx_for_worker = live_progress_tx.clone();
     let workflow_metrics_for_script = workflow_metrics.clone();
 
-    // The script runs synchronously on its own OS thread; its batch runner is
-    // plain sync code, so `blocking_send`/`blocking_recv` are safe here (this is
-    // not a runtime worker thread).
+    // QuickJS and its callbacks run synchronously on a dedicated OS thread.
+    // Channel waits use an executor that can also run inside an entered Tokio
+    // context; Tokio's blocking channel methods would panic there.
     std::thread::Builder::new()
         .name("workflow-script".into())
         .spawn(move || {
@@ -2909,39 +2966,56 @@ async fn run_workflow_script_with_live_updates_recorded(
                     .cloned()
                     .zip(opts_json.iter().cloned())
                     .collect();
-                if req_tx.blocking_send((calls, reply_tx)).is_err() {
+                if futures::executor::block_on(req_tx.send((calls, reply_tx))).is_err() {
                     return Vec::new();
                 }
-                reply_rx.blocking_recv().unwrap_or_default()
+                futures::executor::block_on(reply_rx).unwrap_or_default()
             };
-            // `phase()`/`log()` fire this live; an unbounded `send` is non-blocking
-            // and needs no runtime, so it is safe from the script thread. The host
-            // drains `progress_tx` concurrently (e.g. spools to the task output).
+            // Both consumers drain concurrently. Backpressure bounds queued
+            // progress while keeping each native log intact and in order.
             let on_progress = move |p: &workflow::Progress| {
                 if let workflow::Progress::Phase { index, title } = p {
                     // The callback runs on the dedicated script thread, so a
                     // blocking lock cannot stall the async runtime. Record
                     // phase-only workflows independently of agent metrics.
-                    workflow_metrics_for_script
-                        .blocking_lock()
+                    futures::executor::block_on(workflow_metrics_for_script.lock())
                         .record_phase(*index, title.clone());
                 }
+                let order = progress_tx
+                    .as_ref()
+                    .and_then(ProgressSender::order)
+                    .or_else(|| live_progress_tx.as_ref().and_then(ProgressSender::order));
+                let _order = order
+                    .as_ref()
+                    .map(|order| futures::executor::block_on(order.lock()));
                 if let Some(tx) = &progress_tx {
-                    let _ = tx.send(format_progress(p));
+                    let _ = tx.send_sync(format_progress(p));
                 }
                 if let Some(tx) = &live_progress_tx {
-                    let _ = tx.send(workflow_progress_update(p));
+                    let _ = tx.send_sync(workflow_progress_update(p));
                 }
             };
-            let outcome = workflow::run_with_progress(
-                &script_owned,
-                runner,
-                on_progress,
-                Some(budget_source),
-                allow_nested,
-                nested_args,
-                Some(cancel),
-            );
+            let outcome = if collect_progress {
+                workflow::run_with_progress(
+                    &script_owned,
+                    runner,
+                    on_progress,
+                    Some(budget_source),
+                    allow_nested,
+                    nested_args,
+                    Some(cancel),
+                )
+            } else {
+                workflow::run_streaming(
+                    &script_owned,
+                    runner,
+                    on_progress,
+                    Some(budget_source),
+                    allow_nested,
+                    nested_args,
+                    Some(cancel),
+                )
+            };
             let _ = outcome_tx.send(outcome);
         })
         .expect("spawn workflow-script thread");
@@ -3211,12 +3285,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                                 update.tool_use_id =
                                     Some(format!("workflow_agent_{call_index}_cached"));
                                 update.last_progress_at_ms = Some(unix_time_ms_now());
-                                if let Some(ref tx) = ptx {
-                                    emit_workflow_agent_snapshot(Some(tx), &update);
-                                }
-                                if let Some(ref tx) = live_tx {
-                                    let _ = tx.send(update);
-                                }
+                                emit_workflow_agent_snapshot(ptx.as_ref(), live_tx.as_ref(), update).await;
                                 return result;
                             }
                             Plan::Live {
@@ -3336,7 +3405,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                             phase_title.clone(),
                             agent_display_model.clone(),
                             queued_ms,
-                        );
+                        ).await;
                         let queued_at_ms = Some(queued_ms);
                         let observer_enabled =
                             live_tx.is_some() || (journal_writer.is_some() && key.is_some());
@@ -3472,12 +3541,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                                 update.error = terminal_error.clone();
                                 update.tool_use_id = Some(tool_use_id);
                                 update.last_progress_at_ms = Some(unix_time_ms_now());
-                                if let Some(ref tx) = ptx {
-                                    emit_workflow_agent_snapshot(Some(tx), &update);
-                                }
-                                if let Some(ref tx) = live_tx {
-                                    let _ = tx.send(update);
-                                }
+                                emit_workflow_agent_snapshot(ptx.as_ref(), live_tx.as_ref(), update).await;
                             }
                         }
                         if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
@@ -3509,7 +3573,11 @@ async fn run_workflow_script_with_live_updates_recorded(
         }
     }
 
-    let outcome = outcome_rx.await.map_err(|_| {
+    let outcome = outcome_rx.await;
+    // The script has exited. Ordinary script/engine errors remain failures,
+    // rather than being reclassified as caller cancellation by the guard.
+    cancel_on_drop.0 = None;
+    let outcome = outcome.map_err(|_| {
         workflow::WorkflowError::Engine(
             "workflow script thread terminated without an outcome".into(),
         )
@@ -3734,7 +3802,7 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = watch::channel(false);
         // Cloned for kill-detection in tengu_workflow_completed status derivation
         // (oracle §7: `abortController?.signal.aborted ? "killed" : error ? "failed" : "completed"`).
         let completed_cancel = cancel.clone();
@@ -3908,8 +3976,19 @@ impl Task for LocalWorkflowHandler {
                 // long workflow's progress is visible via TaskOutput before it
                 // finishes. The drainer ends when `run_workflow_script` drops its
                 // sender on return.
-                let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
-                let (wptx, mut wprx) = mpsc::unbounded_channel::<WorkflowProgressUpdate>();
+                let progress_budget = ProgressBudget::new(PROGRESS_BYTE_BUDGET);
+                let (ptx, mut prx) = progress_transport::channel(
+                    PROGRESS_CHANNEL_CAPACITY,
+                    progress_budget.clone(),
+                    worker_cancel.clone(),
+                    String::len,
+                );
+                let (wptx, mut wprx) = progress_transport::channel(
+                    PROGRESS_CHANNEL_CAPACITY,
+                    progress_budget,
+                    worker_cancel.clone(),
+                    WorkflowProgressUpdate::queued_bytes,
+                );
                 let workflow_metrics =
                     Arc::new(tokio::sync::Mutex::new(WorkflowRunMetrics::default()));
                 let prog_output = output_manager.clone();
@@ -3917,17 +3996,19 @@ impl Task for LocalWorkflowHandler {
                 let worker_task_id_for_progress = worker_task_id.clone();
                 let run_id_for_progress = run_id.clone();
                 let drain = async move {
-                    while let Some(line) = prx.recv().await {
-                        let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
+                    while let Some(item) = prx.recv().await {
+                        let _ = prog_output
+                            .append(&prog_spool, &format!("{}\n", item.value))
+                            .await;
                     }
                 };
                 let live_drain = async move {
-                    while let Some(progress) = wprx.recv().await {
+                    while let Some(item) = wprx.recv().await {
                         if let Some(ref sink) = workflow_progress_sink {
                             sink.emit_workflow_progress(
                                 &worker_task_id_for_progress,
                                 &run_id_for_progress,
-                                progress,
+                                item.value,
                             )
                             .await;
                         }
@@ -3991,6 +4072,7 @@ impl Task for LocalWorkflowHandler {
                     Some(phase_telemetry_ctx.clone()),
                     Some(workflow_metrics.clone()),
                     output_scope,
+                    false,
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
                 // Natural completion and TaskStop race on the worker map. Once
@@ -4171,7 +4253,7 @@ impl Task for LocalWorkflowHandler {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
                 cancel,
-                completion_rx: StdMutex::new(Some(completion_rx)),
+                completion_rx,
                 finalizing: false,
             },
         );
@@ -4219,17 +4301,11 @@ impl Task for LocalWorkflowHandler {
             let workers = self.workers.lock().await;
             workers
                 .values()
-                .filter_map(|worker| {
-                    worker
-                        .completion_rx
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                })
+                .map(|worker| worker.completion_rx.clone())
                 .collect::<Vec<_>>()
         };
         for completion in completions {
-            let _ = completion.await;
+            wait_for_worker_completion(completion).await;
         }
         Ok(())
     }

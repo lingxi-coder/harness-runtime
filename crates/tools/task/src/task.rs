@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lingxi_core::host::task_registry::TaskRegistryError;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use lingxi_core::TodoState;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -443,11 +443,16 @@ fn status_wire(state: TodoState) -> &'static str {
 }
 
 /// Render an id list as `#a, #b` (claude-code `ids.map(id => \`#${id}\`)...`).
-fn join_hash(ids: &[String]) -> String {
-    ids.iter()
-        .map(|id| format!("#{id}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn source_join_hash(ids: JsonValueView<'_>) -> Option<Vec<u16>> {
+    let mut units = Vec::new();
+    for index in 0..ids.array_len()? {
+        if index > 0 {
+            units.extend(", ".encode_utf16());
+        }
+        units.push(u16::from(b'#'));
+        units.extend(ids.get_index(index)?.code_units()?);
+    }
+    Some(units)
 }
 
 /// JS-truthiness of `task.metadata?._internal` (`TaskListTool` filter).
@@ -531,7 +536,7 @@ fn todo_store(config_home: Option<&std::path::Path>, list_id: &str) -> TodoStore
     )
 }
 
-/// Borrowed view of a [`TodoTask`] used to render `TaskList` lines.
+/// Projection of a [`TodoTask`] for the structured `TaskList` result.
 struct TaskListRow {
     id: String,
     subject: Utf16JsonProjection,
@@ -540,53 +545,74 @@ struct TaskListRow {
     blocked_by: Vec<String>,
 }
 
-/// Render the `TaskList` result string (`mapToolResultToToolResultBlockParam`).
-fn render_task_list(rows: &[TaskListRow]) -> Utf16JsonProjection {
-    if rows.is_empty() {
-        return source_text_projection("No tasks found");
+/// Render structured results for both normal calls and hook replacements.
+fn render_task_create(result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let mut units = "Task #".encode_utf16().collect::<Vec<_>>();
+    units.extend(result.string_units("/task/id")?);
+    units.extend(" created successfully: ".encode_utf16());
+    units.extend(result.string_units("/task/subject")?);
+    Some(source_text_projection_units(&units))
+}
+
+/// Native `mapToolResultToToolResultBlockParam`, retaining source UTF-16.
+fn render_task_list(result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let tasks = result.at_pointer("/tasks")?;
+    let count = tasks.array_len()?;
+    if count == 0 {
+        return Some(source_text_projection("No tasks found"));
     }
     let mut units = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
+    for index in 0..count {
         if index > 0 {
             units.push(u16::from(b'\n'));
         }
-        let owner = row
-            .owner
-            .as_deref()
-            .filter(|o| !o.is_empty())
-            .map(|o| format!(" ({o})"))
-            .unwrap_or_default();
-        let blocked = if row.blocked_by.is_empty() {
-            String::new()
-        } else {
-            format!(" [blocked by {}]", join_hash(&row.blocked_by))
-        };
-        units.extend(format!("#{} [{}] ", row.id, status_wire(row.status)).encode_utf16());
-        units.extend(row.subject.string_units("").unwrap_or_default());
-        units.extend(owner.encode_utf16());
-        units.extend(blocked.encode_utf16());
+        let row = tasks.get_index(index)?;
+        units.push(u16::from(b'#'));
+        units.extend(row.get_property("id")?.code_units()?);
+        units.extend(" [".encode_utf16());
+        units.extend(row.get_property("status")?.code_units()?);
+        units.extend("] ".encode_utf16());
+        units.extend(row.get_property("subject")?.code_units()?);
+        if let Some(owner) = row.get_property("owner") {
+            let owner = owner.code_units()?;
+            if !owner.is_empty() {
+                units.extend(" (".encode_utf16());
+                units.extend(owner);
+                units.push(u16::from(b')'));
+            }
+        }
+        let blocked = source_join_hash(row.get_property("blockedBy")?)?;
+        if !blocked.is_empty() {
+            units.extend(" [blocked by ".encode_utf16());
+            units.extend(blocked);
+            units.push(u16::from(b']'));
+        }
     }
-    source_text_projection_units(&units)
+    Some(source_text_projection_units(&units))
 }
 
 /// Render the `TaskGet` result string.
-fn render_task_get(task: Option<&TodoTask>) -> Utf16JsonProjection {
-    let Some(task) = task else {
-        return source_text_projection("Task not found");
-    };
-    let mut units = format!("Task #{}: ", task.id)
-        .encode_utf16()
-        .collect::<Vec<_>>();
-    units.extend(task.subject.string_units("").unwrap_or_default());
-    units.extend(format!("\nStatus: {}\nDescription: ", status_wire(task.status)).encode_utf16());
-    units.extend(task.description.string_units("").unwrap_or_default());
-    if !task.blocked_by.is_empty() {
-        units.extend(format!("\nBlocked by: {}", join_hash(&task.blocked_by)).encode_utf16());
+fn render_task_get(result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let task = result.subprojection("/task").ok()?;
+    if task.at_pointer("")?.is_null() {
+        return Some(source_text_projection("Task not found"));
     }
-    if !task.blocks.is_empty() {
-        units.extend(format!("\nBlocks: {}", join_hash(&task.blocks)).encode_utf16());
+    let mut units = "Task #".encode_utf16().collect::<Vec<_>>();
+    units.extend(task.string_units("/id")?);
+    units.extend(": ".encode_utf16());
+    units.extend(task.string_units("/subject")?);
+    units.extend("\nStatus: ".encode_utf16());
+    units.extend(task.string_units("/status")?);
+    units.extend("\nDescription: ".encode_utf16());
+    units.extend(task.string_units("/description")?);
+    for (key, prefix) in [("blockedBy", "\nBlocked by: "), ("blocks", "\nBlocks: ")] {
+        let ids = source_join_hash(task.at_pointer(&format!("/{key}"))?)?;
+        if !ids.is_empty() {
+            units.extend(prefix.encode_utf16());
+            units.extend(ids);
+        }
     }
-    source_text_projection_units(&units)
+    Some(source_text_projection_units(&units))
 }
 
 fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
@@ -967,7 +993,7 @@ static TASK_CREATE_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
 fn is_filled_string(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty())
+        .is_some_and(|s| !lingxi_core::host::effort::trim_js_whitespace(s).is_empty())
 }
 
 /// `AOe(e)` — carries a batch parameter TaskCreate does not have.
@@ -982,24 +1008,12 @@ fn has_agent_keys(map: &serde_json::Map<String, Value>) -> bool {
     map.contains_key("prompt") || map.contains_key("subagent_type")
 }
 
-/// `TOo(e)` — derive a subject from a description: trim, cap at 80 CHARACTERS
-/// (`Array.from`, i.e. code points), and prefer to cut on the last space when
-/// that space is past the halfway point.
+/// Native `qir` — first line, JavaScript trim, then at most 80 code points.
 #[cfg(test)]
 fn subject_from_description(description: &str) -> String {
-    let trimmed = description.trim();
-    let chars: Vec<char> = trimmed.chars().collect();
-    if chars.len() <= 80 {
-        return trimmed.to_string();
-    }
-    let head: String = chars[..80].iter().collect();
-    match head.rfind(' ') {
-        // `d>40` is a BYTE index upstream, but the comparison is against a
-        // fixed 40 and the cut is the same character boundary either way for
-        // any input where a space exists in the first 80 characters.
-        Some(idx) if idx > 40 => head[..idx].trim().to_string(),
-        _ => head.trim().to_string(),
-    }
+    source_subject_from_description(&source_text_projection(description))
+        .and_then(|subject| subject.string_at("").map(str::to_owned))
+        .expect("a valid Unicode description produces a valid Unicode subject")
 }
 
 /// Aliases upstream accepts for each canonical field.
@@ -1199,7 +1213,7 @@ fn source_has_any(input: JsonValueView<'_>, keys: &[&str]) -> bool {
 fn source_filled_string(value: Option<JsonValueView<'_>>) -> bool {
     value
         .and_then(JsonValueView::as_str)
-        .is_some_and(|text| !text.trim().is_empty())
+        .is_some_and(|text| !lingxi_core::host::effort::trim_js_whitespace(text).is_empty())
 }
 
 fn source_set_field(
@@ -1253,6 +1267,11 @@ fn source_retain_task_create_fields(input: &Utf16JsonProjection) -> Option<Utf16
 
 fn source_subject_from_description(value: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
     let units = value.string_units("")?;
+    // The imported native `Wn` takes the first LF-delimited line before trim.
+    let units = &units[..units
+        .iter()
+        .position(|unit| *unit == u16::from(b'\n'))
+        .unwrap_or(units.len())];
     let mut spans: Vec<(usize, usize, Option<char>)> = Vec::new();
     let mut index = 0;
     while index < units.len() {
@@ -1276,7 +1295,7 @@ fn source_subject_from_description(value: &Utf16JsonProjection) -> Option<Utf16J
         }
     }
     let is_trim_space =
-        |scalar: Option<char>| scalar.is_some_and(|ch| ch.is_whitespace() || ch == '\u{feff}');
+        |scalar: Option<char>| scalar.is_some_and(lingxi_core::host::effort::javascript_whitespace);
     let start = spans
         .iter()
         .position(|(_, _, scalar)| !is_trim_space(*scalar))
@@ -1295,7 +1314,9 @@ fn source_subject_from_description(value: &Utf16JsonProjection) -> Option<Utf16J
     let chosen = head
         .iter()
         .rposition(|(_, _, scalar)| *scalar == Some(' '))
-        .filter(|index| *index > 40)
+        // `lastIndexOf` measures the threshold in UTF-16 units, although
+        // `Array.from(...).slice(0, 80)` measured the head in code points.
+        .filter(|index| head[*index].0 - head[0].0 > 40)
         .unwrap_or(head.len());
     let count = if chosen < head.len() {
         chosen
@@ -1481,40 +1502,32 @@ fn merge_task_metadata(
         .unwrap_or(&empty);
     let old_entries = existing.object_entries()?;
     let new_entries = incoming.object_entries()?;
-    let mut fields: Vec<(Vec<u16>, Utf16JsonProjection)> = Vec::new();
+    let mut replacements = HashMap::with_capacity(new_entries.len());
+    for entry in &new_entries {
+        replacements.entry(entry.code_units).or_insert(entry.value);
+    }
+    let old_keys: HashSet<&[u16]> = old_entries.iter().map(|entry| entry.code_units).collect();
+    let mut builder = Utf16JsonBuilder::new();
+    let mut fields = Vec::with_capacity(old_entries.len() + new_entries.len());
     for old in &old_entries {
-        let replacement = new_entries
-            .iter()
-            .find(|new| new.code_units == old.code_units);
-        if let Some(new) = replacement {
-            if new.value.is_null() {
-                continue;
-            }
-            fields.push((
-                old.code_units.to_vec(),
-                incoming.subprojection_property_units(new.code_units).ok()?,
-            ));
-        } else {
-            fields.push((
-                old.code_units.to_vec(),
-                existing.subprojection_property_units(old.code_units).ok()?,
-            ));
-        }
+        let value = match replacements.get(old.code_units) {
+            Some(value) if value.is_null() => continue,
+            Some(value) => *value,
+            None => old.value,
+        };
+        fields.push((old.code_units.to_vec(), builder.import_view(value).ok()?));
     }
     for new in &new_entries {
-        if old_entries
-            .iter()
-            .any(|old| old.code_units == new.code_units)
-            || new.value.is_null()
-        {
+        if old_keys.contains(new.code_units) || new.value.is_null() {
             continue;
         }
         fields.push((
             new.code_units.to_vec(),
-            incoming.subprojection_property_units(new.code_units).ok()?,
+            builder.import_view(new.value).ok()?,
         ));
     }
-    Utf16JsonProjection::object_units(fields).ok()
+    let root = builder.push_object_units(fields).ok()?;
+    builder.finish(root).ok()
 }
 
 /// Product-A V2 `TaskCreate` — appends a task to the todo store.
@@ -1551,6 +1564,9 @@ impl Tool for TaskCreateTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &TASK_CREATE_SOURCE_SCHEMA
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        render_task_create(result)
     }
     fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
         ToolInputRepairMetadata::Known {
@@ -1757,26 +1773,18 @@ impl Tool for TaskCreateTool {
         )
         .await;
 
-        let mut content_units = format!("Task #{task_id} created successfully: ")
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        content_units.extend(subject.string_units("").unwrap_or_default());
-        let data = source_object(vec![
-            (
-                "content".to_owned(),
-                source_text_projection_units(&content_units),
-            ),
-            (
-                "task".to_owned(),
-                source_object(vec![
-                    ("id".to_owned(), source_text_projection(&task_id)),
-                    ("subject".to_owned(), subject),
-                ]),
-            ),
-        ]);
+        let data = source_object(vec![(
+            "task".to_owned(),
+            source_object(vec![
+                ("id".to_owned(), source_text_projection(&task_id)),
+                ("subject".to_owned(), subject),
+                ("description".to_owned(), description),
+            ]),
+        )]);
+        let model_content = self.map_result_text(&data);
         Ok(ToolCallResult {
             data,
-            model_content: None,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -1835,6 +1843,9 @@ impl Tool for TaskGetTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &TASK_GET_SOURCE_SCHEMA
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        render_task_get(result)
     }
     fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
         ToolInputRepairMetadata::Known {
@@ -1927,7 +1938,6 @@ impl Tool for TaskGetTool {
         )
         .await;
 
-        let content = render_task_get(task.as_ref());
         let task_json = match &task {
             Some(t) => source_object(vec![
                 ("id".to_owned(), source_text_projection(&t.id)),
@@ -1942,12 +1952,11 @@ impl Tool for TaskGetTool {
             ]),
             None => generated_builtin_result(&Value::Null),
         };
+        let data = source_object(vec![("task".to_owned(), task_json)]);
+        let model_content = self.map_result_text(&data);
         Ok(ToolCallResult {
-            data: source_object(vec![
-                ("content".to_owned(), content),
-                ("task".to_owned(), task_json),
-            ]),
-            model_content: None,
+            data,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -2003,6 +2012,9 @@ impl Tool for TaskListTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &TASK_LIST_SOURCE_SCHEMA
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        render_task_list(result)
     }
     fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
         ToolInputRepairMetadata::Known {
@@ -2116,7 +2128,6 @@ impl Tool for TaskListTool {
             })
             .collect();
 
-        let content = render_task_list(&rows);
         let tasks: Vec<Utf16JsonProjection> = rows
             .iter()
             .map(|row| {
@@ -2132,21 +2143,20 @@ impl Tool for TaskListTool {
                         "status".to_owned(),
                         source_text_projection(status_wire(row.status)),
                     ),
-                    ("blockedBy".to_owned(), source_string_array(&row.blocked_by)),
                 ];
                 if let Some(owner) = row.owner.as_deref() {
                     fields.push(("owner".to_owned(), source_text_projection(owner)));
                 }
+                fields.push(("blockedBy".to_owned(), source_string_array(&row.blocked_by)));
                 source_object(fields)
             })
             .collect();
         let tasks = Utf16JsonProjection::array(tasks).expect("TaskList result array is valid JSON");
+        let data = source_object(vec![("tasks".to_owned(), tasks)]);
+        let model_content = self.map_result_text(&data);
         Ok(ToolCallResult {
-            data: source_object(vec![
-                ("content".to_owned(), content),
-                ("tasks".to_owned(), tasks),
-            ]),
-            model_content: None,
+            data,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -2615,9 +2625,10 @@ impl Tool for TaskUpdateTool {
         // address is that same name/label, which the router resolves to an id
         // (or accepts as the `team-lead` label).
         if is_agent_swarms_enabled() {
-            if let (Some(owner), Some(router)) =
-                (new_owner.clone(), self.ctx.mailbox_router.clone())
-            {
+            if let (Some(owner), Some(router)) = (
+                new_owner.clone().filter(|owner| !owner.is_empty()),
+                self.ctx.mailbox_router.clone(),
+            ) {
                 let sender_name = ctx
                     .agent_name
                     .as_deref()
@@ -3113,27 +3124,25 @@ impl Tool for TaskStopTool {
         .await;
 
         // No `content` key → the orchestrator JSON-stringifies the whole data.
-        let mut fields = vec![
+        let fields = vec![
             ("message".to_owned(), {
-                let mut units = "Successfully stopped task: "
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
-                units.extend(task_id.encode_utf16());
-                units.extend(" (".encode_utf16());
-                units.extend(command.string_units("").unwrap_or_default());
-                units.extend(")".encode_utf16());
-                source_text_projection_units(&units)
+                if ended_with_live_loop {
+                    source_text_projection(&format!("Task {task_id} had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status))
+                } else {
+                    let mut units = "Successfully stopped task: "
+                        .encode_utf16()
+                        .collect::<Vec<_>>();
+                    units.extend(task_id.encode_utf16());
+                    units.extend(" (".encode_utf16());
+                    units.extend(command.string_units("").unwrap_or_default());
+                    units.extend(")".encode_utf16());
+                    source_text_projection_units(&units)
+                }
             }),
             ("task_id".to_owned(), source_text_projection(&task_id)),
             ("task_type".to_owned(), source_text_projection(&task_type)),
             ("command".to_owned(), command.clone()),
         ];
-        if ended_with_live_loop {
-            fields.push((
-                "note".to_owned(),
-                source_text_projection(&format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status)),
-            ));
-        }
         Ok(ToolCallResult {
             data: source_object(fields),
             model_content: None,
@@ -3908,55 +3917,93 @@ impl Tool for TaskOutputTool {
             }
         };
 
-        // Blocking wait (`waitForTaskCompletion`, `TaskOutputTool.tsx:118-143`):
-        // re-read every 100 ms until the task is terminal (`done`) or the
-        // timeout elapses. Elapsed is measured on a `std::time::Instant`.
+        // Poll only the completion barrier. Spool contents are materialized
+        // once more when the wait ends, instead of discarded every 100 ms.
         if block && !chunk.done {
             let wait_started = Instant::now();
-            while !chunk.done {
-                if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
+            loop {
+                let mut polled = false;
+                loop {
+                    if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
+                        break;
+                    }
+                    if let Some(cancel) = ctx.cancel.as_ref() {
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => return Err(ToolError::Aborted),
+                            () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    polled = true;
+                    match registry.output_status(&task_id).await {
+                        Ok(Some(status)) if matches!(status.as_str(), "running" | "pending") => {}
+                        Ok(Some(_)) => break,
+                        Ok(None) | Err(TaskRegistryError::NotFound(_)) => {
+                            emit_completed(
+                                &bus,
+                                TASK_OUTPUT_COMPLETED,
+                                &invocation_id,
+                                started.elapsed().as_millis() as u64,
+                                &[],
+                            )
+                            .await;
+                            return Ok(missing_waited_task_output());
+                        }
+                        Err(e) => {
+                            emit_failed(
+                                &bus,
+                                TASK_OUTPUT_FAILED,
+                                &invocation_id,
+                                "registry_error",
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
+                            return Err(registry_err_to_tool_err("TaskOutput", e));
+                        }
+                    }
+                }
+                // A zero timeout preserves the initial snapshot. Abort never
+                // causes an extra read or a terminal notification claim.
+                if polled {
+                    if ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        return Err(ToolError::Aborted);
+                    }
+                    chunk = match registry.output(&task_id, None).await {
+                        Ok(c) => c,
+                        Err(TaskRegistryError::NotFound(_)) => {
+                            emit_completed(
+                                &bus,
+                                TASK_OUTPUT_COMPLETED,
+                                &invocation_id,
+                                started.elapsed().as_millis() as u64,
+                                &[],
+                            )
+                            .await;
+                            return Ok(missing_waited_task_output());
+                        }
+                        Err(e) => {
+                            emit_failed(
+                                &bus,
+                                TASK_OUTPUT_FAILED,
+                                &invocation_id,
+                                "registry_error",
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
+                            return Err(registry_err_to_tool_err("TaskOutput", e));
+                        }
+                    };
+                }
+                // A settled agent can resume between the status observation and
+                // the final read. Keep waiting against the original deadline.
+                if chunk.done
+                    || !polled
+                    || (wait_started.elapsed().as_millis() as u64) >= timeout_ms
+                {
                     break;
                 }
-                // 2.1.263 `zqo`: abort is an error, never a timeout result.
-                // Race the poll delay too, so cancellation cannot trigger one
-                // more output read (or mark a newly completed task notified).
-                if let Some(cancel) = ctx.cancel.as_ref() {
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return Err(ToolError::Aborted),
-                        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                    }
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                chunk = match registry.output(&task_id, None).await {
-                    Ok(c) => c,
-                    // The initial existence check still errors. Only a task
-                    // disappearing after the blocking wait began maps to null
-                    // (`zqo` → `kWn.call` in 2.1.263).
-                    Err(TaskRegistryError::NotFound(_)) => {
-                        emit_completed(
-                            &bus,
-                            TASK_OUTPUT_COMPLETED,
-                            &invocation_id,
-                            started.elapsed().as_millis() as u64,
-                            &[],
-                        )
-                        .await;
-                        return Ok(missing_waited_task_output());
-                    }
-                    Err(e) => {
-                        emit_failed(
-                            &bus,
-                            TASK_OUTPUT_FAILED,
-                            &invocation_id,
-                            "registry_error",
-                            started.elapsed().as_millis() as u64,
-                        )
-                        .await;
-                        return Err(registry_err_to_tool_err("TaskOutput", e));
-                    }
-                };
             }
         }
 

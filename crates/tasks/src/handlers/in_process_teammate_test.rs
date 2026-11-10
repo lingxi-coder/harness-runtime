@@ -3011,7 +3011,19 @@ async fn pool_allocation_failure_rolls_back_startup_claim() {
         .unwrap();
 
     handle.activate();
-    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
+    // Startup rollback includes real asynchronous task-store I/O. A fixed
+    // number of scheduler yields can finish before that I/O is acknowledged.
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = sink.last_status().filter(|status| status.is_terminal()) {
+                break status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("failed pool admission must finish startup rollback");
+    assert_eq!(terminal, TaskStatus::Failed);
     let task = store.get(&task_id).await.unwrap();
     assert_eq!(task.owner, None, "failed startup must release the claim");
     assert_eq!(task.status, lingxi_core::TodoState::Pending);
@@ -3306,6 +3318,7 @@ fn source_json_fixture(
 }
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        session_interactive: None,
         available_tool_names: None,
         cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,

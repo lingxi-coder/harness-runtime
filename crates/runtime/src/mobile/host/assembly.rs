@@ -1339,7 +1339,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = if cfg.cwd.starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
+    let permission_cwd = if cfg
+        .cwd
+        .starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
         || is_bound_mode_default_cwd(&cfg, &cwd)
     {
         cwd.clone()
@@ -2158,6 +2160,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     ));
     let session_agent_transcript_cache = session_agent_observer.transcript_cache.clone();
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_forward_subagent_output(&output)
         .with_instruction_provider(instruction_provider.clone())
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)

@@ -266,6 +266,67 @@ fn tool_invocation_carries_native_query_depth_separately_from_spawn_depth() {
 }
 
 #[test]
+fn native_319_nested_fork_captures_the_dispatching_agents_wire_effort() {
+    for effort in [
+        None,
+        Some(crate::definition::AgentEffort::Level("low".into())),
+        Some(crate::definition::AgentEffort::Numeric(2048)),
+    ] {
+        let mut ctx = fresh_subagent_ctx();
+        ctx.agent_definition.effort = effort.clone();
+        let invocation = invocation_context_for_tool(
+            &ctx,
+            "Agent",
+            &ToolUseId::new(),
+            MessageId::new(),
+            &[],
+            None,
+            "test-model",
+            None,
+            &ctx.allowed_tools,
+            None,
+        );
+        assert_eq!(
+            invocation.fork_context.unwrap().parent_effort,
+            effort.as_ref().map(crate::definition::AgentEffort::to_wire)
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_319_nested_tool_context_separates_session_mode_from_background_permissions() {
+    for interactive in [false, true] {
+        for is_async in [false, true] {
+            let mut ctx = fresh_subagent_ctx();
+            ctx.session_interactive = Some(interactive);
+            ctx.is_async = is_async;
+            let non_interactive = !interactive || is_async;
+            lingxi_core::host::session_flags::scope_non_interactive_session(
+                non_interactive,
+                async {
+                    let invocation = invocation_context_for_tool(
+                        &ctx,
+                        "Agent",
+                        &ToolUseId::new(),
+                        MessageId::new(),
+                        &[],
+                        None,
+                        "test-model",
+                        None,
+                        &ctx.allowed_tools,
+                        None,
+                    );
+                    assert_eq!(invocation.session_interactive, Some(interactive));
+                    assert_eq!(invocation.is_non_interactive_session, non_interactive);
+                    assert_eq!(invocation.is_async, is_async);
+                },
+            )
+            .await;
+        }
+    }
+}
+
+#[test]
 fn completed_result_keeps_exact_utf16_text_from_the_final_agent_row() {
     let exact_text = ConversationMessage::Assistant {
         id: MessageId::new(),

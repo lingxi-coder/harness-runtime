@@ -893,21 +893,32 @@ impl TaskRegistryHandle for TaskRegistry {
         let mut deadline = agent_wait_deadline(timeout)?;
         let mut observed_task_id: Option<String> = None;
         let mut last_transcript: Option<Utf16JsonProjection> = None;
+        let mut last_projection: Option<(String, u64)> = None;
 
         let mut active_claim: Option<AgentWaitNotificationClaim> = None;
         loop {
-            let state = TaskRegistry::list(self)
-                .await
-                .into_iter()
-                .find(|state| {
-                    matches!(state, TaskState::LocalAgent(agent) if agent.agent_id.as_uuid().to_string() == raw_agent_id)
-                });
+            let selected = self
+                .find_ordered_task(|state, revision| {
+                    let TaskState::LocalAgent(agent) = state else {
+                        return None;
+                    };
+                    if agent.agent_id.as_uuid().to_string() != raw_agent_id {
+                        return None;
+                    }
+                    let changed = last_projection
+                        .as_ref()
+                        .is_none_or(|(id, previous)| id != &agent.base.id || *previous != revision);
+                    Some((
+                        agent.base.id.clone(),
+                        agent.base.status,
+                        agent.error.as_ref().map(Utf16JsonProjection::from),
+                        revision,
+                        changed.then(|| native_agent_transcript_text(&agent.messages)),
+                    ))
+                })
+                .await;
 
-            if let Some(state) = state {
-                let TaskState::LocalAgent(agent) = &state else {
-                    continue;
-                };
-                let task_id = state.base().id.clone();
+            if let Some((task_id, status, error, revision, transcript)) = selected {
                 if observed_task_id.is_none() {
                     // K3 claims the completion notification once the matching
                     // registry row is first observed. Do not call mark_notified:
@@ -934,22 +945,26 @@ impl TaskRegistryHandle for TaskRegistry {
                     }
                 }
                 if observed_task_id.is_some() {
-                    let transcript_text = native_agent_transcript_text(&agent.messages);
-                    last_transcript = Some(transcript_text.clone());
-                    let snapshot = AgentTerminalSnapshot {
-                        task_id: task_id.clone(),
-                        native_transcript_text: transcript_text,
-                        error: agent.error.as_ref().map(Utf16JsonProjection::from),
-                    };
-                    let terminal_outcome = match state.base().status {
-                        TaskStatus::Completed => {
-                            Some(AgentTerminalWaitOutcome::Completed(snapshot))
-                        }
-                        TaskStatus::Failed => Some(AgentTerminalWaitOutcome::Failed(snapshot)),
-                        TaskStatus::Killed => Some(AgentTerminalWaitOutcome::Killed(snapshot)),
-                        TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => None,
-                    };
-                    if let Some(outcome) = terminal_outcome {
+                    if let Some(transcript) = transcript {
+                        last_transcript = Some(transcript);
+                        last_projection = Some((task_id.clone(), revision));
+                    }
+                    if status.is_terminal() {
+                        let snapshot = AgentTerminalSnapshot {
+                            task_id,
+                            native_transcript_text: last_transcript
+                                .take()
+                                .expect("observed Agent row includes its first transcript"),
+                            error,
+                        };
+                        let outcome = match status {
+                            TaskStatus::Completed => AgentTerminalWaitOutcome::Completed(snapshot),
+                            TaskStatus::Failed => AgentTerminalWaitOutcome::Failed(snapshot),
+                            TaskStatus::Killed => AgentTerminalWaitOutcome::Killed(snapshot),
+                            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => {
+                                unreachable!("checked terminal task status")
+                            }
+                        };
                         if let Some(claim) = active_claim.take() {
                             claim.finish().await;
                         }
@@ -1008,13 +1023,14 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn wait_for_agent_settled(&self, task_id: &str) -> Result<(), TaskRegistryError> {
         loop {
-            let state = TaskRegistry::list(self)
-                .await
-                .into_iter()
-                .find(|state| state.base().id == task_id);
-            match state {
+            let status = self
+                .find_ordered_task(|state, _| {
+                    (state.base().id == task_id).then_some(state.base().status)
+                })
+                .await;
+            match status {
                 None => return Ok(()),
-                Some(state) if state.base().status.is_terminal() => return Ok(()),
+                Some(status) if status.is_terminal() => return Ok(()),
                 Some(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
             }
         }
@@ -1300,6 +1316,13 @@ impl TaskRegistryHandle for TaskRegistry {
     ) -> Result<bool, TaskRegistryError> {
         TaskRegistry::settle_mcp_task(self, id, result_text, failed)
             .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn output_status(&self, id: &str) -> Result<Option<String>, TaskRegistryError> {
+        self.output_completion_status(id)
+            .await
+            .map(|status| Some(status_to_wire(status).to_owned()))
             .map_err(task_err_to_registry_err)
     }
 

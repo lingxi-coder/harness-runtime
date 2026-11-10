@@ -115,7 +115,12 @@ impl FileSystem for PosixFileSystem {
         &self,
         root: &Path,
     ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
-        lingxi_core::host::rooted_fs::root_identity(root).map(Some)
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::root_identity(&root).map(Some)
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
     }
 
     fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
@@ -281,6 +286,95 @@ impl FileSystem for PosixFileSystem {
         lingxi_core::host::rooted_fs::append_file(root, relative, content)
     }
 
+    async fn read_file_rooted_journal_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected_root: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<lingxi_core::host::rooted_fs::JournalRead, FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected_root = expected_root.copied();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::read_journal_pinned(
+                &root,
+                &relative,
+                expected_root.as_ref(),
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
+    async fn append_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        content: &str,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        let content = content.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::append_journal_durable(
+                &root, &relative, &expected, &content,
+            )
+        })
+        .await
+        .map_err(|error| {
+            lingxi_core::host::rooted_fs::JournalWriteError::uncertain(FsError::Io(
+                error.to_string(),
+            ))
+        })?
+    }
+
+    async fn truncate_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        length: u64,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::truncate_journal_durable(
+                &root, &relative, &expected, length,
+            )
+        })
+        .await
+        .map_err(|error| {
+            lingxi_core::host::rooted_fs::JournalWriteError::uncertain(FsError::Io(
+                error.to_string(),
+            ))
+        })?
+    }
+
+    async fn sync_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+    ) -> Result<(), FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::sync_journal_durable(&root, &relative, &expected)
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
     async fn append_file_rooted_durable(
         &self,
         root: &Path,
@@ -396,9 +490,46 @@ impl FileSystem for PosixFileSystem {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<u8>, FsError> {
-        lingxi_core::host::rooted_fs::read_byte_window_pinned(
-            root, relative, expected, offset, limit,
-        )
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = expected.copied();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::read_byte_window_pinned(
+                &root,
+                &relative,
+                expected.as_ref(),
+                offset,
+                limit,
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
+    async fn read_file_rooted_text_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        tail_bytes: u64,
+    ) -> Result<lingxi_core::host::rooted_fs::TextWindow, FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = expected.copied();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::read_text_window_pinned(
+                &root,
+                &relative,
+                expected.as_ref(),
+                offset,
+                limit,
+                tail_bytes,
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
     }
 
     async fn write_file_rooted_atomic(
@@ -422,15 +553,23 @@ impl FileSystem for PosixFileSystem {
         content: &str,
         expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<(), FsError> {
-        let expected =
-            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
-        lingxi_core::host::rooted_fs::atomic_write_pinned(
-            root,
-            relative,
-            content.as_bytes(),
-            lingxi_core::host::AtomicWriteOptions::default(),
-            expected,
-        )
+        let expected = expected
+            .copied()
+            .ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let content = content.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::atomic_write_pinned(
+                &root,
+                &relative,
+                content.as_bytes(),
+                lingxi_core::host::AtomicWriteOptions::default(),
+                &expected,
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
     }
 
     async fn flock_exclusive_rooted_pinned(
@@ -585,6 +724,60 @@ impl FlockGuard for PosixFlockGuard {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[tokio::test]
+    async fn rooted_text_projection_streams_tail_and_validates_skipped_bytes() {
+        use lingxi_core::host::FileSystem;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let relative = std::path::Path::new("spool.output");
+        let path = root.join(relative);
+        std::fs::write(&path, "head\r\n🙂中\ntail\n").unwrap();
+        let fs = super::PosixFileSystem::new(root.to_owned());
+        let pin = fs.root_identity_no_follow(root).await.unwrap();
+        let tail = fs
+            .read_file_rooted_text_window_pinned(root, relative, pin.as_ref(), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(tail.content, "中\ntail\n");
+        assert_eq!(tail.omitted_bytes, 10);
+        assert_eq!(tail.total_lines, 3);
+        let line = fs
+            .read_file_rooted_text_window_pinned(root, relative, pin.as_ref(), Some(1), Some(1), 1)
+            .await
+            .unwrap();
+        assert_eq!(line.content, "🙂中");
+        assert_eq!(line.total_lines, 3);
+        assert_eq!(line.omitted_bytes, 0);
+        assert_eq!(
+            fs.read_file_rooted_byte_window_pinned(root, relative, pin.as_ref(), 6, 4,)
+                .await
+                .unwrap(),
+            "🙂".as_bytes()
+        );
+        std::fs::write(&path, b"first\n\xff\n").unwrap();
+        assert!(matches!(
+            fs.read_file_rooted_text_window_pinned(
+                root,
+                relative,
+                pin.as_ref(),
+                Some(0),
+                Some(1),
+                1,
+            )
+            .await,
+            Err(lingxi_core::host::FsError::Io(_))
+        ));
+        std::fs::remove_file(&path).unwrap();
+        let outside = directory.path().join("target");
+        std::fs::write(&outside, "hidden").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(matches!(
+            fs.read_file_rooted_text_window_pinned(root, relative, pin.as_ref(), None, None, 3,)
+                .await,
+            Err(lingxi_core::host::FsError::OutsideWorkspace(_))
+        ));
+    }
+
     use super::*;
     use lingxi_core::host::FileSystem;
 

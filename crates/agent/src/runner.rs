@@ -231,6 +231,7 @@ fn invocation_context_for_tool(
 ) -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     let agent_id = ctx.agent_id;
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        session_interactive: ctx.session_interactive,
         available_tool_names: Some(
             allowed_tools
                 .iter()
@@ -251,6 +252,11 @@ fn invocation_context_for_tool(
             .then(|| lingxi_core::host::tool_invoker::SubagentForkContext {
                 messages: current_history.to_vec(),
                 system_prompt: system_prompt.cloned(),
+                parent_effort: ctx
+                    .agent_definition
+                    .effort
+                    .as_ref()
+                    .map(crate::definition::AgentEffort::to_wire),
             }),
         tool_execution_policy: if lingxi_core::host::is_fusion_panel_type(
             &ctx.agent_definition.agent_type,
@@ -1944,10 +1950,13 @@ impl Drop for PromptTranscriptCancellationGuard {
 /// Drives the multi-turn loop and emits [`SubagentEvent`]s on `out_tx`.
 /// A missing API client emits a startup failure.
 pub async fn run_subagent(
-    ctx: SubagentContext,
+    mut ctx: SubagentContext,
     event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    ctx.session_interactive.get_or_insert_with(|| {
+        !lingxi_core::host::session_flags::effective_non_interactive_session()
+    });
     let _restore_startup =
         crate::context::HandbackRestoreStartupGuard(ctx.handback_restore_start.clone());
     let input_cleanup = ctx

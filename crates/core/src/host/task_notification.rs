@@ -748,7 +748,7 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> Utf16Jso
     match n.task_type.as_str() {
         "local_agent" => {
             let summary = match n.status.as_str() {
-                "completed" => match n.max_turns_reached {
+                "completed" => match n.max_turns_reached.filter(|limit| *limit > 0) {
                     Some(limit) => summary_with_description(
                         "Agent \"",
                         &n.description,
@@ -763,19 +763,30 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> Utf16Jso
                     summary.text("Agent \"");
                     summary.projection(&n.description);
                     summary.text("\" failed: ");
-                    summary.text(n.error.as_deref().unwrap_or("Unknown error"));
+                    summary.text(
+                        n.error
+                            .as_deref()
+                            .filter(|error| !error.is_empty())
+                            .unwrap_or("Unknown error"),
+                    );
                     summary.finish()
                 }
                 _ => {
                     let verb = match n.killed_by.as_deref() {
-                        Some("parent") => "was stopped by Claude",
-                        Some("user") => "was stopped by user",
-                        _ => "was stopped",
+                        Some("parent") => "was stopped by Claude".to_owned(),
+                        Some("user") => "was stopped by user".to_owned(),
+                        _ => match n.error.as_deref().filter(|error| !error.is_empty()) {
+                            Some(error) => format!("was stopped: {error}"),
+                            None => "was stopped".to_owned(),
+                        },
                     };
                     summary_with_description("Agent \"", &n.description, &format!("\" {verb}"))
                 }
             };
-            let result_section = n.result.as_ref();
+            let result_section = n
+                .result
+                .as_ref()
+                .filter(|result| !projection_units(result).is_empty());
             output.text("<task-notification>\n<task-id>");
             output.text(&n.task_id);
             output.text("</task-id>");
@@ -796,13 +807,17 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> Utf16Jso
                     usage.subagent_tokens, usage.tool_uses, usage.duration_ms
                 ));
             }
-            if let Some(path) = &n.worktree_path {
+            if let Some(path) = n.worktree_path.as_ref().filter(|path| !path.is_empty()) {
                 output.text("\n<worktree><worktreePath>");
                 output.text(path);
                 output.text("</worktreePath>");
-                if let Some(branch) = &n.worktree_branch {
+                if let Some(branch) = n
+                    .worktree_branch
+                    .as_ref()
+                    .filter(|branch| !branch.is_empty())
+                {
                     output.text("<worktreeBranch>");
-                    output.text(branch);
+                    output.escaped_text(branch);
                     output.text("</worktreeBranch>");
                 }
                 output.text("</worktree>");
@@ -1343,6 +1358,65 @@ mod tests {
             workflow_total_tool_calls: None,
             workflow_duration_ms: None,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_notifications_match_native_319_artifact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_task_notifications_319.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let mut notification = base(
+                "a12345678",
+                "local_agent",
+                input["status"].as_str().unwrap(),
+                input["description"].as_str().unwrap_or("audit"),
+            );
+            notification.result = input["finalMessage"].as_str().map(source_text);
+            notification.error = input["error"].as_str().map(str::to_owned);
+            notification.killed_by = input["killedBy"].as_str().map(str::to_owned);
+            notification.max_turns_reached = input["maxTurnsReached"].as_u64();
+            notification.worktree_path = input["worktreePath"].as_str().map(str::to_owned);
+            notification.worktree_branch = input["worktreeBranch"].as_str().map(str::to_owned);
+            notification.tool_use_id = input["toolUseId"].as_str().map(str::to_owned);
+            notification.usage =
+                input
+                    .get("usage")
+                    .map(|usage| crate::host::task_registry::AgentRunUsage {
+                        subagent_tokens: usage["totalTokens"].as_u64().unwrap(),
+                        tool_uses: usage["toolUses"].as_u64().unwrap(),
+                        duration_ms: usage["durationMs"].as_u64().unwrap(),
+                    });
+            assert_eq!(
+                render_one(&notification),
+                case["output"].as_str().unwrap(),
+                "native 319 notification: {}",
+                case["name"]
+            );
+        }
+        let units = |value: &serde_json::Value| -> Vec<u16> {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                .collect()
+        };
+        for case in fixture["rawCases"].as_array().unwrap() {
+            let mut notification = base("a12345678", "local_agent", "completed", "ignored");
+            notification.description =
+                root_string_from_units(units(&case["input"]["descriptionUnits"]));
+            notification.result =
+                Some(root_string_from_units(units(&case["input"]["resultUnits"])));
+            assert_eq!(
+                projection_units(&render_one_with_options(&notification, false)),
+                units(&case["outputUnits"]),
+                "native 319 UTF-16 notification: {}",
+                case["name"]
+            );
         }
     }
 
@@ -2209,8 +2283,8 @@ mod tests {
     /// The optional `<worktree>` section with BOTH `<worktreePath>` and
     /// `<worktreeBranch>`, byte-faithful to the binary's
     /// `\n<worktree><worktreePath>${c}</worktreePath><worktreeBranch>${u}</worktreeBranch></worktree>`,
-    /// riding AFTER `<usage>` (the `${x}${k}${H}` order) and with the path/branch
-    /// interpolated RAW (not XML-escaped).
+    /// riding AFTER `<usage>` (the `${x}${k}${H}` order). The path is raw;
+    /// the 2.1.319 native renderer XML-escapes the branch.
     #[test]
     fn agent_worktree_section_with_branch_rides_after_usage() {
         let mut n = base("a12345678", "local_agent", "completed", "audit");

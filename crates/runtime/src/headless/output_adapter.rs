@@ -28,6 +28,10 @@ impl SinkAdapter {
 
 #[async_trait]
 impl OutputStream for SinkAdapter {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         self.sink.source_text(text).await;
     }

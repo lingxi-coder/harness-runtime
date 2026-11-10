@@ -121,7 +121,7 @@ fn apply_read_tail_cap(content: String) -> String {
 /// Owner of the task-output sandbox directory.
 pub struct TaskOutputManager {
     output_dir: PathBuf,
-    linked_transcripts: Mutex<HashMap<PathBuf, (PathBuf, std::fs::File)>>,
+    linked_transcripts: Mutex<HashMap<PathBuf, Arc<LinkedTranscript>>>,
     fs: Arc<dyn FileSystem>,
     /// Identity of the output directory observed by this manager. The
     /// platform rooted operations still perform handle-relative I/O; this
@@ -152,6 +152,45 @@ pub struct TaskOutputManager {
 }
 
 const MAX_UNWRITTEN_CHARS: u64 = 16 * 1024 * 1024;
+
+/// The global table only owns references. Descriptor cursor access and scans
+/// are serialized per transcript, entirely on a blocking worker.
+struct LinkedTranscript {
+    target: PathBuf,
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+impl LinkedTranscript {
+    fn new(target: PathBuf, file: std::fs::File) -> Arc<Self> {
+        Arc::new(Self {
+            target,
+            file: std::sync::Mutex::new(file),
+        })
+    }
+
+    #[cfg(any(unix, windows))]
+    fn validate(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        file: &std::fs::File,
+    ) -> Result<(), OutputError> {
+        lingxi_core::host::rooted_fs::validate_task_output_link(
+            root,
+            relative,
+            expected,
+            &self.target,
+            file,
+        )
+        .map_err(|error| match error {
+            lingxi_core::host::FsError::OutsideWorkspace(_) => {
+                OutputError::SwapRefused("task output link identity changed".into())
+            }
+            other => OutputError::Io(other.to_string()),
+        })
+    }
+}
 
 #[derive(Default)]
 struct OutputWriter {
@@ -361,8 +400,8 @@ impl TaskOutputManager {
         let relative = self.relative_path_for(output_file)?;
         let lock = self.write_lock_for(output_file).await;
         let _guard = lock.lock().await;
-        if let Some((prior, _)) = self.linked_transcripts.lock().await.get(output_file) {
-            if prior != target {
+        if let Some(prior) = self.linked_transcripts.lock().await.get(output_file) {
+            if prior.target != target {
                 return Err(OutputError::PathEscape(target.display().to_string()));
             }
             #[cfg(unix)]
@@ -376,10 +415,10 @@ impl TaskOutputManager {
             target,
         )
         .map_err(|error| OutputError::Io(error.to_string()))?;
-        self.linked_transcripts
-            .lock()
-            .await
-            .insert(output_file.to_owned(), (target.to_owned(), file));
+        self.linked_transcripts.lock().await.insert(
+            output_file.to_owned(),
+            LinkedTranscript::new(target.to_owned(), file),
+        );
         Ok(())
     }
 
@@ -425,10 +464,10 @@ impl TaskOutputManager {
             target,
         )
         .map_err(|e| OutputError::Io(e.to_string()))?;
-        self.linked_transcripts
-            .lock()
-            .await
-            .insert(output_file.to_owned(), (target.to_owned(), file));
+        self.linked_transcripts.lock().await.insert(
+            output_file.to_owned(),
+            LinkedTranscript::new(target.to_owned(), file),
+        );
         Ok(())
     }
 
@@ -451,75 +490,73 @@ impl TaskOutputManager {
         offset: u64,
     ) -> Result<(String, u64), OutputError> {
         let relative = self.relative_path_for(output_file)?;
+        let writes = self.write_lock_for(output_file).await.lock_owned().await;
+        // The in-memory terminal projection wins even when its physical
+        // rewrite failed, just as it does for a full read.
+        if let Some(terminal_override) = self.terminal_overrides.lock().await.get(output_file) {
+            let bytes = terminal_override.content.as_bytes();
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let end = start
+                .saturating_add(MAX_TASK_OUTPUT_READ_BYTES as usize)
+                .min(bytes.len());
+            return Ok(decode_delta(&bytes[start..end], offset));
+        }
         let identity = self.check_output_root().await?;
         #[cfg(any(unix, windows))]
         {
-            use std::io::{Read, Seek, SeekFrom};
-            #[cfg(unix)]
-            use std::os::unix::fs::MetadataExt;
-            let mut links = self.linked_transcripts.lock().await;
-            if let Some((target, file)) = links.get_mut(output_file) {
-                let pinned = file
-                    .metadata()
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                #[cfg(unix)]
-                {
-                    let advertised = std::fs::read_link(output_file)
-                        .map_err(|e| OutputError::Io(e.to_string()))?;
-                    let current = std::fs::symlink_metadata(&*target)
-                        .map_err(|e| OutputError::Io(e.to_string()))?;
-                    if advertised != *target
-                        || !current.is_file()
-                        || current.ino() != pinned.ino()
-                        || current.dev() != pinned.dev()
-                    {
-                        return Err(OutputError::SwapRefused(
-                            "task output link identity changed".into(),
-                        ));
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    let pin = self.check_output_root().await?;
-                    lingxi_core::host::rooted_fs::validate_task_output_link(
-                        &self.output_dir,
-                        &relative,
-                        pin.as_ref(),
-                        target,
-                        file,
-                    )
-                    .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
-                }
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                let mut bytes = Vec::new();
-                file.take(MAX_TASK_OUTPUT_READ_BYTES)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                let complete = complete_utf8_prefix(&bytes);
-                return Ok((
-                    String::from_utf8_lossy(&bytes[..complete]).into_owned(),
-                    offset.saturating_add(complete as u64),
-                ));
+            let linked = self
+                .linked_transcripts
+                .lock()
+                .await
+                .get(output_file)
+                .cloned();
+            if let Some(linked) = linked {
+                let root = self.output_dir.clone();
+                return tokio::task::spawn_blocking(move || {
+                    use std::io::{Read, Seek, SeekFrom};
+                    // Keep both cursor and spool ownership until the native
+                    // work ends, including cancellation of the async waiter.
+                    let _writes = writes;
+                    let mut file = linked
+                        .file
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    linked.validate(&root, &relative, identity.as_ref(), &file)?;
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(|error| OutputError::Io(error.to_string()))?;
+                    let mut bytes = Vec::new();
+                    (&mut *file)
+                        .take(MAX_TASK_OUTPUT_READ_BYTES)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| OutputError::Io(error.to_string()))?;
+                    Ok(decode_delta(&bytes, offset))
+                })
+                .await
+                .map_err(|error| OutputError::Io(error.to_string()))?;
             }
         }
-        let bytes = self
-            .fs
-            .read_file_rooted_byte_window_pinned(
-                &self.output_dir,
-                &relative,
-                identity.as_ref(),
-                offset,
-                MAX_TASK_OUTPUT_READ_BYTES,
-            )
-            .await
-            .map_err(|e| OutputError::Io(e.to_string()))?;
-        let complete = complete_utf8_prefix(&bytes);
-        let end = offset.saturating_add(complete as u64);
-        Ok((
-            String::from_utf8_lossy(&bytes[..complete]).into_owned(),
-            end,
-        ))
+        let fs = self.fs.clone();
+        let root = self.output_dir.clone();
+        // A cancelled waiter must not release serialization while a native
+        // backend's blocking operation still owns the old spool descriptor.
+        tokio::spawn(async move {
+            let _writes = writes;
+            let bytes = fs
+                .read_file_rooted_byte_window_pinned(
+                    &root,
+                    &relative,
+                    identity.as_ref(),
+                    offset,
+                    MAX_TASK_OUTPUT_READ_BYTES,
+                )
+                .await
+                .map_err(|error| OutputError::Io(error.to_string()))?;
+            Ok(decode_delta(&bytes, offset))
+        })
+        .await
+        .map_err(|error| OutputError::Io(error.to_string()))?
     }
 
     /// A separate supervisor owns this shell's terminal trailer, including
@@ -1159,15 +1196,14 @@ impl TaskOutputManager {
         opts: OutputOptions,
     ) -> Result<TaskOutput, OutputError> {
         let relative = self.relative_path_for(output_file)?;
-        let write_lock = self.write_lock_for(output_file).await;
-        let _writes = write_lock.lock().await;
-        if let Some(terminal_override) = self
+        let writes = self.write_lock_for(output_file).await.lock_owned().await;
+        let terminal_override = self
             .terminal_overrides
             .lock()
             .await
             .get(output_file)
-            .cloned()
-        {
+            .cloned();
+        if let Some(terminal_override) = terminal_override {
             let physical_spool_authoritative = terminal_override.physical_spool_authoritative
                 && self.check_output_root().await.is_ok();
             let fc = lingxi_core::host::apply_line_window(
@@ -1184,123 +1220,84 @@ impl TaskOutputManager {
         }
         #[cfg(any(unix, windows))]
         {
-            use std::io::{Read, Seek, SeekFrom};
-            #[cfg(unix)]
-            use std::os::unix::fs::MetadataExt;
-            let mut links = self.linked_transcripts.lock().await;
-            if let Some((target, file)) = links.get_mut(output_file) {
-                self.check_output_root().await?;
-                let pinned = file
-                    .metadata()
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                #[cfg(unix)]
-                {
-                    let advertised = std::fs::read_link(output_file)
-                        .map_err(|e| OutputError::Io(e.to_string()))?;
-                    let current = std::fs::symlink_metadata(&*target)
-                        .map_err(|e| OutputError::Io(e.to_string()))?;
-                    if advertised != *target
-                        || !current.is_file()
-                        || current.ino() != pinned.ino()
-                        || current.dev() != pinned.dev()
-                    {
-                        return Err(OutputError::SwapRefused(
-                            "task output link identity changed".into(),
-                        ));
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    let pin = self.check_output_root().await?;
-                    lingxi_core::host::rooted_fs::validate_task_output_link(
-                        &self.output_dir,
-                        &relative,
-                        pin.as_ref(),
-                        target,
-                        file,
-                    )
-                    .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
-                }
-                if opts.offset.is_some() || opts.limit.is_some() {
-                    use std::io::BufRead;
+            let linked = self
+                .linked_transcripts
+                .lock()
+                .await
+                .get(output_file)
+                .cloned();
+            if let Some(linked) = linked {
+                // Never retain the table guard across root checks, a cursor
+                // lock, or file I/O. Other spools can progress independently.
+                let identity = self.check_output_root().await?;
+                let root = self.output_dir.clone();
+                return tokio::task::spawn_blocking(move || {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let _writes = writes;
+                    let mut file = linked
+                        .file
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    linked.validate(&root, &relative, identity.as_ref(), &file)?;
+                    let length = file
+                        .metadata()
+                        .map_err(|error| OutputError::Io(error.to_string()))?
+                        .len();
                     file.seek(SeekFrom::Start(0))
-                        .map_err(|e| OutputError::Io(e.to_string()))?;
-                    let reader = std::io::BufReader::new(&mut *file);
-                    let mut content = String::new();
-                    let mut total_lines = 0u64;
-                    let mut taken = 0u64;
-                    for line in reader.lines() {
-                        let line = line.map_err(|e| OutputError::Io(e.to_string()))?;
-                        if total_lines >= opts.offset.unwrap_or(0)
-                            && taken < opts.limit.unwrap_or(u64::MAX)
-                        {
-                            if taken > 0 {
-                                content.push('\n');
-                            }
-                            content.push_str(&line);
-                            taken += 1;
-                        }
-                        total_lines += 1;
+                        .map_err(|error| OutputError::Io(error.to_string()))?;
+                    let window = if opts.offset.is_some() || opts.limit.is_some() {
+                        lingxi_core::host::rooted_fs::read_text_window(
+                            (&mut *file).take(length),
+                            &relative,
+                            opts.offset,
+                            opts.limit,
+                            MAX_TASK_OUTPUT_READ_BYTES,
+                        )
+                    } else {
+                        lingxi_core::host::rooted_fs::read_text_tail_lossy(
+                            (&mut *file).take(length),
+                            &relative,
+                            MAX_TASK_OUTPUT_READ_BYTES,
+                        )
                     }
-                    return Ok(TaskOutput {
-                        content,
-                        total_lines,
-                        truncated: false,
+                    .map_err(|error| OutputError::Io(error.to_string()))?;
+                    let truncated = window.truncated || window.omitted_bytes > 0;
+                    Ok(TaskOutput {
+                        content: format_text_window(window.content, window.omitted_bytes),
+                        total_lines: window.total_lines,
+                        truncated,
                         physical_spool_authoritative: true,
-                    });
-                }
-                let start = pinned.len().saturating_sub(MAX_TASK_OUTPUT_READ_BYTES);
-                file.seek(SeekFrom::Start(start))
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                let mut bytes = Vec::new();
-                file.take(MAX_TASK_OUTPUT_READ_BYTES)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| OutputError::Io(e.to_string()))?;
-                let skip = if start > 0 {
-                    bytes
-                        .iter()
-                        .take_while(|byte| **byte & 0xc0 == 0x80)
-                        .count()
-                } else {
-                    0
-                };
-                let content = String::from_utf8_lossy(&bytes[skip..]).into_owned();
-                let omitted = start.saturating_add(skip as u64);
-                let content = if omitted > 0 && opts.offset.is_none() && opts.limit.is_none() {
-                    format!(
-                        "[{}KB of earlier output omitted]\n{content}",
-                        ((omitted as f64) / 1024.0).round() as u64
-                    )
-                } else {
-                    content
-                };
-                let fc = lingxi_core::host::apply_line_window(content, opts.offset, opts.limit);
-                return Ok(TaskOutput {
-                    content: fc.content,
-                    total_lines: fc.total_lines,
-                    truncated: fc.truncated || start > 0,
-                    physical_spool_authoritative: true,
-                });
+                    })
+                })
+                .await
+                .map_err(|error| OutputError::Io(error.to_string()))?;
             }
         }
         let root_identity = self.check_output_root().await?;
-        let fc = self
-            .fs
-            .read_file_rooted_no_follow_window_pinned(
-                &self.output_dir,
-                &relative,
-                opts.offset,
-                opts.limit,
-                root_identity.as_ref(),
-            )
-            .await
-            .map_err(|e| OutputError::Io(e.to_string()))?;
-        Ok(TaskOutput {
-            content: cap_full_read(fc.content, &opts),
-            total_lines: fc.total_lines,
-            truncated: fc.truncated,
-            physical_spool_authoritative: true,
+        let fs = self.fs.clone();
+        let root = self.output_dir.clone();
+        tokio::spawn(async move {
+            let _writes = writes;
+            let window = fs
+                .read_file_rooted_text_window_pinned(
+                    &root,
+                    &relative,
+                    root_identity.as_ref(),
+                    opts.offset,
+                    opts.limit,
+                    MAX_TASK_OUTPUT_READ_BYTES,
+                )
+                .await
+                .map_err(|error| OutputError::Io(error.to_string()))?;
+            Ok(TaskOutput {
+                content: format_text_window(window.content, window.omitted_bytes),
+                total_lines: window.total_lines,
+                truncated: window.truncated,
+                physical_spool_authoritative: true,
+            })
         })
+        .await
+        .map_err(|error| OutputError::Io(error.to_string()))?
     }
 }
 
@@ -1315,6 +1312,25 @@ fn cap_full_read(content: String, opts: &OutputOptions) -> String {
         return content;
     }
     apply_read_tail_cap(content)
+}
+
+fn format_text_window(content: String, omitted_bytes: u64) -> String {
+    if omitted_bytes == 0 {
+        return content;
+    }
+    format!(
+        "[{}KB of earlier output omitted]\n{}",
+        (omitted_bytes as f64 / 1024.0).round() as u64,
+        content,
+    )
+}
+
+fn decode_delta(bytes: &[u8], offset: u64) -> (String, u64) {
+    let complete = complete_utf8_prefix(bytes);
+    (
+        String::from_utf8_lossy(&bytes[..complete]).into_owned(),
+        offset.saturating_add(complete as u64),
+    )
 }
 
 /// Framed-output owner used by an independent native shell supervisor. The
@@ -1757,6 +1773,167 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn output_delta_uses_terminal_override_after_failed_physical_write() {
+        let (_fs, manager) = manager();
+        let output = manager.allocate("bdelta002").await.unwrap();
+        manager
+            .append(&output, "stale success bytes")
+            .await
+            .unwrap();
+        manager.terminal_overrides.lock().await.insert(
+            output.clone(),
+            TerminalOverride {
+                content: "canonical failure 中".into(),
+                physical_spool_authoritative: false,
+            },
+        );
+        let expected = "canonical failure 中";
+        assert_eq!(
+            manager.read_delta(&output, 0).await.unwrap(),
+            (expected.into(), expected.len() as u64),
+        );
+        assert_eq!(
+            manager
+                .read_delta(&output, expected.len() as u64)
+                .await
+                .unwrap(),
+            (String::new(), expected.len() as u64),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_transcript_keeps_other_spools_and_async_worker_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tasks");
+        std::fs::create_dir(&root).unwrap();
+        let first_target = directory.path().join("first.jsonl");
+        let second_target = directory.path().join("second.jsonl");
+        std::fs::write(&first_target, "first\n").unwrap();
+        std::fs::write(&second_target, "second\n").unwrap();
+        let manager = Arc::new(TaskOutputManager::new(root, ExclusiveFs::new()));
+        let first = manager.allocate("alink0002").await.unwrap();
+        let second = manager.allocate("alink0003").await.unwrap();
+        manager
+            .link_transcript(&first, &first_target)
+            .await
+            .unwrap();
+        manager
+            .link_transcript(&second, &second_target)
+            .await
+            .unwrap();
+        let linked = manager
+            .linked_transcripts
+            .lock()
+            .await
+            .get(&first)
+            .cloned()
+            .unwrap();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        // A dropped sender also releases this worker if an assertion fails.
+        let holder = std::thread::spawn(move || {
+            let _file = linked.file.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = resume_rx.recv();
+        });
+        locked_rx.await.unwrap();
+        let first_serial = manager.write_lock_for(&first).await;
+        let first_reader = {
+            let manager = manager.clone();
+            let first = first.clone();
+            tokio::spawn(async move {
+                manager
+                    .read(
+                        &first,
+                        OutputOptions {
+                            offset: Some(0),
+                            limit: Some(1),
+                        },
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while first_serial.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("read owns the spool while its blocking worker waits");
+        let terminal = {
+            let manager = manager.clone();
+            let first = first.clone();
+            tokio::spawn(async move {
+                manager
+                    .replace_terminal_result_authoritative(&first, "canonical")
+                    .await
+            })
+        };
+        let other = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            assert_eq!(manager.linked_transcripts.lock().await.len(), 2);
+            let full = manager
+                .read(&second, OutputOptions::default())
+                .await
+                .unwrap();
+            let delta = manager.read_delta(&second, 0).await.unwrap();
+            (full.content, delta)
+        })
+        .await
+        .expect("another transcript progresses while the first is blocked");
+        assert_eq!(other, ("second\n".into(), ("second\n".into(), 7)));
+        assert!(
+            !terminal.is_finished(),
+            "terminal replacement waits for the same spool read"
+        );
+        resume_tx.send(()).unwrap();
+        assert_eq!(first_reader.await.unwrap().unwrap().content, "first");
+        terminal.await.unwrap().unwrap();
+        holder.join().unwrap();
+        assert_eq!(
+            manager.read_delta(&first, 0).await.unwrap(),
+            ("canonical".into(), 9)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_tail_reports_exact_whole_transcript_line_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tasks");
+        std::fs::create_dir(&root).unwrap();
+        let target = directory.path().join("large.jsonl");
+        let lines = MAX_TASK_OUTPUT_READ_BYTES as usize / 1024 + 3;
+        let body = format!("{}\n", "x".repeat(1023)).repeat(lines);
+        std::fs::write(&target, &body).unwrap();
+        let manager = TaskOutputManager::new(root, ExclusiveFs::new());
+        let output = manager.allocate("alink0004").await.unwrap();
+        manager.link_transcript(&output, &target).await.unwrap();
+        let full = manager
+            .read(&output, OutputOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(full.total_lines, lines as u64);
+        assert!(full
+            .content
+            .starts_with("[3KB of earlier output omitted]\n"));
+        assert!(full.truncated);
+        let window = manager
+            .read(
+                &output,
+                OutputOptions {
+                    offset: Some(1),
+                    limit: Some(1),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(window.content, "x".repeat(1023));
+        assert_eq!(window.total_lines, lines as u64);
+        assert!(!window.truncated);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn registered_transcript_link_reads_live_inode_and_refuses_retarget() {
@@ -1992,7 +2169,9 @@ mod tests {
             .await
             .get(&output)
             .unwrap()
-            .1
+            .file
+            .lock()
+            .unwrap()
             .metadata()
             .unwrap()
             .ino();
@@ -2043,7 +2222,9 @@ mod tests {
             .await
             .get(&reused)
             .unwrap()
-            .1
+            .file
+            .lock()
+            .unwrap()
             .metadata()
             .unwrap()
             .ino();

@@ -1371,6 +1371,184 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
     spawner.stop(&agent_id).await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn persistent_stop_releases_capacity_before_owned_sequential_mcp_teardown() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        1,
+    ));
+    let spawner = Arc::new(test_spawner(pool.clone()));
+    let (agent_id, _events) = spawner
+        .spawn_persistent(minimal_spawn_request("first"), dummy_inherit())
+        .await
+        .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let first = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+        server_name: "first".into(),
+        run: Arc::new({
+            let started = started.clone();
+            let release = release.clone();
+            let order = order.clone();
+            move || {
+                let started = started.clone();
+                let release = release.clone();
+                let order = order.clone();
+                Box::pin(async move {
+                    order.lock().unwrap().push("first-start");
+                    started.notify_one();
+                    release.notified().await;
+                    order.lock().unwrap().push("first-end");
+                    Err("disconnect failed".into())
+                })
+            }
+        }),
+    };
+    let second = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+        server_name: "second".into(),
+        run: Arc::new({
+            let order = order.clone();
+            move || {
+                let order = order.clone();
+                Box::pin(async move {
+                    order.lock().unwrap().push("second");
+                    Ok(())
+                })
+            }
+        }),
+    };
+    spawner
+        .persistent_agent_mcp_cleanups
+        .lock()
+        .await
+        .insert(agent_id, vec![first, second]);
+    let stop = tokio::spawn({
+        let spawner = spawner.clone();
+        async move { spawner.stop(&agent_id).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+        .await
+        .expect("stop reaches the blocked MCP disconnect");
+    assert_eq!(pool.slot_count().await, 0);
+    assert!(!stop.is_finished());
+    assert!(lingxi_core::host::agent_processes::is_stop_pending(
+        &agent_id.to_string()
+    ));
+    assert_eq!(*order.lock().unwrap(), ["first-start"]);
+
+    // Actual admission in a one-slot pool proves the permit was released,
+    // and an independent agent can finish stopping during this disconnect.
+    let (next_id, _next_events) = spawner
+        .spawn_persistent(minimal_spawn_request("next"), dummy_inherit())
+        .await
+        .expect("blocked MCP teardown must not consume pool capacity");
+    spawner.stop(&next_id).await.unwrap();
+
+    stop.abort();
+    assert!(stop.await.unwrap_err().is_cancelled());
+    assert!(lingxi_core::host::agent_processes::is_stop_pending(
+        &agent_id.to_string()
+    ));
+    let retry = tokio::spawn({
+        let spawner = spawner.clone();
+        async move { spawner.stop(&agent_id).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let queued = spawner
+                .persistent_stop_transactions
+                .lock()
+                .unwrap()
+                .get(&agent_id)
+                .is_some_and(|entry| entry.strong_count() == 2);
+            if queued {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("retry queues behind the owned stop transaction");
+    assert!(!retry.is_finished());
+    assert_eq!(*order.lock().unwrap(), ["first-start"]);
+    release.notify_one();
+    retry.await.unwrap().unwrap();
+    assert_eq!(
+        *order.lock().unwrap(),
+        ["first-start", "first-end", "second"]
+    );
+    assert!(!lingxi_core::host::agent_processes::is_stop_pending(
+        &agent_id.to_string()
+    ));
+    assert!(spawner
+        .persistent_agent_mcp_cleanups
+        .lock()
+        .await
+        .is_empty());
+    assert!(spawner
+        .persistent_stop_transactions
+        .lock()
+        .unwrap()
+        .is_empty());
+    spawner.stop(&agent_id).await.unwrap();
+    assert_eq!(order.lock().unwrap().len(), 3, "cleanup is exactly once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_stop_keeps_mcp_cleanup_owed_when_deallocation_fails() {
+    struct FailFirstCancelRuntime {
+        inner: MockRuntimeSpawner,
+        fail_next: AtomicBool,
+    }
+    #[async_trait]
+    impl RuntimeSpawner for FailFirstCancelRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            self.inner.spawn(name, task).await
+        }
+        async fn sleep(&self, duration: std::time::Duration) {
+            self.inner.sleep(duration).await;
+        }
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                Err(RuntimeError::Internal("retry persistent stop".into()))
+            } else {
+                self.inner.cancel(handle).await
+            }
+        }
+    }
+    let runtime = Arc::new(FailFirstCancelRuntime {
+        inner: MockRuntimeSpawner::default(),
+        fail_next: AtomicBool::new(true),
+    });
+    let pool = Arc::new(StateMachinePool::new(runtime, 1));
+    let cleaned = Arc::new(AtomicUsize::new(0));
+    let spawner =
+        test_spawner(pool).with_mcp_tool_builder(counting_mcp_cleanup_builder(cleaned.clone()));
+    let (agent_id, _events) = spawner
+        .spawn_persistent(minimal_spawn_request("go"), dummy_inherit())
+        .await
+        .unwrap();
+    assert!(spawner.stop(&agent_id).await.is_err());
+    assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+    assert!(spawner
+        .persistent_agent_mcp_cleanups
+        .lock()
+        .await
+        .contains_key(&agent_id));
+    assert!(!lingxi_core::host::agent_processes::is_stop_pending(
+        &agent_id.to_string()
+    ));
+    spawner.stop(&agent_id).await.unwrap();
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    spawner.stop(&agent_id).await.unwrap();
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+}
+
 /// G007 / F012: dropping the `spawn` future mid-flight (Fusion panel
 /// timeout/cancel racing `spawn_workflow_with_observer`, or any other
 /// future combinator that drops it) must not silently hard-abort the

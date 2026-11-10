@@ -20,7 +20,7 @@ use lingxi_core::host::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
 pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
@@ -51,26 +51,35 @@ struct WorkerCancel {
     /// wait on this for up to [`FUSION_KILL_COMPLETION_GRACE`] before falling
     /// back to the hard abort, so a cooperative `cancel()` gets a real chance
     /// to run `FusionOrchestrator::run`'s own finalize path (F012).
-    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
+    completion_rx: watch::Receiver<bool>,
 }
 
-/// Fires its held oneshot on drop, unconditionally — whichever path the
+/// Marks completion on drop, unconditionally — whichever path the
 /// worker future exits through (normal completion, the early
 /// `may_finalize == false` return, or a forced `abort()` dropping the task
 /// mid-poll). Held as the worker future's own first local so its lifetime
 /// exactly brackets "the worker is done, one way or another".
-struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+/// A repeatable completion barrier: each drain owns only a cloned observer.
+/// Dropping a timed-out/canceled observer cannot consume another drain's wait.
+struct WorkerCompletionSignal(watch::Sender<bool>);
 
 impl WorkerCompletionSignal {
-    fn new(tx: oneshot::Sender<()>) -> Self {
-        Self(Some(tx))
+    fn new(tx: watch::Sender<bool>) -> Self {
+        Self(tx)
     }
 }
 
 impl Drop for WorkerCompletionSignal {
     fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            let _ = tx.send(());
+        self.0.send_replace(true);
+    }
+}
+
+async fn wait_for_worker_completion(mut completion: watch::Receiver<bool>) {
+    while !*completion.borrow_and_update() {
+        if completion.changed().await.is_err() {
+            // The worker's signal was dropped before it was first polled.
+            break;
         }
     }
 }
@@ -81,26 +90,17 @@ impl Drop for WorkerCompletionSignal {
 /// F012). Mirrors `local_workflow::cancel_workflow_worker`.
 async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.control.cancel().cancel();
-    let mut completion_rx = rec
-        .completion_rx
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
-        tokio::time::timeout(FUSION_KILL_COMPLETION_GRACE, completion_rx)
-            .await
-            .is_ok()
-    } else {
-        false
-    };
+    let completion = wait_for_worker_completion(rec.completion_rx.clone());
+    tokio::pin!(completion);
+    let completed = tokio::time::timeout(FUSION_KILL_COMPLETION_GRACE, &mut completion)
+        .await
+        .is_ok();
     if !completed {
         rec.runtime
             .cancel(&rec.handle)
             .await
             .map_err(|error| TaskError::Io(error.to_string()))?;
-        if let Some(completion_rx) = completion_rx {
-            let _ = completion_rx.await;
-        }
+        completion.await;
     }
     Ok(())
 }
@@ -667,7 +667,7 @@ impl Task for LocalFusionHandler {
         } else {
             (None, None)
         };
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = watch::channel(false);
 
         let worker = Box::pin(run_fusion_worker(FusionWorkerArgs {
             prepared: Some(prepared),
@@ -695,7 +695,7 @@ impl Task for LocalFusionHandler {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
                 control: prepared_control,
-                completion_rx: StdMutex::new(Some(completion_rx)),
+                completion_rx,
             },
         );
         drop(workers);
@@ -756,18 +756,15 @@ impl Task for LocalFusionHandler {
             let workers = self.workers.lock().await;
             workers
                 .values()
-                .filter_map(|worker| {
-                    worker
-                        .completion_rx
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                })
+                .map(|worker| worker.completion_rx.clone())
                 .collect::<Vec<_>>()
         };
         let mut timed_out = 0_usize;
         for completion in completions {
-            if tokio::time::timeout_at(deadline, completion).await.is_err() {
+            if tokio::time::timeout_at(deadline, wait_for_worker_completion(completion))
+                .await
+                .is_err()
+            {
                 timed_out += 1;
             }
         }

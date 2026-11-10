@@ -224,6 +224,135 @@ pub trait FileSystem: Send + Sync {
         Err(FsError::Io("durable rooted appends are unsupported".into()))
     }
 
+    /// Read raw journal bytes and an identity/length cursor. Native backends
+    /// bind the root and leaf; the default supports virtual filesystems only.
+    async fn read_file_rooted_journal_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected_root: Option<&crate::host::rooted_fs::RootIdentity>,
+    ) -> Result<crate::host::rooted_fs::JournalRead, FsError> {
+        use crate::host::rooted_fs::{JournalCursor, JournalRead};
+        if expected_root.is_some() {
+            return Err(FsError::Io("pinned journal reads are unsupported".into()));
+        }
+        match self.read_file_rooted_no_follow(root, relative).await {
+            Ok(file) if !file.truncated => {
+                let bytes = file.content.into_bytes();
+                Ok(JournalRead {
+                    cursor: JournalCursor::virtual_cursor(bytes.len() as u64, true),
+                    bytes: Some(bytes),
+                })
+            }
+            Ok(_) => Err(FsError::Io("truncated journal read".into())),
+            Err(FsError::NotFound(_)) => Ok(JournalRead {
+                cursor: JournalCursor::virtual_cursor(0, false),
+                bytes: None,
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Append durably against a constant-size cursor. A native implementation
+    /// rolls back through the exact descriptor written before declaring a
+    /// failed admission safe to deliver to another recipient.
+    async fn append_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &crate::host::rooted_fs::JournalCursor,
+        content: &str,
+    ) -> Result<crate::host::rooted_fs::JournalCursor, crate::host::rooted_fs::JournalWriteError>
+    {
+        use crate::host::rooted_fs::{JournalCursor, JournalWriteError};
+        verify_virtual_journal(self, root, relative, expected)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        let length = expected
+            .length
+            .checked_add(content.len() as u64)
+            .ok_or_else(|| {
+                JournalWriteError::certain(FsError::Io("journal length exhausted".into()), None)
+            })?;
+        if let Err(error) = self
+            .append_file_rooted_durable(root, relative, content)
+            .await
+        {
+            let recovered = async {
+                match self
+                    .truncate_file_rooted_no_follow(root, relative, expected.length)
+                    .await
+                {
+                    Ok(()) => {
+                        self.sync_file_rooted_no_follow(root, relative).await?;
+                        let cursor = JournalCursor::virtual_cursor(expected.length, true);
+                        verify_virtual_journal(self, root, relative, &cursor).await?;
+                        Ok(cursor)
+                    }
+                    Err(FsError::NotFound(_)) if !expected.present && expected.length == 0 => {
+                        verify_virtual_journal(self, root, relative, expected).await?;
+                        Ok(*expected)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            .await;
+            return Err(match recovered {
+                Ok(cursor) => JournalWriteError::certain(error, Some(cursor)),
+                Err(_) => JournalWriteError::uncertain(error),
+            });
+        }
+        let cursor = JournalCursor::virtual_cursor(length, true);
+        verify_virtual_journal(self, root, relative, &cursor)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        Ok(cursor)
+    }
+
+    /// Truncate and sync the same cursor inode, never a replacement leaf.
+    async fn truncate_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &crate::host::rooted_fs::JournalCursor,
+        length: u64,
+    ) -> Result<crate::host::rooted_fs::JournalCursor, crate::host::rooted_fs::JournalWriteError>
+    {
+        use crate::host::rooted_fs::{JournalCursor, JournalWriteError};
+        verify_virtual_journal(self, root, relative, expected)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        if length > expected.length {
+            return Err(JournalWriteError::certain(
+                FsError::Io("journal truncate would extend file".into()),
+                None,
+            ));
+        }
+        self.truncate_file_rooted_no_follow(root, relative, length)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        self.sync_file_rooted_no_follow(root, relative)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        let cursor = JournalCursor::virtual_cursor(length, true);
+        verify_virtual_journal(self, root, relative, &cursor)
+            .await
+            .map_err(JournalWriteError::uncertain)?;
+        Ok(cursor)
+    }
+
+    /// Sync a recovered cursor before exposing its replayed admissions.
+    async fn sync_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &crate::host::rooted_fs::JournalCursor,
+    ) -> Result<(), FsError> {
+        verify_virtual_journal(self, root, relative, expected).await?;
+        self.sync_file_rooted_no_follow(root, relative).await?;
+        verify_virtual_journal(self, root, relative, expected).await
+    }
+
     /// Compare an existing rooted file's entire contents and durably append
     /// or sync it through the same single-link handle. A snapshot recording
     /// absence requires the same root and an exclusive creation of the leaf.
@@ -389,6 +518,40 @@ pub trait FileSystem: Send + Sync {
             .await
     }
 
+    /// Read a line window or a bounded full-read tail under a pinned root.
+    /// Native backends stream and validate the entire file on a blocking
+    /// worker, retaining only the requested projection. Virtual backends keep
+    /// their own read semantics through this compatibility implementation.
+    async fn read_file_rooted_text_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&crate::host::rooted_fs::RootIdentity>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        tail_bytes: u64,
+    ) -> Result<crate::host::rooted_fs::TextWindow, FsError> {
+        let file = self
+            .read_file_rooted_no_follow_window_pinned(root, relative, offset, limit, expected)
+            .await?;
+        let mut content = file.content;
+        let mut omitted_bytes = 0;
+        if offset.is_none() && limit.is_none() && content.len() as u64 > tail_bytes {
+            let mut cut = content.len() - usize::try_from(tail_bytes).unwrap_or(usize::MAX);
+            while !content.is_char_boundary(cut) {
+                cut += 1;
+            }
+            content.drain(..cut);
+            omitted_bytes = cut as u64;
+        }
+        Ok(crate::host::rooted_fs::TextWindow {
+            content,
+            total_lines: file.total_lines,
+            omitted_bytes,
+            truncated: file.truncated,
+        })
+    }
+
     /// Read a bounded byte window for task-output deltas. Physical platforms
     /// override this with seek/read; virtual filesystems preserve their backend.
     async fn read_file_rooted_byte_window_pinned(
@@ -535,6 +698,24 @@ pub trait FileSystem: Send + Sync {
     fn translate_model_path(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let _ = (path, write);
         Ok(None)
+    }
+}
+
+async fn verify_virtual_journal<F: FileSystem + ?Sized>(
+    fs: &F,
+    root: &Path,
+    relative: &Path,
+    expected: &crate::host::rooted_fs::JournalCursor,
+) -> Result<(), FsError> {
+    if expected.root.is_some() || expected.file.is_some() {
+        return Err(FsError::Io("native journal cursors are unsupported".into()));
+    }
+    let path = crate::host::rooted_fs::checked_join(root, relative)?;
+    match fs.file_size(&path.to_string_lossy()).await {
+        Ok(length) if expected.present && expected.length == length => Ok(()),
+        Err(FsError::NotFound(_)) if !expected.present && expected.length == 0 => Ok(()),
+        Err(error) => Err(error),
+        _ => Err(FsError::Io("virtual journal length changed".into())),
     }
 }
 

@@ -307,7 +307,7 @@ impl TaskRegistry {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let _mutation = self.shell_transfer_mutation.lock().await;
+        let _mutation = self.shell_transfer_mutation.write().await;
         let (process, _) = self.shell_runtime()?;
         let mut accepted = Vec::new();
         for id in ids {
@@ -473,7 +473,7 @@ impl TaskRegistry {
         if records.is_empty() {
             return Ok(());
         }
-        let _mutation = self.shell_transfer_mutation.lock().await;
+        let _mutation = self.shell_transfer_mutation.write().await;
         let (missing, running): (Vec<_>, Vec<_>) = {
             let tasks = self.tasks.read().await;
             (

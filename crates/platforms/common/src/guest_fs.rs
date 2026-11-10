@@ -207,6 +207,37 @@ impl FileSystem for GuestPathFileSystem {
             .await
     }
 
+    async fn read_file_rooted_text_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        tail_bytes: u64,
+    ) -> Result<lingxi_core::host::rooted_fs::TextWindow, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner
+            .read_file_rooted_text_window_pinned(
+                &root, relative, expected, offset, limit, tail_bytes,
+            )
+            .await
+    }
+
+    async fn read_file_rooted_byte_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner
+            .read_file_rooted_byte_window_pinned(&root, relative, expected, offset, limit)
+            .await
+    }
+
     async fn read_file_rooted_single_link_checked(
         &self,
         root: &Path,
@@ -215,6 +246,99 @@ impl FileSystem for GuestPathFileSystem {
         let root = self.resolve_root(root, false)?;
         self.inner
             .read_file_rooted_single_link_checked(&root, relative)
+            .await
+    }
+
+    async fn read_file_rooted_journal_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected_root: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<lingxi_core::host::rooted_fs::JournalRead, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner
+            .read_file_rooted_journal_pinned(&root, relative, expected_root)
+            .await
+    }
+
+    async fn append_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        content: &str,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = self
+            .resolve_root(root, true)
+            .map_err(lingxi_core::host::rooted_fs::JournalWriteError::uncertain)?;
+        self.inner
+            .append_file_rooted_journal_durable(&root, relative, expected, content)
+            .await
+    }
+
+    async fn truncate_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        length: u64,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = self
+            .resolve_root(root, true)
+            .map_err(lingxi_core::host::rooted_fs::JournalWriteError::uncertain)?;
+        self.inner
+            .truncate_file_rooted_journal_durable(&root, relative, expected, length)
+            .await
+    }
+
+    async fn sync_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .sync_file_rooted_journal_durable(&root, relative, expected)
+            .await
+    }
+
+    async fn append_file_rooted_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .append_file_rooted_durable(&root, relative, content)
+            .await
+    }
+
+    async fn sync_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner.sync_file_rooted_no_follow(&root, relative).await
+    }
+
+    async fn truncate_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+        length: u64,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .truncate_file_rooted_no_follow(&root, relative, length)
             .await
     }
 
@@ -451,6 +575,40 @@ mod tests {
 
     #[async_trait]
     impl FileSystem for RecordingFs {
+        async fn read_file_rooted_text_window_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+            offset: Option<u64>,
+            limit: Option<u64>,
+            tail_bytes: u64,
+        ) -> Result<lingxi_core::host::rooted_fs::TextWindow, FsError> {
+            assert!(expected.is_none());
+            assert_eq!((offset, limit, tail_bytes), (Some(3), Some(2), 17));
+            self.record("text-window", &root.join(relative).to_string_lossy());
+            Ok(lingxi_core::host::rooted_fs::TextWindow {
+                content: "projected".into(),
+                total_lines: 9,
+                omitted_bytes: 0,
+                truncated: false,
+            })
+        }
+
+        async fn read_file_rooted_byte_window_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+            offset: u64,
+            limit: u64,
+        ) -> Result<Vec<u8>, FsError> {
+            assert!(expected.is_none());
+            assert_eq!((offset, limit), (5, 11));
+            self.record("byte-window", &root.join(relative).to_string_lossy());
+            Ok(b"delta".to_vec())
+        }
+
         async fn read_file_rooted_single_link_checked(
             &self,
             root: &Path,
@@ -557,6 +715,56 @@ mod tests {
         let inner = Arc::new(RecordingFs::default());
         let fs = GuestPathFileSystem::new(inner.clone(), Arc::new(MountsOnlyRuntime { mounts }));
         (inner, fs)
+    }
+
+    #[tokio::test]
+    async fn bounded_spool_reads_keep_native_projection_through_guest_mapping() {
+        let (inner, fs) = fs_with(vec![workspace_mount()]);
+        let root = Path::new("/home/lingxi/lingxi/abc");
+        let relative = Path::new("tasks/task.output");
+        let window = fs
+            .read_file_rooted_text_window_pinned(root, relative, None, Some(3), Some(2), 17)
+            .await
+            .unwrap();
+        assert_eq!(window.content, "projected");
+        assert_eq!(window.total_lines, 9);
+        assert_eq!(
+            inner.last(),
+            (
+                "text-window".into(),
+                "/host/workspace/abc/tasks/task.output".into()
+            ),
+        );
+        let bytes = fs
+            .read_file_rooted_byte_window_pinned(root, relative, None, 5, 11)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"delta");
+        assert_eq!(
+            inner.last(),
+            (
+                "byte-window".into(),
+                "/host/workspace/abc/tasks/task.output".into()
+            ),
+        );
+        // Read-only mounts permit reads; unmounted emulated paths stay fenced.
+        let mut readonly = workspace_mount();
+        readonly.read_only = true;
+        let (_, fs) = fs_with(vec![readonly]);
+        fs.read_file_rooted_text_window_pinned(root, relative, None, Some(3), Some(2), 17)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fs.read_file_rooted_byte_window_pinned(
+                Path::new("/root/unmounted"),
+                relative,
+                None,
+                5,
+                11
+            )
+            .await,
+            Err(FsError::PermissionDenied(_)),
+        ));
     }
 
     #[tokio::test]

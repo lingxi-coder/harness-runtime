@@ -248,6 +248,10 @@ where
 struct QuietOutput;
 #[async_trait]
 impl lingxi_core::host::OutputStream for QuietOutput {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_text(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
     async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     async fn emit_tool_call(

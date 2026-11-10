@@ -2050,7 +2050,7 @@ where
 /// # Errors
 /// Returns [`WorkflowError`] if the engine fails to start, the script throws, or
 /// a job raises.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn run_with_progress<R, P>(
     script: &str,
     agent_runner: R,
@@ -2078,6 +2078,67 @@ where
     // model / isolation) onto each subagent request.
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
     // Fires for every `phase()`/`log()` as it is emitted (live).
+    P: FnMut(&Progress) + 'static,
+{
+    run_with_progress_mode(
+        script,
+        agent_runner,
+        on_progress,
+        budget,
+        allow_nested,
+        args,
+        cancel,
+        true,
+    )
+}
+
+/// Run a workflow while delivering every progress event to `on_progress`,
+/// without retaining a second copy of that history in [`RunOutcome::progress`].
+/// The result and non-fatal failures have the same semantics as
+/// [`run_with_progress`]; the returned progress vector is empty.
+///
+/// # Errors
+/// Returns [`WorkflowError`] for the same engine and script failures as
+/// [`run_with_progress`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_streaming<R, P>(
+    script: &str,
+    agent_runner: R,
+    on_progress: P,
+    budget: Option<Arc<dyn WorkflowBudgetSource>>,
+    allow_nested: bool,
+    args: Option<String>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<RunOutcome, WorkflowError>
+where
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
+    P: FnMut(&Progress) + 'static,
+{
+    run_with_progress_mode(
+        script,
+        agent_runner,
+        on_progress,
+        budget,
+        allow_nested,
+        args,
+        cancel,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_with_progress_mode<R, P>(
+    script: &str,
+    agent_runner: R,
+    on_progress: P,
+    budget: Option<Arc<dyn WorkflowBudgetSource>>,
+    allow_nested: bool,
+    args: Option<String>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    collect_progress: bool,
+) -> Result<RunOutcome, WorkflowError>
+where
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
     P: FnMut(&Progress) + 'static,
 {
     use rquickjs::{Context, Function, Runtime};
@@ -2130,7 +2191,9 @@ where
                 Function::new(ctx.clone(), move |msg: String| {
                     let prog = Progress::Log { message: msg };
                     (op_log.borrow_mut())(&prog);
-                    p_log.borrow_mut().push(prog);
+                    if collect_progress {
+                        p_log.borrow_mut().push(prog);
+                    }
                 })
                 .map_err(eng)?,
             )
@@ -2152,7 +2215,9 @@ where
                     *cp_phase.borrow_mut() = Some((index, title.clone()));
                     let prog = Progress::Phase { index, title };
                     (op_phase.borrow_mut())(&prog);
-                    p_phase.borrow_mut().push(prog);
+                    if collect_progress {
+                        p_phase.borrow_mut().push(prog);
+                    }
                 })
                 .map_err(eng)?,
             )
@@ -2344,9 +2409,9 @@ where
     if let Some(e) = error.borrow().clone() {
         return Err(WorkflowError::Script(e));
     }
-    let progress = progress.borrow().clone();
-    let result = result_slot.borrow().clone();
-    let failures = failures.borrow().clone();
+    let progress = std::mem::take(&mut *progress.borrow_mut());
+    let result = result_slot.borrow_mut().take();
+    let failures = std::mem::take(&mut *failures.borrow_mut());
     Ok(RunOutcome {
         progress,
         result,
@@ -3840,6 +3905,69 @@ log('wf=' + (typeof workflow))
         );
         // The same events are still collected in the outcome.
         assert_eq!(out.progress.len(), 4);
+    }
+
+    #[test]
+    fn run_streaming_preserves_callbacks_results_and_failures_without_history() {
+        let script = r#"
+            phase('A');
+            const rs = await pipeline(
+                ['drop', 'keep'],
+                item => { if (item === 'drop') throw new Error('boom'); return item; },
+                value => value + '!'
+            );
+            log(rs.map(String).join('|'));
+            phase('B');
+            return { value: rs[1] };
+        "#;
+        let collected = run(script, no_agents).unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let streamed = run_streaming(
+            script,
+            no_agents,
+            move |event: &Progress| seen.borrow_mut().push(event.clone()),
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), collected.progress);
+        assert!(!events.borrow().is_empty());
+        assert!(streamed.progress.is_empty());
+        assert_eq!(streamed.result, collected.result);
+        assert_eq!(streamed.failures, collected.failures);
+        assert_eq!(streamed.failures, vec!["pipeline[0] failed: boom"]);
+    }
+
+    #[test]
+    fn run_streaming_delivers_large_native_logs_without_retaining_them() {
+        let count = Rc::new(RefCell::new(0));
+        let seen = count.clone();
+        let outcome = run_streaming(
+            "for (let i = 0; i < 64; i++) log(String(i) + ':' + 'x'.repeat(65536)); return 64;",
+            no_agents,
+            move |event: &Progress| {
+                let Progress::Log { message } = event else {
+                    panic!("unexpected phase/agent event");
+                };
+                let mut count = seen.borrow_mut();
+                let prefix = format!("{}:", *count);
+                assert!(message.starts_with(&prefix));
+                assert_eq!(message.len(), prefix.len() + 65536);
+                assert!(message[prefix.len()..].bytes().all(|byte| byte == b'x'));
+                *count += 1;
+            },
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(*count.borrow(), 64);
+        assert!(outcome.progress.is_empty());
+        assert_eq!(outcome.result.as_deref(), Some("64"));
     }
 
     #[test]

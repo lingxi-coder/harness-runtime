@@ -2280,6 +2280,7 @@ pub async fn build_with_credential_stack(
     )
     .map_err(|error| BuildError::ApiBase(format!("model alias resolution: {error}")))?;
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_forward_subagent_output(&output)
         .with_structured_output_validator(json_schema_validator.clone())
         .with_instruction_provider(instruction_provider.clone())
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())

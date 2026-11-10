@@ -7,7 +7,7 @@
 
 use fancy_regex::{Regex, RegexBuilder};
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::{collections::BTreeMap, ops::Range, sync::LazyLock};
 
 /// One matched pattern's tally from native `y`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,10 +196,92 @@ struct CompiledRule {
     pattern: String,
     category: String,
     regex: Regex,
+    line_prefix: Option<LinePrefix>,
     unicode: bool,
     ascii_case_fold: bool,
     neutralizer: Option<Neutralizer>,
     reportable: bool,
+}
+
+// The three native line-prefix expressions share this boundary and an atomic
+// greedy gap capture. Some boundaries are also gap characters, so an unanchored
+// regex retries the same suffix after every character of a failed gap run.
+const LINE_PREFIX: &str = r"(?:^|[\r\n\v\f\u0085\u2028\u2029\u001c-\u001e])(?=(";
+struct LinePrefix {
+    gap_character: Regex,
+}
+impl LinePrefix {
+    fn compile(source: &str) -> (Self, String) {
+        let (gap, suffix) = source
+            .strip_prefix(LINE_PREFIX)
+            .and_then(|source| source.split_once(r"*))(?:\1)"))
+            .expect("pinned native line boundary and atomic leading gap");
+        let gap_character = RegexBuilder::new(&native_regex_source(&format!(r"\A{gap}\z")))
+            .case_insensitive(true)
+            .build()
+            .expect("native leading gap character class");
+        // Capture 1 is used only by the removed leading gap. Retain its slot so
+        // every untouched suffix backreference (2..26) keeps its native number.
+        (Self { gap_character }, format!(r"\A(){suffix}"))
+    }
+
+    fn for_each_match(&self, suffix: &Regex, text: &str, mut visit: impl FnMut(Range<usize>)) {
+        let mut cursor = 0;
+        let mut at_start = true;
+        while at_start || cursor < text.len() {
+            let start = cursor;
+            if at_start {
+                // Native ^ consumes nothing. If this attempt fails on an
+                // initial CR/LF (not a gap), still try that boundary below.
+                at_start = false;
+            } else {
+                let character = text[cursor..].chars().next().expect("remaining scalar");
+                cursor += character.len_utf8();
+                if !matches!(
+                    character,
+                    '\r' | '\n' | '\x0b' | '\x0c' | '\u{85}' | '\u{2028}' | '\u{2029}' | '\x1c'
+                        ..='\x1e'
+                ) {
+                    continue;
+                }
+            }
+            while cursor < text.len() {
+                let character = text[cursor..].chars().next().expect("remaining scalar");
+                let end = cursor + character.len_utf8();
+                if !self
+                    .gap_character
+                    .is_match(&text[cursor..end])
+                    .expect("native leading gap character")
+                {
+                    break;
+                }
+                cursor = end;
+            }
+            // All skipped boundaries inside this maximal gap have the same
+            // suffix. A failed anchored check therefore rules out all of them;
+            // a success uses the first candidate, as native global matching does.
+            if let Some(found) = suffix
+                .find(&text[cursor..])
+                .expect("pinned native line-prefix suffix match")
+            {
+                let end = cursor + found.end();
+                visit(start..end);
+                cursor = end;
+            }
+        }
+    }
+}
+impl CompiledRule {
+    fn for_each_match(&self, text: &str, mut visit: impl FnMut(Range<usize>)) {
+        if let Some(prefix) = &self.line_prefix {
+            prefix.for_each_match(&self.regex, text, visit);
+        } else {
+            for found in self.regex.find_iter(text) {
+                let found = found.expect("pinned native report recognizer match");
+                visit(found.range());
+            }
+        }
+    }
 }
 struct Rules {
     rules: Vec<CompiledRule>,
@@ -241,6 +323,14 @@ static RULES: LazyLock<Rules> = LazyLock::new(|| {
             if ignore_case && !unicode {
                 source.make_ascii_lowercase();
             }
+            let line_prefix = match rule.pattern.as_str() {
+                "marker-prefix-forgery" | "max-turns-note-forgery" | "frame-prefix-forgery" => {
+                    let (prefix, suffix) = LinePrefix::compile(&source);
+                    source = suffix;
+                    Some(prefix)
+                }
+                _ => None,
+            };
             let source = native_regex_source(&source);
             let regex = RegexBuilder::new(&source)
                 .case_insensitive(ignore_case && unicode)
@@ -252,6 +342,7 @@ static RULES: LazyLock<Rules> = LazyLock::new(|| {
                 pattern: rule.pattern,
                 category: rule.category,
                 regex,
+                line_prefix,
                 unicode,
                 ascii_case_fold: ignore_case && !unicode,
                 neutralizer,
@@ -407,17 +498,16 @@ fn apply_patterns(input: &[u16], provenance_enabled: bool) -> (Vec<u16>, Vec<Fin
         let projection = RegexInput::new(&output, rule.unicode, rule.ascii_case_fold);
         let mut insertions = Vec::new();
         let mut count = 0;
-        for found in rule.regex.find_iter(&projection.text) {
-            let found = found.expect("pinned native report recognizer match");
+        rule.for_each_match(&projection.text, |found| {
             count += 1;
             let Some(neutralizer) = &rule.neutralizer else {
-                continue;
+                return;
             };
-            let matched = found.as_str();
+            let matched = &projection.text[found.clone()];
             let insertion = match neutralizer {
-                Neutralizer::Append => found.end(),
+                Neutralizer::Append => found.end,
                 Neutralizer::AfterMarker => {
-                    found.start()
+                    found.start
                         + rules
                             .marker
                             .find(matched)
@@ -426,7 +516,7 @@ fn apply_patterns(input: &[u16], provenance_enabled: bool) -> (Vec<u16>, Vec<Fin
                             .end()
                 }
                 Neutralizer::BeforeColon => {
-                    found.start()
+                    found.start
                         + rules
                             .colon
                             .find(matched)
@@ -435,11 +525,11 @@ fn apply_patterns(input: &[u16], provenance_enabled: bool) -> (Vec<u16>, Vec<Fin
                             .start()
                 }
                 Neutralizer::BeforeAsciiColon => {
-                    found.start() + matched.find(':').expect("native turn colon")
+                    found.start + matched.find(':').expect("native turn colon")
                 }
             };
             insertions.push(projection.unit_offset(insertion));
-        }
+        });
         if count == 0 {
             continue;
         }

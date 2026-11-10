@@ -1291,6 +1291,7 @@ mod tests {
             agent_spawn_provenance: Default::default(),
             native_query_depth: None,
             options: ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -1326,6 +1327,7 @@ mod tests {
             cancel: None,
             cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_parent_effort: None,
             cwd: None,
             depth: 0,
             file_history: None,

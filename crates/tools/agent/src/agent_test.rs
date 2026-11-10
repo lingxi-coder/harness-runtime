@@ -303,6 +303,8 @@ mod tests {
             2,
             500,
             Some(("/repo/.lingxi/worktrees/agent-1", "worktree-agent-1")),
+            true,
+            None,
         );
         assert!(with_wt.string_at("").unwrap().contains(
             "to continue this agent)\nworktreePath: /repo/.lingxi/worktrees/agent-1\nworktreeBranch: worktree-agent-1\n<usage>"
@@ -314,6 +316,8 @@ mod tests {
             10,
             2,
             500,
+            None,
+            true,
             None,
         );
         assert!(!without.string_at("").unwrap().contains("worktreePath"));
@@ -360,6 +364,7 @@ mod tests {
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -367,7 +372,7 @@ mod tests {
                 model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
-                is_non_interactive_session: false,
+                is_non_interactive_session: true,
                 custom_system_prompt: None,
                 append_system_prompt: None,
             },
@@ -393,6 +398,7 @@ mod tests {
             cancel: None,
             cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_parent_effort: None,
             cwd: None,
             depth: 0,
             observer: None,
@@ -588,6 +594,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let _fork = EnvVarRestore::set("LINGXI_FORK_SUBAGENT", "false");
 
         for run_in_background in [false, true] {
             let session_id = lingxi_core::types::SessionId::nil();
@@ -606,6 +613,7 @@ mod tests {
             ));
             let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
             ctx.origin_session_id = Some(session_id);
+            ctx.options.is_non_interactive_session = false;
 
             tool.call(
                 serde_json::json!({
@@ -2329,6 +2337,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "Agent",
                     fusion_input(Some("implement")),
                     SubagentInvocationContext {
+                        session_interactive: None,
                         available_tool_names: None,
                         cancellation_token: tokio_util::sync::CancellationToken::new(),
                         permission_pause_observer: None,
@@ -5901,6 +5910,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "NoopTool",
                 source_fixture(&serde_json::json!({})),
                 lingxi_core::host::tool_invoker::SubagentInvocationContext {
+                    session_interactive: None,
                     available_tool_names: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -6023,12 +6033,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // the prefix gained the don't-fabricate sentence, the tail gained the
         // still-running sentence, both new vs the old 2.1.207 lock.
         let expected = format!(
-            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.\nIn your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running."
+            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id} (internal ID - do not mention to user.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.\nIn your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running."
         );
         assert_eq!(
             model_content_text(&result),
             expected,
-            "async_launched model content must be byte-exact vs CC 2.1.223"
+            "async_launched model content must be byte-exact vs CC 2.1.319 without caller messaging"
         );
     }
 
@@ -6351,7 +6361,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "false");
         lingxi_core::host::subscription::set_current_subscription(Some(
             lingxi_core::host::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
@@ -8418,10 +8428,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         );
     }
 
-    // Unset + headless: 2.1.232 `Krb`/`Nn()` disables fork. Explicit env true
-    // still enables it (the `"env"` arm runs before the headless check).
+    // Native 2.1.319 keeps fork availability enabled by default in headless
+    // sessions; the background policy is evaluated independently.
     #[test]
-    fn build_prompt_fork_gate_off_when_non_interactive_unless_env_set() {
+    fn build_prompt_fork_available_headless_by_default_and_with_env() {
         let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -8439,12 +8449,11 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         lingxi_core::host::session_flags::set_non_interactive_session(false);
         assert!(
-            !p_unset.contains("forks yourself"),
-            "unset + headless disables fork text"
+            p_unset.contains("forks yourself"),
+            "Native 2.1.319 keeps default headless fork availability"
         );
-        assert!(
-            p_unset.contains("specify a subagent_type parameter to select which agent type to use")
-        );
+        assert!(!p_unset
+            .contains("specify a subagent_type parameter to select which agent type to use"));
         assert!(
             p_env.contains("forks yourself"),
             "explicit env true enables fork text even when headless"
@@ -8452,7 +8461,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     #[tokio::test]
-    async fn build_prompt_fork_gate_uses_task_local_session_mode() {
+    async fn build_prompt_fork_availability_matches_native_in_both_session_modes() {
         let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -8465,7 +8474,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let prior_global = lingxi_core::host::session_flags::is_non_interactive_session();
         let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
         lingxi_core::host::session_flags::set_non_interactive_session(true);
-        // Unset env: interactive defaults ON, headless defaults OFF (2.1.232).
+        // Native 2.1.319 defaults to available in both owning-session modes.
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let interactive =
@@ -8479,7 +8488,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let (interactive, headless) = tokio::join!(interactive, headless);
 
         assert!(interactive.contains("forks yourself"));
-        assert!(!headless.contains("forks yourself"));
+        assert!(headless.contains("forks yourself"));
         match prior_env {
             Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
             None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
@@ -8738,7 +8747,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         assert_eq!(
             mc,
             format!(
-                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>",
+                "{frame}\n  the answer\nagentId: {child_id}\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>",
+                frame = lingxi_core::host::handback::HANDBACK_FRAME,
                 child_id = child_id.as_uuid(),
             )
         );
@@ -8800,7 +8810,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // model_content carries the sanitized text too.
         let mc = model_content_text(&result);
         assert!(mc.contains("<\\system-reminder>"));
-        assert!(mc.starts_with("[harness: subagent output matched"));
+        assert!(mc.starts_with("  [harness: subagent output matched"));
 
         // Telemetry: tengu_subagent_output_flagged with sorted-unique fields.
         let events = sink.events().await;
@@ -8906,7 +8916,13 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let result = tool.call(input, ctx, fresh_tx()).await.unwrap();
         let mc = model_content_text(&result);
         // Exactly the content text — NO trailer.
-        assert_eq!(mc, "explored");
+        assert_eq!(
+            mc,
+            format!(
+                "{}\n  explored",
+                lingxi_core::host::handback::HANDBACK_FRAME
+            )
+        );
         assert!(
             !mc.contains("<usage>"),
             "one-shot must skip the <usage> trailer"
@@ -8952,7 +8968,10 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         assert_eq!(data["content"], json!([]));
         let mc = model_content_text(&result);
         assert!(
-            mc.starts_with("(Subagent completed but returned no output.)"),
+            mc.starts_with(&format!(
+                "{}\n  (Subagent completed but returned no output.)",
+                lingxi_core::host::handback::HANDBACK_FRAME
+            )),
             "empty content → no-output marker; got: {mc}"
         );
         // Non-one-shot → trailer still present after the marker.
@@ -9058,6 +9077,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             is_builtin_web_fetch: false,
             is_coordinator: false,
             caller_is_in_process_teammate: false,
+            caller_is_headless_subagent: false,
+            force_async: false,
             background_tasks_disabled: false,
         };
 
@@ -9104,25 +9125,169 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             ..base()
         }));
 
-        // The kill-switch and the teammate carve-out defeat every arm.
-        for d in [
-            BackgroundDecision {
-                wants_background: Some(true),
-                background_tasks_disabled: true,
-                ..base()
-            },
-            BackgroundDecision {
-                wants_background: Some(true),
-                caller_is_in_process_teammate: true,
-                ..base()
-            },
-            BackgroundDecision {
-                definition_background: true,
-                caller_is_in_process_teammate: true,
-                ..base()
-            },
-        ] {
+        // The kill-switch defeats every local background arm. The public
+        // Agent boundary rejects explicit teammate background requests before
+        // reaching this pure decision helper.
+        for d in [BackgroundDecision {
+            wants_background: Some(true),
+            background_tasks_disabled: true,
+            ..base()
+        }] {
             assert!(!should_run_in_background(d));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_319_background_worker_uses_owning_session_for_nested_spawns() {
+        use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _fork = EnvVarRestore::set("LINGXI_FORK_SUBAGENT", "");
+        let _background = EnvVarRestore::set("LINGXI_DISABLE_BACKGROUND_TASKS", "false");
+        for interactive in [false, true] {
+            for requested in [None, Some(false), Some(true)] {
+                let spawner = arc_mock_spawner();
+                let tool = AgentTool::new(wired_ctx(
+                    spawner.clone(),
+                    arc_mock_task_registry(),
+                    arc_mock_mailbox(),
+                    arc_mock_budget(u64::MAX),
+                ));
+                let mut registry = ToolRegistry::new();
+                registry.register_builtin(Arc::new(tool));
+                let invoker =
+                    tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry));
+                let mut input = json!({"description":"nested work", "prompt":"inspect"});
+                if let Some(background) = requested {
+                    input["run_in_background"] = json!(background);
+                }
+                let context = SubagentInvocationContext {
+                    session_interactive: Some(interactive),
+                    available_tool_names: None,
+                    cancellation_token: lingxi_core::host::CancellationToken::new(),
+                    permission_pause_observer: None,
+                    parent_agent_id: Some(lingxi_core::types::AgentId::new()),
+                    native_query_depth: None,
+                    origin_session_id: None,
+                    instruction_context: None,
+                    fork_context: None,
+                    tool_execution_policy: Default::default(),
+                    agent_name: None,
+                    team_name: None,
+                    is_async: true,
+                    is_non_interactive_session: true,
+                    can_show_permission_prompts: false,
+                    cwd: None,
+                    tool_use_id: None,
+                    assistant_message_id: None,
+                    assistant_message: None,
+                    same_turn_tool_uses: Vec::new(),
+                    depth: 1,
+                    observer: None,
+                    parent_model: None,
+                    parent_model_profile: None,
+                    agent_spawn_provenance: Default::default(),
+                    tool_context_state: None,
+                    current_history: Vec::new(),
+                    mode_override: None,
+                    request_source: None,
+                    frozen_command_denies: Vec::new(),
+                };
+                invoker
+                    .invoke("Agent", source_fixture(&input), context)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    spawner.invocations()[0].request.run_in_background,
+                    interactive || requested == Some(true),
+                    "interactive={interactive}, explicit background={requested:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_319_effort_reaches_sync_and_async_spawns_and_forks_inherit() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _fork = EnvVarRestore::set("LINGXI_FORK_SUBAGENT", "false");
+        for background in [false, true] {
+            let spawner = arc_mock_spawner();
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            tool.call(json!({"description":"audit","prompt":"inspect","effort":"xhigh","run_in_background":background}), ctx, fresh_tx()).await.unwrap();
+            assert_eq!(
+                spawner.invocations()[0].request.effort,
+                Some(json!("xhigh"))
+            );
+        }
+        let _fork = EnvVarRestore::set("LINGXI_FORK_SUBAGENT", "true");
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.fork_parent_effort = Some(json!("high"));
+        ctx.fork_parent_system_prompt = Some(source_text_projection("parent system"));
+        let result = tool.call(json!({"description":"audit","prompt":"inspect","subagent_type":"fork","effort":"low"}), ctx, fresh_tx()).await.unwrap();
+        assert_eq!(result.data.string_at("/status"), Some("async_launched"));
+        let requests = spawner.invocations();
+        assert_eq!(requests[0].request.effort, Some(json!("high")));
+        assert!(requests[0].request.fork_context_messages.is_some());
+        assert_eq!(
+            requests[0]
+                .request
+                .fork_parent_system_prompt
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("parent system")
+        );
+    }
+
+    #[test]
+    fn native_319_reserved_names_and_description_whitespace() {
+        for name in ["user", "USER", "system", "System", "team-lead", "MAIN"] {
+            assert_eq!(
+                validate_agent_name(name),
+                Err(AGENT_RESERVED_NAME_MESSAGE.into()),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            normalize_description_ws("\u{feff} inspect\u{85}repo \nnow\u{feff}"),
+            "inspect\u{85}repo now"
+        );
+        let source = Utf16JsonProjection::parse(r#""\ufeff A\u0085\ud800 \tB\ufeff""#).unwrap();
+        assert_eq!(
+            normalize_description_source(&source).string_units(""),
+            Some(vec![65, 0x85, 0xd800, 32, 66])
+        );
+        for effort in [
+            json!("low"),
+            json!("medium"),
+            json!("high"),
+            json!("xhigh"),
+            json!("max"),
+        ] {
+            let source =
+                generated_builtin_result(&json!({"description":"a","prompt":"b","effort":effort}));
+            assert!(parse_agent_tool_input(&source).is_ok());
+        }
+        for effort in [Value::Null, json!("automatic"), json!(5), json!(true)] {
+            let source =
+                generated_builtin_result(&json!({"description":"a","prompt":"b","effort":effort}));
+            assert!(parse_agent_tool_input(&source).is_err());
         }
     }
 
@@ -9257,7 +9422,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             .unwrap();
         let mc = model_content_text(&result);
         assert!(
-            mc.starts_with("NOTE: this agent stopped at its 7-turn limit before finishing. The text below is PARTIAL output; treat it as incomplete. Send the agent a message (SendMessage) to let it continue from where it stopped.\n"),
+            mc.starts_with("  NOTE: this agent stopped at its 7-turn limit before finishing. The text below is PARTIAL output; treat it as incomplete.\n  "),
             "the harness note must front the report; got: {mc}"
         );
         assert!(
@@ -9322,7 +9487,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let mc = model_content_text(&result);
         assert_eq!(
             mc,
-            "NOTE: this agent stopped at its 3-turn limit before finishing. It was still calling tools and had produced no report.\n",
+            "  NOTE: this agent stopped at its 3-turn limit before finishing. It was still calling tools and had produced no report.\n  ",
             "one-shot built-ins take no continuation tail, and a text-less run is not `PARTIAL output`",
         );
     }

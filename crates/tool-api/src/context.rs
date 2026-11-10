@@ -43,8 +43,8 @@ pub enum ToolCancellationScope {
 /// Per-invocation context passed to every [`crate::Tool`] method that needs
 /// to reason about the current call (validation, permission, execution).
 ///
-/// Cloning is cheap: most fields are `Arc`-shared or `Copy`. The file-state
-/// cache slot lands in Plan 10.
+/// Handles are shared, while history and source projections are owned.
+/// Nested dispatch skips query fields that it immediately refreshes.
 #[derive(Clone)]
 pub struct ToolUseContext {
     /// Static per-call options (debug flags, budget, system-prompt overrides).
@@ -148,6 +148,10 @@ pub struct ToolUseContext {
     /// yet wired (`AgentTool` then runs the fork child with `FORK_AGENT`'s empty
     /// system prompt — functional, not byte-identical).
     pub fork_parent_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Actual effort selected by the dispatching parent, captured by the host.
+    /// Explicit forks use this value and ignore model-authored effort overrides.
+    /// `None` preserves an unset parent selection; it must not imply a default.
+    pub fork_parent_effort: Option<serde_json::Value>,
     /// Per-agent working directory OVERRIDE (claude-code's `agentWorktree` /
     /// `cwd`, threaded into the agent's `AsyncLocalStorage` cwd that every tool
     /// reads via `Mt()`). `Some` ONLY for a subagent isolated in a git worktree
@@ -258,6 +262,46 @@ pub trait MediaAgentHandoffHandle: Send + Sync {
 }
 
 impl ToolUseContext {
+    /// Clone retained tool-owned state without copying query data that the
+    /// nested invoker immediately refreshes from trusted host facts.
+    pub(crate) fn clone_for_nested_refresh(&self) -> Self {
+        Self {
+            options: self.options.clone(),
+            messages: Vec::new(),
+            tool_use_id: self.tool_use_id.clone(),
+            assistant_message_id: self.assistant_message_id,
+            trusted_session_profile: self.trusted_session_profile.clone(),
+            durable_tool_origins: self.durable_tool_origins.clone(),
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            available_tool_names: None,
+            agent_id: self.agent_id,
+            nested_memory_triggers: self.nested_memory_triggers.clone(),
+            agent_name: self.agent_name.clone(),
+            team_name: self.team_name.clone(),
+            origin_session_id: self.origin_session_id,
+            agent_spawn_provenance: self.agent_spawn_provenance.clone(),
+            native_query_depth: self.native_query_depth,
+            is_scheduled_turn: self.is_scheduled_turn,
+            tool_execution_policy: self.tool_execution_policy,
+            trusted_effective_permission_mode: self.trusted_effective_permission_mode.clone(),
+            classifier_only_review: self.classifier_only_review.clone(),
+            instruction_context: self.instruction_context.clone(),
+            content_replacement_state: self.content_replacement_state.clone(),
+            session: self.session.clone(),
+            subagent_registry: self.subagent_registry.clone(),
+            cancel: self.cancel.clone(),
+            cancellation_scope: self.cancellation_scope,
+            fork_parent_system_prompt: self.fork_parent_system_prompt.clone(),
+            fork_parent_effort: self.fork_parent_effort.clone(),
+            cwd: self.cwd.clone(),
+            depth: self.depth,
+            observer: self.observer.clone(),
+            observer_pairings: self.observer_pairings.clone(),
+            file_history: self.file_history.clone(),
+        }
+    }
+
     /// Snapshot trusted media routing identity from the exact current
     /// conversation state. This awaits the session lock so normal lock
     /// contention does not masquerade as an unsupported provider.
@@ -331,6 +375,7 @@ impl ToolUseContext {
     pub fn model_seed(main_loop_model: String) -> Self {
         Self {
             options: ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -368,6 +413,7 @@ impl ToolUseContext {
             cancel: None,
             cancellation_scope: ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_parent_effort: None,
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
             depth: 0,
@@ -395,6 +441,9 @@ mod tests {
 /// Per-call options that travel inside [`ToolUseContext`].
 #[derive(Clone)]
 pub struct ToolUseOptions {
+    /// Owning session's interactivity, independent of background tool approval
+    /// behavior. `None` uses `is_non_interactive_session` for legacy callers.
+    pub session_interactive: Option<bool>,
     /// Emit debug-level traces from this call.
     pub debug: bool,
     /// Emit verbose informational traces from this call.
@@ -412,7 +461,8 @@ pub struct ToolUseOptions {
     pub max_budget_nano_usd: Option<u64>,
     /// MCP server connections available for this call.
     pub mcp_clients: Vec<McpConnectionId>,
-    /// Whether the agent is running in a non-interactive session.
+    /// Whether this invocation must avoid interactive permission prompts.
+    /// Background agents set this even when their owning session is interactive.
     pub is_non_interactive_session: bool,
     /// Optional source-preserving system prompt override (replaces the default).
     pub custom_system_prompt: Option<Utf16JsonProjection>,

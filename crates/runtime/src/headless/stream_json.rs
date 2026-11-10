@@ -3134,6 +3134,10 @@ impl OutputStream for StreamJsonStream {
     /// `Task`/`Agent` tool_use_id that spawned the child. Gated + shaped by
     /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
     /// the message has no forwardable text/thinking blocks.
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        self.forward_subagent_text() && !self.suppress_frames
+    }
+
     async fn emit_forwarded_subagent_message(
         &self,
         message: &Utf16JsonProjection,

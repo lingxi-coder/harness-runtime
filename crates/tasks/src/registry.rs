@@ -65,7 +65,7 @@ pub struct TaskRegistry {
     reporting_admission:
         std::sync::OnceLock<std::sync::Weak<dyn lingxi_core::host::handback::ReportingAdmission>>,
     shell_adoption_gate: Arc<tokio::sync::Mutex<()>>,
-    shell_transfer_mutation: tokio::sync::Mutex<()>,
+    shell_transfer_mutation: RwLock<()>,
     /// Allocated shells may exit before their background row is published.
     pending_bash_registration:
         std::sync::Mutex<HashMap<String, Option<(Option<i32>, bool, Option<String>)>>>,
@@ -128,7 +128,7 @@ pub struct TaskRegistry {
     /// publish a terminal status. Weak ownership avoids a registry/controller cycle.
     external_teammate_controller: RwLock<Option<std::sync::Weak<dyn TeamSpawnSeam>>>,
     external_teammate_tasks: RwLock<HashSet<String>>,
-    in_process_stop_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    stop_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Arc<dyn RuntimeSpawner>,
     fs: Arc<dyn FileSystem>,
     /// Owner of task spool files.
@@ -197,6 +197,11 @@ pub struct TaskRegistry {
     /// admission, then snapshots every published owner without a race window.
     lifecycle_gate: Arc<RwLock<()>>,
     accepting_tasks: AtomicBool,
+    /// Callers may abandon their shutdown deadline while independent stop
+    /// transactions are still running. Keep the result channel here so a
+    /// later call joins the same owned drain rather than stopping rows twice.
+    shutdown_drain:
+        tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<Result<(), TaskError>>>>>,
 }
 
 #[derive(Default)]
@@ -549,7 +554,7 @@ impl TaskRegistry {
             self_ref: std::sync::OnceLock::new(),
             observer_pairings: std::sync::OnceLock::new(),
             shell_adoption_gate: Arc::new(tokio::sync::Mutex::new(())),
-            shell_transfer_mutation: tokio::sync::Mutex::new(()),
+            shell_transfer_mutation: RwLock::new(()),
             shell_transfer_fences: Arc::new(std::sync::Mutex::new(HashSet::new())),
             human_messages: std::sync::Mutex::new(HashMap::new()),
             handback_transactions: tokio::sync::Mutex::new(()),
@@ -575,7 +580,7 @@ impl TaskRegistry {
             external_teammate_controller: RwLock::new(None),
             teammate_departure_cleanup: RwLock::new(None),
             external_teammate_tasks: RwLock::new(HashSet::new()),
-            in_process_stop_locks: tokio::sync::Mutex::new(HashMap::new()),
+            stop_locks: tokio::sync::Mutex::new(HashMap::new()),
             runtime,
             fs,
             output_manager,
@@ -595,6 +600,7 @@ impl TaskRegistry {
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             lifecycle_gate: Arc::new(RwLock::new(())),
             accepting_tasks: AtomicBool::new(true),
+            shutdown_drain: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -2884,6 +2890,15 @@ impl TaskRegistry {
         self.tasks.ordered_states().await
     }
 
+    /// Select a borrowed task in JavaScript property order without cloning
+    /// unrelated rows, transcripts, or process ownership.
+    pub(crate) async fn find_ordered_task<R>(
+        &self,
+        select: impl FnMut(&TaskState, u64) -> Option<R>,
+    ) -> Option<R> {
+        self.tasks.ordered_find_map(select).await
+    }
+
     /// Scope workflow rows in `TaskList` / `/workflows` to one session.
     /// `None` leaves all workflows visible (desktop / single-session behavior).
     pub fn set_workflow_session_filter(&self, session_uuid: Option<String>) {
@@ -3375,38 +3390,34 @@ impl TaskRegistry {
         update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
     ) -> Result<(), TaskError> {
         let mut tasks = self.tasks.write().await;
-        let Some(agent) = tasks.values_mut().find_map(|state| match state {
-            TaskState::LocalAgent(agent) if agent.agent_id == agent_id => Some(agent),
-            _ => None,
-        }) else {
+        let Some(facts) = tasks.agent_local_facts_mut(agent_id) else {
             return Err(TaskError::NotFound(agent_id.as_uuid().to_string()));
         };
         use lingxi_core::host::task_registry::{AgentListLocalFactUpdate, FieldPresence};
         match update {
             AgentListLocalFactUpdate::IsIdle(value) => {
-                agent.agent_list_lifecycle.is_idle = FieldPresence::Value(value);
+                facts.is_idle = FieldPresence::Value(value);
             }
             AgentListLocalFactUpdate::Finalizing(value) => {
-                agent.agent_list_lifecycle.finalizing = FieldPresence::Value(value);
+                facts.finalizing = FieldPresence::Value(value);
             }
             AgentListLocalFactUpdate::KeepaliveReason { reason, active } => {
-                agent.agent_list_lifecycle.keepalive_reasons =
-                    match std::mem::take(&mut agent.agent_list_lifecycle.keepalive_reasons) {
-                        FieldPresence::Value(mut reasons) => {
-                            if active {
-                                if !reasons.contains(&reason) {
-                                    reasons.push(reason.clone());
-                                }
-                            } else {
-                                reasons.retain(|existing| existing != &reason);
+                facts.keepalive_reasons = match std::mem::take(&mut facts.keepalive_reasons) {
+                    FieldPresence::Value(mut reasons) => {
+                        if active {
+                            if !reasons.contains(&reason) {
+                                reasons.push(reason.clone());
                             }
-                            FieldPresence::Value(reasons)
+                        } else {
+                            reasons.retain(|existing| existing != &reason);
                         }
-                        FieldPresence::Null | FieldPresence::Missing if active => {
-                            FieldPresence::Value(vec![reason])
-                        }
-                        other => other,
-                    };
+                        FieldPresence::Value(reasons)
+                    }
+                    FieldPresence::Null | FieldPresence::Missing if active => {
+                        FieldPresence::Value(vec![reason])
+                    }
+                    other => other,
+                };
             }
         }
         drop(tasks);
@@ -3861,13 +3872,15 @@ impl TaskRegistry {
             .await
             .unwrap_or_else(|| task_id.to_owned());
         let mut rows = self.tasks.write().await;
-        let Some(state) = rows.get_mut(&task_id) else {
+        let Some(state) = rows.get(&task_id) else {
             return Err(TaskError::NotFound(task_id));
         };
-        let TaskState::LocalAgent(agent) = state else {
+        if !matches!(state, TaskState::LocalAgent(_)) {
             return Err(TaskError::Unsupported);
-        };
-        agent.messages = messages;
+        }
+        *rows
+            .agent_transcript_mut(&task_id)
+            .expect("checked local Agent row while holding its write lock") = messages;
         Ok(())
     }
 
@@ -4441,7 +4454,7 @@ impl TaskRegistry {
 
     async fn activate_notification_recipient_locked(
         &self,
-        map: &mut HashMap<String, TaskState>,
+        map: &mut crate::lifecycle_store::TaskWriteGuard<'_>,
         recipient: Option<lingxi_core::types::AgentId>,
         has_notifications: bool,
     ) -> bool {
@@ -5169,6 +5182,53 @@ impl TaskRegistry {
     /// after it is released, no task can appear outside this drain set.
     /// Teardown attempts every task and returns the first error only afterward.
     pub async fn shutdown_background_tasks(&self) -> Result<(), TaskError> {
+        if let Some(registry) = self.owned_self() {
+            let mut result = {
+                let mut drain = self.shutdown_drain.lock().await;
+                let current = drain.as_ref().filter(|result| match &*result.borrow() {
+                    // Failed attempts keep the owner graph available for a
+                    // fresh retry. A running or successful attempt is shared.
+                    Some(Err(_)) => false,
+                    Some(Ok(())) => true,
+                    None => result.has_changed().is_ok(),
+                });
+                if let Some(current) = current {
+                    current.clone()
+                } else {
+                    let (sender, receiver) = tokio::sync::watch::channel(None);
+                    let worker =
+                        tokio::spawn(
+                            async move { registry.shutdown_background_tasks_inner().await },
+                        );
+                    // The supervisor owns the join, including panic reporting,
+                    // independently of the first caller's timeout/cancellation.
+                    tokio::spawn(async move {
+                        let result = worker.await.unwrap_or_else(|error| {
+                            Err(TaskError::Internal(format!(
+                                "task shutdown transaction joined: {error}"
+                            )))
+                        });
+                        sender.send_replace(Some(result));
+                    });
+                    *drain = Some(receiver.clone());
+                    receiver
+                }
+            };
+            loop {
+                if let Some(result) = result.borrow_and_update().clone() {
+                    return result;
+                }
+                result.changed().await.map_err(|error| {
+                    TaskError::Internal(format!("task shutdown supervisor closed: {error}"))
+                })?;
+            }
+        }
+        // A by-value registry cannot outlive its borrow. Production registry
+        // owners install the weak self binding through RegistryStatusSink.
+        self.shutdown_background_tasks_inner().await
+    }
+
+    async fn shutdown_background_tasks_inner(&self) -> Result<(), TaskError> {
         let admission = self.lifecycle_gate.write().await;
         self.accepting_tasks.store(false, Ordering::Release);
         let mut task_ids = self
@@ -5185,8 +5245,14 @@ impl TaskRegistry {
         drop(admission);
 
         let mut first_error = None;
-        for task_id in task_ids {
-            if let Err(error) = self.kill_with_reason(&task_id, "system").await {
+        // Poll every independent stop transaction before awaiting their joint
+        // completion. A first owner's cooperative grace must not consume the
+        // host's shared deadline before later owners even receive Stop.
+        let stops = task_ids
+            .iter()
+            .map(|task_id| self.kill_with_reason(task_id, "system"));
+        for result in futures::future::join_all(stops).await {
+            if let Err(error) = result {
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -5268,8 +5334,23 @@ impl TaskRegistry {
             .await
             .get(&canonical)
             .is_some_and(|state| matches!(state, TaskState::LocalBash(_)));
+        let has_runtime_handle = self.handles.lock().await.contains_key(&canonical);
+        let _task_stop = if is_shell || has_runtime_handle {
+            let lock = self
+                .stop_locks
+                .lock()
+                .await
+                .entry(canonical.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(lock.lock_owned().await)
+        } else {
+            None
+        };
         let _transfer_mutation = if is_shell {
-            Some(self.shell_transfer_mutation.lock().await)
+            // Independent stops may share this ownership fence. Source
+            // commit/rollback takes its exclusive side and cannot cross them.
+            Some(self.shell_transfer_mutation.read().await)
         } else {
             None
         };
@@ -5385,7 +5466,7 @@ impl TaskRegistry {
         let stop_lock =
             if self.spawned.read().await.get(task_id_ref) == Some(&TaskType::InProcessTeammate) {
                 Some(
-                    self.in_process_stop_locks
+                    self.stop_locks
                         .lock()
                         .await
                         .entry(task_id_ref.to_owned())
@@ -5451,14 +5532,18 @@ impl TaskRegistry {
             return Ok(());
         }
 
-        let cleanup = self.cleanups.lock().await.remove(task_id_ref);
-        let mut handles = self.handles.lock().await;
-        if let Some(h) = handles.remove(task_id_ref) {
+        // Keep the handle and cleanup discoverable until cancellation succeeds.
+        // Per-task exclusion above prevents duplicate cancellation, while the
+        // global map lock must not serialize unrelated runtime acknowledgments.
+        let handle = self.handles.lock().await.get(task_id_ref).cloned();
+        if let Some(handle) = handle {
             self.runtime
-                .cancel(&h)
+                .cancel(&handle)
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?;
+            self.handles.lock().await.remove(task_id_ref);
         }
+        let cleanup = self.cleanups.lock().await.remove(task_id_ref);
         self.mark_killed(task_id_ref, was_live).await;
         if let Some(cleanup) = cleanup {
             cleanup();
@@ -5717,7 +5802,7 @@ impl TaskRegistry {
     /// only thing holding it. That is a KNOWN narrowing, not an oversight.
     fn evict_notified_terminal_rows(
         &self,
-        map: &mut HashMap<String, TaskState>,
+        map: &mut crate::lifecycle_store::TaskWriteGuard<'_>,
         // Resolved by the caller: the handler table is behind an async lock
         // and this body is synchronous.
         agent_handler: Option<&Arc<dyn Task>>,

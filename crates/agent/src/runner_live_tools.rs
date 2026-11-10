@@ -355,6 +355,7 @@ mod tests {
 
     fn invocation_context() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: CancellationToken::new(),
             permission_pause_observer: None,
@@ -366,6 +367,7 @@ mod tests {
             fork_context: Some(SubagentForkContext {
                 messages: Vec::new(),
                 system_prompt: None,
+                parent_effort: None,
             }),
             agent_name: None,
             team_name: None,

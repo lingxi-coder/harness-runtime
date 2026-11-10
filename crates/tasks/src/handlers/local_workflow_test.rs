@@ -2913,6 +2913,201 @@ async fn workflow_drain_preserves_terminalizing_outcome_window() {
 }
 
 #[tokio::test]
+async fn canceled_workflow_shutdown_drain_retries_every_finalizing_worker() {
+    struct GatedTerminalSink {
+        inner: RecordingSink,
+        entered: mpsc::UnboundedSender<()>,
+        release: tokio::sync::Semaphore,
+    }
+    #[async_trait]
+    impl TaskStatusSink for GatedTerminalSink {
+        async fn set_status(&self, task_id: &str, status: TaskStatus) {
+            self.inner.set_status(task_id, status).await;
+        }
+        async fn finish_workflow_terminal(
+            &self,
+            task_id: &str,
+            outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
+            status: TaskStatus,
+        ) {
+            let _ = self.entered.send(());
+            self.release.acquire().await.unwrap().forget();
+            self.inner.set_workflow_outcome(task_id, outcome).await;
+            self.inner.set_status(task_id, status).await;
+        }
+    }
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let output = Arc::new(TaskOutputManager::new(dir.path().to_path_buf(), fs.clone()));
+    let (entered, mut entered_rx) = mpsc::unbounded_channel();
+    let sink = Arc::new(GatedTerminalSink {
+        inner: RecordingSink::default(),
+        entered,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let handler = make_handler(Arc::new(EchoSpawner::default()), output, sink.clone());
+    let ctx = make_ctx(fs);
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        handles.push(
+            handler
+                .spawn(workflow_input("return 7;"), ctx.clone())
+                .await
+                .unwrap(),
+        );
+    }
+    for _ in 0..2 {
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("each worker enters natural finalization")
+            .expect("finalization signal");
+    }
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        handler.drain_shutdown(),
+    )
+    .await
+    .is_err());
+
+    let retry = handler.drain_shutdown();
+    tokio::pin!(retry);
+    assert!(futures::poll!(&mut retry).is_pending());
+    for handle in &handles {
+        handler.kill(&handle.task_id, ctx.clone()).await.unwrap();
+    }
+    assert_eq!(handler.workers.lock().await.len(), 2);
+    sink.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while handler.workers.lock().await.len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one worker completes");
+    assert!(
+        futures::poll!(&mut retry).is_pending(),
+        "the other worker is still live"
+    );
+    sink.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), retry)
+        .await
+        .expect("retry finishes after both workers")
+        .unwrap();
+    assert!(handler.workers.lock().await.is_empty());
+    handler.drain_shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bounded_streaming_workflow_keeps_ordered_logs_live_updates_and_metrics() {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = ProgressBudget::new(1024);
+    let (spool, mut spool_rx) =
+        progress_transport::channel(2, budget.clone(), cancel.clone(), String::len);
+    let (live, mut live_rx) = progress_transport::channel(
+        2,
+        budget,
+        cancel.clone(),
+        WorkflowProgressUpdate::queued_bytes,
+    );
+    let metrics = Arc::new(TokioMutex::new(WorkflowRunMetrics::default()));
+    let script = "phase('A'); for (let i=0; i<40; i++) log(String(i)+':'+'x'.repeat(8192)); await parallel([() => agent('probe-0'), () => agent('probe-1'), () => agent('probe-2')]); phase('B'); log('done'); return {ok:true};";
+    let run = run_workflow_script_with_live_updates_recorded(
+        script,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "workflow",
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        Some(spool),
+        Some(live),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        cancel,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        Some(metrics.clone()),
+        None,
+        false,
+    );
+    let spool_drain = async move {
+        let mut lines = Vec::new();
+        while let Some(item) = spool_rx.recv().await {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            lines.push(item.value);
+        }
+        lines
+    };
+    let live_drain = async move {
+        let mut updates = Vec::new();
+        while let Some(item) = live_rx.recv().await {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            updates.push(item.value);
+        }
+        updates
+    };
+    let (outcome, lines, updates) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(run, spool_drain, live_drain)
+        })
+        .await
+        .expect("bounded producers and concurrent drains must finish");
+    let outcome = outcome.unwrap();
+    assert!(
+        outcome.progress.is_empty(),
+        "task runs retain no duplicate history"
+    );
+    assert_eq!(outcome.result.as_deref(), Some(r#"{"ok":true}"#));
+    let expected = (0..40)
+        .map(|index| format!("{index}:{}", "x".repeat(8192)))
+        .chain(std::iter::once("done".to_string()))
+        .collect::<Vec<_>>();
+    let spool_agents = lines
+        .iter()
+        .filter_map(|line| {
+            line.strip_prefix("[workflow_agent] ").map(|json| {
+                serde_json::from_str::<serde_json::Value>(json).unwrap()["toolUseID"].clone()
+            })
+        })
+        .collect::<Vec<_>>();
+    let live_agents = updates
+        .iter()
+        .filter(|update| update.kind == "workflow_agent")
+        .map(|update| serde_json::json!(update.tool_use_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spool_agents, live_agents,
+        "paired updates keep identical publication order under backpressure"
+    );
+    let native_lines = lines
+        .into_iter()
+        .filter(|line| !line.starts_with('['))
+        .collect::<Vec<_>>();
+    let live_logs = updates
+        .iter()
+        .filter_map(|update| update.message.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(native_lines, expected);
+    assert_eq!(live_logs, expected);
+    assert_eq!(
+        updates
+            .iter()
+            .filter_map(|update| update.title.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["A", "B"]
+    );
+    assert!(updates.iter().any(|update| update.kind == "workflow_agent"));
+    let metrics = metrics.lock().await;
+    assert_eq!(metrics.call_count, 3);
+    assert_eq!(metrics.phases.len(), 2);
+    assert_eq!(metrics.terminal_counts(), (3, 0, 0, 0));
+}
+
+#[tokio::test]
 async fn workflow_cleanup_records_cancellation_even_when_worker_map_is_contended() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
@@ -4718,7 +4913,7 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
     let (tx, mut rx) = mpsc::unbounded_channel();
     let observer = WorkflowAgentLiveObserver::new_with_metrics(
         None,
-        Some(tx),
+        Some(tx.into()),
         workflow_progress_update(&workflow::Progress::Agent {
             index: 3,
             label: "Design".to_string(),
@@ -4782,6 +4977,8 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
 async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
     let (spool_tx, mut spool_rx) = mpsc::unbounded_channel();
     let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+    let spool_tx: ProgressSender<_> = spool_tx.into();
+    let live_tx: ProgressSender<_> = live_tx.into();
     emit_workflow_agent_queued(
         Some(&spool_tx),
         Some(&live_tx),
@@ -4792,7 +4989,8 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         Some("Implementation".to_string()),
         Some("deepseek/deepseek-flash".to_string()),
         100,
-    );
+    )
+    .await;
     let queued_line = spool_rx.recv().await.expect("queued spool line");
     let queued_json: serde_json::Value =
         serde_json::from_str(queued_line.trim_start_matches("[workflow_agent] "))
@@ -4925,7 +5123,7 @@ async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treati
     let (tx, mut rx) = mpsc::unbounded_channel();
     let observer = WorkflowAgentLiveObserver::new_with_metrics(
         None,
-        Some(tx),
+        Some(tx.into()),
         workflow_progress_update(&workflow::Progress::Agent {
             index: 2,
             label: "Review".into(),

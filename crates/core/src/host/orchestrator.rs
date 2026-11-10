@@ -4706,6 +4706,13 @@ pub trait OutputStream: Send + Sync {
     /// mocks) keep compiling unchanged; the TUI bridge overrides it.
     async fn emit_subagent_activity(&self, _text: &Utf16JsonProjection) {}
 
+    /// Whether this sink currently consumes forwarded nested messages.
+    /// Defaults to true for existing custom sinks; built-in ignoring sinks
+    /// opt out before producers serialize full assistant payloads.
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        true
+    }
+
     /// Emit a spawned subagent's assistant TEXT + THINKING as an `assistant`
     /// frame whose `parent_tool_use_id` is the spawning `Task`/`Agent`
     /// tool_use_id — the `--forward-subagent-text` (2.1.212) deep-forwarding

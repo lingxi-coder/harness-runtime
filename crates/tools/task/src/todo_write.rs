@@ -4,7 +4,7 @@
 //! are NOT accepted.
 
 use async_trait::async_trait;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use lingxi_core::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -330,40 +330,33 @@ static SOURCE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
 fn parse_todos(input: &Utf16JsonProjection) -> Result<Vec<TodoItem>, ToolError> {
     let todos = input
         .get_property("todos")
-        .and_then(JsonValueView::array_len)
+        .filter(|todos| todos.array_len().is_some())
         .ok_or_else(|| invalid_tool_input("TodoWrite: missing or invalid 'todos' field"))?;
-    let mut parsed = Vec::with_capacity(todos);
-    for index in 0..todos {
-        let item = input
-            .at_pointer(&format!("/todos/{index}"))
+    let count = todos.array_len().expect("TodoWrite todos are an array");
+    let mut parsed = Vec::with_capacity(count);
+    for index in 0..count {
+        let item = todos
+            .get_index(index)
             .filter(|item| item.object_entries().is_some())
             .ok_or_else(|| {
                 invalid_tool_input(format!("TodoWrite: todos[{index}] must be an object"))
             })?;
-        if item
+        let content = item
             .get_property("content")
             .and_then(JsonValueView::code_units)
-            .is_none()
-        {
-            return Err(invalid_tool_input(format!(
-                "TodoWrite: todos[{index}].content must be a string"
-            )));
-        }
-        if item
+            .ok_or_else(|| {
+                invalid_tool_input(format!(
+                    "TodoWrite: todos[{index}].content must be a string"
+                ))
+            })?;
+        let active_form = item
             .get_property("activeForm")
             .and_then(JsonValueView::code_units)
-            .is_none()
-        {
-            return Err(invalid_tool_input(format!(
-                "TodoWrite: todos[{index}].activeForm must be a string"
-            )));
-        }
-        let content = input
-            .subprojection(&format!("/todos/{index}/content"))
-            .expect("string content subtree is present");
-        let active_form = input
-            .subprojection(&format!("/todos/{index}/activeForm"))
-            .expect("string activeForm subtree is present");
+            .ok_or_else(|| {
+                invalid_tool_input(format!(
+                    "TodoWrite: todos[{index}].activeForm must be a string"
+                ))
+            })?;
         let status = item
             .get_property("status")
             .and_then(JsonValueView::as_str)
@@ -382,27 +375,56 @@ fn parse_todos(input: &Utf16JsonProjection) -> Result<Vec<TodoItem>, ToolError> 
         };
         parsed.push(TodoItem {
             id: String::new(),
-            content,
+            content: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(content),
+                content.to_vec(),
+            )
+            .expect("string content retains exact UTF-16"),
             status,
-            active_form,
+            active_form: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(active_form),
+                active_form.to_vec(),
+            )
+            .expect("string activeForm retains exact UTF-16"),
         });
     }
     Ok(parsed)
 }
 
 fn todos_result_projection(input: &Utf16JsonProjection) -> Utf16JsonProjection {
-    let count = input
-        .array_len("/todos")
+    let todos = input
+        .get_property("todos")
         .expect("TodoWrite todos were validated");
-    let todos = (0..count)
+    let count = todos.array_len().expect("TodoWrite todos are an array");
+    let mut builder = Utf16JsonBuilder::new();
+    let rows = (0..count)
         .map(|index| {
-            input
-                .subprojection(&format!("/todos/{index}"))
-                .and_then(|item| item.pick_object_fields(&["content", "status", "activeForm"]))
-                .expect("TodoWrite todo has the schema fields")
+            let item = todos
+                .get_index(index)
+                .expect("TodoWrite todo was validated");
+            let fields = ["content", "status", "activeForm"]
+                .into_iter()
+                .map(|field| {
+                    let value = item
+                        .get_property(field)
+                        .expect("TodoWrite field was validated");
+                    let id = builder
+                        .import_view(value)
+                        .expect("TodoWrite field is valid JSON");
+                    (field.into(), id)
+                })
+                .collect();
+            builder
+                .push_object(fields)
+                .expect("TodoWrite row is valid JSON")
         })
         .collect();
-    Utf16JsonProjection::array(todos).expect("TodoWrite todo list is valid JSON")
+    let root = builder
+        .push_array(rows)
+        .expect("TodoWrite rows are valid JSON");
+    builder
+        .finish(root)
+        .expect("TodoWrite todo list is valid JSON")
 }
 
 fn todo_items_projection(todos: &[TodoItem]) -> Utf16JsonProjection {
@@ -702,6 +724,91 @@ mod tests {
     fn source_text_units(units: &[u16]) -> Utf16JsonProjection {
         Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
             .expect("source test text is valid JSON")
+    }
+
+    #[test]
+    fn borrowed_todo_parser_preserves_validation_order_and_sparse_hole_errors() {
+        for (source, expected) in [
+            (r#"{}"#, "TodoWrite: missing or invalid 'todos' field"),
+            (
+                r#"{"todos":null}"#,
+                "TodoWrite: missing or invalid 'todos' field",
+            ),
+            (
+                r#"{"todos":[null]}"#,
+                "TodoWrite: todos[0] must be an object",
+            ),
+            (
+                r#"{"todos":[{"content":null,"activeForm":null,"status":null}]}"#,
+                "TodoWrite: todos[0].content must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":null,"status":null}]}"#,
+                "TodoWrite: todos[0].activeForm must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":"y","status":null}]}"#,
+                "TodoWrite: todos[0].status must be a string",
+            ),
+            (
+                r#"{"todos":[{"content":"x","activeForm":"y","status":"done"}]}"#,
+                "TodoWrite: todos[0].status is invalid",
+            ),
+        ] {
+            let input = Utf16JsonProjection::parse(source).unwrap();
+            let ToolError::InvalidInput(message) = parse_todos(&input).unwrap_err() else {
+                panic!("expected TodoWrite input error");
+            };
+            assert_eq!(message.string_at(""), Some(expected), "{source}");
+        }
+        let input = Utf16JsonProjection::object(vec![(
+            "todos".into(),
+            Utf16JsonProjection::sparse_array(1, Vec::new()).unwrap(),
+        )])
+        .unwrap();
+        let ToolError::InvalidInput(message) = parse_todos(&input).unwrap_err() else {
+            panic!("expected TodoWrite hole error");
+        };
+        assert_eq!(
+            message.string_at(""),
+            Some("TodoWrite: todos[0] must be an object")
+        );
+    }
+
+    #[test]
+    fn borrowed_todo_rows_strip_unknown_subtrees_and_keep_exact_result_order() {
+        let input = Utf16JsonProjection::parse(&format!(
+            r#"{{"todos":[{{"activeForm":"\udc00","ignored":{}0{},"status":"pending","content":"\ud800","id":"ignored"}}]}}"#,
+            "[".repeat(2_000), "]".repeat(2_000),
+        )).unwrap();
+        let parsed = parse_todos(&input).unwrap();
+        assert_eq!(parsed[0].content.string_units(""), Some(vec![0xd800]));
+        assert_eq!(parsed[0].active_form.string_units(""), Some(vec![0xdc00]));
+        assert!(parsed[0].id.is_empty());
+        assert_eq!(
+            todos_result_projection(&input).to_json_string().unwrap(),
+            r#"[{"content":"\ud800","status":"pending","activeForm":"\udc00"}]"#
+        );
+    }
+
+    #[test]
+    fn borrowed_todo_rows_cover_large_flat_shapes_without_changing_result_bytes() {
+        let row = r#"{"content":"\ud800","status":"pending","activeForm":"\udc00"}"#;
+        for count in [0, 1, 256, 4_096] {
+            let rows = std::iter::repeat_n(row, count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let input = Utf16JsonProjection::parse(&format!(r#"{{"todos":[{rows}]}}"#)).unwrap();
+            let parsed = parse_todos(&input).unwrap();
+            assert_eq!(parsed.len(), count);
+            assert!(parsed
+                .iter()
+                .all(|item| item.content.string_units("") == Some(vec![0xd800])));
+            assert_eq!(
+                todos_result_projection(&input).to_json_string().unwrap(),
+                format!("[{rows}]")
+            );
+        }
     }
 
     fn prompt_text(prompt: Utf16JsonProjection) -> String {

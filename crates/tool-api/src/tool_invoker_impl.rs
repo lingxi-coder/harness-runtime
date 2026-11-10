@@ -149,6 +149,7 @@ impl ToolInvoker for RegistryToolInvoker {
             is_scheduled_turn: false,
             available_tool_names: None,
             options: crate::context::ToolUseOptions {
+                session_interactive: None,
                 output_style_is_default: None,
                 debug: false,
                 verbose: false,
@@ -184,6 +185,7 @@ impl ToolInvoker for RegistryToolInvoker {
             cancel: None,
             cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_parent_effort: None,
             cwd: None,
             depth: 0,
             observer: None,
@@ -361,11 +363,12 @@ impl RegistryToolInvoker {
                     )
                 })?
                 .as_ref()
-                .clone(),
+                .clone_for_nested_refresh(),
             None => crate::context::ToolUseContext {
                 is_scheduled_turn: false,
                 available_tool_names: ctx.available_tool_names.clone(),
                 options: crate::context::ToolUseOptions {
+                    session_interactive: ctx.session_interactive,
                     output_style_is_default: None,
                     debug: false,
                     verbose: false,
@@ -380,7 +383,7 @@ impl RegistryToolInvoker {
                     custom_system_prompt: None,
                     append_system_prompt: None,
                 },
-                messages: ctx.current_history.clone(),
+                messages: Vec::new(),
                 tool_use_id: None,
                 assistant_message_id: None,
                 trusted_session_profile: None,
@@ -404,6 +407,7 @@ impl RegistryToolInvoker {
                 cancel: Some(ctx.cancellation_token.clone()),
                 cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
                 fork_parent_system_prompt: None,
+                fork_parent_effort: None,
                 cwd: None,
                 depth: 0,
                 observer: None,
@@ -420,6 +424,7 @@ impl RegistryToolInvoker {
             .clone()
             .unwrap_or_else(|| "subagent".into());
         tool_use_ctx.options.model_profile = ctx.parent_model_profile.clone();
+        tool_use_ctx.options.session_interactive = ctx.session_interactive;
         tool_use_ctx.options.is_non_interactive_session = ctx.is_non_interactive_session;
         tool_use_ctx.messages = ctx.current_history.clone();
         tool_use_ctx.available_tool_names = ctx.available_tool_names.clone();
@@ -458,6 +463,10 @@ impl RegistryToolInvoker {
             .fork_context
             .as_ref()
             .and_then(|fork| fork.system_prompt.clone());
+        tool_use_ctx.fork_parent_effort = ctx
+            .fork_context
+            .as_ref()
+            .and_then(|fork| fork.parent_effort.clone());
         tool_use_ctx.cwd = ctx.cwd.clone();
         tool_use_ctx.depth = ctx.depth;
         tool_use_ctx.observer = ctx.observer.clone();
@@ -681,8 +690,9 @@ impl RegistryToolInvoker {
 
         // Drop the progress receiver immediately — production tools tolerate
         // a closed progress channel, and we don't surface progress here.
-        let (progress_tx, _progress_rx) =
+        let (progress_tx, progress_rx) =
             tokio::sync::mpsc::channel::<crate::progress::ToolProgress>(8);
+        drop(progress_rx);
 
         // Preserve the concrete per-agent context that the tool actually
         // received. The Agent runner applies selected one-shot context
@@ -867,8 +877,16 @@ mod tests {
             &self,
             input: Utf16JsonProjection,
             _ctx: ToolUseContext,
-            _progress_tx: ToolProgressSender,
+            progress_tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
+            for _ in 0..input.number_at("/progress_events").unwrap_or(0.0) as usize {
+                let _ = progress_tx
+                    .send(crate::ToolProgress {
+                        tool_use_id: lingxi_core::types::ToolUseId::new(),
+                        data: json!({"tick": true}),
+                    })
+                    .await;
+            }
             Ok(ToolCallResult {
                 is_error: input
                     .get_property("fail")
@@ -1475,6 +1493,7 @@ mod tests {
                     Option<lingxi_core::host::instructions::InstructionContext>,
                     Option<lingxi_core::types::ConversationMessage>,
                     Vec<lingxi_core::types::ContentBlock>,
+                    Option<serde_json::Value>,
                 )>,
             >,
         >,
@@ -1539,6 +1558,7 @@ mod tests {
                 ctx.instruction_context,
                 ctx.assistant_message,
                 ctx.same_turn_tool_uses,
+                ctx.fork_parent_effort,
             ));
             Ok(ToolCallResult {
                 data: json!({}),
@@ -1594,6 +1614,7 @@ mod tests {
             provider_id: Some("provider-prior".into()),
         };
         let mut stale_context = crate::context::ToolUseContext::model_seed("stale".into());
+        stale_context.fork_parent_effort = Some(serde_json::json!("max"));
         stale_context.assistant_message =
             Some(lingxi_core::types::ConversationMessage::Assistant {
                 per_turn_effort: None,
@@ -1617,6 +1638,7 @@ mod tests {
             .insert("/project/pkg/AGENTS.md".into());
 
         let mut invocation = SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -1627,6 +1649,7 @@ mod tests {
             fork_context: Some(lingxi_core::host::tool_invoker::SubagentForkContext {
                 messages: vec![policy.clone()],
                 system_prompt: Some("exact parent system".into()),
+                parent_effort: Some(serde_json::json!("low")),
             }),
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
@@ -1667,6 +1690,7 @@ mod tests {
             captured_instructions,
             captured_assistant_message,
             captured_same_turn_tool_uses,
+            captured_parent_effort,
         ) = captured_guard
             .as_ref()
             .expect("NameRecordingTool::call ran");
@@ -1713,6 +1737,11 @@ mod tests {
             Some("exact parent system")
         );
         assert_eq!(captured_instructions.as_ref(), Some(&instruction_context));
+        assert_eq!(
+            captured_parent_effort.as_ref(),
+            Some(&serde_json::json!("low")),
+            "the current parent's effort replaces stale inherited context"
+        );
         drop(captured_guard);
 
         let next_policy = lingxi_core::types::ConversationMessage::user_meta(
@@ -1738,6 +1767,7 @@ mod tests {
             input: json!({"file_path":"next-prior.txt"}),
             provider_id: None,
         };
+        invocation.fork_context = None;
         invocation.current_history = vec![next_policy.clone()];
         invocation.assistant_message = Some(next_assistant_row.clone());
         invocation.same_turn_tool_uses = vec![next_sibling_tool_use.clone()];
@@ -1751,6 +1781,10 @@ mod tests {
         assert_eq!(captured.5, vec![next_policy]);
         assert_eq!(captured.8, Some(next_assistant_row));
         assert_eq!(captured.9, vec![next_sibling_tool_use]);
+        assert!(
+            captured.10.is_none(),
+            "a call without a fork carrier clears stale parent effort"
+        );
     }
 
     #[tokio::test]
@@ -1766,6 +1800,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    session_interactive: None,
                     available_tool_names: None,
                     cancellation_token: tokio_util::sync::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -1977,8 +2012,61 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    #[test]
+    fn nested_context_refresh_omits_replaced_history_but_keeps_tool_state() {
+        let mut original = ToolUseContext::model_seed("model".into());
+        original
+            .messages
+            .push(lingxi_core::types::ConversationMessage::user_meta(
+                lingxi_core::types::MessageId::new(),
+                "history".repeat(1000),
+            ));
+        original.assistant_message = original.messages.first().cloned();
+        original
+            .same_turn_tool_uses
+            .push(lingxi_core::types::ContentBlock::Text {
+                text: "sibling".into(),
+                citations: None,
+            });
+        original.available_tool_names = Some(vec![json!("Read")]);
+        original.agent_name = Some("worker".into());
+        original.depth = 3;
+        original.fork_parent_system_prompt =
+            Some(Utf16JsonProjection::parse(r#""\ud800exact""#).unwrap());
+        let refreshed = original.clone_for_nested_refresh();
+        assert!(refreshed.messages.is_empty());
+        assert!(refreshed.assistant_message.is_none());
+        assert!(refreshed.same_turn_tool_uses.is_empty());
+        assert!(refreshed.available_tool_names.is_none());
+        assert_eq!(original.messages.len(), 1);
+        assert_eq!(refreshed.agent_name, original.agent_name);
+        assert_eq!(refreshed.depth, 3);
+        assert_eq!(
+            refreshed.fork_parent_system_prompt,
+            original.fork_parent_system_prompt
+        );
+        assert!(Arc::ptr_eq(
+            &refreshed.nested_memory_triggers,
+            &original.nested_memory_triggers
+        ));
+    }
+
+    #[tokio::test]
+    async fn ignored_nested_progress_does_not_block_tool_completion() {
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            invoker.invoke("TestEcho", json!({"progress_events": 32}), no_ctx()),
+        )
+        .await
+        .expect("discarded progress must never fill an undrained queue")
+        .expect("tool succeeds");
+        assert_eq!(result.number_at("/echo/progress_events"), Some(32.0));
+    }
+
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2013,7 +2101,7 @@ mod tests {
     }
 
     struct SessionModeRecordingTool {
-        captured: Arc<StdMutex<Option<bool>>>,
+        captured: Arc<StdMutex<Option<(bool, Option<bool>)>>>,
     }
 
     #[async_trait]
@@ -2065,7 +2153,10 @@ mod tests {
             ctx: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            *self.captured.lock().unwrap() = Some(ctx.options.is_non_interactive_session);
+            *self.captured.lock().unwrap() = Some((
+                ctx.options.is_non_interactive_session,
+                ctx.options.session_interactive,
+            ));
             Ok(ToolCallResult {
                 data: json!({}),
                 model_content: None,
@@ -2100,9 +2191,46 @@ mod tests {
 
         assert_eq!(
             *captured.lock().unwrap(),
-            Some(true),
+            Some((true, None)),
             "a synchronous child must inherit its scheduled-headless owner's mode"
         );
+    }
+
+    #[tokio::test]
+    async fn background_tool_context_refreshes_owning_session_mode_and_keeps_prompt_restrictions() {
+        let captured = Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SessionModeRecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        for session_interactive in [Some(true), Some(false), None] {
+            for reused in [false, true] {
+                let mut context = no_ctx();
+                context.session_interactive = session_interactive;
+                context.is_async = true;
+                context.is_non_interactive_session = true;
+                if reused {
+                    let mut stale = ToolUseContext::model_seed("stale".into());
+                    stale.options.session_interactive = session_interactive
+                        .map(|interactive| !interactive)
+                        .or(Some(true));
+                    stale.options.is_non_interactive_session = false;
+                    context.tool_context_state =
+                        Some(ToolInvocationContextState::new(Arc::new(stale)));
+                }
+                invoker
+                    .invoke("SessionModeRecordingTool", json!({}), context)
+                    .await
+                    .expect("background tool dispatch succeeds");
+                assert_eq!(
+                    *captured.lock().unwrap(),
+                    Some((true, session_interactive)),
+                    "owning mode is refreshed without enabling prompts (reused={reused})"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -2225,6 +2353,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2378,6 +2507,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_interactive: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,

@@ -115,7 +115,12 @@ impl FileSystem for WindowsFileSystem {
         &self,
         root: &Path,
     ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
-        lingxi_core::host::rooted_fs::root_identity(root).map(Some)
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::root_identity(&root).map(Some)
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
     }
 
     fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
@@ -226,6 +231,95 @@ impl FileSystem for WindowsFileSystem {
         )
     }
 
+    async fn read_file_rooted_journal_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected_root: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<lingxi_core::host::rooted_fs::JournalRead, FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected_root = expected_root.copied();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::read_journal_pinned(
+                &root,
+                &relative,
+                expected_root.as_ref(),
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
+    async fn append_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        content: &str,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        let content = content.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::append_journal_durable(
+                &root, &relative, &expected, &content,
+            )
+        })
+        .await
+        .map_err(|error| {
+            lingxi_core::host::rooted_fs::JournalWriteError::uncertain(FsError::Io(
+                error.to_string(),
+            ))
+        })?
+    }
+
+    async fn truncate_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+        length: u64,
+    ) -> Result<
+        lingxi_core::host::rooted_fs::JournalCursor,
+        lingxi_core::host::rooted_fs::JournalWriteError,
+    > {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::truncate_journal_durable(
+                &root, &relative, &expected, length,
+            )
+        })
+        .await
+        .map_err(|error| {
+            lingxi_core::host::rooted_fs::JournalWriteError::uncertain(FsError::Io(
+                error.to_string(),
+            ))
+        })?
+    }
+
+    async fn sync_file_rooted_journal_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::JournalCursor,
+    ) -> Result<(), FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = *expected;
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::sync_journal_durable(&root, &relative, &expected)
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
     async fn append_file_rooted_durable(
         &self,
         root: &Path,
@@ -309,6 +403,62 @@ impl FileSystem for WindowsFileSystem {
         Ok(lingxi_core::host::apply_line_window(content, offset, limit))
     }
 
+    async fn read_file_rooted_text_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        tail_bytes: u64,
+    ) -> Result<lingxi_core::host::rooted_fs::TextWindow, FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = expected.copied();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::read_text_window_pinned(
+                &root,
+                &relative,
+                expected.as_ref(),
+                offset,
+                limit,
+                tail_bytes,
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
+    async fn read_file_rooted_byte_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let expected = expected.copied();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = lingxi_core::host::rooted_fs::open_read_file_pinned(
+                &root,
+                &relative,
+                expected.as_ref(),
+            )?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            let mut bytes = Vec::new();
+            file.take(limit)
+                .read_to_end(&mut bytes)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            Ok(bytes)
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
+    }
+
     async fn write_file_rooted_atomic(
         &self,
         root: &Path,
@@ -330,15 +480,23 @@ impl FileSystem for WindowsFileSystem {
         content: &str,
         expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<(), FsError> {
-        let expected =
-            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
-        lingxi_core::host::rooted_fs::atomic_write_pinned(
-            root,
-            relative,
-            content.as_bytes(),
-            lingxi_core::host::AtomicWriteOptions::default(),
-            expected,
-        )
+        let expected = expected
+            .copied()
+            .ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        let root = root.to_owned();
+        let relative = relative.to_owned();
+        let content = content.to_owned();
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::atomic_write_pinned(
+                &root,
+                &relative,
+                content.as_bytes(),
+                lingxi_core::host::AtomicWriteOptions::default(),
+                &expected,
+            )
+        })
+        .await
+        .map_err(|error| FsError::Io(error.to_string()))?
     }
 
     async fn flock_exclusive_rooted_pinned(
