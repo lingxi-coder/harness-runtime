@@ -2733,7 +2733,9 @@ async fn prompt_section_mod_rewrites_and_removes_named_system_sections() {
     session_cwd.swap(second_cwd.clone(), Vec::new());
     let moved = orch.build_system_prompt().await.unwrap();
     assert!(moved.contains("MOD PRONOUNS 3"));
-    assert!(moved.contains(&format!(
+    let environment = orch.environment_prompt_ingress_attachments().await;
+    let moved_environment = text(&environment.first().expect("moved environment").message);
+    assert!(moved_environment.contains(&format!(
         "Primary working directory: {}",
         second_cwd.canonicalize().unwrap().display()
     )));
@@ -2805,8 +2807,8 @@ async fn prompt_compose_mod_can_reorder_and_replace_system_sections() {
             }
             const answer = await next(e);
             const lean = e.traits.includes('lean');
-            const baseIds = answer.sections.some(section => section.id === 'communication')
-              && !answer.sections.some(section => section.id.startsWith('communication:'));
+            const baseIds = answer.sections.some(section => section.id === 'pronouns')
+              && !answer.sections.some(section => section.id.startsWith('pronouns:'));
             return { sections: [
               ...answer.sections.filter(section => section.id !== 'context_management'),
               { id: 'compose-mod:policy',

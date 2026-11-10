@@ -1349,6 +1349,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn context_319_direct_skill_listing_attachment_matches_native_heading() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/context_prompts_319.json"
+        ))
+        .unwrap();
+        let rendered = render_reminder(
+            &[entry("verify", "Check changes", None, false)],
+            None,
+            CHARS_PER_TOKEN,
+            SkillListingBudgetSettings::default(),
+        )
+        .unwrap();
+        let expected = oracle["skill_listing"][2]["expected"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            rendered.string_at("").unwrap(),
+            format!("<system-reminder>\n{expected}\n</system-reminder>")
+        );
+        assert!(render_reminder(
+            &[],
+            None,
+            CHARS_PER_TOKEN,
+            SkillListingBudgetSettings::default()
+        )
+        .is_none());
+    }
+
     fn format(entries: &[SkillListingEntry], context: Option<usize>) -> Source {
         format_within_budget(
             entries,

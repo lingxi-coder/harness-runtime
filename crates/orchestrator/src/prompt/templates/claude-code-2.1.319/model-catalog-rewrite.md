@@ -1,0 +1,1 @@
+The most recent Claude models are as follows, with their model IDs: Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, generally you want to use the latest and most capable Claude models by default.

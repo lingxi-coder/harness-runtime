@@ -72,6 +72,15 @@ use tool_api::tool_trait::{
     ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
+pub(crate) fn skill_prompt_for_rewrite(rewrite: bool) -> String {
+    let native = if rewrite {
+        include_str!("templates/skill_rewritten_319.md")
+    } else {
+        include_str!("templates/skill_standard_319.md")
+    };
+    format!("{native}\nWhen a skill explicitly loads reference topics through `args`, calling it with a topic not yet loaded retrieves new material; do not repeat a topic already present.\n")
+}
+
 /// Tool name byte-lock.
 pub const SKILL_TOOL_NAME: &str = "Skill";
 /// Descriptor (description) char cap (spec §7).
@@ -533,6 +542,10 @@ impl SkillTool {
             fork_context_messages: None,
             instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
@@ -1227,41 +1240,9 @@ impl Tool for SkillTool {
         }
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
-        // Binary-grounded text (cc 2.1.220 `Xh_`, bytes 231510981; verified
-        // against the live-captured 2.1.220 request body — INCLUDING the
-        // trailing newline the template literal ends with). The background-
-        // return sentence ("A skill that runs in the background…") was added in
-        // cc 2.1.218. Unlike Bash/Agent this text is NOT model-conditional
-        // (identical for opus-4-8 and opus-5 in 2.1.220), so a single string
-        // suffices. The final reference-loading clarification is a deliberate
-        // product extension for the on-demand LingXi guide; the Native text
-        // stays locked separately in the prompt regression test.
-        "Invoke a skill.\n\
-\n\
-A skill is a packaged set of instructions the user or project has set up for a particular \
-kind of task (deploy steps, a review checklist, a repo-specific workflow). Available \
-skills appear in a system-reminder listing with one-line descriptions. When the task at \
-hand is one a listed skill covers, call this tool first — the skill's instructions load \
-into the turn for you to follow in place of your default approach; some skills instead \
-run in a subagent and return the finished result. A skill that runs in the background \
-returns only the agent's name — its result arrives later as a task notification, so \
-don't wait on it or invoke it again in the meantime. Users may also ask for one by name \
-(`/<name>`, or \"slash command\"); that's a request to invoke it.\n\
-\n\
-- `skill`: exact name from the listing, no leading slash. Plugin skills use \
-`plugin:skill`. Directory-scoped skills are listed with a path prefix (`apps/web:deploy`); \
-when both scoped and unscoped variants of a name exist, pick the one whose directory \
-contains the files you're working on (most specific wins; unscoped otherwise).\n\
-- `args`: optional arguments to pass through.\n\
-\n\
-Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI \
-commands (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already \
-present this turn, the skill is loaded — follow it directly rather than calling again.\n\
-\n\
-When a skill explicitly loads reference topics through `args`, calling it with \
-a topic not yet loaded retrieves new material; do not repeat a topic already present.\n"
-            .into()
+    async fn prompt(&self, options: &PromptOptions) -> Utf16JsonProjection {
+        let rewrite = tool_api::prompt_uses_rewrite(options);
+        skill_prompt_for_rewrite(rewrite).into()
     }
 
     async fn validate_input(

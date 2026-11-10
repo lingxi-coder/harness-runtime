@@ -1,60 +1,22 @@
-//! `# Environment` markdown formatter — produces the environment section of
-//! the MAIN (J0 / interactive) system prompt with cwd, git-repo bool,
-//! platform, shell, OS version, model + cutoff, and the static model/CLI
-//! guidance lines.
+//! Claude Code 2.1.319 environment, model-identity and catalog renderers.
 //!
-//! Byte-locked against the clean-room Claude Code 2.1.220 `env_info_simple`
-//! section. The MAIN prompt's
-//! `getSystemPrompt` selects `Kym` (`env_info_simple`) when
-//! `excludeDynamicSections` is false. (In v2.1.183 the SUBAGENT path selected
-//! the static `zym` — model + cutoff only; as of v2.1.186 the subagent path
-//! instead appends the FULL `<env>` block via `tIm` — see
-//! [`super::subagent_env`].) LingXi's subagent path is assembled separately
-//! (`agent/handle.rs` + `subagent_env`).
-//!
-//! Shape (`Kym`):
-//! ```text
-//! ["# Environment",
-//!  "You have been invoked in the following environment: ",   (trailing space)
-//!  ...AG(u)].join("\n")
-//! ```
-//! where `AG(u)` prefixes each scalar element with ` - ` (space-dash-space)
-//! and each ARRAY element (additional working dirs) with `  - ` (two-space).
-//! The element array `u` is, after dropping nulls:
-//! ```text
-//!  - Primary working directory: {cwd}
-//!  - Is a git repository: {true|false}
-//!  - Platform: {process.platform e.g. darwin}
-//!  - Shell: {zsh|bash|raw $SHELL}
-//!  - OS Version: {os.type() os.release()}
-//!  - You are powered by the model named {name}. The exact model ID is {id}.   (or id-only)
-//!  - Assistant knowledge cutoff is {cutoff}.   (omitted when unknown)
-//!  - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. …
-//!  - LingXi is available as a CLI in the terminal, …
-//!  - Fast mode for LingXi uses Claude Opus with faster output …
-//! ```
-//!
-//! NOTE: the model line `s` and cutoff line `a` are SEPARATE array elements,
-//! so each becomes its own ` - ` bullet (the cutoff is NOT joined to the model
-//! line by a blank line as in the old `<env>` form). The static
-//! Model-IDs / availability / Fast-mode lines carry the product name `LingXi`
-//! (rebranded from claude-code's `Claude Code`); the model-family name `Claude`
-//! (Opus/Sonnet/Fable) stays. The em-dash in
-//! "Model IDs —" and "isolated copy …— Run" is U+2014.
+//! Stable catalog guidance and dynamic host/model announcements are separate
+//! surfaces. `format` remains a combined compatibility entry point; new assembly
+//! code uses the explicit renderers to preserve Native's cache/source grouping.
 #![forbid(unsafe_code)]
 
 use crate::prompt::SystemPromptContext;
 use std::fmt::Write;
 
-/// Canonical model-id constants interpolated into the "most recent Claude
-/// models" static line. 2.1.220 (`hhc`): the line renders `latest_per_family`
-/// (`{fable: claude-fable-5-1, opus: claude-opus-5, sonnet: claude-sonnet-5,
-/// haiku: claude-haiku-4-5}`) as `${display_name}: '${id}'` pairs, with
-/// haiku-4-5 special-cased to its dated id.
-const MODEL_ID_FABLE: &str = "claude-fable-5-1";
-const MODEL_ID_OPUS: &str = "claude-opus-5";
-const MODEL_ID_SONNET: &str = "claude-sonnet-5";
-const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
+/// Native `tEo`; shared by initial environment announcements and later updates.
+pub const UNTRUSTED_DOWNLOAD_GUIDANCE: &str = "Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run.";
+const MODEL_CATALOG_STANDARD: &str =
+    include_str!("templates/claude-code-2.1.319/model-catalog-standard.md");
+const MODEL_CATALOG_REWRITE: &str =
+    include_str!("templates/claude-code-2.1.319/model-catalog-rewrite.md");
+const PRODUCT_AVAILABILITY: &str =
+    include_str!("templates/claude-code-2.1.319/product-availability.md");
+const FAST_MODE_GUIDANCE: &str = "Fast mode for LingXi uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.";
 
 /// Format the `# Environment` block for a given context.
 ///
@@ -62,7 +24,16 @@ const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
 /// appends a section separator. Each line carries the ` - ` bullet prefix per
 /// claude-code `AG`.
 #[must_use]
-pub fn format(ctx: &SystemPromptContext) -> String {
+pub fn format_host_environment(ctx: &SystemPromptContext) -> String {
+    format_host_environment_with_additional_dirs(ctx, &[])
+}
+
+/// Child agents can carry additional host-approved working directories.
+#[must_use]
+pub fn format_host_environment_with_additional_dirs(
+    ctx: &SystemPromptContext,
+    additional_dirs: &[String],
+) -> String {
     let mut s = String::with_capacity(1024);
 
     // Header lines — byte-exact `Kym`. The second line has a TRAILING SPACE.
@@ -101,6 +72,13 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     let is_git = ctx.git_status.is_some();
     write!(&mut s, "\n - Is a git repository: {is_git}").unwrap();
 
+    if !additional_dirs.is_empty() {
+        s.push_str("\n - Additional working directories:");
+        for directory in additional_dirs {
+            write!(&mut s, "\n  - {directory}").unwrap();
+        }
+    }
+
     // `Platform: ${je.platform}` — `je.platform` is `process.platform`
     // (`darwin`/`linux`/`win32`). LingXi feeds `std::env::consts::OS`, which is
     // `macos`/`linux`/`windows`; the caller maps it to the node value.
@@ -113,72 +91,88 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // `OS Version: ${o}` — `o = nIo()` = `${os.type()} ${os.release()}`.
     write!(&mut s, "\n - OS Version: {}", ctx.os_version).unwrap();
 
-    // Model line `s`: named form when the marketing name is known, else the
-    // bare-id fallback (claude-code `ZA(e)` truthy/falsy).
-    match &ctx.model_marketing_name {
-        Some(name) => {
-            write!(
-                &mut s,
-                "\n - You are powered by the model named {name}. The exact model ID is {}.",
-                ctx.model
-            )
-            .unwrap();
-        }
-        None => {
-            write!(&mut s, "\n - You are powered by the model {}.", ctx.model).unwrap();
-        }
-    }
-
-    // Cutoff line `a`: a SEPARATE bullet, omitted entirely when unknown
-    // (`eIo(e)` null ⇒ the element is `null` and filtered out).
-    if let Some(cutoff) = &ctx.knowledge_cutoff {
-        write!(&mut s, "\n - Assistant knowledge cutoff is {cutoff}.").unwrap();
-    }
-
-    // Static guidance lines — byte-verbatim vs the 2.1.220 binary (`hhc`):
-    // lead sentence "the Claude 5 family and Haiku 4.5"; the Model
-    // IDs render latest_per_family (fable, opus, sonnet→claude-sonnet-5,
-    // haiku→dated id). The em-dash is U+2014.
-    //
-    // CLAUDE-ONLY (LingXi multi-provider divergence): claude-code only ever runs
-    // Claude, so it always emits this Claude-model catalog + the Claude-Opus
-    // fast-mode note. LingXi can run a non-Claude model (deepseek/gemini/…) via
-    // `/model`; feeding THAT model the first-party Claude catalog both
-    // misinforms it and pollutes its self-identity. Gate both
-    // Claude-specific lines on the active model being a recognized Claude
-    // profile. Raw substring matching here previously polluted custom
-    // non-Claude model ids that merely contained `claude`.
-    let is_claude = lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model)
-        != lingxi_core::host::model_capabilities::PromptProfile::FullHarness;
-    if is_claude {
-        write!(
-            &mut s,
-            "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. \
-Model IDs \u{2014} Fable 5.1: '{MODEL_ID_FABLE}', Opus 5: '{MODEL_ID_OPUS}', \
-Sonnet 5: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
-When building AI applications, default to the latest and most capable Claude models."
-        )
-        .unwrap();
-    }
-
-    s.push_str(
-        "\n - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \
-web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
-    );
-
-    // Fast-mode line: present on the MAIN path (claude-code `t?null:…` — `t` is
-    // the subagent flag, false here). LingXi's subagent path is assembled
-    // separately, so the main assembler always emits this line. Claude-only (it
-    // describes the Claude-Opus fast path) — gated like the catalog above.
-    if is_claude {
-        s.push_str(
-            "\n - Fast mode for LingXi uses Claude Opus with faster output \
-(it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 5/4.8.",
-        );
-    }
-
+    write!(&mut s, "\n - {UNTRUSTED_DOWNLOAD_GUIDANCE}").unwrap();
     s
+}
+
+/// Native `iAt`; the model identity is an independent dynamic announcement.
+#[must_use]
+pub fn format_model_identity(ctx: &SystemPromptContext) -> String {
+    format_model_identity_with_rewrite(ctx, false)
+}
+
+#[must_use]
+pub fn format_model_identity_with_rewrite(ctx: &SystemPromptContext, rewrite: bool) -> String {
+    let mut result = match (&ctx.model_marketing_name, rewrite) {
+        (Some(name), false) => format!(
+            "You are powered by the model named {name}. The exact model ID is {}.",
+            ctx.model
+        ),
+        (Some(name), true) => format!(
+            "You are currently powered by the model named {name}. The exact model ID is {}.",
+            ctx.model
+        ),
+        (None, false) => format!("You are powered by the model {}.", ctx.model),
+        (None, true) => format!("You are currently powered by the model {}.", ctx.model),
+    };
+    if let Some(cutoff) = &ctx.knowledge_cutoff {
+        if rewrite {
+            write!(&mut result, " Your innate base knowledge cutoff is {cutoff}. For anything which has happened after this date, you may have to use tools to help yourself get an accurate picture of the world.").unwrap();
+        } else {
+            write!(&mut result, " Assistant knowledge cutoff is {cutoff}.").unwrap();
+        }
+    }
+    result
+}
+
+/// Native `jCr`: stable model catalog and product guidance, without host facts.
+#[must_use]
+pub fn format_catalog(ctx: &SystemPromptContext, is_subagent: bool, rewrite: bool) -> String {
+    let is_claude = lingxi_core::host::model_capabilities::normalize_model_id(&ctx.model)
+        .starts_with("claude-");
+    let mut sections = vec!["# Environment"];
+    if is_claude {
+        sections.push(if rewrite {
+            MODEL_CATALOG_REWRITE
+        } else {
+            MODEL_CATALOG_STANDARD
+        });
+    }
+    sections.push(PRODUCT_AVAILABILITY);
+    if is_claude && !is_subagent {
+        sections.push(FAST_MODE_GUIDANCE);
+    }
+    let mut output = sections.remove(0).to_owned();
+    for section in sections {
+        write!(&mut output, "\n - {section}").unwrap();
+    }
+    output
+}
+
+/// Compatibility formatter for callers that still request a combined block.
+#[must_use]
+pub fn format(ctx: &SystemPromptContext) -> String {
+    let mut output = format_host_environment(ctx);
+    match &ctx.model_marketing_name {
+        Some(name) => write!(
+            &mut output,
+            "\n - You are powered by the model named {name}. The exact model ID is {}.",
+            ctx.model
+        )
+        .unwrap(),
+        None => write!(
+            &mut output,
+            "\n - You are powered by the model {}.",
+            ctx.model
+        )
+        .unwrap(),
+    }
+    if let Some(cutoff) = &ctx.knowledge_cutoff {
+        write!(&mut output, "\n - Assistant knowledge cutoff is {cutoff}.").unwrap();
+    }
+    let catalog = format_catalog(ctx, false, false);
+    output.push_str(catalog.strip_prefix("# Environment").unwrap());
+    output
 }
 
 #[cfg(test)]
@@ -189,6 +183,8 @@ mod tests {
 
     fn ctx() -> SystemPromptContext {
         SystemPromptContext {
+            native_system_turns: None,
+            prompt_policy: None,
             cwd: PathBuf::from("/x"),
             platform: "linux".into(),
             model: "claude-opus-4-7".into(),
@@ -223,8 +219,94 @@ mod tests {
         assert!(!out.contains("Assistant knowledge cutoff"));
         // Static lines present, em-dash byte-exact.
         assert!(out.contains("Model IDs \u{2014} Fable 5.1: 'claude-fable-5-1'"));
-        assert!(out.contains("Opus 5: 'claude-opus-5'"));
-        assert!(out.ends_with("available on Opus 5/4.8."));
+        assert!(out.contains("Opus 5.5: 'claude-opus-5-5'"));
+        assert!(out.ends_with("It can be toggled with /fast."));
+    }
+
+    #[test]
+    fn context_319_environment_and_identity_match_native_renderers() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/context_prompts_319.json"
+        ))
+        .unwrap();
+        for case in oracle["environment"].as_array().unwrap() {
+            let input = &case["input"];
+            let mut context = ctx();
+            context.cwd = input["workingDirectory"].as_str().unwrap().into();
+            context.platform = input["platform"].as_str().unwrap().into();
+            context.shell = input["shell"].as_str().unwrap().into();
+            context.os_version = input["osVersion"].as_str().unwrap().into();
+            context.in_worktree = input["isWorktree"].as_bool().unwrap();
+            context.git_status = input["isGitRepo"].as_bool().unwrap().then(Default::default);
+            let additional_dirs = input["additionalWorkingDirectories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|directory| directory.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            let expected = case["expected"]
+                .as_str()
+                .unwrap()
+                .replace("other Claude sessions", "other LingXi sessions");
+            assert_eq!(
+                format_host_environment_with_additional_dirs(&context, &additional_dirs),
+                expected
+            );
+            if additional_dirs.is_empty() {
+                assert_eq!(format_host_environment(&context), expected);
+            }
+        }
+        for case in oracle["model_identity"].as_array().unwrap() {
+            let input = &case["input"];
+            let mut context = ctx();
+            context.model = input["modelId"].as_str().unwrap().into();
+            context.model_marketing_name = input["marketingName"].as_str().map(str::to_owned);
+            context.knowledge_cutoff = input["knowledgeCutoff"].as_str().map(str::to_owned);
+            assert_eq!(
+                format_model_identity(&context),
+                case["expected"].as_str().unwrap()
+            );
+            assert_eq!(
+                format_model_identity_with_rewrite(&context, true),
+                case["rewrite"].as_str().unwrap()
+            );
+        }
+        // The upstream availability line describes Claude's product surfaces.
+        // Replace only that complete line with the host's confirmed capability
+        // statement; keep every other native catalog byte unchanged.
+        let host_catalog = |native: &str| {
+            const NATIVE_AVAILABILITY_LINE: &str = " - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).";
+            assert_eq!(
+                native
+                    .split('\n')
+                    .filter(|line| *line == NATIVE_AVAILABILITY_LINE)
+                    .count(),
+                1
+            );
+            native
+                .split('\n')
+                .map(|line| {
+                    if line == NATIVE_AVAILABILITY_LINE {
+                        format!(" - {PRODUCT_AVAILABILITY}")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            format_catalog(&ctx(), false, false),
+            host_catalog(oracle["model_catalog"]["body"].as_str().unwrap())
+        );
+        assert_eq!(
+            format_catalog(&ctx(), true, false),
+            host_catalog(oracle["model_catalog"]["subagent_body"].as_str().unwrap())
+        );
+        assert_eq!(
+            format_catalog(&ctx(), false, true),
+            host_catalog(oracle["model_catalog"]["rewrite_body"].as_str().unwrap())
+        );
     }
 
     #[test]
@@ -251,7 +333,7 @@ The exact model ID is claude-opus-4-8[1m]."
         // Multi-provider divergence: a non-Claude model (deepseek) must NOT be
         // told the first-party Claude model catalog
         // (it misinforms + pollutes self-identity). The id-only model line and
-        // the LingXi CLI-availability line still render.
+        // the host capability statement still render.
         let mut c = ctx();
         c.model = "deepseek-v4-pro".into();
         c.model_marketing_name = None;
@@ -272,10 +354,9 @@ The exact model ID is claude-opus-4-8[1m]."
             !out.contains("Fast mode for LingXi uses Claude Opus"),
             "Claude fast-mode note omitted for a non-Claude model: {out}"
         );
-        // The provider-neutral LingXi availability line still renders, and is now
-        // the last bullet (fast-mode omitted).
+        // The host capability statement is the last bullet (fast-mode omitted).
         assert!(
-            out.ends_with("IDE extensions (VS Code, JetBrains)."),
+            out.ends_with("LingXi runs in the current host client. Use the interfaces and capabilities explicitly exposed in this session."),
             "LingXi availability line remains, last: {out}"
         );
     }

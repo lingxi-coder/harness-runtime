@@ -200,6 +200,11 @@ pub struct SubagentForkContext {
     pub messages: Vec<crate::types::ConversationMessage>,
     /// The exact rendered parent system prompt, used by explicit forks.
     pub system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Explicit user system override, kept separate from the rendered template.
+    pub custom_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    pub append_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Original role instructions for a fork launched by a specialized agent.
+    pub role_system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// Per-call invocation context handed to a [`ToolInvoker`].
@@ -210,6 +215,9 @@ pub struct SubagentForkContext {
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
+    /// Prompt bundle resolved for this agent's actual request route. Nested
+    /// tools carry this value instead of borrowing the parent agent's model.
+    pub prompt_policy: Option<std::sync::Arc<crate::host::prompt_policy::ResolvedPromptPolicy>>,
     /// Cancellation scope for this physical tool call. A streamed Agent tool
     /// use owns a distinct token; receivers must copy it into the concrete
     /// `ToolUseContext` rather than reusing a previous call's token.
@@ -634,6 +642,12 @@ pub struct ToolInvocationResult {
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync + Any {
+    /// Trusted host-owned session profile used to resolve a child request's
+    /// conversation mode. Tool input and API transport do not define it.
+    fn trusted_session_profile(&self) -> Option<crate::host::session_context::SessionModeSnapshot> {
+        None
+    }
+
     /// Host-owned durable-origin acknowledgement state for child transcript
     /// writers. This is opaque to core and never comes from tool input.
     fn durable_origin_state(&self) -> Option<ToolInvocationContextState> {

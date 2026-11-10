@@ -4657,6 +4657,19 @@ impl ConversationOrchestrator {
         let compact_summary_content =
             compact_summary_content_source_if_unmodified(msg, &rewritten, compact_summary);
         let msg = &rewritten;
+        let committed_at = preappended
+            .as_ref()
+            .and_then(|metadata| chrono::DateTime::parse_from_rfc3339(metadata.timestamp).ok())
+            .map_or_else(
+                || chrono::Utc::now().timestamp_millis(),
+                |time| time.timestamp_millis(),
+            );
+        self.prompt_runtime
+            .silent_turn_message_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(msg.id())
+            .or_insert(committed_at);
         self.note_assistant_commit(msg).await;
         if matches!(msg, ConversationMessage::Assistant { .. }) {
             if api_error.is_some()
@@ -6323,6 +6336,12 @@ impl ConversationOrchestrator {
     /// persistence seams, including writer-less runtimes.
     pub(crate) async fn note_assistant_commit(&self, msg: &ConversationMessage) {
         if matches!(msg, ConversationMessage::Assistant { .. }) {
+            self.prompt_runtime
+                .silent_turn_message_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(msg.id())
+                .or_insert_with(|| chrono::Utc::now().timestamp_millis());
             // An ordinary later assistant replaces a recoverable API-error row.
             // API persistence stamps its explicit marker after this common seam.
             self.note_turn_api_error_stop_reason(None);

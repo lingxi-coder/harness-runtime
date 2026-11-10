@@ -992,6 +992,10 @@ mod tests {
             fork_context_messages: None,
             instruction_context: None,
             fork_parent_system_prompt: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
@@ -1371,6 +1375,7 @@ export function register(on) {
             .clone()
             .expect("the teammate spawn seam receives the decorated invoker");
         let invocation = SubagentInvocationContext {
+            prompt_policy: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

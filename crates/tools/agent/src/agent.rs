@@ -3207,63 +3207,55 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         }
     }
 
-    /// Format one agent catalog line for the tool prompt, matching claude-code's
-    /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
-    /// `getPrompt` (binary `bin/claude.exe` offset ~208233723). 2.1.193 ALWAYS
-    /// externalizes the agent catalog to a per-turn `agent_listing_delta`
-    /// `<system-reminder>` attachment (built by the orchestrator,
-    /// [`crate::PoolSubagentSpawner`]-fed); the tool DESCRIPTION carries only the
-    /// static pointer line "Available agent types are listed in <system-reminder>
-    /// messages in the conversation." — there is NO inline-catalog variant in the
-    /// description. The catalog always travels in the per-turn reminder.
-    ///
-    /// The body is MODEL-GATED, exactly as the binary's `if(m){…}` split
-    /// (`m = qk(model)` = `tool_api::dh_simple_system_prompt`): a lean-prompt
-    /// model gets the SHORT form (intro + `## When to use` + four terse
-    /// bullets); every classic model (sonnet / haiku / `claude-3-*` /
-    /// `opus-4-0..4-7`) — and an unknown/absent model, since `Dh(undefined)` is
-    /// `false` — gets the LONG form: `## When not to use`, `## Usage notes`,
-    /// `## Writing the prompt`, and the `Example usage:` `<example>` blocks.
-    ///
-    /// `is_coordinator` selects the slim coordinator prompt (intro only; the
-    /// coordinator system prompt already covers usage / examples).
-    ///
-    /// The `d` pro-plan gate (`vi()==="pro"`) IS modeled: a `pro` subscription
-    /// (read from the process-global [`lingxi_core::host::subscription::is_pro_plan`]) injects
-    /// the "Do not spawn agents unless the user asks" block after the catalog
-    /// pointer line and suppresses `## When to use`. It is inert until a
-    /// composition root resolves the plan via
-    /// [`lingxi_core::host::subscription::set_current_subscription`] (subscription resolution
-    /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
-    /// default).
-    ///
-    /// The `o` fork-subagent gate (`isForkSubagentEnabled` / 2.1.232 `SPe`) IS
-    /// modeled: when fork is enabled (`is_fork_subagent_enabled(is_coordinator,
-    /// is_non_interactive)`, reading the process-global
-    /// [`lingxi_core::host::session_flags::is_non_interactive_session`]), the subagent_type
-    /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
-    /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
-    /// qualifier. Default ON for interactive non-coordinator sessions; set
-    /// `LINGXI_FORK_SUBAGENT=0` to disable.
-    ///
-    /// Deferred vs binary (no behavioral surface here): the embedded-grep hint
-    /// swap (`S = VH()&&Sh()?…`, which only fires in sessions where Glob/Grep
-    /// are REMOVED — LingXi always registers them), teammate (`yB`/`_m`) notes,
-    /// and the remote-isolation (`V8t`) note. The
-    /// fabricated "# MCP Servers" note (NOT present in the 2.1.193 binary) is
-    /// removed; `_mcp_server_names` is retained for signature stability.
-    ///
-    /// `model` is the binary's `CGf({model:e,…})` argument, consumed by the
-    /// LEAN/LONG gate `m = qk(e)` (`tool_api::dh_simple_system_prompt`);
-    /// `general_purpose_available` is 2.1.238's `generalPurposeAvailable`
-    /// (`p7f(agents, allowedAgentTypes)`), computed by the caller from the
-    /// PRE-deny-filter listing exactly as the binary's `prompt({agents,…})`
-    /// wrapper does (@292885292).
+    #[cfg(test)]
     fn build_prompt(
         agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
         model: Option<&str>,
+        general_purpose_available: bool,
+    ) -> String {
+        Self::build_prompt_for_options(
+            agents,
+            mcp_server_names,
+            is_coordinator,
+            &PromptOptions {
+                model: model.map(str::to_owned),
+                ..PromptOptions::default()
+            },
+            general_purpose_available,
+        )
+    }
+
+    #[cfg(test)]
+    fn build_prompt_with_async_agents(
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+        async_agents_available: bool,
+        model: Option<&str>,
+        general_purpose_available: bool,
+    ) -> String {
+        Self::build_prompt_with_async_agents_for_options(
+            agents,
+            mcp_server_names,
+            is_coordinator,
+            async_agents_available,
+            &PromptOptions {
+                model: model.map(str::to_owned),
+                ..PromptOptions::default()
+            },
+            general_purpose_available,
+        )
+    }
+
+    /// Build a tool description from the owning request's resolved policy and
+    /// the host's actual agent capabilities.
+    fn build_prompt_for_options(
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+        options: &PromptOptions,
         general_purpose_available: bool,
     ) -> String {
         // Binary `l=!DT()&&!aZ()` @234652470.
@@ -3280,29 +3272,27 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
                 .ok()
                 .as_deref(),
         );
-        Self::build_prompt_with_async_agents(
+        Self::build_prompt_with_async_agents_for_options(
             agents,
             mcp_server_names,
             is_coordinator,
             async_agents_available,
-            model,
+            options,
             general_purpose_available,
         )
     }
 
-    /// `build_prompt` with the binary's `l` gate supplied explicitly, so tests
-    /// can exercise both arms without touching the process-global env.
-    fn build_prompt_with_async_agents(
+    /// Supply the background-agent capability explicitly for deterministic
+    /// rendering and tests.
+    fn build_prompt_with_async_agents_for_options(
         agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
-        model: Option<&str>,
+        options: &PromptOptions,
         general_purpose_available: bool,
     ) -> String {
-        // `re = PC({model, leanPrompt})` — the LEAN-prompt flag, computed ONCE
-        // and used for the SHORT/LONG arm split below, exactly as `H2n` does.
-        let lean = tool_api::dh_simple_system_prompt(model);
+        let lean = tool_api::prompt_uses_lean(options);
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
         // description carries only the static pointer line.
@@ -3347,7 +3337,9 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         // binary's unknown-plan default). The block is injected right after the
         // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
         // section — both per the binary's `${d}` / `${d?"":…}` placements.
-        let pro_block = if lingxi_core::host::subscription::is_pro_plan() {
+        let pro_block = if tool_api::prompt_uses_native(options)
+            && lingxi_core::host::subscription::is_pro_plan()
+        {
             // Binary `d=Pi()==="pro"?`\n\n**Do not spawn…`:""` — DOUBLE leading `\n`
             // (injected as `…conversation.${d}\n\n${subagent}`; od -c verified on
             // 2.1.195 @211615145).
@@ -3429,14 +3421,8 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
         // the Agent tool prompt consults the SAME gate.
         let steer_is_default = lingxi_core::host::live_sessions::subagent_steer_is_default();
 
-        // LEAN/LONG split (binary `m = qk(e)`, the shared `Dh(model)` gate the
-        // port already implements as `tool_api::dh_simple_system_prompt`):
-        // `if(m){ …SHORT… } return …LONG…`. Every other ported tool consults it
-        // through `PromptOptions.model` (Read/Bash/Glob/Grep/Write/TodoWrite);
-        // the Agent tool used to discard `PromptOptions` entirely and always
-        // render the SHORT arm, so a sonnet / haiku / `claude-3-*` /
-        // `opus-4-0..4-7` session never saw `## When not to use`,
-        // `## Usage notes`, `## Writing the prompt`, or the `<example>` blocks.
+        // Preserve the synchronized native arms while allowing the resolved
+        // bundle to select generic Lean for a different model family.
         if lean {
             // ---- SHORT (lean) arm — binary `if(m){…}` ----
             //
@@ -3447,24 +3433,13 @@ If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SE
             // qJn()?…:""`, gate `tengu_neapolitan`) are gated OFF by default and
             // remain unmodeled.
             //
-            // `## When to use` is SUPPRESSED on the pro plan (binary
-            // `${y?"":g?…:…}`): when the pro-block is present, the
-            // discouragement replaces the when-to-use guidance. When the steer
-            // is NOT `"default"` the heading survives but the "Reach for this
-            // when…" lead sentence is dropped and `R` stands alone. The four
-            // bullets are NOT gated and always render.
-            const WHEN_TO_USE_SEARCH_DIRECTLY: &str = "For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.";
             let when_to_use = if !pro_block.is_empty() {
                 String::new()
-            } else if steer_is_default {
-                // Binary `${g?`\n\n## When to use\n\nReach…`}` — DOUBLE `\n`
-                // before the heading AND before the paragraph (od -c verified on
-                // 2.1.195).
-                format!(
-                    "\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. {WHEN_TO_USE_SEARCH_DIRECTLY}"
-                )
             } else {
-                format!("\n\n## When to use\n\n{WHEN_TO_USE_SEARCH_DIRECTLY}")
+                format!(
+                    "\n\n## When to use\n\n{}",
+                    include_str!("templates/when_to_use_319.md").trim_end_matches('\n')
+                )
             };
             // Fork addendum (binary `${A}`), after `## When to use`, before the
             // bullets.
@@ -4138,7 +4113,28 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             worktree: agent_worktree,
             fork_context_messages: None,
             instruction_context: ctx.instruction_context.clone(),
-            fork_parent_system_prompt: None,
+            fork_parent_system_prompt: is_fork
+                .then(|| ctx.fork_parent_system_prompt.clone())
+                .flatten(),
+            fork_prompt_policy: is_fork
+                .then(|| {
+                    ctx.fork_prompt_policy.clone().or_else(|| {
+                        ctx.options
+                            .prompt_policy
+                            .as_ref()
+                            .map(|policy| policy.metadata())
+                    })
+                })
+                .flatten(),
+            fork_custom_system_prompt: is_fork
+                .then(|| ctx.fork_custom_system_prompt.clone())
+                .flatten(),
+            fork_append_system_prompt: is_fork
+                .then(|| ctx.fork_append_system_prompt.clone())
+                .flatten(),
+            fork_role_system_prompt: is_fork
+                .then(|| ctx.fork_role_system_prompt.clone())
+                .flatten(),
             // The Agent tool has no structured-output schema param.
             schema: None,
             structured_output_mode: StructuredOutputMode::default(),
@@ -4513,11 +4509,11 @@ impl Tool for AgentTool {
         // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
         // web-fetch agent for a coordinator session.
         drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
-        let prompt = Self::build_prompt(
+        let prompt = Self::build_prompt_for_options(
             &agents,
             &mcp_server_names,
             is_coordinator,
-            opts.model.as_deref(),
+            opts,
             general_purpose_available,
         );
         // The catalog rows here are host-parsed UTF-8 definitions and the
@@ -6180,6 +6176,25 @@ Use /mcp to configure and authenticate the required MCP servers.",
             } else {
                 None
             },
+            fork_prompt_policy: is_fork
+                .then(|| {
+                    ctx.fork_prompt_policy.clone().or_else(|| {
+                        ctx.options
+                            .prompt_policy
+                            .as_ref()
+                            .map(|policy| policy.metadata())
+                    })
+                })
+                .flatten(),
+            fork_custom_system_prompt: is_fork
+                .then(|| ctx.fork_custom_system_prompt.clone())
+                .flatten(),
+            fork_append_system_prompt: is_fork
+                .then(|| ctx.fork_append_system_prompt.clone())
+                .flatten(),
+            fork_role_system_prompt: is_fork
+                .then(|| ctx.fork_role_system_prompt.clone())
+                .flatten(),
             schema: None,
             structured_output_mode: StructuredOutputMode::default(),
             structured_output_parse_retries: 0,

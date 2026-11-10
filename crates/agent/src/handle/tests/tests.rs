@@ -432,6 +432,10 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -4335,6 +4339,10 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -4415,6 +4423,10 @@ async fn effective_parent_model_precedence_override_then_live_then_boot() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -5438,6 +5450,10 @@ async fn spawn_request_model_override_takes_precedence() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -5593,6 +5609,10 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -5848,6 +5868,10 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -5941,6 +5965,10 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -6024,6 +6052,10 @@ async fn build_subagent_context_threads_persistent_flag() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -6151,6 +6183,10 @@ async fn build_subagent_context_copies_correlation_id() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -6469,6 +6505,10 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -6550,18 +6590,24 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
 /// model id. The fork path is byte-verbatim (no env block). An unfilled
 /// renderer cell is a no-op.
 #[tokio::test]
-async fn build_subagent_context_appends_env_block_nonfork_only() {
+async fn build_subagent_context_announces_env_in_messages_nonfork_only() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     // A renderer that echoes the resolved model id into a sentinel block.
     let spawner = test_spawner(pool)
         .with_default_model("claude-opus-4-8[1m]")
-        .with_subagent_env_renderer(Arc::new(|model_id: &str, cwd: Option<&std::path::Path>| {
-            format!(
-                "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
-                cwd.map_or("<none>".to_string(), |p| p.display().to_string())
-            )
-        }));
+        .with_subagent_env_renderer(Arc::new(
+            |target: &SubagentPromptTarget, cwd: Option<&std::path::Path>| {
+                let model_id = target.model.as_str();
+                crate::handle::SubagentPromptContext {
+                    additional_context: vec![format!(
+                        "MODEL: {model_id}\nCWD: {}",
+                        cwd.map_or("<none>".to_string(), |p| p.display().to_string())
+                    )],
+                    system_suffix: Some("PREFIX BUDGET".to_owned()),
+                }
+            },
+        ));
     let mk_inherit = || SubagentInheritance {
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
@@ -6592,6 +6638,10 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -6624,8 +6674,6 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         restore_handback_start: None,
     };
 
-    // Non-fork: env block appended after the body, joined by a blank line,
-    // rendered with the resolved default model id.
     let ctx = spawner
         .build_subagent_context(&req, mk_inherit(), false)
         .await
@@ -6637,12 +6685,19 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         .unwrap()
         .string_at("")
         .unwrap();
-    assert!(
-        sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
-        "env block must be appended with the resolved model + no cwd override; got:\n{sys}"
+    assert!(sys.ends_with("\n\nPREFIX BUDGET"));
+    assert!(!sys.contains("CWD:"));
+    let ConversationMessage::System {
+        api_system: Some(environment),
+        ..
+    } = &ctx.prompt_messages[1]
+    else {
+        panic!("mid-conversation-system models announce environment after the task")
+    };
+    assert_eq!(
+        environment.content[0].visible_text(),
+        Some("MODEL: claude-opus-4-8[1m]\nCWD: <none>")
     );
-    // The Notes trailer still precedes it.
-    assert!(sys.contains("this note is about report files.)\n\n<env>"));
 
     // A worktree-isolated spawn (request.cwd Some) threads the cwd into the
     // env renderer so the agent's env block reflects the worktree.
@@ -6653,15 +6708,19 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         .await
         .expect("worktree cwd context should build")
         .0;
-    let wt_sys = wt_ctx
-        .rendered_system_prompt
-        .as_ref()
-        .unwrap()
-        .string_at("")
-        .unwrap();
+    let ConversationMessage::System {
+        api_system: Some(environment),
+        ..
+    } = &wt_ctx.prompt_messages[1]
+    else {
+        panic!("worktree environment must be in a message")
+    };
     assert!(
-        wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
-        "worktree cwd must reach the env renderer; got:\n{wt_sys}"
+        environment.content[0]
+            .visible_text()
+            .unwrap()
+            .contains("CWD: /repo/.lingxi/worktrees/agent-x"),
+        "worktree cwd must reach the env renderer"
     );
     assert_eq!(
         wt_ctx.cwd.as_deref(),
@@ -6671,6 +6730,7 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
 
     // Fork path: the parent's rendered prompt is replayed verbatim — NO env.
     req.fork_parent_system_prompt = Some("PARENT VERBATIM".to_string().into());
+    req.fork_prompt_policy = ctx.prompt_policy.as_ref().map(|policy| policy.metadata());
     let fork_ctx = spawner
         .build_subagent_context(&req, mk_inherit(), false)
         .await
@@ -6684,6 +6744,115 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         Some("PARENT VERBATIM"),
         "fork path must not append the env block"
     );
+}
+
+#[tokio::test]
+async fn child_prompt_policy_uses_its_actual_route_and_trusted_owner_mode() {
+    use lingxi_core::host::prompt_policy::PromptTarget;
+    use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
+    struct ChildRoutePolicyApi;
+    #[async_trait]
+    impl crate::api::SubagentApiClient for ChildRoutePolicyApi {
+        fn prompt_target(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+            mode: ConversationMode,
+        ) -> Result<PromptTarget, llm_runtime::LlmError> {
+            let (provider, underlying) = if profile == Some("claude-channel") {
+                ("openrouter", "claude-opus-5")
+            } else {
+                ("kimi", "kimi-k2.5")
+            };
+            Ok(PromptTarget::from_route(
+                mode,
+                provider,
+                model,
+                Some(underlying),
+                None,
+                profile,
+            ))
+        }
+        async fn stream(
+            &self,
+            request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            PendingModel.stream(request).await
+        }
+    }
+    for mode in [ConversationMode::Chat, ConversationMode::Code] {
+        let pool = Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        ));
+        let spawner = test_spawner(pool)
+            .with_default_model("shared-model")
+            .with_api_client(Arc::new(ChildRoutePolicyApi))
+            .with_conversation_mode(if mode == ConversationMode::Chat {
+                ConversationMode::Code
+            } else {
+                ConversationMode::Chat
+            });
+        for profile in ["claude-channel", "kimi-messages"] {
+            let owner = lingxi_core::types::SessionId::new();
+            let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+                "subagent_type": "general-purpose", "prompt": "inspect", "model": "shared-model", "model_profile": profile, "origin_session_id": owner,
+            })).unwrap();
+            let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(
+                tool_api::ToolRegistry::new(),
+            ))
+            .with_trusted_session(
+                Some(SessionModeSnapshot {
+                    session_id: owner.as_uuid().to_string(),
+                    mode,
+                }),
+                None,
+            );
+            let (context, _) = spawner
+                .build_subagent_context(
+                    &request,
+                    SubagentInheritance {
+                        tool_invoker: Arc::new(invoker),
+                        budget: Arc::new(DummyBudget),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+            let policy = context.prompt_policy.as_ref().unwrap();
+            assert_eq!(policy.target.mode, mode);
+            assert_eq!(
+                policy.target.provider_id,
+                if profile == "claude-channel" {
+                    "openrouter"
+                } else {
+                    "kimi"
+                }
+            );
+            assert_eq!(policy.tools.is_native(), profile == "claude-channel");
+            assert_eq!(context.model_profile.as_deref(), Some(profile));
+            let body = context
+                .rendered_system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at("")
+                .unwrap();
+            if profile == "kimi-messages" {
+                assert!(body.contains(if mode == ConversationMode::Chat {
+                    "research, writing"
+                } else {
+                    "software engineering"
+                }));
+                assert!(!body.contains("Claude"));
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -6717,6 +6886,10 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -7372,6 +7545,10 @@ async fn spawn_async_default_returns_internal_error() {
         fork_context_messages: None,
         instruction_context: None,
         fork_parent_system_prompt: None,
+        fork_prompt_policy: None,
+        fork_custom_system_prompt: None,
+        fork_append_system_prompt: None,
+        fork_role_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
         structured_output_parse_retries: 0,
@@ -7604,5 +7781,98 @@ async fn persistent_forwarder_owns_completed_failed_and_resumed_turns_but_never_
         drop(seen);
         assert!(executor.take_agent_prompt_transcript(session, id).is_none());
         spawner.stop(&id).await.unwrap();
+    }
+}
+#[test]
+fn subagent_appendices_match_319_native_builders() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../scripts/tests/fixtures/agent_reminders_319.json"
+    ))
+    .unwrap();
+    for case in fixture["subagentAppendices"].as_array().unwrap() {
+        let (consent, notes) =
+            PoolSubagentSpawner::subagent_prompt_appendix(case["rewrite"].as_bool().unwrap());
+        assert_eq!(consent, case["parts"][0].as_str().unwrap());
+        assert_eq!(notes, case["parts"][1].as_str().unwrap());
+    }
+}
+
+#[test]
+fn child_prefix_and_context_order_match_319_live_captures() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../scripts/tests/fixtures/agent_child_prefix_319.json"
+    ))
+    .unwrap();
+    for case in fixture["cases"].as_array().unwrap() {
+        let definition = AgentDefinition {
+            model: AgentModel::Explicit(case["model"].as_str().unwrap().to_owned()),
+            system_prompt: Some("WIRE_CHILD_AGENT".into()),
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        };
+        let mut context =
+            PoolSubagentSpawner::make_subagent_context(definition, "WIRE_CHILD_AGENT", None, None);
+        let sections = case["contextSections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|section| section.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        PoolSubagentSpawner::apply_subagent_prompt_context(
+            &mut context,
+            crate::handle::SubagentPromptContext {
+                additional_context: sections.clone(),
+                system_suffix: case["systemSuffix"].as_str().map(str::to_owned),
+            },
+        );
+        assert_eq!(
+            context
+                .rendered_system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at(""),
+            case["systemBody"].as_str(),
+            "{}",
+            case["model"]
+        );
+        if case["contextPlacement"].as_str() == Some("system_after_task") {
+            assert_eq!(context.prompt_messages.len(), 2);
+            assert_eq!(
+                context.prompt_messages[0].text_content(),
+                "WIRE_CHILD_AGENT"
+            );
+            let ConversationMessage::System {
+                api_system: Some(payload),
+                ..
+            } = &context.prompt_messages[1]
+            else {
+                panic!("environment must follow the task as an API system message")
+            };
+            assert_eq!(
+                payload.content[0].visible_text(),
+                Some(sections.join("\n\n").as_str())
+            );
+        } else {
+            assert_eq!(context.prompt_messages.len(), 1);
+            let ConversationMessage::User { content, .. } = &context.prompt_messages[0] else {
+                panic!("environment must precede the task in the user message")
+            };
+            assert_eq!(content.len(), 4);
+            for index in 0..3 {
+                assert_eq!(
+                    content[index].visible_text(),
+                    Some(
+                        format!(
+                            "<system-reminder>\n{}\n</system-reminder>{}",
+                            sections[index],
+                            if index == 2 { "\n" } else { "" }
+                        )
+                        .as_str()
+                    )
+                );
+            }
+            assert_eq!(content[3].visible_text(), Some("WIRE_CHILD_AGENT"));
+        }
     }
 }

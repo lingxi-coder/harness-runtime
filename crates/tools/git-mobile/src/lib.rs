@@ -586,6 +586,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_declares_structured_git_with_push() {
         let opts = PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             include_examples: false,

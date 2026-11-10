@@ -367,6 +367,14 @@ pub struct SubagentSpawnRequest {
         deserialize_with = "deserialize_optional_source_text"
     )]
     pub fork_parent_system_prompt: Option<Utf16JsonProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_prompt_policy: Option<crate::host::prompt_policy::PromptPolicyMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_custom_system_prompt: Option<Utf16JsonProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_append_system_prompt: Option<Utf16JsonProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_role_system_prompt: Option<Utf16JsonProjection>,
     /// Private live instruction state. Forks treat this as an explicit context
     /// override; a cold restore rebuilds Gv and starts a fresh Ye cursor.
     #[serde(skip)]

@@ -226,6 +226,8 @@ fn attachment(payload: serde_json::Value) -> JsonlMessage {
 #[test]
 fn prompt_snapshot_serializes_to_oracle_payload_shape() {
     let snapshot = PromptSnapshot {
+        prompt_policy: None,
+        append_system_prompt: None,
         context_rendering: Some(lingxi_core::host::instructions::InstructionRendering::Announced),
         system_prompt: vec!["frozen static prompt".to_string()],
         system_prompt_utf16: Vec::new(),
@@ -267,6 +269,132 @@ fn prompt_snapshot_reads_only_current_native_fields() {
     assert!(serialized.get("context_rendering").is_none());
     assert!(serialized.get("recordedToolDescriptions").is_none());
     assert!(serialized.get("toolDescriptions").is_none());
+}
+
+#[test]
+fn prompt_snapshot_append_source_serde_preserves_utf16_and_ignores_wrong_types() {
+    let snapshot: PromptSnapshot =
+        serde_json::from_str(r#"{"systemPrompt":["frozen"],"appendSystemPrompt":"append\ud800"}"#)
+            .unwrap();
+    let mut units = "append".encode_utf16().collect::<Vec<_>>();
+    units.push(0xd800);
+    assert_eq!(
+        snapshot
+            .append_system_prompt
+            .as_ref()
+            .unwrap()
+            .string_units(""),
+        Some(units.clone())
+    );
+    let serialized = Source::parse(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+    assert_eq!(serialized.string_units("/appendSystemPrompt"), Some(units));
+    assert!(!serialized.contains_property("append_system_prompt"));
+
+    for invalid in ["null", "false", "42", "[]", r#"{"rawSource":"untyped"}"#] {
+        let snapshot: PromptSnapshot = serde_json::from_str(&format!(
+            r#"{{"systemPrompt":["latest"],"appendSystemPrompt":{invalid}}}"#
+        ))
+        .unwrap();
+        assert_eq!(snapshot.system_prompt, ["latest"]);
+        assert!(snapshot.append_system_prompt.is_none());
+    }
+}
+
+#[test]
+fn prompt_snapshot_cold_reader_keeps_typed_append_without_policy() {
+    let mut latest = attachment(json!({
+        "type": "prompt_snapshot", "systemPrompt": ["opaque legacy body"]
+    }));
+    latest.attachment_projection = Some(
+        Source::parse(
+            r#"{"type":"prompt_snapshot","systemPrompt":["opaque legacy body"],"appendSystemPrompt":"append\ud800"}"#,
+        )
+        .unwrap(),
+    );
+    let snapshot = crate::resume::prompt_snapshot_from_messages(&[latest]).unwrap();
+    assert!(snapshot.prompt_policy.is_none());
+    let source = snapshot.append_system_prompt.unwrap();
+    assert_eq!(source.string_units("").unwrap().last(), Some(&0xd800));
+
+    for invalid in [json!(null), json!(false), json!(42), json!([]), json!({})] {
+        let earlier = attachment(json!({
+            "type": "prompt_snapshot", "systemPrompt": ["earlier"],
+            "appendSystemPrompt": "earlier append"
+        }));
+        let latest = attachment(json!({
+            "type": "prompt_snapshot", "systemPrompt": ["latest"],
+            "appendSystemPrompt": invalid
+        }));
+        let snapshot = crate::resume::prompt_snapshot_from_messages(&[earlier, latest]).unwrap();
+        assert_eq!(snapshot.system_prompt, ["latest"]);
+        assert!(snapshot.append_system_prompt.is_none());
+    }
+}
+
+#[tokio::test]
+async fn prompt_snapshot_policy_rebuild_retains_only_typed_append_sources() {
+    let append = Source::parse(r#""approved append\ud800""#).unwrap();
+    for has_policy in [false, true] {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let policy = orch.current_prompt_policy().await.unwrap();
+        let mut snapshot = PromptSnapshot {
+            system_prompt: vec!["opaque old system and an unclassified final section".into()],
+            append_system_prompt: Some(append.clone()),
+            ..Default::default()
+        };
+        if has_policy {
+            let mut metadata = policy.metadata();
+            metadata.bundle_version.push_str("-old");
+            snapshot.prompt_policy = Some(metadata);
+        }
+        let history = ConversationMessage::user(MessageId::new(), "keep history".into());
+        orch.session.lock().await.history.push(history.clone());
+        *orch.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
+        orch.reconcile_prompt_snapshot_policy(&policy).await;
+        assert!(orch.prompt_runtime.prompt_snapshot.lock().await.is_none());
+        let prompt = orch.provider_system_prompt().await.unwrap();
+        let source = ConversationOrchestrator::system_prompt_source_text(&prompt);
+        assert!(source
+            .string_units("")
+            .unwrap()
+            .ends_with(&append.string_units("").unwrap()));
+        assert!(!prompt.display_text().contains("opaque old system"));
+        assert_eq!(orch.session.lock().await.history, [history]);
+        let typed = orch.effective_append_system_prompt().unwrap();
+        assert_eq!(typed, append);
+    }
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig {
+            append_system_prompt: Some("current explicit append".into()),
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    orch.prompt_runtime
+        .restore_prompt_snapshot_append_source(Some(&PromptSnapshot {
+            append_system_prompt: Some(append),
+            ..Default::default()
+        }));
+    assert_eq!(
+        orch.effective_append_system_prompt().unwrap().string_at(""),
+        Some("current explicit append")
+    );
 }
 
 #[tokio::test]
@@ -378,6 +506,8 @@ async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
         std::env::temp_dir(),
     );
     *orch.prompt_runtime.prompt_snapshot.lock().await = Some(PromptSnapshot {
+        prompt_policy: None,
+        append_system_prompt: None,
         context_rendering: None,
         system_prompt: vec!["frozen".to_string()],
         system_prompt_utf16: Vec::new(),
@@ -632,6 +762,10 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         assert_eq!(snapshots.len(), 2);
         for payload in snapshots {
             assert_eq!(
+                payload.string_units("/appendSystemPrompt"),
+                Some(append_units.clone())
+            );
+            assert_eq!(
                 payload.string_at("/contextRendering"),
                 Some(match rendering {
                     InstructionRendering::Inline => "inline",
@@ -646,10 +780,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let cold_marker = "policy loaded only after cold resume";
         let cold_api = Arc::new(MockApiClient::new(vec![response()]));
         let cold = ConversationOrchestrator::with_resume(
-            OrchestratorConfig {
-                append_system_prompt: Some(append_source.clone()),
-                ..OrchestratorConfig::default()
-            },
+            OrchestratorConfig::default(),
             session_id.as_uuid(),
             home,
             cwd_string,
@@ -692,6 +823,11 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         assert_eq!(cold_snapshot.system_prompt, expected_snapshot.system_prompt);
         assert_eq!(cold_snapshot.tools, expected_snapshot.tools);
         assert_eq!(
+            cold_snapshot.append_system_prompt,
+            Some(append_source.clone()),
+            "cold resume must retain the source without repeating startup configuration"
+        );
+        assert_eq!(
             cold_snapshot.context_rendering,
             expected_snapshot.context_rendering
         );
@@ -705,6 +841,19 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
             "valid strings use parallel empty slots only in memory"
         );
         assert_eq!(cold.current_context_rendering().await, rendering);
+        if rendering == InstructionRendering::Inline {
+            cold.prompt_runtime
+                .prompt_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .prompt_policy
+                .as_mut()
+                .unwrap()
+                .bundle_version
+                .push_str("-old");
+        }
         cold.run_turn("cold prompt").await.unwrap();
         let cold_requests = cold_api.captured_requests().await;
         assert_eq!(cold_requests.len(), 1);
@@ -789,6 +938,8 @@ async fn prompt_snapshot_writer_omits_absent_rendering_on_legacy_tool_update() {
     )
     .with_jsonl_writer(Arc::new(JsonlWriter::new(path.clone(), fs.clone())));
     *orch.prompt_runtime.prompt_snapshot.lock().await = Some(PromptSnapshot {
+        prompt_policy: None,
+        append_system_prompt: None,
         system_prompt: vec!["legacy static prefix".into()],
         system_prompt_utf16: Vec::new(),
         tools: Vec::new(),

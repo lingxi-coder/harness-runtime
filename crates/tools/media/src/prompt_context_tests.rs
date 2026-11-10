@@ -50,6 +50,7 @@ fn request_options(
     is_scheduled_turn: bool,
 ) -> PromptOptions {
     PromptOptions {
+        prompt_policy: None,
         session_id: Some(session_id),
         is_scheduled_turn,
         model: Some("shared-model".into()),

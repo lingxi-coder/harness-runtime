@@ -1,0 +1,1 @@
+  - Use Agent tool (if available) for open-ended searches requiring multiple rounds

@@ -119,21 +119,18 @@ impl TodoReminderTaskProvider for StaticTasks {
     }
 }
 
-/// A main-loop model BELOW the `OO()` gate's thresholds
-/// (`[("opus",[4,8]),("sonnet",[5]),("fable",[5]),("mythos",[5])]`).
-///
-/// `OrchestratorConfig::default()` uses `claude-opus-4-8`, which sits exactly AT
-/// the opus threshold, so on the default config 2.1.263 withdraws the five
-/// todo/task tools and both reminder variants with them. That is correct
-/// behaviour, and [`the_model_gate_suppresses_the_reminder`] pins it — but it is
-/// not what the rest of this file is about, so every other test here runs on an
-/// ungated model and keeps exercising the reminder's own counters and text.
+/// A Claude model in the task-tool allowlist. Pin the actual session route as
+/// well as the tool registry: reminders now select their policy from that route.
+/// The default gated model is exercised separately below.
 const UNGATED_MODEL: &str = "claude-sonnet-4-5";
 
 fn orch_with(tools: ToolRegistry) -> ConversationOrchestrator {
     let api = Arc::new(MockApiClient::new(vec![]));
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        OrchestratorConfig {
+            model: UNGATED_MODEL.into(),
+            ..Default::default()
+        },
         api,
         Arc::new(tools),
         noop_hook_executor(),
@@ -172,6 +169,7 @@ async fn the_model_gate_suppresses_the_reminder() {
         // carries; `orch_with` overrides it, so put it back for this test.
         orch.tools
             .set_main_loop_model(Some(orchestrator_default_model().to_string()));
+        orch.session.lock().await.model = orchestrator_default_model().to_string();
         prime_session(&orch, 10, 10).await;
         assert!(
             orch.todo_reminder_message().await.is_none(),
@@ -183,6 +181,7 @@ async fn the_model_gate_suppresses_the_reminder() {
         // counters or an empty history.
         orch.tools
             .set_main_loop_model(Some(UNGATED_MODEL.to_string()));
+        orch.session.lock().await.model = UNGATED_MODEL.to_string();
         assert!(
             orch.todo_reminder_message().await.is_some(),
             "{tool} reminder must fire once the gate opens"

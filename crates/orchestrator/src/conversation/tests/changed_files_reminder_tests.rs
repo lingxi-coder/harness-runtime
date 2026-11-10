@@ -1366,10 +1366,7 @@ async fn the_snippet_budget_blanks_later_files() {
         "the LRU-oldest entry is rendered last; got: {last}"
     );
     assert!(
-        last.contains(
-            "The diff is omitted here because other changed files this turn already filled \
-the snippet budget; use Read if you need the current content."
-        ),
+        last.contains("The changes are not shown here; use Read if you need the current content."),
         "the post-budget file must be blanked; got: {last}"
     );
     assert!(

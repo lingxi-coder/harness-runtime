@@ -105,6 +105,20 @@ struct PromptContext {
     /// Source-backed gates for Native's late-tool sidecar projection. These
     /// facts are captured from the same prepared request as its tool snapshot.
     deferred_tools_projection_facts: std::sync::Mutex<Option<DeferredToolsProjectionFacts>>,
+    prompt_policies: std::sync::Mutex<
+        std::collections::HashMap<
+            (String, Option<String>, &'static str),
+            std::sync::Arc<
+                tokio::sync::OnceCell<
+                    std::sync::Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+                >,
+            >,
+        >,
+    >,
+    system_prompt_policy: std::sync::Mutex<Option<String>>,
+    pending_prompt_source_vector: std::sync::Mutex<
+        Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>,
+    >,
 }
 
 #[derive(Default)]
@@ -153,6 +167,107 @@ struct PromptIngressBatch {
 
 tokio::task_local! {
     static REQUEST_CONTEXT: PromptContext;
+}
+
+pub(crate) fn prompt_policy_cell(
+    model: &str,
+    profile: Option<&str>,
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> Option<
+    std::sync::Arc<
+        tokio::sync::OnceCell<
+            std::sync::Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+        >,
+    >,
+> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let mut policies = context
+                .prompt_policies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::sync::Arc::clone(
+                policies
+                    .entry((model.to_owned(), profile.map(str::to_owned), mode.as_str()))
+                    .or_default(),
+            )
+        })
+        .ok()
+}
+
+pub(crate) fn system_prompt_policy() -> Option<String> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .system_prompt_policy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Alias resolution may change the wire model/profile spelling. Publish the
+/// already resolved immutable policy under that identity as well, so request
+/// assembly does not repeat provider resolution for the same physical route.
+pub(crate) fn seed_prompt_policy_alias(
+    policy: &std::sync::Arc<lingxi_core::host::prompt_policy::ResolvedPromptPolicy>,
+) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        let target = &policy.target;
+        let mut policies = context
+            .prompt_policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        policies
+            .entry((
+                target.request_model.clone(),
+                target.profile_name.clone(),
+                target.mode.as_str(),
+            ))
+            .or_insert_with(|| {
+                let cell = tokio::sync::OnceCell::new();
+                let _ = cell.set(std::sync::Arc::clone(policy));
+                std::sync::Arc::new(cell)
+            });
+    });
+}
+
+pub(crate) fn set_system_prompt_policy(fingerprint: String) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        *context
+            .system_prompt_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fingerprint);
+    });
+}
+
+/// A request owns its source vector even when another query uses this session.
+/// The outer Option distinguishes a context with no pending vector from callers
+/// outside a request scope (previews and legacy host integrations).
+pub(crate) fn take_pending_prompt_source_vector(
+) -> Option<Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>> {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .pending_prompt_source_vector
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+        .ok()
+}
+
+pub(crate) fn set_pending_prompt_source_vector(
+    vector: Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>,
+) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        *context
+            .pending_prompt_source_vector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = vector;
+    });
 }
 
 #[cfg(test)]
@@ -218,6 +333,9 @@ impl ConversationOrchestrator {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    prompt_policies: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let outcome = self
@@ -254,6 +372,9 @@ impl ConversationOrchestrator {
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    prompt_policies: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let outcome = self
@@ -453,6 +574,9 @@ pub(crate) async fn scope_if_missing<T, F: Future<Output = Result<T, Orchestrato
                     ingress_batch: std::sync::Mutex::new(PromptIngressBatch::default()),
                     next_model_step_ingress_kind: std::sync::Mutex::new(None),
                     deferred_tools_projection_facts: std::sync::Mutex::new(None),
+                    prompt_policies: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    system_prompt_policy: std::sync::Mutex::new(None),
+                    pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
                     let output = future.await;
@@ -1984,6 +2108,9 @@ mod prompt_ingress_kind_tests {
                 PromptIngressKind::DirectBash,
             )),
             deferred_tools_projection_facts: std::sync::Mutex::new(None),
+            prompt_policies: std::sync::Mutex::new(std::collections::HashMap::new()),
+            system_prompt_policy: std::sync::Mutex::new(None),
+            pending_prompt_source_vector: std::sync::Mutex::new(None),
         };
         REQUEST_CONTEXT
             .scope(context, async {

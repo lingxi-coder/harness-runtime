@@ -2312,24 +2312,20 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             })?;
         let mut verdict = evaluation.verdict;
 
-        let (messages, model, selected_model_profile) = {
-            let session = self.session.lock().await;
-            (
-                session.model_context_history(),
-                session.model.clone(),
-                session.model_profile.clone(),
-            )
+        let messages = self.session.lock().await.model_context_history();
+        let prompt_policy = self.current_prompt_policy().await.ok();
+        let (model, model_profile) = match prompt_policy.as_ref() {
+            Some(policy) => (
+                policy.target.request_model.clone(),
+                policy.target.profile_name.clone(),
+            ),
+            None => self.current_prompt_route().await,
         };
-        let model_profile = self
-            .api
-            .resolve_media_route(&model, selected_model_profile.as_deref())
-            .ok()
-            .map(|route| route.main.profile_name)
-            .or(selected_model_profile);
         let context = ToolUseContext {
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             available_tool_names: None,
             options: ToolUseOptions {
+                prompt_policy,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
                 debug: false,
                 verbose: false,
@@ -2371,6 +2367,10 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             cancel: None,
             cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
+            fork_prompt_policy: None,
+            fork_custom_system_prompt: None,
+            fork_append_system_prompt: None,
+            fork_role_system_prompt: None,
             cwd: None,
             depth: 0,
             observer: None,
@@ -3877,7 +3877,11 @@ mod dispatch_facts_tests {
     fn sibling_dispatch_facts_share_request_history_but_contexts_can_mutate() {
         let facts = ToolUseDispatchFacts {
             native_query_depth: 2,
-            query_history: vec![ConversationMessage::user(MessageId::new(), "request".into())].into(),
+            query_history: vec![ConversationMessage::user(
+                MessageId::new(),
+                "request".into(),
+            )]
+            .into(),
             assistant_message: ConversationMessage::user(MessageId::new(), "row".into()),
             same_turn_tool_uses: Vec::new(),
             refusal_call_boundary: None,
@@ -3897,7 +3901,10 @@ mod dispatch_facts_tests {
         assert_eq!(first.same_turn_tool_uses.len(), 0);
         assert_eq!(second.same_turn_tool_uses.len(), 1);
         let mut physical_context_messages = first.query_history.to_vec();
-        physical_context_messages.push(ConversationMessage::user(MessageId::new(), "consent".into()));
+        physical_context_messages.push(ConversationMessage::user(
+            MessageId::new(),
+            "consent".into(),
+        ));
         assert_eq!(physical_context_messages.len(), 2);
         assert_eq!(second.query_history.len(), 1);
     }
@@ -3907,20 +3914,19 @@ pub(crate) async fn streaming_tool_context_base(
     orch: &ConversationOrchestrator,
     messages: Vec<ConversationMessage>,
 ) -> ToolUseContext {
-    let (main_loop_model, selected_model_profile) = {
-        let session = orch.session.lock().await;
-        (session.model.clone(), session.model_profile.clone())
+    let prompt_policy = orch.current_prompt_policy().await.ok();
+    let (main_loop_model, model_profile) = match prompt_policy.as_ref() {
+        Some(policy) => (
+            policy.target.request_model.clone(),
+            policy.target.profile_name.clone(),
+        ),
+        None => orch.current_prompt_route().await,
     };
-    let model_profile = orch
-        .api
-        .resolve_media_route(&main_loop_model, selected_model_profile.as_deref())
-        .ok()
-        .map(|route| route.main.profile_name)
-        .or(selected_model_profile);
     ToolUseContext {
         is_scheduled_turn: crate::scheduled_turn::current().is_some(),
         available_tool_names: None,
         options: ToolUseOptions {
+            prompt_policy,
             output_style_is_default: Some(orch.active_output_style_is_default().await),
             debug: false,
             verbose: false,
@@ -3972,6 +3978,19 @@ pub(crate) async fn streaming_tool_context_base(
         cancel: None,
         cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
         fork_parent_system_prompt: orch.current_turn_system_prompt().await,
+        fork_prompt_policy: orch
+            .current_turn_prompt_state()
+            .await
+            .and_then(|(_, policy)| policy),
+        fork_custom_system_prompt: orch.config.system_prompt_override.clone(),
+        fork_append_system_prompt: orch.effective_append_system_prompt(),
+        fork_role_system_prompt: orch
+            .lifecycle_runtime
+            .main_thread_agent
+            .read()
+            .await
+            .as_ref()
+            .and_then(|agent| agent.system_prompt.clone()),
         cwd: None,
         depth: 0,
         observer: None,
@@ -7458,7 +7477,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
         let mut post_additional_contexts = post_agg.additional_contexts.clone();
-        if let Some(notice) = memdir_index_notice_for_tool(orch, name, &effective_input, is_error).await {
+        if let Some(notice) =
+            memdir_index_notice_for_tool(orch, name, &effective_input, is_error).await
+        {
             if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
                 let mut metadata = telemetry::LogEventMetadata::new();
                 metadata.insert(

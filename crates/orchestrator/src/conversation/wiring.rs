@@ -1017,13 +1017,10 @@ impl ConversationOrchestrator {
             self.tools
                 .find_registered(parent_name)
                 .is_some_and(|parent| {
-                    parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
-                        main_loop_model: self.tools.main_loop_model(),
-                        ..Default::default()
-                    }) && context
-                        .deny_rules
-                        .iter()
-                        .any(|rule| rule.rule_content.is_none() && rule.tool_name == parent_name)
+                    parent.is_enabled(&self.tool_static_context())
+                        && context.deny_rules.iter().any(|rule| {
+                            rule.rule_content.is_none() && rule.tool_name == parent_name
+                        })
                 })
         })
     }
@@ -1102,10 +1099,7 @@ impl ConversationOrchestrator {
         {
             return None;
         }
-        let ctx = tool_api::tool_trait::ToolStaticContext {
-            main_loop_model: self.tools.main_loop_model(),
-            ..Default::default()
-        };
+        let ctx = self.tool_static_context();
         if !tool.is_enabled(&ctx)
             || (honor_pool_deny && self.is_tool_pool_denied(tool.as_ref()))
             || (self.is_coordinator_mode_enabled() && !self.is_coordinator_pool_tool(tool.as_ref()))

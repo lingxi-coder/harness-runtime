@@ -140,7 +140,7 @@ pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> SourceToolWi
         .unwrap_or_else(|| tool.input_schema().clone());
     SourceToolWireDefinition {
         name: tool.name().to_owned(),
-        description: tool.prompt(opts).await,
+        description: crate::apply_prompt_tool_override(tool.name(), opts, tool.prompt(opts).await),
         input_schema,
         strict: tool.strict(),
         defer_loading: false,
@@ -381,6 +381,7 @@ mod tests {
 
     fn opts() -> PromptOptions {
         PromptOptions {
+            prompt_policy: None,
             is_scheduled_turn: false,
             session_id: None,
             include_examples: true,
@@ -408,6 +409,45 @@ mod tests {
         assert_eq!(wire.input_schema.string_at("/type"), Some("object"));
         assert!(!wire.strict);
         assert!(!wire.defer_loading);
+    }
+
+    #[tokio::test]
+    async fn concurrent_tool_serialization_keeps_each_requests_complete_override() {
+        use lingxi_core::host::prompt_policy::{
+            resolve_prompt_policy, PromptTarget, PromptTemplateOverride, ToolPromptBinding,
+        };
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let tool = StubTool {
+            name: "Read",
+            prompt: "Default Read instructions.",
+            schema: generated_builtin_schema(&json!({"type": "object"})),
+        };
+        let mut policy =
+            resolve_prompt_policy(PromptTarget::for_model(ConversationMode::Code, "gpt-5.5"));
+        policy.tools = ToolPromptBinding::Lean {
+            overrides: &[PromptTemplateOverride {
+                key: "Read",
+                template: "Complete Read replacement for this bundle.",
+            }],
+        };
+        let replacement = PromptOptions {
+            prompt_policy: Some(Arc::new(policy)),
+            ..opts()
+        };
+        let ordinary = opts();
+        let (a, b) = tokio::join!(
+            tool_to_wire(&tool, &replacement),
+            tool_to_wire(&tool, &ordinary),
+        );
+        assert_eq!(
+            a.description.string_at(""),
+            Some("Complete Read replacement for this bundle.")
+        );
+        assert_eq!(
+            b.description.string_at(""),
+            Some("Default Read instructions.")
+        );
     }
 
     #[tokio::test]

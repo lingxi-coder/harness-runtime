@@ -74,6 +74,43 @@ mod seed_content_tests {
 }
 
 impl ConversationOrchestrator {
+    /// Main requests advertise and dispatch against their own physical route.
+    /// Outside that scope (including child invokers), retain the owning
+    /// session's model gate rather than the most recently rendered child.
+    pub(crate) fn tool_static_context(&self) -> tool_api::tool_trait::ToolStaticContext {
+        let current_route = crate::query_model::current();
+        let route = super::prompt_selection::PROMPT_POLICY_OVERRIDE
+            .try_with(|(policy_route, policy)| {
+                current_route
+                    .as_ref()
+                    .is_none_or(|route| route == policy_route)
+                    .then(|| crate::query_model::ModelRoute {
+                        model: policy.target.request_model.clone(),
+                        profile: policy.target.profile_name.clone(),
+                    })
+            })
+            .ok()
+            .flatten()
+            .or(current_route);
+        let model = route
+            .map(|route| {
+                let context =
+                    self.model_resolution_context_provider
+                        .as_ref()
+                        .and_then(|provider| {
+                            provider
+                                .context_for_route(&route.model, route.profile.as_deref())
+                                .ok()
+                        });
+                canonical_main_loop_model(&route.model, context.as_ref()).unwrap_or(route.model)
+            })
+            .or_else(|| self.tools.main_loop_model());
+        tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: model,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn refresh_main_loop_model_for_route(&self, model: &str, profile: Option<&str>) {
         let context = self
             .model_resolution_context_provider
@@ -682,30 +719,27 @@ impl ConversationOrchestrator {
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
-        let (session_id, model, selected_model_profile) = {
-            let s = self.session.lock().await;
-            (s.session_id, s.model.clone(), s.model_profile.clone())
+        let (session_id, owning_model, owning_profile) = {
+            let session = self.session.lock().await;
+            (
+                session.session_id,
+                session.model.clone(),
+                session.model_profile.clone(),
+            )
         };
-        // Same snapshot, one turn earlier than it used to be taken: claude-code
-        // registers the main-loop model as a LIVE accessor (`Dx(()=>HR(rt()))`,
-        // read back by `J$e()`), so the `OO()` todo/task tool gate must see the
-        // current `/model`. Republishing from THIS snapshot — rather than from
-        // inside `filtered_available_tools` — keeps the advertise path free of a
-        // second `session` lock, which would deadlock the callers that already
-        // hold one.
-        self.refresh_main_loop_model_for_route(&model, selected_model_profile.as_deref());
+        let prompt_policy = self.current_prompt_policy().await?;
+        let model = prompt_policy.target.request_model.clone();
+        let model_profile = prompt_policy.target.profile_name.clone();
+        // The registry remains the owning-session fallback for child gates.
+        // A Mod/fallback's physical route belongs only to this request's
+        // static context; publishing it globally races buffered responses.
+        self.refresh_main_loop_model_for_route(&owning_model, owning_profile.as_deref());
         let model_source = self
-            .main_model_source_for_request(&model, selected_model_profile.as_deref())
+            .main_model_source_for_request(&model, model_profile.as_deref())
             .await;
         // Use the provider profile selected by the trusted runtime route, not
         // a model-name guess. This also fills in a configured default profile
         // when the session has no explicit profile pin.
-        let model_profile = self
-            .api
-            .resolve_media_route(&model, selected_model_profile.as_deref())
-            .ok()
-            .map(|route| route.main.profile_name)
-            .or(selected_model_profile);
         let tools = self.filtered_available_tools().await;
         // Capture canonical names and aliases from the exact post-filter vector
         // used below to build this request's wire tool declarations. A later
@@ -749,6 +783,7 @@ impl ConversationOrchestrator {
         let output_style_is_default = self.active_output_style_is_default().await;
         let plan_mode_hybrid_search = self.native_plan_mode_hybrid_search();
         let prompt_options = PromptOptions {
+            prompt_policy: Some(Arc::clone(&prompt_policy)),
             include_examples: true,
             session_id: Some(session_id),
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
@@ -761,6 +796,7 @@ impl ConversationOrchestrator {
             bash_precommit_session_generation,
         };
         let cache_key = WireToolSchemaCacheKey {
+            prompt_policy_fingerprint: prompt_policy.fingerprint(),
             exact_schema_identities: tools
                 .iter()
                 .map(|tool| {
@@ -1208,6 +1244,10 @@ impl ConversationOrchestrator {
         if !self.prompt_snapshot_eligible() {
             return;
         }
+        let Ok(policy) = self.current_prompt_policy().await else {
+            return;
+        };
+        let metadata = policy.metadata();
         let recorded = self
             .prompt_runtime
             .prompt_snapshot
@@ -1216,6 +1256,7 @@ impl ConversationOrchestrator {
             .as_ref()
             .filter(|snapshot| {
                 !snapshot.system_prompt.is_empty()
+                    && snapshot.prompt_policy.as_ref() == Some(&metadata)
                     && snapshot.system_prompt.iter().all(|part| !part.is_empty())
                     && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
             })
@@ -1288,15 +1329,13 @@ impl ConversationOrchestrator {
     pub(crate) async fn filtered_available_tools(
         &self,
     ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
-        use tool_api::tool_trait::ToolStaticContext;
-
         // `eZf()` — refresh the registry's synchronous pending-server mirror
         // before the enable-filter runs, so `WaitForMcpServersTool::is_enabled`
         // observes the live state. See `apply_wait_for_mcp_servers_gate`.
         if let Some(registry) = self.mcp_registry.as_ref() {
             registry.refresh_pending_servers().await;
         }
-        let mut tools = self.tools.available_tools(&ToolStaticContext::default());
+        let mut tools = self.tools.available_tools(&self.tool_static_context());
         let deny_context = self.perms.native_mcp_deny_context().await;
         *self
             .tool_pool_deny_context

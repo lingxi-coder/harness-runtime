@@ -251,6 +251,18 @@ fn invocation_context_for_tool(
             .then(|| lingxi_core::host::tool_invoker::SubagentForkContext {
                 messages: current_history.to_vec(),
                 system_prompt: system_prompt.cloned(),
+                custom_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.custom_system_prompt.clone()),
+                append_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.append_system_prompt.clone()),
+                role_system_prompt: ctx
+                    .prompt_state
+                    .as_ref()
+                    .and_then(|state| state.role.clone()),
             }),
         tool_execution_policy: if lingxi_core::host::is_fusion_panel_type(
             &ctx.agent_definition.agent_type,
@@ -279,6 +291,7 @@ fn invocation_context_for_tool(
             .cloned(),
         parent_model: Some(model.to_owned()),
         parent_model_profile: model_profile,
+        prompt_policy: ctx.prompt_policy.clone(),
         agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
         tool_context_state,
         current_history: current_history.to_vec(),
@@ -319,6 +332,7 @@ struct AgentStreamAttempt {
     declined_fallback: Option<String>,
     declined_api_error_row: Option<lingxi_core::host::ServerFallbackApiErrorRow>,
     partial_response: Option<llm_runtime::HistoryResponse>,
+    prompt_captures: crate::prompt_policy::RequestPromptCaptures,
 }
 
 impl AgentStreamAttempt {
@@ -334,6 +348,7 @@ impl AgentStreamAttempt {
             declined_fallback: None,
             declined_api_error_row: None,
             partial_response: None,
+            prompt_captures: Default::default(),
         }
     }
 }
@@ -1228,6 +1243,7 @@ async fn accumulate_agent_stream_live(
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
     request_messages: Vec<ConversationMessage>,
     system_prompt: Option<Utf16JsonProjection>,
+    prompt_captures: crate::prompt_policy::RequestPromptCaptures,
     initial_response_model: String,
     logical_tool_model: String,
     logical_tool_model_profile: Option<String>,
@@ -1261,6 +1277,7 @@ async fn accumulate_agent_stream_live(
     )> = None;
     let mut response_error: Option<(Vec<llm_runtime::ContentBlock>, LlmError)> = None;
     let mut active_response_model = initial_response_model.clone();
+    let mut active_prompt: Option<crate::prompt_policy::CapturedRequestPrompt> = None;
     // Keep the route being served separately from ResponseObserved: Native
     // emits that event when a fallback candidate starts, before the host has
     // accepted it. Only an admitted visible hop advances this source route.
@@ -1333,6 +1350,15 @@ async fn accumulate_agent_stream_live(
                 break;
             }
         };
+        if let HistoryEvent::MessageStart { response } | HistoryEvent::Completed { response } =
+            &event
+        {
+            active_prompt = prompt_captures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&response.id)
+                .cloned();
+        }
 
         if let HistoryEvent::ResponseObserved { model, .. } = &event {
             active_response_model.clone_from(model);
@@ -1474,15 +1500,22 @@ async fn accumulate_agent_stream_live(
                         .then_some(index)
                         .into_iter()
                         .collect::<Vec<_>>();
+                let source_ctx = active_prompt.as_ref().map(|capture| {
+                    let mut source = ctx.clone();
+                    source.prompt_policy = Some(capture.policy.clone());
+                    source
+                });
                 stage_assistant_row(
                     index,
                     std::slice::from_ref(&block),
                     None,
                     &source_tool_use_block_indices,
-                    ctx,
+                    source_ctx.as_ref().unwrap_or(ctx),
                     transcript,
                     &request_messages,
-                    system_prompt.as_ref(),
+                    active_prompt
+                        .as_ref()
+                        .map_or(system_prompt.as_ref(), |capture| capture.system.as_ref()),
                     &active_response_model,
                     &logical_tool_model,
                     logical_tool_model_profile.clone(),
@@ -1578,15 +1611,22 @@ async fn accumulate_agent_stream_live(
                         })
                         .collect::<Vec<_>>();
                     let mut complete_row_prior_siblings = Vec::new();
+                    let source_ctx = active_prompt.as_ref().map(|capture| {
+                        let mut source = ctx.clone();
+                        source.prompt_policy = Some(capture.policy.clone());
+                        source
+                    });
                     stage_assistant_row(
                         0,
                         &completed.content,
                         completed.stop_reason.as_deref(),
                         &source_tool_use_block_indices,
-                        ctx,
+                        source_ctx.as_ref().unwrap_or(ctx),
                         transcript,
                         &request_messages,
-                        system_prompt.as_ref(),
+                        active_prompt
+                            .as_ref()
+                            .map_or(system_prompt.as_ref(), |capture| capture.system.as_ref()),
                         &active_response_model,
                         &logical_tool_model,
                         logical_tool_model_profile.clone(),
@@ -1797,6 +1837,7 @@ async fn accumulate_agent_stream_live(
         declined_fallback,
         declined_api_error_row,
         partial_response,
+        prompt_captures,
     }
 }
 
@@ -3764,7 +3805,7 @@ async fn run_subagent_loop(
     // because they share its query generator; here the loops are separate, so
     // each run walks its own chain (handed down on the context).
     let mut refusal_cascade = lingxi_core::host::refusal_driver::RefusalCascadeState::default();
-    let system: Option<Utf16JsonProjection> = ctx
+    let mut system: Option<Utf16JsonProjection> = ctx
         .rendered_system_prompt
         .as_ref()
         .map(|prompt| prompt.as_ref().clone());
@@ -3779,6 +3820,23 @@ async fn run_subagent_loop(
     // gets sent on the wire as `tool_choice`.
     let mut tool_schemas: Vec<lingxi_core::host::SourceToolWireDefinition> =
         ctx.tool_schemas.clone();
+    let prompt_mode = ctx
+        .prompt_policy
+        .as_ref()
+        .map(|policy| policy.target.mode)
+        .or_else(|| {
+            ctx.tool_invoker
+                .as_ref()
+                .and_then(|invoker| invoker.trusted_session_profile())
+                .map(|profile| profile.mode)
+        })
+        .unwrap_or_default();
+    let mut prompt_route = ctx
+        .prompt_policy
+        .as_ref()
+        .filter(|_| ctx.resumed_history.is_none())
+        .map(|_| (model.clone(), model_profile.clone()));
+    let mut request_prompt: Option<crate::prompt_policy::RenderedSubagentPrompt> = None;
     let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
         let input_schema = Utf16JsonProjection::parse(schema_str).unwrap_or_else(|_| {
             Utf16JsonProjection::parse(r#"{"type":"object"}"#)
@@ -4544,6 +4602,50 @@ async fn run_subagent_loop(
                 )
                 .await;
                 flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+                if prompt_route.as_ref() != Some(&(model.clone(), model_profile.clone())) {
+                    let prepared = async {
+                        let target = crate::prompt_policy::resolve_target(
+                            Some(api_client.as_ref()),
+                            &model,
+                            model_profile.as_deref(),
+                            prompt_mode,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        if let Some(state) = &ctx.prompt_state {
+                            let rendered = state
+                                .render_for_route(&target)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let tools =
+                                crate::prompt_policy::rerender_tools(&ctx, &target, &tool_schemas)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                            system = rendered.system.as_ref().map(|body| body.as_ref().clone());
+                            tool_schemas = tools;
+                            request_prompt = Some(rendered);
+                        }
+                        ctx.prompt_policy = Some(target.policy);
+                        Ok::<_, String>(())
+                    }
+                    .await;
+                    if let Err(error) = prepared {
+                        emit_failed(
+                            &ctx,
+                            &out_tx,
+                            transcript.as_ref(),
+                            history,
+                            &mut transcript_written,
+                            agent_id,
+                            error,
+                            cumulative_usage.clone(),
+                            &last_usage,
+                            live_hook_model_selection,
+                        )
+                        .await;
+                        return;
+                    }
+                    prompt_route = Some((model.clone(), model_profile.clone()));
+                }
                 native_response_request_model.clone_from(&model);
                 native_response_request_profile.clone_from(&model_profile);
                 let api_call = async {
@@ -4567,6 +4669,13 @@ async fn run_subagent_loop(
                     // blocks were finalized.
                     let profile = model_profile.as_deref();
                     let mut model_snapshot = history.to_vec();
+                    let mut prompt_context = ctx.clone();
+                    if let (Some(state), Some(rendered)) = (&ctx.prompt_state, &request_prompt) {
+                        prompt_context.prompt_state = Some(std::sync::Arc::new(
+                            state.project_context(&mut model_snapshot, rendered),
+                        ));
+                        prompt_context.prompt_policy = Some(rendered.policy.clone());
+                    }
                     child_attachments
                         .screen(&mut model_snapshot, mod_host.as_ref(), &mod_cwd, agent_id)
                         .await;
@@ -4574,6 +4683,10 @@ async fn run_subagent_loop(
                         &model_snapshot,
                         &ctx.instruction_context,
                         ctx.max_input_bytes_per_turn,
+                        prompt_context
+                            .prompt_state
+                            .as_ref()
+                            .map(|state| &state.seeded_context),
                     ) {
                         Ok(messages) => messages,
                         Err(message) => {
@@ -4604,6 +4717,9 @@ async fn run_subagent_loop(
                         api: api_client.clone(),
                         model: current_model.clone(),
                         profile: profile.map(str::to_owned),
+                        prompt_profile: profile.map(str::to_owned),
+                        prompt_context: Some(prompt_context),
+                        prompt_captures: Default::default(),
                         system: system.clone(),
                         messages: messages_for_api,
                         tools,
@@ -4724,6 +4840,7 @@ async fn run_subagent_loop(
                         transcript.as_ref(),
                         request_messages,
                         system.clone(),
+                        request.prompt_captures.clone(),
                         current_model.clone(),
                         logical_tool_model.clone(),
                         logical_tool_model_profile.clone(),
@@ -5040,6 +5157,7 @@ async fn run_subagent_loop(
                     std::mem::take(&mut pending_attempt.early_tool_result_ids);
                 let attempt_request_messages =
                     std::mem::take(&mut pending_attempt.request_messages);
+                let attempt_prompt_captures = pending_attempt.prompt_captures.clone();
                 let (response, mut remainder) = match pending_attempt.response {
                     Some(Ok(r)) => r,
                     Some(Err((partial_blocks, e))) => {
@@ -6163,6 +6281,7 @@ async fn run_subagent_loop(
                     let next_transcript = transcript.clone();
                     let next_request_messages = attempt_request_messages.clone();
                     let next_system = system.clone();
+                    let next_prompt_captures = attempt_prompt_captures.clone();
                     let next_logical_tool_model = logical_tool_model.clone();
                     let next_logical_tool_profile = logical_tool_model_profile.clone();
                     let next_tool_context_state = tool_context_state.clone();
@@ -6186,6 +6305,7 @@ async fn run_subagent_loop(
                                 next_transcript.as_ref(),
                                 next_request_messages,
                                 next_system,
+                                next_prompt_captures,
                                 next_logical_tool_model.clone(),
                                 next_logical_tool_model,
                                 next_logical_tool_profile,
@@ -7329,6 +7449,7 @@ fn append_serialized_input_unit(current_bytes: u64, unit: &SerializedInputUnit) 
 fn cap_input_bytes(
     messages: &[lingxi_core::types::ConversationMessage],
     max_bytes: Option<u64>,
+    mandatory_context: &[MessageId],
 ) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
     let Some(max) = max_bytes else {
         return Ok(messages.to_vec());
@@ -7356,9 +7477,15 @@ fn cap_input_bytes(
     // result pair) and is also mandatory. Reject when preserving it together
     // with the seed would exceed the cap rather than silently sending stale,
     // incomplete history. Older units may be dropped as whole units.
-    let mut selected_tail: Vec<&[lingxi_core::types::ConversationMessage]> = Vec::new();
+    let mut selected = vec![false; units.len()];
+    selected[0] = true;
     let mut selected_bytes = head_bytes;
-    if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
+    if let Some((newest_index, newest)) =
+        units.iter().enumerate().skip(1).rev().find(|(_, unit)| {
+            unit.iter()
+                .any(|row| !mandatory_context.contains(&row.id()))
+        })
+    {
         let newest_measurement = measure_serialized_input_unit(newest);
         let head_and_newest_bytes =
             append_serialized_input_unit(selected_bytes, &newest_measurement);
@@ -7368,37 +7495,76 @@ fn cap_input_bytes(
                 "mandatory latest tool/message unit exceeds max_input_bytes_per_turn when combined with the initial prompt ({head_bytes} + {newest_bytes} > {max})"
             ));
         }
-        selected_tail.push(newest);
+        selected[newest_index] = true;
         selected_bytes = head_and_newest_bytes;
+    }
+
+    // A mid-conversation API-system environment seed carries the current
+    // model, cwd and date. Preserve its exact unit and ordering just like the
+    // task and latest continuation; dropping it would silently change meaning.
+    for (index, unit) in units.iter().enumerate().skip(1) {
+        if selected[index] || !unit.iter().any(|row| mandatory_context.contains(&row.id())) {
+            continue;
+        }
+        let measurement = measure_serialized_input_unit(unit);
+        let candidate_bytes = append_serialized_input_unit(selected_bytes, &measurement);
+        if candidate_bytes > max {
+            return Err(format!(
+                "mandatory environment context exceeds max_input_bytes_per_turn when combined with the initial prompt and latest unit ({candidate_bytes} > {max})"
+            ));
+        }
+        selected[index] = true;
+        selected_bytes = candidate_bytes;
     }
 
     // Fill from the newest older unit backwards, keeping each tool_use /
     // tool_result pair atomic. A unit that does not fit is dropped and the
     // search continues; no over-cap fallback is permitted. Each optional unit
     // is measured only when reached, once, in newest-to-oldest order.
-    if units.len() > 2 {
-        for unit in units[1..units.len() - 1].iter().rev().copied() {
+    if units.len() > 1 {
+        for index in (1..units.len()).rev() {
+            if selected[index] {
+                continue;
+            }
+            let unit = units[index];
             let measurement = measure_serialized_input_unit(unit);
             let candidate_bytes = append_serialized_input_unit(selected_bytes, &measurement);
             if candidate_bytes <= max {
-                selected_tail.push(unit);
+                selected[index] = true;
                 selected_bytes = candidate_bytes;
             }
         }
     }
 
-    selected_tail.reverse();
-    let mut out =
-        Vec::with_capacity(head.len() + selected_tail.iter().map(|unit| unit.len()).sum::<usize>());
-    out.extend(head.iter().cloned());
-    for unit in selected_tail {
-        out.extend(unit.iter().cloned());
-    }
+    let out = units
+        .iter()
+        .zip(selected)
+        .filter(|(_, keep)| *keep)
+        .flat_map(|(unit, _)| unit.iter().cloned())
+        .collect();
     debug_assert!(
         selected_bytes <= max,
         "cap_input_bytes must never return an over-cap request"
     );
     Ok(out)
+}
+
+/// A physical Mod rewrite can grow the environment after the runner trimmed
+/// history. Validate the final projection without trimming it again: its first
+/// row may now be the Inline instruction prefix, rather than the task seed.
+pub(crate) fn validate_request_input_bytes(
+    messages: &[ConversationMessage],
+    max_bytes: Option<u64>,
+) -> Result<(), LlmError> {
+    if let Some(max) = max_bytes {
+        let bytes = measure_serialized_input_unit(messages).serialized_bytes;
+        if bytes > max {
+            return Err(LlmError::InvalidRequest {
+                message: format!("physical request exceeds max_input_bytes_per_turn after prompt projection ({bytes} > {max})"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Inline runQuery receives userContext separately from durable messages.
@@ -7407,12 +7573,14 @@ fn instruction_request_messages(
     history: &[ConversationMessage],
     context: &lingxi_core::host::instructions::InstructionContext,
     max_bytes: Option<u64>,
+    seed: Option<&crate::prompt_policy::PromptContextSeed>,
 ) -> Result<Vec<ConversationMessage>, String> {
+    let mandatory = seed.map_or(&[][..], |seed| seed.system_messages.as_slice());
     if context.rendering != lingxi_core::host::instructions::InstructionRendering::Inline {
-        return cap_input_bytes(history, max_bytes);
+        return cap_input_bytes(history, max_bytes, mandatory);
     }
     let Some(reminder) = context.reminder_source() else {
-        return cap_input_bytes(history, max_bytes);
+        return cap_input_bytes(history, max_bytes, mandatory);
     };
     let reminder_units = reminder
         .string_units("")
@@ -7423,7 +7591,7 @@ fn instruction_request_messages(
         reminder_units,
     );
     if history.is_empty() {
-        return cap_input_bytes(&[prefix], max_bytes);
+        return cap_input_bytes(&[prefix], max_bytes, mandatory);
     }
     // Reserve the prefix bytes without making it the trimming algorithm's
     // mandatory task unit; the actual initial task must remain mandatory too.
@@ -7436,7 +7604,7 @@ fn instruction_request_messages(
                 .ok_or_else(|| "instruction context exceeds max_input_bytes_per_turn".to_string())
         })
         .transpose()?;
-    let history = cap_input_bytes(history, history_cap)?;
+    let history = cap_input_bytes(history, history_cap, mandatory)?;
     let mut messages = Vec::with_capacity(history.len() + 1);
     messages.push(prefix);
     messages.extend(history);

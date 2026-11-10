@@ -1648,17 +1648,18 @@ that bypasses Perforce tracking."
             )
             .await;
         assert_eq!(d, "A tool for editing files");
-        // The long body is prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        // The long body is prompt(model:claude-sonnet-4-6) selects the native long template.
         // Header + the `\n-` pre-read seam (Usage: immediately followed by the
         // first bullet). v2.1.183 dropped the trailing space the older builds
         // had after "reading the file." — the pre-read bullet now ends exactly
         // at the period with no trailing space (binary `wBp()`/`RBp()`).
         let long_prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,
-                model: None,
+                model: Some("claude-sonnet-4-6".into()),
                 model_profile: None,
                 ..Default::default()
             })
@@ -1680,7 +1681,7 @@ that bypasses Perforce tracking."
             .ends_with("This parameter is useful if you want to rename a variable for instance."));
         // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
         assert!(!long.contains("smallest old_string"));
-        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        // prompt(model:claude-sonnet-4-6) selects the native long template.
         // description() (short label) and the long prompt() differ — confirm.
         assert_ne!(long, d);
     }
@@ -1693,6 +1694,7 @@ that bypasses Perforce tracking."
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
         let prompt = tool
             .prompt(&PromptOptions {
+                prompt_policy: None,
                 is_scheduled_turn: false,
                 session_id: None,
                 include_examples: false,

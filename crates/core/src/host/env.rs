@@ -43,6 +43,20 @@ pub fn is_env_truthy(value: Option<&str>) -> bool {
     )
 }
 
+/// Read a product setting before its upstream compatibility alias. A defined
+/// product value, including an empty or false value, owns the setting.
+#[must_use]
+pub fn var_with_legacy(product: &str, legacy: &str) -> Option<String> {
+    var_os_with_legacy(product, legacy).and_then(|value| value.into_string().ok())
+}
+
+/// The same precedence for raw JavaScript environment truthiness, including
+/// non-Unicode values on platforms that support them.
+#[must_use]
+pub fn var_os_with_legacy(product: &str, legacy: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(product).or_else(|| std::env::var_os(legacy))
+}
+
 /// `isAgentSwarmsEnabled()` — oracle 2.1.263 `zr()`
 /// (`src_160714897.js` @752):
 ///

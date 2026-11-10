@@ -31,3 +31,24 @@ pub fn render_reminder_sources_in_turn(
         telemetry::push_notifications_enabled(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn notification_headers_match_319_native_source() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            super::NON_USER_INPUT_HEADER,
+            fixture["notificationHeaders"]["normal"].as_str().unwrap()
+        );
+        assert_eq!(
+            super::IN_HUMAN_TURN_HEADER,
+            fixture["notificationHeaders"]["inHumanTurn"]
+                .as_str()
+                .unwrap()
+        );
+    }
+}

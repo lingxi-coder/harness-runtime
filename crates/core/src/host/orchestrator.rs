@@ -760,6 +760,24 @@ where
 /// the orchestrator and is deliberately not stored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSnapshot {
+    #[serde(
+        rename = "promptPolicy",
+        default,
+        deserialize_with = "deserialize_prompt_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt_policy: Option<super::prompt_policy::PromptPolicyMetadata>,
+    /// Source-backed additive instructions, retained independently of the
+    /// rendered body so a bundle migration can rebuild without losing them.
+    /// This host extension is absent from older Native snapshots.
+    #[serde(
+        rename = "appendSystemPrompt",
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "deserialize_prompt_append_system_prompt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub append_system_prompt: Option<Utf16JsonProjection>,
     /// Native prompt-snapshot routing hint; `inline` preserves the captured
     /// outgoing context lane.
     #[serde(
@@ -782,6 +800,26 @@ pub struct PromptSnapshot {
     /// Non-deferred inline tool descriptions in first-seen order.
     #[serde(rename = "tools", default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<PromptToolDescription>,
+}
+
+fn deserialize_prompt_append_system_prompt<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let source = crate::types::utf16_json::raw_json_serde::deserialize_option(deserializer)?;
+    Ok(source.filter(|source| source.string_units("").is_some()))
+}
+
+fn deserialize_prompt_policy<'de, D>(
+    deserializer: D,
+) -> Result<Option<super::prompt_policy::PromptPolicyMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 // Native fmn catches an invalid routing hint independently of the snapshot's
@@ -3060,7 +3098,9 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn auto_compact_command_snapshot(
         &self,
     ) -> Result<super::auto_compact::AutoCompactCommandSnapshot, HandleError> {
-        Err(HandleError::Unimplemented("auto_compact_command_snapshot".into()))
+        Err(HandleError::Unimplemented(
+            "auto_compact_command_snapshot".into(),
+        ))
     }
 
     /// Publish a successful persisted per-model window edit to the live session.
@@ -3069,7 +3109,9 @@ pub trait OrchestratorHandle: Send + Sync {
         _settings_key: &str,
         _window: super::auto_compact::AutoCompactWindow,
     ) -> Result<(), HandleError> {
-        Err(HandleError::Unimplemented("auto_compact_window_changed".into()))
+        Err(HandleError::Unimplemented(
+            "auto_compact_window_changed".into(),
+        ))
     }
 
     /// Independent session switch; changing it never rewrites effort.

@@ -106,6 +106,18 @@ pub fn should_attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audience_note_matches_319_native_renderer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/agent_reminders_319.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            BASH_OUTPUT_AUDIENCE_NOTE,
+            fixture["bashAudienceNote"].as_str().unwrap()
+        );
+    }
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     #[test]

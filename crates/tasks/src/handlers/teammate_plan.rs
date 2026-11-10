@@ -176,6 +176,12 @@ impl PlanAwareInvoker {
 }
 #[async_trait]
 impl ToolInvoker for PlanAwareInvoker {
+    fn trusted_session_profile(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {
+        self.inner.trusted_session_profile()
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
