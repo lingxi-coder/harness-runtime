@@ -2510,7 +2510,14 @@ pub(super) async fn build_mobile_inner_with_ask(
             None => Ok(audio),
         })
         .transpose()?;
+    let goal_proposal_host = super::goal_proposal::mobile_goal_proposal_host(
+        &cfg,
+        interactive_launch,
+        ask_user_question_tx.clone(),
+        analytics_bus.clone(),
+    );
     let tool_ctx = BuiltinToolContext {
+        goal_proposal_host: Some(goal_proposal_host.clone()),
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         side_chat: false,
@@ -3360,6 +3367,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
+    goal_proposal_host.bind(&orch);
     // Install before registry population: any later error or cancelled build
     // must drain this exact composition and break its handler back edges.
     let retirement = super::MobileSessionRetirement::new(
@@ -4302,6 +4310,7 @@ fn build_mobile_engine_on_worker(
     let task_notification_watcher_join = {
         let registry = inner.task_registry.clone();
         let orch = inner.orchestrator.clone();
+        let goal_proposal_dispatcher = inner.dispatcher.clone_shared();
         let permission_gate = inner.permission_gate.clone();
         let session_uuid = inner.active_session_uuid.clone();
         let session_writer = inner.session_writer.clone();
@@ -4345,6 +4354,7 @@ fn build_mobile_engine_on_worker(
                         .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
                             command.is_main_thread()
                                 && (command.uuid.starts_with("goal-retry-")
+                                    || command.uuid.starts_with("goal-proposal:")
                                     || matches!(
                                         command.source,
                                         msgqueue::QueueSource::Cron
@@ -4382,6 +4392,7 @@ fn build_mobile_engine_on_worker(
                             .dequeue_filtered(|command| {
                                 command.is_main_thread()
                                     && (command.uuid.starts_with("goal-retry-")
+                                    || command.uuid.starts_with("goal-proposal:")
                                         || matches!(
                                             command.source,
                                             msgqueue::QueueSource::Cron
@@ -4674,6 +4685,10 @@ fn build_mobile_engine_on_worker(
                     let scheduled_fire_id = scheduled
                         .as_ref()
                         .and_then(|command| command.scheduled_fire_id.clone());
+                    let goal_proposal = scheduled
+                        .as_ref()
+                        .filter(|command| command.uuid.starts_with("goal-proposal:"))
+                        .cloned();
                     let goal_retry_id = scheduled
                         .as_ref()
                         .filter(|c| c.uuid.starts_with("goal-retry-"))
@@ -4751,12 +4766,24 @@ fn build_mobile_engine_on_worker(
                     );
                     let scheduler = loop_scheduler.clone();
                     let reason = cancel_reason.clone();
+                    let goal_dispatcher = goal_proposal_dispatcher.clone_shared();
+                    let goal_dispatch_transition = loop_transition.clone();
                     // The turn task embeds the streaming + Mod lifecycle state
                     // machine. Box it at the spawn boundary so the worker does
                     // not materialize the full queued-turn future inline while
                     // creating the Tokio task.
                     let task = tokio::spawn(child_turn_tasks.track_future(Box::pin(async move {
-                        let result = if let Some((_, inputs)) = mobile_delivery {
+                        let result = if let Some(command) = goal_proposal {
+                            super::goal_proposal::run_queued_goal_proposal(
+                                &orch,
+                                &goal_dispatcher,
+                                command,
+                                task_turn.cancel.clone(),
+                                sink.as_ref(),
+                                goal_dispatch_transition,
+                            ).await
+                        } else {
+                            let result = if let Some((_, inputs)) = mobile_delivery {
                             orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone()).await
                         } else {
                             match prompt {
@@ -4811,6 +4838,8 @@ fn build_mobile_engine_on_worker(
                                 }
                             }
                             }
+                        };
+                            result.map(|_| ())
                         };
                         if let Err(error) = result {
                             message_output.reset_message_buffer().await;

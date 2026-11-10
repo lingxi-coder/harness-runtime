@@ -3615,7 +3615,9 @@ impl ConversationOrchestrator {
                 return Ok(TurnOutcome::EndTurn);
             }
             apply_current_native_user_source(&mut inputs);
-            if inputs.iter().any(|input| !input.is_meta) {
+            let in_human_turn = crate::native_user_message_source::queued_turn_authority()
+                .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
+            if in_human_turn {
                 self.reset_goal_interruption();
             }
             let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
@@ -3624,7 +3626,7 @@ impl ConversationOrchestrator {
             let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
             let prompt = inputs[primary].text.clone();
             self.begin_turn_metrics();
-            let _activity_guard = self.main_loop_activity(true);
+            let _activity_guard = self.main_loop_activity(in_human_turn);
             tracing::info!(
                 event = orch_events::CONVERSATION_STARTED,
                 prompt_len = prompt.string_at("").unwrap_or_default().len()
@@ -3774,7 +3776,9 @@ impl ConversationOrchestrator {
                     .await;
                 submissions.push((input, message, context));
             }
-            if submissions.iter().any(|(input, _, _)| !input.is_meta) {
+            if crate::native_user_message_source::queued_turn_authority().unwrap_or(true)
+                && submissions.iter().any(|(input, _, _)| !input.is_meta)
+            {
                 self.lifecycle_runtime
                     .goal_checkin
                     .lock()
@@ -4375,7 +4379,9 @@ impl ConversationOrchestrator {
                 return Ok(TurnOutcome::EndTurn);
             }
             apply_current_native_user_source(&mut inputs);
-            if inputs.iter().any(|input| !input.is_meta) {
+            let in_human_turn = crate::native_user_message_source::queued_turn_authority()
+                .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
+            if in_human_turn {
                 self.reset_goal_interruption();
             }
             self.cancel_idle_compaction();
@@ -4399,7 +4405,6 @@ impl ConversationOrchestrator {
                 .unwrap_or_default()
                 .to_owned();
             let message_id = inputs[primary].message_id;
-            let in_human_turn = inputs.iter().any(|input| !input.is_meta);
             self.run_turn_streaming_inputs_locked(
                 &turn_guard,
                 &prompt,

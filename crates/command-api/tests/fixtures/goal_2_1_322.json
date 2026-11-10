@@ -1,0 +1,2919 @@
+{
+  "native": {
+    "version": "2.1.322",
+    "sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+    "runtime": "Bun 1.4.3"
+  },
+  "sourceByteRanges": [
+    {
+      "name": "well-formed UTF-16 filtering",
+      "start": 260462323,
+      "end": 260462884,
+      "sha256": "b185fd1e8a6849ece80201f3443addd5daa90bf0363928bfd4b23b87ff43110e"
+    },
+    {
+      "name": "format, private-use and unassigned filtering",
+      "start": 260481569,
+      "end": 260481882,
+      "sha256": "56aee5cf75a1768566489bf8a86378ea497f601c7df0b595495446dd21f150c5"
+    },
+    {
+      "name": "native Bun display width",
+      "start": 261246167,
+      "end": 261246239,
+      "sha256": "fd4d14f7bc144cbd387e86b39d2b92fcc8e78b35e0525ae72655d23995757a5a"
+    },
+    {
+      "name": "native eight-column tab expansion",
+      "start": 261907332,
+      "end": 261908631,
+      "sha256": "9b1b2df897d24f0597dc0f0b6d10bcfdff20b531e93eb0cfef35ece4dad93cd4"
+    },
+    {
+      "name": "terminal control predicates",
+      "start": 261932754,
+      "end": 261932974,
+      "sha256": "857e711ae0c2e17769f228f4204f6bc1cee7402bab7a07e154f5d92a865f7833"
+    },
+    {
+      "name": "terminal-safe text and default-ignorable filtering",
+      "start": 261934897,
+      "end": 261935102,
+      "sha256": "6c58a9d1582360e6051b057557a35a35746d6bb423a2260cc17f462f872441a8"
+    },
+    {
+      "name": "proposal display canonicalization",
+      "start": 261935511,
+      "end": 261935551,
+      "sha256": "4c257eb43e078e35672a6a8957c21a11dc8bb8e48f33660f8faa805ffc25c9fe"
+    },
+    {
+      "name": "proposal single-line display",
+      "start": 295391641,
+      "end": 295391702,
+      "sha256": "994b9b951938dff843f35c062b7145ae9a26a9114260e62cbd974945fc9443f5"
+    },
+    {
+      "name": "goal state, gates, directive and transcript helpers",
+      "start": 265723694,
+      "end": 265727475,
+      "sha256": "d141fea6b0d02b617e18c7038c9c0e039ce8b22653c27829475730461d727e14"
+    },
+    {
+      "name": "noninteractive goal command",
+      "start": 304740195,
+      "end": 304741029,
+      "sha256": "bbfe3ab37bd66f961448271cabe197facc4815c0740bed39e600a7ed8d294d9f"
+    },
+    {
+      "name": "proposal prompt and description",
+      "start": 269967551,
+      "end": 269969141,
+      "sha256": "2ae5f01d16c0403a2049bf742733134278a65feea03672b8fb0ff289d86ecfe7"
+    },
+    {
+      "name": "proposal schemas, guards, decisions and result mapping",
+      "start": 295448013,
+      "end": 295453252,
+      "sha256": "413d411188d6e66702185ad9da1d57b06fc90ba0be01ee77d5abf3547899d58a"
+    },
+    {
+      "name": "proposal admission feature flag",
+      "start": 287227110,
+      "end": 287227159,
+      "sha256": "bf34e5a121adce3ccacb34642b40191dc838f1f592ed2b1ac248c8748caa34e7"
+    },
+    {
+      "name": "trusted proposal setting and persistent-presence guard",
+      "start": 262192013,
+      "end": 262192229,
+      "sha256": "ade92f68434231b35cf757c51f1706dcfbe49d50f11cf09395a223ad9e6c6bd7"
+    },
+    {
+      "name": "iteration pluralization",
+      "start": 260461274,
+      "end": 260461315,
+      "sha256": "45f1e3bc4a287f79f38b9aaf60cebd55f609060f32b7ae9d04b8fb6976c97537"
+    },
+    {
+      "name": "first delimiter-separated source segment",
+      "start": 260463715,
+      "end": 260463780,
+      "sha256": "7184cd31a9af8f0fac35de5b85a290da988105f5df932de856f663e2dc2427cd"
+    },
+    {
+      "name": "first source line",
+      "start": 260464148,
+      "end": 260464180,
+      "sha256": "968dddda80d3ead12b9faf8432897056a27d17312c7abeae2c71647a2ca2765e"
+    },
+    {
+      "name": "goal interruption classification",
+      "start": 280512353,
+      "end": 280514445,
+      "sha256": "cff9dd3d40481c5ec828ad677ef4b8de85e9ca3ff99a5ea7ed0b1cca2ad603ea"
+    },
+    {
+      "name": "goal interruption notices and retry ladder",
+      "start": 280509366,
+      "end": 280510704,
+      "sha256": "9366de50c9296f9438f58a646cf01ec370cb4fd65fb569cc5b1e3d18cfd72337"
+    },
+    {
+      "name": "goal check-in interval",
+      "start": 280412762,
+      "end": 280412869,
+      "sha256": "ae8b083d07a2c87d44d316d935d74a1c6aa8851d8b91d77ab7604ae26b6109f5"
+    },
+    {
+      "name": "goal check-in defaults",
+      "start": 280412465,
+      "end": 280412688,
+      "sha256": "add0b8127097dd30686a99f4012bed5869e5cec34a0b1c52f9e60b95da59d6a0"
+    },
+    {
+      "name": "typed environment parser adapter",
+      "start": 260739069,
+      "end": 260739110,
+      "sha256": "6ef20a81a0d196d8d7b79bc4b4d63f0cfca19d6dab5e44378648dfb1ce1a815c"
+    },
+    {
+      "name": "typed environment source string",
+      "start": 260739158,
+      "end": 260739207,
+      "sha256": "8326d38e4082258438fd2a666f2ce6d0bd6ef3762742515191455b12c1405441"
+    },
+    {
+      "name": "typed environment bounded integer",
+      "start": 260739692,
+      "end": 260739997,
+      "sha256": "bf79a5fc80b8f82ba9dddd1af684d486355b3a2925a47835c557dca8c07dbcaf"
+    },
+    {
+      "name": "native integer syntax parsing",
+      "start": 260733400,
+      "end": 260733745,
+      "sha256": "bb51e30463cba298482c352c7a445705170d8db590d36bc6caa32bc14f99d5b1"
+    },
+    {
+      "name": "typed goal interval configuration",
+      "start": 260904385,
+      "end": 260904426,
+      "sha256": "f24cd945aaacea95d731c9d0d4d721edb2431f19aaf5efc3e5ee9d1f988113ce"
+    }
+  ],
+  "directive": "A session-scoped Stop hook is now active with condition: \"{condition}\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early.",
+  "gates": {
+    "trust": "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again.",
+    "held": "/goal can't run yet: your organization's settings haven't been read, so it isn't known whether it allows hooks.",
+    "restricted": "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).",
+    "relay": "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app."
+  },
+  "commands": [
+    {
+      "name": "no active goal",
+      "args": "",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "No goal set. Usage: `/goal <condition>`"
+      },
+      "afterState": null,
+      "operations": []
+    },
+    {
+      "name": "ECMAScript whitespace-only status",
+      "args": "﻿ \t\r\n",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "No goal set. Usage: `/goal <condition>`"
+      },
+      "afterState": null,
+      "operations": []
+    },
+    {
+      "name": "active, not evaluated",
+      "args": "",
+      "state": {
+        "condition": "ship it",
+        "iterations": 0
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal active: ship it (not yet evaluated)"
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "ship it",
+        "iterations": 0
+      },
+      "operations": []
+    },
+    {
+      "name": "active, one turn",
+      "args": "",
+      "state": {
+        "condition": "ship it",
+        "iterations": 1
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal active: ship it (1 turn)"
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "ship it",
+        "iterations": 1
+      },
+      "operations": []
+    },
+    {
+      "name": "active, last reason first line",
+      "args": "",
+      "state": {
+        "condition": "ship it",
+        "iterations": 7,
+        "lastReason": " \t first\nsecond \r\n "
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal active: ship it (7 turns)\nLast check: first"
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "ship it",
+        "iterations": 7,
+        "lastReason": " \t first\nsecond \r\n "
+      },
+      "operations": []
+    },
+    {
+      "name": "active, truthy whitespace-only reason",
+      "args": "",
+      "state": {
+        "condition": "ship it",
+        "iterations": 2,
+        "lastReason": " \t "
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal active: ship it (2 turns)\nLast check: "
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "ship it",
+        "iterations": 2,
+        "lastReason": " \t "
+      },
+      "operations": []
+    },
+    {
+      "name": "active, exact lone UTF-16 units",
+      "args": "",
+      "state": {
+        "condition": "a\ud800z",
+        "iterations": 3,
+        "lastReason": "\udc00 check\nnext"
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal active: a\ud800z (3 turns)\nLast check: \udc00 check"
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "a\ud800z",
+        "iterations": 3,
+        "lastReason": "\udc00 check\nnext"
+      },
+      "operations": []
+    },
+    {
+      "name": "clear token clear",
+      "args": " ﻿clear\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear token STOP",
+      "args": " ﻿STOP\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear token Off",
+      "args": " ﻿Off\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear token reset",
+      "args": " ﻿reset\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear token none",
+      "args": " ﻿none\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear token CANCEL",
+      "args": " ﻿CANCEL\t",
+      "state": {
+        "condition": "old goal",
+        "iterations": 4
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: old goal"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "old goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clear with nothing set",
+      "args": "clear",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "No goal set"
+      },
+      "afterState": null,
+      "operations": []
+    },
+    {
+      "name": "set a goal",
+      "args": " ship it ",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: ship it",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"ship it\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "ship it",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "ship it"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set exact UTF-16 source",
+      "args": "a\ud800\u0000\udc00z",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: a\ud800\u0000\udc00z",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"a\ud800\u0000\udc00z\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "a\ud800\u0000\udc00z",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "a\ud800\u0000\udc00z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "typed goal retains internal lines",
+      "args": "first\nsecond\tthird",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: first\nsecond\tthird",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"first\nsecond\tthird\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "first\nsecond\tthird",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "first\nsecond\tthird"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "NEL is not ECMAScript trim whitespace",
+      "args": "",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: ",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "replace an active goal",
+      "args": "new goal",
+      "state": {
+        "condition": "old goal",
+        "iterations": 9
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: new goal",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"new goal\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "new goal",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "new goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "at the 4000-unit cap",
+      "args": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "over the 4000-unit cap",
+      "args": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal condition is limited to 4000 characters (got 4001)"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "failed": "goal_set",
+          "reason": "too_long"
+        }
+      ]
+    },
+    {
+      "name": "2000 emoji fit exactly",
+      "args": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2001 emoji exceed UTF-16 cap",
+      "args": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal condition is limited to 4000 characters (got 4002)"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "failed": "goal_set",
+          "reason": "too_long"
+        }
+      ]
+    },
+    {
+      "name": "length precedes set gates",
+      "args": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "state": null,
+      "gate": {
+        "hooksRestricted": true,
+        "hooksHeld": true,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal condition is limited to 4000 characters (got 4001)"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "failed": "goal_set",
+          "reason": "too_long"
+        }
+      ]
+    },
+    {
+      "name": "restricted hooks precede held policy and trust",
+      "args": "goal",
+      "state": null,
+      "gate": {
+        "hooksRestricted": true,
+        "hooksHeld": true,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy)."
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "failed": "goal_set",
+          "reason": "hooks_gate"
+        }
+      ]
+    },
+    {
+      "name": "held policy precedes trust",
+      "args": "goal",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": true,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "/goal can't run yet: your organization's settings haven't been read, so it isn't known whether it allows hooks."
+      },
+      "afterState": null,
+      "operations": [
+        "read_hook_policy",
+        {
+          "failed": "goal_set",
+          "reason": "hooks_held"
+        }
+      ]
+    },
+    {
+      "name": "held policy in a trusted workspace",
+      "args": "goal",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": true,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "/goal can't run yet: your organization's settings haven't been read, so it isn't known whether it allows hooks."
+      },
+      "afterState": null,
+      "operations": [
+        "read_hook_policy",
+        {
+          "failed": "goal_set",
+          "reason": "hooks_held"
+        }
+      ]
+    },
+    {
+      "name": "trust gate",
+      "args": "goal",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again."
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "failed": "goal_set",
+          "reason": "trust_gate"
+        }
+      ]
+    },
+    {
+      "name": "noninteractive trust bypass",
+      "args": "goal",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": false,
+        "nonInteractive": true
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: goal",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"goal\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "goal",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "goal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "status bypasses set gates",
+      "args": "",
+      "state": null,
+      "gate": {
+        "hooksRestricted": true,
+        "hooksHeld": true,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "No goal set. Usage: `/goal <condition>`"
+      },
+      "afterState": null,
+      "operations": []
+    },
+    {
+      "name": "clear bypasses set gates",
+      "args": "clear",
+      "state": {
+        "condition": "clear me",
+        "iterations": 0
+      },
+      "gate": {
+        "hooksRestricted": true,
+        "hooksHeld": true,
+        "trusted": false,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "Goal cleared: clear me"
+      },
+      "afterState": null,
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": true,
+              "sentinel": true,
+              "condition": "clear me"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "verified relay blocks status",
+      "args": "",
+      "state": {
+        "condition": "keep",
+        "iterations": 1
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app."
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "keep",
+        "iterations": 1
+      },
+      "operations": []
+    },
+    {
+      "name": "verified relay blocks clear",
+      "args": "clear",
+      "state": {
+        "condition": "keep",
+        "iterations": 1
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app."
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "keep",
+        "iterations": 1
+      },
+      "operations": []
+    },
+    {
+      "name": "verified relay blocks set this",
+      "args": "set this",
+      "state": {
+        "condition": "keep",
+        "iterations": 1
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app."
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "keep",
+        "iterations": 1
+      },
+      "operations": []
+    },
+    {
+      "name": "verified relay blocks overlong input",
+      "args": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "state": {
+        "condition": "keep",
+        "iterations": 1
+      },
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": true
+      },
+      "expected": {
+        "type": "text",
+        "value": "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app."
+      },
+      "afterState": {
+        "setAt": 1000,
+        "tokensAtStart": 1,
+        "origin": "user",
+        "condition": "keep",
+        "iterations": 1
+      },
+      "operations": []
+    },
+    {
+      "name": "bridge without verified relayed-human fact",
+      "args": "allowed",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": false,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: allowed",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"allowed\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "allowed",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "allowed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "verified fact without bridge dispatch",
+      "args": "allowed",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": false,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": true
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: allowed",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"allowed\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "allowed",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "allowed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "relay feature disabled",
+      "args": "allowed",
+      "state": null,
+      "gate": {
+        "hooksRestricted": false,
+        "hooksHeld": false,
+        "trusted": true,
+        "nonInteractive": false
+      },
+      "relay": {
+        "dispatchedOverBridge": true,
+        "submissionVerifiedSlackHumanTurn": true,
+        "enabled": false
+      },
+      "expected": {
+        "type": "query",
+        "value": "Goal set: allowed",
+        "prompt": "A session-scoped Stop hook is now active with condition: \"allowed\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early."
+      },
+      "afterState": {
+        "condition": "allowed",
+        "iterations": 0,
+        "setAt": 10000,
+        "origin": "user",
+        "tokensAtStart": 100
+      },
+      "operations": [
+        {
+          "append": [
+            {
+              "type": "goal_status",
+              "met": false,
+              "sentinel": true,
+              "condition": "allowed"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "normalization": [
+    {
+      "name": "ASCII trim",
+      "input": "  ship it  ",
+      "expected": "ship it"
+    },
+    {
+      "name": "line-break run",
+      "input": "a\r\n  b",
+      "expected": "a b"
+    },
+    {
+      "name": "separated line breaks",
+      "input": "a\n \rb",
+      "expected": "a   b"
+    },
+    {
+      "name": "one tab",
+      "input": "a\tb",
+      "expected": "a       b"
+    },
+    {
+      "name": "two tabs",
+      "input": "a\t\tb",
+      "expected": "a               b"
+    },
+    {
+      "name": "leading and trailing tabs",
+      "input": "\tship it\t",
+      "expected": "ship it"
+    },
+    {
+      "name": "CJK tab stop",
+      "input": "界\tready",
+      "expected": "界      ready"
+    },
+    {
+      "name": "emoji tab stop",
+      "input": "😀\tready",
+      "expected": "😀      ready"
+    },
+    {
+      "name": "combining tab stop",
+      "input": "é\tready",
+      "expected": "é       ready"
+    },
+    {
+      "name": "ZWJ family then tab",
+      "input": "👨‍👩‍👧\tready",
+      "expected": "👨👩👧  ready"
+    },
+    {
+      "name": "format characters",
+      "input": "a​‏⁦﻿b",
+      "expected": "ab"
+    },
+    {
+      "name": "private-use characters",
+      "input": "a󰀀b",
+      "expected": "ab"
+    },
+    {
+      "name": "unassigned characters",
+      "input": "a͸￿b",
+      "expected": "ab"
+    },
+    {
+      "name": "default-ignorable combining marks",
+      "input": "a͏️᠋b",
+      "expected": "ab"
+    },
+    {
+      "name": "invisible-only",
+      "input": "​͏",
+      "expected": ""
+    },
+    {
+      "name": "C0 and C1 controls",
+      "input": "a\u0000\u0001\b\u000b\f\u001bb",
+      "expected": "a���������b"
+    },
+    {
+      "name": "ANSI-looking text",
+      "input": "\u001b[31mred\u001b[0m",
+      "expected": "�[31mred�[0m"
+    },
+    {
+      "name": "unpaired high surrogate",
+      "input": "a\ud800b",
+      "expected": "ab"
+    },
+    {
+      "name": "unpaired low surrogate",
+      "input": "a\udc00b",
+      "expected": "ab"
+    },
+    {
+      "name": "paired surrogate emoji",
+      "input": "a😀b",
+      "expected": "a😀b"
+    },
+    {
+      "name": "fullwidth punctuation remains",
+      "input": "Ａ：Ｂ",
+      "expected": "Ａ：Ｂ"
+    },
+    {
+      "name": "Unicode spaces trim",
+      "input": "  word　",
+      "expected": "word"
+    },
+    {
+      "name": "tabs exceed canonical cap",
+      "input": "a\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tx",
+      "expected": "a                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       x"
+    }
+  ],
+  "interruption": {
+    "backoffs": [
+      60000,
+      300000,
+      900000
+    ],
+    "jitter": 0.2,
+    "maxRetries": 3,
+    "retryCauses": {
+      "api_unavailable": "the API was unavailable or the connection dropped",
+      "unclassified": "the API returned an unexpected response",
+      "output_limit": "the response hit the output token limit",
+      "cloud_credentials": "cloud credentials did not load",
+      "host_auth": "sign-in was being refreshed",
+      "image": "an image could not be sent",
+      "unreadable_tool_call": "Claude's tool call could not be read",
+      "goal_check": "the goal check could not complete"
+    },
+    "pauseMessages": {
+      "request_rejected": "Goal paused · the API rejected the last request · send a message to continue, or run /goal clear",
+      "turn_error": "Goal paused · the last turn could not finish · send a message to continue",
+      "hook_stopped": "Goal paused · a hook ended the turn · send a message to continue",
+      "goal_check_timeout": "Goal paused · the goal check timed out · send a message to continue",
+      "goal_check_capped": "Goal paused · goal checks kept finding it unmet this turn · send a message to continue",
+      "rate_limited": "Goal paused · the request was rate limited · send a message to retry",
+      "daily_cap": "Goal paused · usage is paused for your organization",
+      "usage_limit": "Goal paused · usage limit reached · send a message after it resets to continue",
+      "usage_limit_waiting": "Goal paused · usage limit reached · continues automatically when it resets"
+    },
+    "cases": [
+      {
+        "name": "aborted_streaming",
+        "input": {
+          "reason": "aborted_streaming"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "aborted_tools",
+        "input": {
+          "reason": "aborted_tools"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "max_turns",
+        "input": {
+          "reason": "max_turns"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "tool_deferred",
+        "input": {
+          "reason": "tool_deferred"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "background_requested",
+        "input": {
+          "reason": "background_requested"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "stop_hook_prevented",
+        "input": {
+          "reason": "stop_hook_prevented"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "hook_stopped"
+        }
+      },
+      {
+        "name": "hook_stopped",
+        "input": {
+          "reason": "hook_stopped"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "hook_stopped"
+        }
+      },
+      {
+        "name": "blocking_limit",
+        "input": {
+          "reason": "blocking_limit"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "context_limit"
+        }
+      },
+      {
+        "name": "prompt_too_long",
+        "input": {
+          "reason": "prompt_too_long"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "context_limit"
+        }
+      },
+      {
+        "name": "rapid_refill_breaker",
+        "input": {
+          "reason": "rapid_refill_breaker"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "context_limit"
+        }
+      },
+      {
+        "name": "image_error",
+        "input": {
+          "reason": "image_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "image"
+        }
+      },
+      {
+        "name": "model_error",
+        "input": {
+          "reason": "model_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "turn_error"
+        }
+      },
+      {
+        "name": "malformed_tool_use_exhausted",
+        "input": {
+          "reason": "malformed_tool_use_exhausted"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "unreadable_tool_call"
+        }
+      },
+      {
+        "name": "completed error",
+        "input": {
+          "reason": "completed",
+          "goalPass": "error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "goal_check"
+        }
+      },
+      {
+        "name": "completed cancelled",
+        "input": {
+          "reason": "completed",
+          "goalPass": "cancelled"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "goal_check_timeout"
+        }
+      },
+      {
+        "name": "completed not_met",
+        "input": {
+          "reason": "completed",
+          "goalPass": "not_met"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "goal_check_capped"
+        }
+      },
+      {
+        "name": "completed met",
+        "input": {
+          "reason": "completed",
+          "goalPass": "met"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "completed impossible",
+        "input": {
+          "reason": "completed",
+          "goalPass": "impossible"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "completed deferred",
+        "input": {
+          "reason": "completed",
+          "goalPass": "deferred"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "completed without a goal pass",
+        "input": {
+          "reason": "completed"
+        },
+        "context": {},
+        "expected": {
+          "kind": "none"
+        }
+      },
+      {
+        "name": "API rate_limit",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "rate_limit"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "rate_limited"
+        }
+      },
+      {
+        "name": "API max_output_tokens",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "max_output_tokens"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "output_limit"
+        }
+      },
+      {
+        "name": "API cloud_credential_error",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "cloud_credential_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "cloud_credentials"
+        }
+      },
+      {
+        "name": "API overloaded",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "overloaded"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "api_unavailable"
+        }
+      },
+      {
+        "name": "API server_error",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "server_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "api_unavailable"
+        }
+      },
+      {
+        "name": "API unknown",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "unknown"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "unclassified"
+        }
+      },
+      {
+        "name": "API invalid_request",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "invalid_request"
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "request_rejected"
+        }
+      },
+      {
+        "name": "API authentication_failed",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "authentication_failed"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "auth"
+        }
+      },
+      {
+        "name": "API oauth_org_not_allowed",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "oauth_org_not_allowed"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "auth"
+        }
+      },
+      {
+        "name": "API account_on_hold",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "account_on_hold"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "auth"
+        }
+      },
+      {
+        "name": "API verification_required",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "verification_required"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "verification_required"
+        }
+      },
+      {
+        "name": "API billing_error",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "billing_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "billing"
+        }
+      },
+      {
+        "name": "API model_not_found",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "model_not_found"
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "model_unavailable"
+        }
+      },
+      {
+        "name": "API unclassified",
+        "input": {
+          "reason": "api_error"
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "unclassified"
+        }
+      },
+      {
+        "name": "transient invalid request retries",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "invalid_request",
+          "isTransient": true
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "api_unavailable"
+        }
+      },
+      {
+        "name": "rate limiting precedes transient retry",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "rate_limit",
+          "isTransient": true
+        },
+        "context": {},
+        "expected": {
+          "kind": "pause",
+          "cause": "rate_limited"
+        }
+      },
+      {
+        "name": "usage limit exhaustion",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "rate_limit",
+          "quotaLimits": {}
+        },
+        "context": {
+          "quotaExhausted": true
+        },
+        "expected": {
+          "kind": "pause",
+          "cause": "usage_limit"
+        }
+      },
+      {
+        "name": "daily cap precedes quota exhaustion and transient retry",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "rate_limit",
+          "isTransient": true,
+          "quotaLimits": {
+            "dailyCapPaused": true
+          }
+        },
+        "context": {
+          "quotaExhausted": true
+        },
+        "expected": {
+          "kind": "pause",
+          "cause": "daily_cap"
+        }
+      },
+      {
+        "name": "daily cap does not affect a different API error",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "server_error",
+          "quotaLimits": {
+            "dailyCapPaused": true
+          }
+        },
+        "context": {},
+        "expected": {
+          "kind": "retry",
+          "cause": "api_unavailable"
+        }
+      },
+      {
+        "name": "remote auth envRemote",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "authentication_failed"
+        },
+        "context": {
+          "envRemote": true
+        },
+        "expected": {
+          "kind": "retry",
+          "cause": "host_auth"
+        }
+      },
+      {
+        "name": "remote auth remoteHost",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "authentication_failed"
+        },
+        "context": {
+          "remoteHost": true
+        },
+        "expected": {
+          "kind": "retry",
+          "cause": "host_auth"
+        }
+      },
+      {
+        "name": "remote auth workspaceHost",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "authentication_failed"
+        },
+        "context": {
+          "workspaceHost": true
+        },
+        "expected": {
+          "kind": "retry",
+          "cause": "host_auth"
+        }
+      },
+      {
+        "name": "remote auth inProcessRemote",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "authentication_failed"
+        },
+        "context": {
+          "inProcessRemote": true
+        },
+        "expected": {
+          "kind": "retry",
+          "cause": "host_auth"
+        }
+      },
+      {
+        "name": "OAuth refresh disk-full stop",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "unknown",
+          "oauthRefreshDiskFull": true
+        },
+        "context": {},
+        "expected": {
+          "kind": "stop",
+          "cause": "disk_full"
+        }
+      },
+      {
+        "name": "remote OAuth refresh disk-full retry",
+        "input": {
+          "reason": "api_error",
+          "errorKind": "unknown",
+          "oauthRefreshDiskFull": true
+        },
+        "context": {
+          "envRemote": true
+        },
+        "expected": {
+          "kind": "retry",
+          "cause": "host_auth"
+        }
+      }
+    ]
+  },
+  "checkin": {
+    "defaultMinutes": 30,
+    "idlePausedSuffix": " · idle check-ins paused until your next message",
+    "idlePausedInstruction": " Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand.",
+    "concurrentCheckLimit": 2,
+    "consecutiveCheckinLimit": 3,
+    "idleTaskInterval": 120,
+    "intervalCases": [
+      {
+        "name": "absent",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"0\"",
+        "raw": "0",
+        "flag": true,
+        "parsed": 0,
+        "expected": 0
+      },
+      {
+        "name": "\"-0\"",
+        "raw": "-0",
+        "flag": true,
+        "parsed": 0,
+        "expected": 0
+      },
+      {
+        "name": "\"+0\"",
+        "raw": "+0",
+        "flag": true,
+        "parsed": 0,
+        "expected": 0
+      },
+      {
+        "name": "\"1\"",
+        "raw": "1",
+        "flag": true,
+        "parsed": 1,
+        "expected": 60000
+      },
+      {
+        "name": "\"30\"",
+        "raw": "30",
+        "flag": true,
+        "parsed": 30,
+        "expected": 1800000
+      },
+      {
+        "name": "\"+30\"",
+        "raw": "+30",
+        "flag": true,
+        "parsed": 30,
+        "expected": 1800000
+      },
+      {
+        "name": "\"10080\"",
+        "raw": "10080",
+        "flag": true,
+        "parsed": 10080,
+        "expected": 604800000
+      },
+      {
+        "name": "\"10081\"",
+        "raw": "10081",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"-1\"",
+        "raw": "-1",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"0.5\"",
+        "raw": "0.5",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"\"",
+        "raw": "",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\" \"",
+        "raw": " ",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"1e1\"",
+        "raw": "1e1",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"1_000\"",
+        "raw": "1_000",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"﻿30\"",
+        "raw": "﻿30",
+        "flag": true,
+        "parsed": 30,
+        "expected": 1800000
+      },
+      {
+        "name": "\"30\"",
+        "raw": "30",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "\"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001\"",
+        "raw": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+        "flag": true,
+        "parsed": 1,
+        "expected": 60000
+      },
+      {
+        "name": "\"9999999999999999999999999999999999999999\"",
+        "raw": "9999999999999999999999999999999999999999",
+        "flag": true,
+        "parsed": null,
+        "expected": 1800000
+      },
+      {
+        "name": "feature disabled",
+        "flag": false,
+        "raw": "30",
+        "parsed": 30,
+        "expected": 0
+      }
+    ]
+  },
+  "proposal": {
+    "name": "ProposeGoal",
+    "description": "Propose a session goal condition, with one-keypress user approval; once set, Claude keeps working until a separate evaluator confirms it is met",
+    "prompt": "Propose a completion condition for this session's work — a goal that keeps you working until a separate evaluator confirms it is met. Non-blocking: the proposal renders alongside your work, so keep working while it is handled.\n\nask_user true (the default) asks the user first, with a one-keypress approval dialog. If they decline you will not be notified — do not ask about the decision and do not re-propose the same or a reworded condition. Set ask_user false — which sets the goal directly, with no dialog — ONLY when the user's own words in this conversation stated this outcome as what they want; if you inferred it from their intent or the task's shape — or are in doubt — ask. Either path confirms a set goal with a kickoff message; until that message arrives, no new goal is active.\n\nPropose only when the user has asked for an outcome with a verifiable end state (\"make the tests pass\", \"migrate every call site\") and the work spans multiple turns. Not for one-off tasks, and never to widen scope: the condition must follow from their request.\n\nThe evaluator verifies the condition from the conversation alone — it cannot run commands or read files — so state one measurable end state with its check (e.g. \"bun test exits 0\"), in at most 500 characters. One goal is active at a time; a newly approved or directly set proposal replaces the current one.",
+    "searchHint": "propose a session goal condition for the user to approve with one keypress",
+    "shouldDefer": true,
+    "backgrounding": "never",
+    "maxResultSizeChars": 1000,
+    "concurrencySafe": false,
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "strict": true,
+      "fields": [
+        {
+          "name": "condition",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "The completion condition to propose, written so a separate evaluator can verify it from the conversation (e.g. \"all tests in test/auth pass (bun test exits 0)\"). At most 500 characters — the user must be able to read the whole condition in the approval dialog."
+        },
+        {
+          "name": "ask_user",
+          "type": "boolean",
+          "optional": true,
+          "description": "Whether to ask the user for approval before the goal is set. Defaults to true — an approval dialog is shown. Set false ONLY when the user's own words in this conversation stated this outcome as what they want; the goal is then set directly, with a visible notice in the transcript, and the user can clear it with /goal clear."
+        }
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "strict": false,
+      "fields": [
+        {
+          "name": "condition",
+          "type": "string",
+          "description": "The condition shown to the user for approval, or set directly when ask_user was false"
+        },
+        {
+          "name": "askUser",
+          "type": "boolean",
+          "description": "Whether the user was asked for approval (true) or the goal was set directly (false)"
+        }
+      ]
+    },
+    "results": {
+      "approval": "Sent the goal proposal to the user for approval. Continue working — do not wait for their decision. If they approve, the proposed goal is set and you will receive a kickoff message; until then, no new goal is active — any previously set goal remains in effect. If they decline you will not be notified — do not ask about the decision or re-propose the same condition.",
+      "direct": "Setting the goal now, without an approval dialog — the user sees it being set and can clear it with /goal clear. It becomes active at the end of this turn, when you will receive a kickoff message confirming it; until that message arrives, any previously set goal remains in effect. Continue working — do not wait for the kickoff."
+    },
+    "availability": [
+      {
+        "facts": {},
+        "expected": true
+      },
+      {
+        "facts": {
+          "flag": false
+        },
+        "expected": false
+      },
+      {
+        "facts": {
+          "nonInteractive": true
+        },
+        "expected": false
+      },
+      {
+        "facts": {
+          "remote": true
+        },
+        "expected": false
+      },
+      {
+        "facts": {
+          "thinClient": true
+        },
+        "expected": false
+      },
+      {
+        "facts": {
+          "mode": "alwaysAsk"
+        },
+        "expected": true
+      },
+      {
+        "facts": {
+          "mode": "disabled"
+        },
+        "expected": false
+      }
+    ],
+    "settings": [
+      {
+        "setting": "auto",
+        "presence": "absent",
+        "sync": "auto",
+        "async": "auto"
+      },
+      {
+        "setting": "auto",
+        "presence": "present",
+        "sync": "auto",
+        "async": "auto"
+      },
+      {
+        "setting": "auto",
+        "presence": "unknown",
+        "sync": "auto",
+        "async": "auto"
+      },
+      {
+        "setting": "alwaysAsk",
+        "presence": "absent",
+        "sync": "alwaysAsk",
+        "async": "alwaysAsk"
+      },
+      {
+        "setting": "alwaysAsk",
+        "presence": "present",
+        "sync": "alwaysAsk",
+        "async": "alwaysAsk"
+      },
+      {
+        "setting": "alwaysAsk",
+        "presence": "unknown",
+        "sync": "alwaysAsk",
+        "async": "alwaysAsk"
+      },
+      {
+        "setting": "disabled",
+        "presence": "absent",
+        "sync": "disabled",
+        "async": "disabled"
+      },
+      {
+        "setting": "disabled",
+        "presence": "present",
+        "sync": "disabled",
+        "async": "disabled"
+      },
+      {
+        "setting": "disabled",
+        "presence": "unknown",
+        "sync": "disabled",
+        "async": "disabled"
+      },
+      {
+        "setting": "unset",
+        "presence": "absent",
+        "sync": "auto",
+        "async": "auto"
+      },
+      {
+        "setting": "unset",
+        "presence": "present",
+        "sync": "auto",
+        "async": "alwaysAsk"
+      },
+      {
+        "setting": "unset",
+        "presence": "unknown",
+        "sync": "auto",
+        "async": "alwaysAsk"
+      }
+    ],
+    "cases": [
+      {
+        "name": "default approval remains nonblocking",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {},
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": "fixture-proposal-uuid"
+      },
+      {
+        "name": "direct kickoff",
+        "input": {
+          "condition": "tests pass",
+          "ask_user": false
+        },
+        "facts": {},
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": false
+          }
+        },
+        "queue": [
+          {
+            "agentId": "main",
+            "mode": "prompt",
+            "value": "/goal tests pass",
+            "origin": {
+              "kind": "task-notification"
+            }
+          }
+        ],
+        "origins": [
+          {
+            "condition": "tests pass",
+            "origin": "proposal_direct"
+          }
+        ],
+        "pending": null
+      },
+      {
+        "name": "alwaysAsk overrides direct request",
+        "input": {
+          "condition": "tests pass",
+          "ask_user": false
+        },
+        "facts": {
+          "setting": "alwaysAsk"
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": "fixture-proposal-uuid"
+      },
+      {
+        "name": "approved kickoff",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": true
+          }
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [
+          {
+            "agentId": "main",
+            "mode": "prompt",
+            "value": "/goal tests pass",
+            "origin": {
+              "kind": "auto-continuation"
+            }
+          }
+        ],
+        "origins": [
+          {
+            "condition": "tests pass",
+            "origin": "proposal_approved"
+          }
+        ],
+        "pending": null
+      },
+      {
+        "name": "explicit decline stays silent",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": false,
+            "explicit": true
+          }
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "unanswered proposal stays silent",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": false
+          }
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "disabled before approval resolves",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": true
+          },
+          "disabledAfterApproval": true
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "plan mode before approval resolves",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": true
+          },
+          "planAfterApproval": true
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "stale approval cannot replace a new proposal",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "decision": {
+            "approved": true
+          },
+          "staleAfterApproval": true
+        },
+        "expected": {
+          "data": {
+            "condition": "tests pass",
+            "askUser": true
+          }
+        },
+        "queue": [],
+        "origins": [],
+        "pending": "replacement-proposal"
+      },
+      {
+        "name": "agent context first",
+        "input": {
+          "condition": ""
+        },
+        "facts": {
+          "agent": true
+        },
+        "expected": {
+          "error": "ProposeGoal cannot be used in agent contexts"
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "noninteractive session first",
+        "input": {
+          "condition": ""
+        },
+        "facts": {
+          "nonInteractive": true
+        },
+        "expected": {
+          "error": "Goal proposals are only available in interactive local sessions."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "remote session",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "remote": true
+        },
+        "expected": {
+          "error": "Goal proposals are only available in interactive local sessions."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "thin client session",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "thinClient": true
+        },
+        "expected": {
+          "error": "Goal proposals are only available in interactive local sessions."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "empty visible condition",
+        "input": {
+          "condition": "​"
+        },
+        "facts": {},
+        "expected": {
+          "error": "The goal condition is empty once whitespace and invisible characters are removed. Provide a visible condition."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "canonical display cap",
+        "input": {
+          "condition": "a\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tx"
+        },
+        "facts": {},
+        "expected": {
+          "error": "The goal condition exceeds 500 characters once canonicalized for display (tabs expand to spaces). Shorten the condition — the user must be able to read all of it in the approval dialog."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "clear token rejected",
+        "input": {
+          "condition": " \tSTOP\n"
+        },
+        "facts": {},
+        "expected": {
+          "error": "ProposeGoal only proposes a new goal; it cannot clear one. The user can clear an active goal with /goal clear."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "hook restriction precedes plan and setting",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "gate": {
+            "hooksRestricted": true
+          },
+          "planMode": true,
+          "setting": "disabled"
+        },
+        "expected": {
+          "error": "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy)."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "held hook policy",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "gate": {
+            "hooksHeld": true
+          }
+        },
+        "expected": {
+          "error": "/goal can't run yet: your organization's settings haven't been read, so it isn't known whether it allows hooks."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "untrusted workspace",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "gate": {
+            "trusted": false
+          }
+        },
+        "expected": {
+          "error": "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "plan before disabled setting",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "planMode": true,
+          "setting": "disabled"
+        },
+        "expected": {
+          "error": "Plan mode is active, so a goal cannot be proposed yet. Keep planning; propose the goal after the plan is approved."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "disabled setting",
+        "input": {
+          "condition": "tests pass"
+        },
+        "facts": {
+          "setting": "disabled"
+        },
+        "expected": {
+          "error": "The user has disabled model-proposed goals in their settings. Do not propose goals; the user can set one themselves with /goal."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "dialog required even for a direct request",
+        "input": {
+          "condition": "tests pass",
+          "ask_user": false
+        },
+        "facts": {
+          "dialogAvailable": false
+        },
+        "expected": {
+          "error": "Goal proposals need an interactive session to render the approval prompt; none is available here."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": null
+      },
+      {
+        "name": "pending decision blocks another proposal",
+        "input": {
+          "condition": "tests pass",
+          "ask_user": false
+        },
+        "facts": {
+          "pending": true
+        },
+        "expected": {
+          "error": "A goal proposal is already awaiting the user's decision. Keep working; if it is approved you will receive a kickoff message."
+        },
+        "queue": [],
+        "origins": [],
+        "pending": "previous-proposal"
+      },
+      {
+        "name": "canonical condition reaches queue",
+        "input": {
+          "condition": " \t界\tall\r\ntests​ pass ",
+          "ask_user": false
+        },
+        "facts": {},
+        "expected": {
+          "data": {
+            "condition": "界      all tests pass",
+            "askUser": false
+          }
+        },
+        "queue": [
+          {
+            "agentId": "main",
+            "mode": "prompt",
+            "value": "/goal 界      all tests pass",
+            "origin": {
+              "kind": "task-notification"
+            }
+          }
+        ],
+        "origins": [
+          {
+            "condition": "界      all tests pass",
+            "origin": "proposal_direct"
+          }
+        ],
+        "pending": null
+      }
+    ],
+    "classifierInputs": [
+      {
+        "input": {
+          "condition": "tests pass"
+        },
+        "expected": "ask_user=true: tests pass"
+      },
+      {
+        "input": {
+          "condition": "tests pass",
+          "ask_user": false
+        },
+        "expected": "ask_user=false: tests pass"
+      },
+      {
+        "input": {
+          "condition": "a\ud800z",
+          "ask_user": true
+        },
+        "expected": "ask_user=true: a\ud800z"
+      }
+    ]
+  },
+  "boundaries": [
+    "Unchanged bounded native helpers replay with explicit inert host dependencies; no assistant session, credentials or network request is used.",
+    "Native Bun.stringWidth delegates to the installed pinned Bun runtime; future runtime or Unicode-table changes require a reviewed fixture refresh.",
+    "Schema factories record ordered native field metadata, strictness, requiredness and limits; native Zod JSON Schema serializer bytes and aggregate diagnostic formatting are not asserted.",
+    "Approval tests use controlled promises and exact queue operations; they do not establish native terminal rendering or cross-platform UI acceptance."
+  ]
+}

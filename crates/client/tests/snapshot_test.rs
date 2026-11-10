@@ -1068,6 +1068,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         multi_select: false,
                     }],
                     timeout_secs: Some(120),
+                    session_owned: false,
                 },
             },
         ),

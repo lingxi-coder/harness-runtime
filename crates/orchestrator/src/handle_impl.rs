@@ -292,6 +292,7 @@ impl ConversationOrchestrator {
         // The transcript activation seam has already retired the old session
         // under its publication lock. No fallible target activation may follow
         // this reset: a rejected target must leave the live session intact.
+        self.invalidate_goal_proposals();
         self.reset_background_memory().await;
         self.reset_native_proactivity_session();
         self.reset_prompt_suggestion_session();
@@ -2263,10 +2264,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
         })
     }
 
+    async fn claim_goal_proposal(&self, id: &str) -> bool {
+        self.claim_queued_goal_proposal(id)
+    }
+
+    async fn retire_goal_set_origin(
+        &self,
+        condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let _ = self.take_queued_goal_origin(condition);
+    }
+
     async fn set_active_goal(
         &self,
         condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
+        // Claim this invocation's origin before an external provider can reenter.
+        let origin = self.take_queued_goal_origin(condition);
         // Usage providers are external and may reenter goal controls. Do not
         // hold the transition owner until this observation is complete.
         let superseded = loop {
@@ -2287,7 +2301,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                         last_reason: None,
                         iterations: 0,
                         tokens_at_start: cost.total_tokens,
-                        origin: lingxi_core::session::GoalOrigin::User,
+                        origin,
                     });
                     let snapshot = s.active_goal.clone();
                     drop(s);
@@ -2313,8 +2327,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await;
         }
         // `rRe`: `i("tengu_stop_hook_added",{promptLength,via:_("goal"),origin})`
-        // (`src_160454523.js`). `origin` is always `"user"` here — see
-        // `fire_goal_terminal_event`.
+        // (`src_160454523.js`). Queued proposals retain their trusted origin.
         if let Some(bus) = self.model_runtime.analytics_bus.as_ref() {
             let mut metadata = telemetry::LogEventMetadata::new();
             metadata.insert(
@@ -2329,7 +2342,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             );
             metadata.insert(
                 "origin".into(),
-                telemetry::AnalyticsValue::String("user".to_string()),
+                telemetry::AnalyticsValue::String(origin.as_str().to_owned()),
             );
             bus.log_event("tengu_stop_hook_added", metadata).await;
         }
@@ -2367,7 +2380,29 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.workspace_trusted
     }
 
+    fn goal_is_non_interactive(&self) -> bool {
+        !self.prompt_is_interactive()
+    }
+
     async fn hooks_restricted(&self) -> bool {
+        if let Some(reader) = self.mod_settings_reader.as_ref() {
+            if let Ok(settings) = reader
+                .read(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                        .expect("static settings options are an object"),
+                )
+                .await
+            {
+                return ["/disableAllHooks", "/allowManagedHooksOnly"]
+                    .iter()
+                    .any(|pointer| {
+                        settings
+                            .at_pointer(pointer)
+                            .and_then(|value| value.as_bool())
+                            == Some(true)
+                    });
+            }
+        }
         self.hooks_restricted
     }
 

@@ -288,6 +288,8 @@ impl GoalEvalOutcome {
     }
 }
 
+/// A goal verdict is consumed only by its identity-checked goal path. Keeping
+/// it in the generic Stop fallback would revive a cleared or replaced goal.
 fn accumulate_mod_turn_usage(
     facts: &mut ModTurnFacts,
     usage: &llm_runtime::ExecutionUsage,
@@ -1693,6 +1695,7 @@ impl ConversationOrchestrator {
         self.sync_goal_checkin_idle_task().await;
     }
 
+    /// Deferral timing belongs to one goal, including its owned idle timer.
     /// Tear the active goal down, reporting `reason` on `tengu_goal_cleared`.
     ///
     /// The reason is a parameter because upstream's is: `kB(goal, reason)`
@@ -2247,6 +2250,10 @@ impl ConversationOrchestrator {
         }
         let (goal_deferred, checkin_emitted, checkin_owner) =
             self.goal_checkin_pass_tasks(&deferring_tasks).await;
+        // Native 2.1.322 suppresses only the Goal evaluator under live hook
+        // restrictions. Select its registry role rather than a retired ID.
+        let goal_evaluator_restricted =
+            lingxi_core::host::OrchestratorHandle::hooks_restricted(self).await;
         let agg = self
             .hooks
             .execute_excluding_session_named_hook(
@@ -2254,7 +2261,7 @@ impl ConversationOrchestrator {
                     reason: reason.to_string(),
                 },
                 ctx,
-                goal_deferred.then_some(GOAL_STOP_HOOK_NAME),
+                (goal_deferred || goal_evaluator_restricted).then_some(GOAL_STOP_HOOK_NAME),
             )
             .await;
         let goal_hook_id = agg.session_hook_ids.get(GOAL_STOP_HOOK_NAME).copied();
@@ -2274,8 +2281,12 @@ impl ConversationOrchestrator {
                 GoalEvalOutcome::Deferred,
             )
         } else {
-            self.goal_stop_hook_disposition(goal_hook_id, &agg, parent_aborted)
-                .await
+            self.goal_stop_hook_disposition(
+                goal_hook_id.filter(|_| !goal_evaluator_restricted),
+                &agg,
+                parent_aborted,
+            )
+            .await
         };
         // The goal owns a separate, identity-checked control channel. Its
         // captured result must never fall back to an ordinary Stop block after

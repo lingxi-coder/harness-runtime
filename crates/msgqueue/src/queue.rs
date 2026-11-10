@@ -321,6 +321,38 @@ impl MessageQueueManager {
         })
         .await;
     }
+    /// Enqueue a proposal kickoff as an ordinary between-turn slash command.
+    pub async fn enqueue_goal_proposal(
+        &self,
+        uuid: String,
+        body: Utf16JsonProjection,
+        origin: lingxi_core::session::GoalOrigin,
+        cancel: CancellationToken,
+    ) {
+        self.enqueue(QueuedCommand {
+            uuid: uuid.clone(),
+            content: QueuedCommandContent::UserInput { text: body },
+            priority: QueuePriority::Later,
+            queued_at: SystemTime::now(),
+            source: if origin == lingxi_core::session::GoalOrigin::ProposalDirect {
+                QueueSource::TaskCompletion
+            } else {
+                QueueSource::Hook
+            },
+            agent_id: None,
+            skip_slash_commands: false,
+            is_meta: false,
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+        })
+        .await;
+        let queue = self.clone();
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            queue.remove(&[uuid], "goal proposal invalidated").await;
+        });
+    }
+
     /// Enqueue a passive goal retry through the ordinary host turn lifecycle.
     pub async fn enqueue_goal_retry(
         &self,
@@ -895,6 +927,47 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn goal_proposal_waits_between_turns_and_retains_nonhuman_origin() {
+        for (origin, source) in [
+            (
+                lingxi_core::session::GoalOrigin::ProposalDirect,
+                QueueSource::TaskCompletion,
+            ),
+            (
+                lingxi_core::session::GoalOrigin::ProposalApproved,
+                QueueSource::Hook,
+            ),
+        ] {
+            let queue = MessageQueueManager::new();
+            let cancel = CancellationToken::new();
+            queue
+                .enqueue_goal_proposal(
+                    "goal-proposal:test".into(),
+                    "/goal ship it".into(),
+                    origin,
+                    cancel.clone(),
+                )
+                .await;
+            assert!(queue.take_mid_turn_prompt().await.is_none());
+            let commands = queue.snapshot().await;
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].source, source);
+            assert_eq!(commands[0].priority, QueuePriority::Later);
+            assert!(commands[0].is_slash_command());
+            assert!(!commands[0].skip_slash_commands);
+            assert!(!commands[0].is_meta);
+            cancel.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !queue.snapshot().await.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
     }
 
     #[tokio::test]

@@ -2322,6 +2322,8 @@ pub use drivers_impl::{
 pub(crate) mod context_announcements_impl;
 #[path = "conversation/goal_retry.rs"]
 mod goal_retry_impl;
+#[path = "conversation/goal_proposal.rs"]
+mod goal_proposal_impl;
 #[path = "conversation/hooks.rs"]
 mod hooks_impl;
 #[path = "conversation/main_reports.rs"]

@@ -140,6 +140,14 @@ pub struct AskUserQuestionRequestDto {
     /// Idle auto-continue window in seconds; `None` means wait indefinitely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Broker-authored display lifetime: retain this request across turn end.
+    /// Answer authority remains with the broker's internal lifetime record.
+    #[serde(
+        default,
+        rename = "sessionOwned",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub session_owned: bool,
 }
 
 fn decode_answer_object(raw: &str) -> Result<AskUserQuestionAnswersDto, String> {
@@ -411,11 +419,37 @@ mod tests {
                 multi_select: false,
             }],
             timeout_secs: None,
+            session_owned: false,
         };
         let encoded = serde_json::to_string(&request).unwrap();
         assert!(encoded.contains(r#""question":"Q\ud800""#));
         assert!(encoded.contains(r#""label":"A\udc00""#));
+        assert!(!encoded.contains("sessionOwned"));
         let decoded: AskUserQuestionRequestDto = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn session_owned_request_marker_is_optional_and_preserves_ordinary_wire() {
+        let mut request = AskUserQuestionRequestDto {
+            request_id: 7,
+            questions: Vec::new(),
+            timeout_secs: None,
+            session_owned: false,
+        };
+        let ordinary = r#"{"request_id":7,"questions":[]}"#;
+        assert_eq!(serde_json::to_string(&request).unwrap(), ordinary);
+        assert_eq!(
+            serde_json::from_str::<AskUserQuestionRequestDto>(ordinary).unwrap(),
+            request
+        );
+
+        request.session_owned = true;
+        let goal = r#"{"request_id":7,"questions":[],"sessionOwned":true}"#;
+        assert_eq!(serde_json::to_string(&request).unwrap(), goal);
+        assert_eq!(
+            serde_json::from_str::<AskUserQuestionRequestDto>(goal).unwrap(),
+            request
+        );
     }
 }

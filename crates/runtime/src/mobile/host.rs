@@ -182,6 +182,7 @@ use automation::{
 
 mod configuration_admin;
 mod fast_mode_preference;
+mod goal_proposal;
 mod model_preference;
 mod permission_preference;
 mod settings_commands;
@@ -3314,6 +3315,21 @@ struct MobileMsgQueueInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueueInput {
+    fn supports_goal_proposals(&self) -> bool {
+        true
+    }
+    async fn enqueue_goal_proposal(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        origin: lingxi_core::session::GoalOrigin,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.queue
+            .enqueue_goal_proposal(id, body, origin, cancel)
+            .await;
+        Ok(())
+    }
     fn supports_goal_retries(&self) -> bool {
         true
     }
