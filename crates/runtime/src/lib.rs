@@ -54,6 +54,8 @@ mod effort_settings;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod fast_settings;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+mod goal_proposal;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod skill_prompt;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]

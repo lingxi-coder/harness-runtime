@@ -964,6 +964,11 @@ pub struct ResumeRuntimeSnapshot {
     pub compact_summary_message_ids: Vec<crate::types::MessageId>,
     /// User rows with the independent JSONL `isVirtual` flag.
     pub virtual_user_message_ids: Vec<crate::types::MessageId>,
+    /// Whether this session has observed provider rejection of a thinking signature.
+    pub thinking_signature_stripped: bool,
+    /// Rejected assistant reasoning ranges, keyed by their original message identity.
+    /// Each value preserves the count of reasoning blocks before the stripped suffix.
+    pub thinking_stripped_messages: std::collections::HashMap<crate::types::MessageId, usize>,
     /// Real user turns removed from a compacted in-memory history. A resume
     /// reconstructed from full JSONL history leaves this at zero.
     pub compacted_user_turns: u64,
@@ -2909,8 +2914,18 @@ pub trait OrchestratorHandle: Send + Sync {
         None
     }
 
+    /// Admit a host-generated proposal kickoff exactly once, while the host
+    /// holds its existing turn/session-switch dispatch slot.
+    async fn claim_goal_proposal(&self, _id: &str) -> bool {
+        false
+    }
+
     /// Activate or replace the current session-scoped `/goal`.
     async fn set_active_goal(&self, _condition: &Utf16JsonProjection) {}
+
+    /// Retire only a matching staged proposal origin when a set attempt is
+    /// rejected by its evaluator gate. Native consumes it before that gate.
+    async fn retire_goal_set_origin(&self, _condition: &Utf16JsonProjection) {}
 
     /// Clear the current session-scoped `/goal`, returning the removed value.
     async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
@@ -2927,6 +2942,19 @@ pub trait OrchestratorHandle: Send + Sync {
 
     /// Whether hook policy currently restricts `/goal`.
     async fn hooks_restricted(&self) -> bool {
+        false
+    }
+
+    /// Whether organization hook consent is still unanswered. A host without
+    /// that consent flow has no held request. This is separate from an
+    /// affirmative hooks restriction and from workspace trust.
+    async fn goal_hooks_held(&self) -> bool {
+        false
+    }
+
+    /// Native noninteractive sessions skip workspace trust only; hooks policy
+    /// and organization consent continue to apply.
+    fn goal_is_non_interactive(&self) -> bool {
         false
     }
 

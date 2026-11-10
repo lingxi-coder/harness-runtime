@@ -1,0 +1,1820 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "source_byte_ranges": [
+    {
+      "label": "JavaScript whitespace word count",
+      "start": 278816079,
+      "endExclusive": 278816127,
+      "sha256": "a1cf2b4ca1cde2580a4aedacf6270f60b0245b8d880aa957be8cd940db8f52ee"
+    },
+    {
+      "label": "new message count",
+      "start": 278816490,
+      "endExclusive": 278816713,
+      "sha256": "7661b1b92c5347428ad5977bef1821b5aeb7e1c55d192c682abdf2072f9af643"
+    },
+    {
+      "label": "main writes and own-user prose",
+      "start": 278816992,
+      "endExclusive": 278818024,
+      "sha256": "f4d89d2bf0db3acb87a54830205b82663ffe260cb6947e5d4f7bfabb1eb62c35"
+    },
+    {
+      "label": "prose cursor scan",
+      "start": 278818333,
+      "endExclusive": 278818469,
+      "sha256": "b3640b8b38fe9f9e3290e438eb483d55eff8e2471e0152451514ded4379d5271"
+    },
+    {
+      "label": "file-write path extraction",
+      "start": 278819994,
+      "endExclusive": 278820191,
+      "sha256": "e3fbcd8c3577e105813350cc5ba2253df6660ba86be5c3baa2baa63fc2cb5ec0"
+    },
+    {
+      "label": "file extraction prompt",
+      "start": 278823415,
+      "endExclusive": 278825795,
+      "sha256": "dca57a3002acdee7aa02c2a69e4c52da87fedde68b0af726122457288c8c86de"
+    },
+    {
+      "label": "successful-write summary",
+      "start": 278833730,
+      "endExclusive": 278833885,
+      "sha256": "b0707a439966317fed815e07f7c4b45e5556a0002162e8125e4c9f3559b8d3f2"
+    },
+    {
+      "label": "existing memory inventory renderer",
+      "start": 270728598,
+      "endExclusive": 270728791,
+      "sha256": "ceba488a17afa3015aa4b892a78571f6eb362fdda6fdc9f24900435fb91ac6ef"
+    },
+    {
+      "label": "frontmatter BOM removal",
+      "start": 265395460,
+      "endExclusive": 265395519,
+      "sha256": "5ba38baca353363bc1bf5ad163449c79ffe88f83c4ed632c1503eb79cecd0d3d"
+    },
+    {
+      "label": "native frontmatter delimiter regex",
+      "start": 265481250,
+      "endExclusive": 265481283,
+      "sha256": "9e981c749b286cad6299c355e7cc8c2439400df8002ec0e945de780e41102f84"
+    },
+    {
+      "label": "native frontmatter extraction",
+      "start": 265481364,
+      "endExclusive": 265483279,
+      "sha256": "836b4610e2c870c7a6fbd0c3efb26a550785619a36dc82e33eb5d5505fbd78b4"
+    },
+    {
+      "label": "file-extraction fork options",
+      "start": 278843749,
+      "endExclusive": 278844005,
+      "sha256": "75139f382137d16502c706867af203e7770e5147d1dc97bb2967be71ae8ff625"
+    },
+    {
+      "label": "native cadence default",
+      "start": 278837741,
+      "endExclusive": 278837825,
+      "sha256": "ad725cb73c2e3c75a3e2e3a69862f033ad6f83bcece0f1fddee092dfff0e135e"
+    },
+    {
+      "label": "file-extraction rollout gate",
+      "start": 278847085,
+      "endExclusive": 278847215,
+      "sha256": "cc20d36a01895e3c44e62c9afe016a5a2638c65bed835862d4947d175a5cd0e9"
+    },
+    {
+      "label": "file inventory head limits",
+      "start": 265481229,
+      "endExclusive": 265481250,
+      "sha256": "b77e5f2b6b55d200a745f334955150feddf9ca10d32b428acd4d8d224bc20493"
+    },
+    {
+      "label": "memory shell denial text",
+      "start": 278831612,
+      "endExclusive": 278831931,
+      "sha256": "61a6671f731432ea0b11e0331fa5e38138928aa85008972b12e4202aeb2b6d46"
+    },
+    {
+      "label": "memory tool denial text",
+      "start": 278832130,
+      "endExclusive": 278832213,
+      "sha256": "1fa4b154a9fd1d6565d895639fc8096f5e1844cb02e1afcca7405accb862d467"
+    }
+  ],
+  "scope": "Native local-file extraction prompt, own-user prose/cursor/write-skip helpers, and write summaries. Host policy, tools, file scan, provider dispatch and automatic scheduling need independent production checks. Legacy agents/session-memory is a LingXi extension.",
+  "file_pass": {
+    "query_source": "extract_memories",
+    "fork_label": "extract_memories",
+    "max_turns": 5,
+    "default_every_n_turns": 1,
+    "rollout_flag": "tengu_passport_quail",
+    "rollout_default": false,
+    "inventory_head_lines": 30,
+    "inventory_head_bytes": 65536
+  },
+  "prompts": [
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 2
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~2 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~2 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 3
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~3 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~3 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 5
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~5 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~5 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 6
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~6 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~6 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 8
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~8 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~8 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 9
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~9 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~9 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 11
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~11 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~11 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 12
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~12 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~12 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 14
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~14 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~14 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 15
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~15 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~15 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": true,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only, and Bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable Bash, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 17
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~17 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~17 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 18
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~18 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~18 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 20
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~20 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~20 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 21
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~21 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~21 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 23
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~23 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~23 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 24
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~24 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~24 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 26
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~26 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~26 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 27
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~27 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~27 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": false,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 29
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~29 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~29 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": false,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 30
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~30 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~30 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": false,
+        "message_count": 0
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~0 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~0 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only."
+    },
+    {
+      "input": {
+        "posix": false,
+        "existing_memory_files": "- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks",
+        "has_scope_guidance": true,
+        "project_skill_upkeep": true,
+        "shared_memory_tools_unavailable": true,
+        "message_count": 32
+      },
+      "expected": "You are now acting as the memory extraction subagent. Analyze the most recent ~32 messages above and use them to update your persistent memory systems.\n\nAvailable tools: Read, Grep, Glob, read-only PowerShell (Get-ChildItem/Get-Content/Select-Object -First/-Last and similar), and Edit/Write for paths inside the memory directory only, and PowerShell Remove-Item of .md files inside the memory directory only (outside protected subdirectories like .git or agents). All other tools — MCP, Agent, write-capable PowerShell, etc — will be denied.\n\nYou have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel. Do not interleave reads and writes across multiple turns.\n\nYou MUST only use content from the last ~32 messages to update your persistent memories. Do not waste any turns attempting to investigate or verify that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.\n\n## Existing memory files\n\n- [feedback] test.md (2026-11-09T00:00:00.000Z): Use focused checks\n\nCheck this list before writing — update an existing file rather than creating a duplicate.\n\nIf nothing is worth saving, output only 'Nothing to save.' Do not explain why.\n\nIf the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.\n\nApply the memory types, scope guidance, what-not-to-save criteria, and frontmatter format from the Memory section of your system prompt — it is already in your context above.\n\nSkip the project-skill upkeep step here: your writes are restricted to the memory directory, so record the correction as a feedback memory only.\n\nThe memory_list / memory_read / memory_write tools are unavailable here, so skip anything the scope guidance marks as shared with the project — the main conversation saves those; never file them in the personal directory instead. Save only what belongs in your personal memory directory."
+    }
+  ],
+  "triggers": [
+    {
+      "messages": [],
+      "cursor": null,
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "two words"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "two words"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "two words"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two"
+              },
+              {
+                "type": "text",
+                "text": "three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two"
+              },
+              {
+                "type": "text",
+                "text": "three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two"
+              },
+              {
+                "type": "text",
+                "text": "three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "one two three"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": true,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": true,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": true,
+          "message": {
+            "content": "save this preference"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one﻿two﻿three"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one﻿two﻿three"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one﻿two﻿three"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "onetwothree"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "onetwothree"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "onetwothree"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one two three"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one two three"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "one two three"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "一 二 三"
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "一 二 三"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "一 二 三"
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": true
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/outside/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/outside/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 0,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Write",
+                "id": "w1",
+                "input": {
+                  "file_path": "/outside/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Edit",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "w1",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": true
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Edit",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "w1",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Edit",
+                "id": "w1",
+                "input": {
+                  "file_path": "/memory/a.md",
+                  "content": "fact"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "w1",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": ""
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": true
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": ""
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": ""
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "shared",
+                "name": "memory_write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "isMeta": false,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "shared",
+                "content": "",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        },
+        {
+          "type": "system",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "message": {
+            "content": "not prose"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000003",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": null,
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        },
+        {
+          "type": "system",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "message": {
+            "content": "not prose"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000003",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000001",
+      "expected": {
+        "message_count": 1,
+        "has_user_prose": false,
+        "main_wrote_memory": false
+      }
+    },
+    {
+      "messages": [
+        {
+          "type": "user",
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "isMeta": false,
+          "message": {
+            "content": "save this preference"
+          }
+        },
+        {
+          "type": "system",
+          "uuid": "00000000-0000-4000-8000-000000000002",
+          "message": {
+            "content": "not prose"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "00000000-0000-4000-8000-000000000003",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ],
+      "cursor": "00000000-0000-4000-8000-000000000099",
+      "expected": {
+        "message_count": 2,
+        "has_user_prose": true,
+        "main_wrote_memory": false
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "paths": [],
+      "expected": {
+        "source": "extract",
+        "summary": "updated the memory index",
+        "paths": []
+      }
+    },
+    {
+      "paths": [
+        "/memory/MEMORY.md"
+      ],
+      "expected": {
+        "source": "extract",
+        "summary": "updated the memory index",
+        "paths": [
+          "/memory/MEMORY.md"
+        ]
+      }
+    },
+    {
+      "paths": [
+        "/memory/a.md"
+      ],
+      "expected": {
+        "source": "extract",
+        "summary": "saved 1 memory",
+        "paths": [
+          "/memory/a.md"
+        ]
+      }
+    },
+    {
+      "paths": [
+        "/memory/MEMORY.md",
+        "/memory/a.md",
+        "/memory/b.md"
+      ],
+      "expected": {
+        "source": "extract",
+        "summary": "saved 2 memories",
+        "paths": [
+          "/memory/MEMORY.md",
+          "/memory/a.md",
+          "/memory/b.md"
+        ]
+      }
+    }
+  ],
+  "inventories": [
+    {
+      "entries": [],
+      "expected": ""
+    },
+    {
+      "entries": [
+        {
+          "filename": "a.md",
+          "mtimeMs": 0,
+          "iso_timestamp": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "expected": "- a.md (1970-01-01T00:00:00.000Z)"
+    },
+    {
+      "entries": [
+        {
+          "filename": "user/name.md",
+          "mtimeMs": 1794182400123,
+          "type": "user",
+          "description": "Prefers focused checks",
+          "iso_timestamp": "2026-11-09T00:00:00.123Z"
+        }
+      ],
+      "expected": "- [user] user/name.md (2026-11-09T00:00:00.123Z): Prefers focused checks"
+    },
+    {
+      "entries": [
+        {
+          "filename": "a.md",
+          "mtimeMs": 1,
+          "type": "feedback",
+          "description": "",
+          "iso_timestamp": "1970-01-01T00:00:00.001Z"
+        },
+        {
+          "filename": "b.md",
+          "mtimeMs": 999,
+          "description": "Two lines\nstay literal",
+          "iso_timestamp": "1970-01-01T00:00:00.999Z"
+        }
+      ],
+      "expected": "- [feedback] a.md (1970-01-01T00:00:00.001Z)\n- b.md (1970-01-01T00:00:00.999Z): Two lines\nstay literal"
+    }
+  ],
+  "frontmatter_heads": [
+    {
+      "head": "---\nname: a\ndescription: Topic\n---\nBody",
+      "expected_yaml": "name: a\ndescription: Topic\n"
+    },
+    {
+      "head": "---\nname: a\n---",
+      "expected_yaml": "name: a\n"
+    },
+    {
+      "head": "﻿---\r\nname: a\r\n---  \r\nBody",
+      "expected_yaml": "name: a\r\n"
+    },
+    {
+      "head": "--- \n\ndescription: spaced\n---\n",
+      "expected_yaml": "description: spaced\n"
+    },
+    {
+      "head": "---\ndescription: early---suffix\n---\n",
+      "expected_yaml": "description: early"
+    },
+    {
+      "head": "body without frontmatter",
+      "expected_yaml": null
+    },
+    {
+      "head": "---\nmissing: delimiter",
+      "expected_yaml": null
+    },
+    {
+      "head": "---\nname: not-js-space\n---\n",
+      "expected_yaml": null
+    },
+    {
+      "head": "---﻿\nname: js-space\n---\n",
+      "expected_yaml": "name: js-space\n"
+    }
+  ],
+  "denials": [
+    {
+      "root": "/memory",
+      "posix": true,
+      "expected_shell": "Only read-only shell commands and rm (no flags except -f) of .md files under /memory (not protected subdirectories like .git or agents) are permitted in this context (ls, find, grep, cat, stat, wc, head, tail, and similar)",
+      "expected_tool": "only Read, Grep, Glob, read-only Bash, and Edit/Write within /memory are allowed"
+    },
+    {
+      "root": "/memory",
+      "posix": false,
+      "expected_shell": "Only read-only shell commands and Remove-Item of .md files under /memory (not protected subdirectories like .git or agents) are permitted in this context (Get-ChildItem, Get-Content, Select-Object -First/-Last, and similar)",
+      "expected_tool": "only Read, Grep, Glob, read-only PowerShell, and Edit/Write within /memory are allowed"
+    },
+    {
+      "root": "/home/u/.lingxi/project memory",
+      "posix": true,
+      "expected_shell": "Only read-only shell commands and rm (no flags except -f) of .md files under /home/u/.lingxi/project memory (not protected subdirectories like .git or agents) are permitted in this context (ls, find, grep, cat, stat, wc, head, tail, and similar)",
+      "expected_tool": "only Read, Grep, Glob, read-only Bash, and Edit/Write within /home/u/.lingxi/project memory are allowed"
+    },
+    {
+      "root": "/home/u/.lingxi/project memory",
+      "posix": false,
+      "expected_shell": "Only read-only shell commands and Remove-Item of .md files under /home/u/.lingxi/project memory (not protected subdirectories like .git or agents) are permitted in this context (Get-ChildItem, Get-Content, Select-Object -First/-Last, and similar)",
+      "expected_tool": "only Read, Grep, Glob, read-only PowerShell, and Edit/Write within /home/u/.lingxi/project memory are allowed"
+    }
+  ]
+}

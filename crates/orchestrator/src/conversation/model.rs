@@ -2171,8 +2171,12 @@ impl ConversationOrchestrator {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
             return Ok(());
         };
-        slot.save(self.build_cache_safe_params(system, model, tools).await?)
-            .await;
+        self.publish_memory_cache_safe_params(
+            slot,
+            self.build_cache_safe_params(system, model, tools).await?,
+            false,
+        )
+        .await;
         Ok(())
     }
 
@@ -2204,7 +2208,7 @@ impl ConversationOrchestrator {
         if let Some(inline_context) = inline_context {
             params.user_context_message = Some(inline_context.clone());
         }
-        slot.save(params).await;
+        self.publish_memory_cache_safe_params(slot, params, true).await;
         Ok(())
     }
 
@@ -2949,6 +2953,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Revoke both foreground launch and startup-prewarm admission before the
     /// host awaits teardown. Existing Arc holders cannot reopen either owner.
     pub fn close_background_producer_admission(&self) {
+        self.close_goal_proposal_admission();
         if let Some(forker) = &self.bg_session_forker {
             forker.lifecycle().close();
         }
@@ -3287,9 +3292,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     pub(super) async fn sync_goal_checkin_idle_task(&self) {
+        // Publish the timer under the same owner lock used by replacement and
+        // clear, so a retired goal cannot install a timer after its reset.
+        let session = self.session.lock().await;
         let should_run = self.lifecycle_runtime.stop_hook_snapshot.is_some()
             && crate::prompt::goal_checkin::checkin_interval_ms() > 0
-            && self.session.lock().await.active_goal.is_some()
+            && session.active_goal.is_some()
             && self
                 .lifecycle_runtime
                 .goal_checkin
@@ -4335,6 +4343,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         before_start.await?;
+        let prior_assistants: std::collections::HashSet<_> = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::Assistant { .. }
+                )
+            })
+            .map(lingxi_core::types::ConversationMessage::id)
+            .collect();
         let outcome = self
             .run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await?;
@@ -4347,7 +4369,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 matches!(
                     message,
                     lingxi_core::types::ConversationMessage::Assistant { .. }
-                )
+                ) && !prior_assistants.contains(&message.id())
             })
             .map(lingxi_core::types::ConversationMessage::text_content)
             .unwrap_or_default();
@@ -4392,11 +4414,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         settings: crate::scheduled_turn::ScheduledSettings,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
-        // A scheduled run drives the LIVE session's output stream, so the client
-        // has to learn a turn started — otherwise the composer stays unlocked,
-        // no Stop button appears, and any permission prompt this turn raises
-        // belongs to a turn the client was never told about.
-        self.output.emit_turn_started().await;
+        // The shared admission boundary announces the live scheduled turn only
+        // after its storage/profile checks and cancellation checks succeed.
         crate::scheduled_turn::SETTINGS
             .scope(
                 settings,

@@ -544,6 +544,10 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::AutoModeScan => TaskSpawnInput::AutoModeScan,
         TaskType::Dream => TaskSpawnInput::Dream {
             prompt: String::new(),
+            context: None,
+            fork_request: None,
+            fork_wire: None,
+            writes: None,
             max_iterations: None,
         },
         TaskType::LocalFusion => TaskSpawnInput::LocalFusion {

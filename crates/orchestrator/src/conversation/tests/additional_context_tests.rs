@@ -830,6 +830,77 @@ async fn denied_turn_step_model_rewrite_streams_configured_source_on_original_ro
 }
 
 #[tokio::test]
+async fn ordinary_stream_preserves_configured_native_model_source_before_policy_scope() {
+    use crate::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut configured_model_units = "claude-sonnet-4-6".encode_utf16().collect::<Vec<_>>();
+    configured_model_units.push(0xD800);
+    let configured_model_source = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&configured_model_units),
+        configured_model_units.clone(),
+    )
+    .expect("configured model source keeps its exact UTF-16 units");
+    let streaming = Arc::new(ConfiguredModelSourceStreamingApi::with_events(vec![
+        message_start("msg_configured_model_source", "claude-sonnet-4-6"),
+        content_block_start_text(0),
+        text_delta(0, "continued with the configured source"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]));
+    let mut orchestrator = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            model: "claude-sonnet-4-6".into(),
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(ManagedModelRouteApi),
+        streaming.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    );
+    orchestrator.session.lock().await.model_profile = Some("configured-profile".into());
+    orchestrator = orchestrator
+        .with_main_model_selection(
+            Some(String::from_utf16_lossy(&configured_model_units)),
+            Some(configured_model_source.clone()),
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault,
+            None,
+        )
+        .await;
+    let orchestrator = ConversationOrchestrator::into_shared(orchestrator);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        orchestrator.run_turn_streaming("question"),
+    )
+    .await
+    .expect("the ordinary stream completes on its configured route")
+    .unwrap();
+
+    let calls = streaming.calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.model, "claude-sonnet-4-6");
+    assert_eq!(call.profile.as_deref(), Some("configured-profile"));
+    assert_eq!(call.model_source.as_ref(), Some(&configured_model_source));
+    assert_eq!(
+        call.model_source
+            .as_ref()
+            .and_then(|source| source.string_units("")),
+        Some(configured_model_units),
+        "the internal policy scope must not discard or re-encode the owned Native model source"
+    );
+}
+
+#[tokio::test]
 async fn mod_turn_step_stream_keeps_synthetic_and_physical_assistant_records() {
     use crate::test_support_stream::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
@@ -2972,6 +3043,108 @@ async fn prompt_compose_api_returns_detached_hooked_sections() {
             .expect("context message"),
     );
     assert!(body.contains("# composeProof\nCOMPOSE API OK"));
+    assert!(orch
+        .prompt_runtime
+        .mod_prompt_sections
+        .lock()
+        .await
+        .answers
+        .is_empty());
+}
+
+#[tokio::test]
+async fn chat_prompt_compose_next_preserves_mode_and_instruction_epoch() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("chat-compose-next.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('prompt.compose', async ($, e, next) => {
+            const answer = await next({ ...e, traits: [...e.traits, 'sdk-preset'] });
+            return { sections: [...answer.sections,
+              { id: 'chat-recompose-marker', text: 'CHAT RECOMPOSED', scope: 'session' }] };
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "chat-compose-next",
+        dir.path(),
+        &module,
+        empty_mod_options(),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
+        .with_conversation_mode(ConversationMode::Chat)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    orch.restore_captured_conversation_profile(ConversationMode::Chat, 7)
+        .await
+        .unwrap();
+
+    let prompt = orch.build_system_prompt().await.unwrap();
+    assert!(prompt.starts_with(crate::prompt::profile_header(ConversationMode::Chat)));
+    assert!(prompt.contains("Discuss and explain when asked to discuss"));
+    assert!(prompt.contains("Current conversation profile: chat (context epoch 7)"));
+    assert!(prompt.ends_with("CHAT RECOMPOSED"));
+    assert!(!prompt.contains(crate::prompt::profile_header(ConversationMode::Code)));
+    assert!(!prompt.contains("Primary working directory:"));
+}
+
+#[tokio::test]
+async fn chat_detached_prompt_compose_preserves_mode_and_instruction_epoch() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("chat-compose-api.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('prompt.context', async ($, e, next) => {
+            const answer = await $.prompt.compose({ traits: ['sdk-preset'] });
+            return next({ ...e, blocks: [...e.blocks, {
+              name: 'chatDetachedCompose',
+              text: answer.sections.map(section => section.text).join('\n\n')
+            }] });
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("chat-compose-api", dir.path(), &module, empty_mod_options())
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
+        .with_conversation_mode(ConversationMode::Chat)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    orch.restore_captured_conversation_profile(ConversationMode::Chat, 9)
+        .await
+        .unwrap();
+
+    let context = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("Mod context"),
+    );
+    assert!(context.contains("# chatDetachedCompose\n"));
+    assert!(context.contains(crate::prompt::profile_header(ConversationMode::Chat)));
+    assert!(context.contains("Discuss and explain when asked to discuss"));
+    assert!(context.contains("Current conversation profile: chat (context epoch 9)"));
+    assert!(!context.contains(crate::prompt::profile_header(ConversationMode::Code)));
+    assert!(!context.contains("Primary working directory:"));
     assert!(orch
         .prompt_runtime
         .mod_prompt_sections

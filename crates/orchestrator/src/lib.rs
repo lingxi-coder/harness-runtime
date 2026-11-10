@@ -44,10 +44,12 @@ pub mod error;
 pub mod file_changed_firer;
 pub mod handle_impl;
 pub mod hook_attachment_sink;
+mod hook_context_source;
 pub mod hook_prompt_runner;
 pub mod image_input;
 pub mod loop_permission_classifier;
 pub mod mcp_hook_dispatcher;
+pub use hook_context_source::HookContextSource;
 pub mod mod_prompt_origin;
 pub mod mod_surface_roster;
 pub mod mod_turn_step;
@@ -122,10 +124,11 @@ pub use conversation::{
     ScheduledLoopFire, ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 pub use conversation::{
-    AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
-    OrchestratorApiClient, OrchestratorApiRequest, PersistentChatContextConfig,
-    QueryUserInterruptionKind, SessionMemoryHandle, SideChatParentSnapshot, StreamingApiClient,
-    TurnExecutionMetrics, TurnOutcome,
+    AppAgentPromptProfile, AutoMemoryHandle, ConversationOrchestrator, ConversationOutcome,
+    HookPromptRequest, MemoryPreferences, MemoryPreferencesProvider, OrchestratorApiClient,
+    OrchestratorApiRequest, PersistentChatContextConfig, QueryUserInterruptionKind,
+    SessionMemoryHandle, SideChatParentSnapshot, StreamingApiClient, TurnExecutionMetrics,
+    TurnOutcome,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;

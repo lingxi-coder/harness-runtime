@@ -1,0 +1,1 @@
+ The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.

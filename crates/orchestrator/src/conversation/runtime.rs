@@ -29,6 +29,47 @@ mod synthetic_api_error_identity_tests {
 
 use super::*;
 
+/// Admission lease for queued lifecycle jobs. A transition closes admission
+/// until its new session starts; retained jobs keep their retired token.
+pub(crate) struct ModSessionJobLifetime {
+    state: std::sync::Mutex<(CancellationToken, bool)>,
+}
+
+impl ModSessionJobLifetime {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new((CancellationToken::new(), true)),
+        }
+    }
+
+    pub(crate) fn capture(&self) -> Option<CancellationToken> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.1.then(|| state.0.clone())
+    }
+
+    pub(crate) fn retire(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.0.cancel();
+        state.1 = false;
+    }
+
+    pub(crate) fn activate(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.1 {
+            *state = (CancellationToken::new(), true);
+        }
+    }
+}
+
 /// Session owner for tool-hook publication generations. A normal per-turn
 /// executor may finish while an admitted async hook is still running, so its
 /// generation must remain current until the session changes. Session switches
@@ -41,6 +82,7 @@ pub(crate) struct SessionToolHookGeneration {
 struct SessionToolHookGenerationState {
     root: lingxi_core::host::CancellationToken,
     publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_publications: Arc<crate::autonomous_tool_scheduler::TransientPublicationGate>,
 }
 
 impl SessionToolHookGeneration {
@@ -49,6 +91,7 @@ impl SessionToolHookGeneration {
             state: std::sync::Mutex::new(SessionToolHookGenerationState {
                 root: lingxi_core::host::CancellationToken::new(),
                 publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+                transient_publications: Arc::default(),
             }),
         }
     }
@@ -71,6 +114,18 @@ impl SessionToolHookGeneration {
         )
     }
 
+    pub(crate) fn transient_publications(
+        &self,
+    ) -> Arc<crate::autonomous_tool_scheduler::TransientPublicationGate> {
+        Arc::clone(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .transient_publications,
+        )
+    }
+
     /// Invalidate every retired executor generation first, then wait for any
     /// durable mutation already admitted under the old session's lease. New
     /// sessions receive a distinct token and commit lock.
@@ -83,6 +138,7 @@ impl SessionToolHookGeneration {
             let replacement = SessionToolHookGenerationState {
                 root: lingxi_core::host::CancellationToken::new(),
                 publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+                transient_publications: Arc::default(),
             };
             let old = std::mem::replace(&mut *state, replacement);
             old.root.cancel();
@@ -194,6 +250,11 @@ pub(crate) struct TranscriptStore {
     /// persisted and its post-result hooks/attachments have run.
     pub(crate) pending_tool_result_turn_end:
         Mutex<std::collections::HashMap<String, tool_api::tool_trait::ToolResultTurnEnd>>,
+    /// Accepted EndConversation results retain their generation authority until
+    /// the driver consumes them; a reset after metadata commit revokes them.
+    pub(crate) pending_end_conversation_requests: Mutex<
+        std::collections::HashMap<String, crate::end_conversation_tool::EndConversationRequest>,
+    >,
     /// `tool_use_id` → claude's `sourceToolAssistantUUID`: the uuid of the
     /// ASSISTANT transcript line that carried this `tool_use` block
     /// (`sourceToolAssistantUUID: i.uuid` at every producer site). claude's
@@ -286,6 +347,7 @@ impl TranscriptStore {
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
             pending_tool_result_turn_end: Mutex::new(std::collections::HashMap::new()),
+            pending_end_conversation_requests: Mutex::new(std::collections::HashMap::new()),
             tool_source_assistant_uuids: Arc::new(Mutex::new(std::collections::HashMap::new())),
             tool_persisted_origins: Arc::new(Mutex::new(std::collections::HashMap::new())),
             tool_source_assistant_notify: Arc::new(tokio::sync::Notify::new()),
@@ -328,6 +390,7 @@ impl TranscriptStore {
         self.tool_use_results.lock().await.clear();
         self.tool_use_mcp_meta.lock().await.clear();
         self.pending_tool_result_turn_end.lock().await.clear();
+        self.pending_end_conversation_requests.lock().await.clear();
         self.tool_source_assistant_uuids.lock().await.clear();
         self.tool_persisted_origins.lock().await.clear();
         self.pending_hook_attachments.lock().await.clear();
@@ -858,6 +921,12 @@ impl ConversationOrchestrator {
 }
 
 pub(crate) struct PromptRuntime {
+    pub(crate) auto_memory: Option<Arc<super::auto_memory::AutoMemoryHandle>>,
+    pub(crate) auto_dream: Option<super::background_memory::AutoDreamBinding>,
+    pub(crate) background_memory_lifecycle: Mutex<()>,
+    pub(crate) memory_preferences_provider:
+        Option<Arc<super::background_memory::MemoryPreferencesProvider>>,
+    pub(crate) memory_preferences: Mutex<Option<super::background_memory::MemoryPreferences>>,
     /// Host-only, nonserialized boundary for private workspaces. Prompt and
     /// transcript metadata must not execute commands against model-owned Git.
     pub(crate) host_environment_probes_disabled: bool,
@@ -1161,6 +1230,17 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// Metadata retained while a live memory change replaces an existing
+    /// snapshot. A resumed session without a snapshot never creates one here.
+    pub(crate) pending_memory_prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// A live memory change awaits a main request with a matching wire prefix,
+    /// independently of whether static prompt snapshots are enabled.
+    pub(crate) memory_prompt_dirty: std::sync::atomic::AtomicBool,
+    /// Only the serialized main request captures this epoch; previews and
+    /// prewarm cannot acknowledge a changed dynamic memory directory.
+    pub(crate) memory_prompt_generation: std::sync::atomic::AtomicU64,
+    pub(crate) main_memory_prompt_generation: std::sync::atomic::AtomicU64,
+    pub(crate) memory_resume_prompt_checked: std::sync::atomic::AtomicBool,
     /// Typed additive source restored independently of a frozen prompt body.
     /// A route or bundle migration may discard that body while keeping this
     /// host-approved source; current configuration always has precedence.
@@ -1211,6 +1291,11 @@ impl PromptRuntime {
 
     pub(crate) fn new() -> Self {
         Self {
+            auto_memory: None,
+            auto_dream: None,
+            background_memory_lifecycle: Mutex::new(()),
+            memory_preferences_provider: None,
+            memory_preferences: Mutex::new(None),
             host_environment_probes_disabled: false,
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
             suggestion_background: std::sync::Mutex::new(Default::default()),
@@ -1276,6 +1361,11 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            pending_memory_prompt_snapshot: Mutex::new(None),
+            memory_prompt_dirty: std::sync::atomic::AtomicBool::new(false),
+            memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
+            main_memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
+            memory_resume_prompt_checked: std::sync::atomic::AtomicBool::new(false),
             restored_append_system_prompt: std::sync::RwLock::new(None),
             frozen_prompt_source_vector: Mutex::new(None),
             prompt_snapshot_epoch: Mutex::new(None),
@@ -1404,6 +1494,15 @@ impl PromptRuntime {
         *self.pending_memory_prefetch.lock().await = None;
         *self.pending_skill_prefetch.lock().await = None;
         *self.pending_prompt_source_vector.lock().await = None;
+        *self.pending_memory_prompt_snapshot.lock().await = None;
+        self.memory_prompt_dirty
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.memory_prompt_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.main_memory_prompt_generation
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_snapshot.lock().await = None;
         self.restore_prompt_snapshot_append_source(None);
         *self.frozen_prompt_source_vector.lock().await = None;
@@ -1707,6 +1806,11 @@ impl CompactionRuntime {
         if let Some(compactor) = self.compaction.as_ref() {
             let _ = compactor.context_collapse.reset("session_boundary");
         }
+        self.reset_session_memory().await;
+    }
+
+    /// Fence pending legacy extraction before disabling or changing stores.
+    pub(crate) async fn reset_session_memory(&self) {
         if let Some(handle) = self.session_memory.as_ref() {
             let mut extractor = handle.extractor.lock().await;
             handle
@@ -1766,6 +1870,11 @@ mod total_tokens_lifecycle_tests;
 
 /// State owned by lifecycle hooks, goal checks, and main-thread agents.
 pub(crate) struct LifecycleRuntime {
+    /// Serializes goal state and its ordered metadata publication. External
+    /// evaluators, usage providers and analytics run outside this guard.
+    pub(crate) goal_transition: tokio::sync::Mutex<()>,
+    pub(crate) mod_session_jobs: ModSessionJobLifetime,
+    pub(crate) goal_proposal: super::goal_proposal_impl::GoalProposalRuntime,
     pub(crate) goal_retry: std::sync::Mutex<super::goal_retry_impl::GoalRetryState>,
     pub(crate) goal_retry_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
     /// Parent cancellation/commit scope shared by every streaming executor in
@@ -1845,12 +1954,15 @@ pub(crate) struct LifecycleRuntime {
 impl LifecycleRuntime {
     pub(crate) fn new() -> Self {
         Self {
+            goal_transition: tokio::sync::Mutex::new(()),
+            mod_session_jobs: ModSessionJobLifetime::new(),
             hook_registry: None,
             agent_catalog: None,
             main_thread_agent: tokio::sync::RwLock::new(None),
             main_thread_agent_hook_id: Mutex::new(None),
             goal_retry: std::sync::Mutex::new(super::goal_retry_impl::GoalRetryState::default()),
             goal_retry_owner: std::sync::OnceLock::new(),
+            goal_proposal: super::goal_proposal_impl::GoalProposalRuntime::default(),
             session_tool_hook_generation: SessionToolHookGeneration::new(),
             goal_checkin: Arc::new(std::sync::Mutex::new(
                 crate::prompt::goal_checkin::GoalDeferralState::default(),

@@ -158,6 +158,23 @@ impl Default for CancelReasonFlag {
 /// each origin through the Mod receive screen before the text is joined.
 #[async_trait]
 pub trait MidTurnInputSource: Send + Sync {
+    /// Whether this host owns an ordinary between-turn Goal command queue.
+    fn supports_goal_proposals(&self) -> bool {
+        false
+    }
+
+    /// Enqueue a model-proposed Goal kickoff as a slash command. Hosts must
+    /// leave the active goal unchanged until this command is dispatched.
+    async fn enqueue_goal_proposal(
+        &self,
+        _id: String,
+        _body: Utf16JsonProjection,
+        _origin: lingxi_core::session::GoalOrigin,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        Err("Goal proposal queue is unavailable".into())
+    }
+
     /// Hosts can restrict their input to a particular native consumption point.
     /// Desktop and mobile queues retain their existing drain behavior.
     fn admits_at(&self, point: MidTurnInputPoint) -> bool {

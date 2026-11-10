@@ -45,10 +45,194 @@ pub(crate) struct OwnedToolCall {
     pub(crate) tool_context_state: Option<ToolInvocationContextState>,
 }
 
+/// Temporary admission for cancellable UI/progress output. It is independent
+/// of durable session authority so a rejected switch can keep its old owners.
+#[derive(Default)]
+pub(crate) struct TransientPublicationGate {
+    state: Mutex<TransientPublicationState>,
+}
+
+#[derive(Default)]
+struct TransientPublicationState {
+    suspensions: usize,
+    cancellation: CancellationToken,
+}
+
+impl TransientPublicationGate {
+    #[cfg(test)]
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .suspensions
+            != 0
+    }
+
+    fn admit(&self) -> Option<CancellationToken> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.suspensions == 0).then(|| state.cancellation.clone())
+    }
+
+    pub(crate) fn suspend(self: &Arc<Self>) -> TransientPublicationSuspension {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.suspensions += 1;
+        state.cancellation.cancel();
+        TransientPublicationSuspension(Arc::clone(self))
+    }
+}
+
+pub(crate) struct TransientPublicationSuspension(Arc<TransientPublicationGate>);
+
+impl Drop for TransientPublicationSuspension {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.suspensions -= 1;
+        if state.suspensions == 0 {
+            state.cancellation = CancellationToken::new();
+        }
+    }
+}
+
+#[cfg(test)]
+mod transient_publication_tests {
+    use super::*;
+    use hooks::attachment::HookPublicationGuard;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn suspension_cancels_a_mod_owned_sink_and_keeps_future_a_publications() {
+        let authority = CancellationToken::new();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let gate = Arc::new(TransientPublicationGate::default());
+        let fence = ToolDispatchPublicationFence::new(authority.clone(), lock.clone())
+            .with_transient_publications(gate.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let running = fence.clone();
+        let started = entered.clone();
+        let output = tokio::spawn(async move {
+            running
+                .publish_if_current(async move {
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                })
+                .await
+        });
+        entered.notified().await;
+        let suspension = gate.suspend();
+        assert!(gate.is_suspended());
+        assert!(!tokio::time::timeout(Duration::from_secs(2), output)
+            .await
+            .unwrap()
+            .unwrap());
+        let lease = tokio::time::timeout(Duration::from_secs(2), lock.lock())
+            .await
+            .unwrap();
+        drop(lease);
+        assert!(!authority.is_cancelled());
+        assert!(fence.is_current());
+        assert!(
+            !fence
+                .publish_if_current(async { panic!("suspended UI was admitted") })
+                .await
+        );
+        // A failed target activation does not revoke durable ownership.
+        assert!(HookPublicationGuard::commit_if_current(&fence, Box::pin(async {})).await);
+        drop(suspension);
+        assert!(!gate.is_suspended());
+        assert!(fence.publish_if_current(async {}).await);
+    }
+
+    #[tokio::test]
+    async fn suspension_also_cancels_publications_waiting_for_the_commit_lock() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let gate = Arc::new(TransientPublicationGate::default());
+        let fence = ToolDispatchPublicationFence::new(CancellationToken::new(), lock.clone())
+            .with_transient_publications(gate.clone());
+        let lease = lock.lock().await;
+        let publication = fence.publish_if_current(async { panic!("held lock was bypassed") });
+        tokio::pin!(publication);
+        assert!(matches!(
+            futures::poll!(publication.as_mut()),
+            std::task::Poll::Pending
+        ));
+        let _suspension = gate.suspend();
+        assert!(!tokio::time::timeout(Duration::from_secs(2), publication)
+            .await
+            .unwrap());
+        drop(lease);
+        assert!(fence.is_current());
+    }
+
+    #[tokio::test]
+    async fn suspension_does_not_cancel_an_admitted_durable_mutation() {
+        let authority = CancellationToken::new();
+        let gate = Arc::new(TransientPublicationGate::default());
+        let fence = ToolDispatchPublicationFence::new(
+            authority.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        )
+        .with_transient_publications(gate.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = entered.clone();
+        let released = release.clone();
+        let mut commit = tokio::spawn(async move {
+            HookPublicationGuard::commit_if_current(
+                &fence,
+                Box::pin(async move {
+                    started.notify_one();
+                    released.notified().await;
+                }),
+            )
+            .await
+        });
+        entered.notified().await;
+        let _suspension = gate.suspend();
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut commit)
+            .await
+            .is_err());
+        assert!(!authority.is_cancelled());
+        release.notify_one();
+        assert!(commit.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn nested_suspensions_resume_only_after_the_last_guard_and_do_not_revive_authority() {
+        let authority = CancellationToken::new();
+        let gate = Arc::new(TransientPublicationGate::default());
+        let fence = ToolDispatchPublicationFence::new(
+            authority.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        )
+        .with_transient_publications(gate.clone());
+        let first = gate.suspend();
+        let second = gate.suspend();
+        drop(first);
+        assert!(gate.is_suspended());
+        assert!(!fence.publish_if_current(async {}).await);
+        authority.cancel();
+        drop(second);
+        assert!(!gate.is_suspended());
+        assert!(!fence.is_current());
+        assert!(!fence.publish_if_current(async {}).await);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolDispatchPublicationFence {
     generation_root: CancellationToken,
     publication_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_publications: Option<Arc<TransientPublicationGate>>,
 }
 
 impl ToolDispatchPublicationFence {
@@ -59,7 +243,16 @@ impl ToolDispatchPublicationFence {
         Self {
             generation_root,
             publication_lock,
+            transient_publications: None,
         }
+    }
+
+    pub(crate) fn with_transient_publications(
+        mut self,
+        gate: Arc<TransientPublicationGate>,
+    ) -> Self {
+        self.transient_publications = Some(gate);
+        self
     }
 
     /// Serialize one external progress/UI publication against reset, while
@@ -67,19 +260,41 @@ impl ToolDispatchPublicationFence {
     /// Result rows themselves are carried to Tn and committed only after actor
     /// acceptance; this lease is only for side-channel events.
     pub(crate) async fn publish_if_current(&self, publication: impl Future<Output = ()>) -> bool {
+        // Each call reads the shared gate anew: an old A capability remains
+        // usable after a failed B activation resumes transient admission.
+        let transient = match &self.transient_publications {
+            Some(gate) => match gate.admit() {
+                Some(token) => Some(token),
+                None => return false,
+            },
+            None => None,
+        };
+        let transient_cancelled = async {
+            match &transient {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(transient_cancelled);
         let root = self.generation_root.clone();
         let lock = Arc::clone(&self.publication_lock);
         let _guard = tokio::select! {
             biased;
             () = root.cancelled() => return false,
+            () = &mut transient_cancelled => return false,
             guard = lock.lock_owned() => guard,
         };
-        if root.is_cancelled() {
+        if root.is_cancelled()
+            || transient
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
             return false;
         }
         tokio::select! {
             biased;
             () = root.cancelled() => false,
+            () = &mut transient_cancelled => false,
             () = publication => true,
         }
     }
@@ -259,12 +474,14 @@ pub(crate) struct ToolScheduler {
     stop_scheduling_requested: Arc<AtomicBool>,
     completion_commit_lock: Arc<Mutex<()>>,
     publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_publications: Option<Arc<TransientPublicationGate>>,
     lifecycle: ToolUseLifecycleTracker,
     #[cfg(test)]
     actor_terminated: Arc<tokio::sync::Notify>,
 }
 
 impl ToolScheduler {
+    #[cfg(test)]
     pub(crate) fn spawn(
         dispatch: ToolDispatch,
         max_safe_concurrency: usize,
@@ -273,6 +490,29 @@ impl ToolScheduler {
         session_root: CancellationToken,
         publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
         model_context_resolver: Option<ModelContextResolver>,
+    ) -> Self {
+        Self::spawn_with_transient_publications(
+            dispatch,
+            max_safe_concurrency,
+            user_cancel,
+            initial_tool_context_state,
+            session_root,
+            publication_commit_lock,
+            model_context_resolver,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_with_transient_publications(
+        dispatch: ToolDispatch,
+        max_safe_concurrency: usize,
+        user_cancel: Option<CancellationToken>,
+        initial_tool_context_state: Option<ToolInvocationContextState>,
+        session_root: CancellationToken,
+        publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+        model_context_resolver: Option<ModelContextResolver>,
+        transient_publications: Option<Arc<TransientPublicationGate>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         // User interruption is per-tool (InterruptBehavior::Cancel). The root
@@ -297,6 +537,7 @@ impl ToolScheduler {
             stop_scheduling_requested: Arc::clone(&stop_scheduling_requested),
             completion_commit_lock: Arc::clone(&completion_commit_lock),
             publication_commit_lock: Arc::clone(&publication_commit_lock),
+            transient_publications: transient_publications.clone(),
             normal_finished: Arc::clone(&normal_finished),
             user_cancel_applied: false,
             max_safe_concurrency: max_safe_concurrency.max(1),
@@ -334,6 +575,7 @@ impl ToolScheduler {
             stop_scheduling_requested,
             completion_commit_lock,
             publication_commit_lock,
+            transient_publications,
             lifecycle: ToolUseLifecycleTracker::default(),
             #[cfg(test)]
             actor_terminated,
@@ -354,7 +596,12 @@ impl ToolScheduler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        ToolDispatchPublicationFence::new(root, Arc::clone(&self.publication_commit_lock))
+        let mut fence =
+            ToolDispatchPublicationFence::new(root, Arc::clone(&self.publication_commit_lock));
+        if let Some(gate) = &self.transient_publications {
+            fence = fence.with_transient_publications(Arc::clone(gate));
+        }
+        fence
     }
 
     pub(crate) async fn add(&mut self, call: OwnedToolCall) -> Result<bool, SchedulerStopped> {
@@ -570,6 +817,7 @@ struct Actor {
     stop_scheduling_requested: Arc<AtomicBool>,
     completion_commit_lock: Arc<Mutex<()>>,
     publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_publications: Option<Arc<TransientPublicationGate>>,
     normal_finished: Arc<AtomicBool>,
     user_cancel_applied: bool,
     max_safe_concurrency: usize,
@@ -872,10 +1120,14 @@ impl Actor {
         #[cfg(test)]
         let dispatch_finished_tx = call.dispatch_finished_tx.take();
         record.call_cancellation = Some(call_cancellation);
-        call.publication_fence = Some(ToolDispatchPublicationFence::new(
+        let mut publication_fence = ToolDispatchPublicationFence::new(
             self.root.clone(),
             Arc::clone(&self.publication_commit_lock),
-        ));
+        );
+        if let Some(gate) = &self.transient_publications {
+            publication_fence = publication_fence.with_transient_publications(Arc::clone(gate));
+        }
+        call.publication_fence = Some(publication_fence);
         let (started_tx, started_rx) = oneshot::channel();
         let dispatch = Arc::clone(&self.dispatch);
         let trace_context = telemetry::otel::capture_current_trace_context();

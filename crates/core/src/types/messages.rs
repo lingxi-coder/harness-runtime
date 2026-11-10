@@ -840,6 +840,10 @@ pub enum CompactGoalOrigin {
     User,
     /// The goal came back with a resumed session.
     Restored,
+    /// A model proposal set the goal without a dialog.
+    ProposalDirect,
+    /// The user approved a model proposal.
+    ProposalApproved,
 }
 
 /// Typed metadata carried by a compact-boundary system message.

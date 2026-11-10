@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
+lingxi-llm-client.workspace = true
 tool-api = { path = "../tool-api" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

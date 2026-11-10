@@ -647,6 +647,14 @@ pub struct ToolInvocationResult {
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync + Any {
+    /// Snapshot private file-tool state for one host-owned memory fork while
+    /// retaining the same registry and enforcing permission gate. Test or
+    /// stateless invokers may leave this unsupported. Inherited reads are
+    /// admitted only when the host freezes this state with its history.
+    fn fork_for_memory(&self, _inherit_reads: bool) -> Option<Arc<dyn ToolInvoker>> {
+        None
+    }
+
     /// Trusted host-owned session profile used to resolve a child request's
     /// conversation mode. Tool input and API transport do not define it.
     fn trusted_session_profile(&self) -> Option<crate::host::session_context::SessionModeSnapshot> {

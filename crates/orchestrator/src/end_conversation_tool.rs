@@ -34,6 +34,35 @@ use crate::prompt::end_conversation as ec;
 /// `StructuredOutputTool`'s captured-slot pattern (no shared-struct change).
 pub type EndConversationSlot = Arc<AtomicBool>;
 
+#[derive(Clone)]
+pub(crate) struct EndConversationRequest {
+    pub(crate) slot: EndConversationSlot,
+    pub(crate) publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+}
+
+tokio::task_local! {
+    static DISPATCH_END_REQUEST: Arc<std::sync::Mutex<Option<EndConversationSlot>>>;
+}
+
+/// A dispatcher must publish termination with its selected result. Direct tool
+/// callers retain the captured-slot API, while dispatched calls leave the slot
+/// untouched until the result's publication and consumption boundaries.
+pub(crate) async fn capture_end_conversation_request<F: std::future::Future>(
+    tool_name: &str,
+    future: F,
+) -> (F::Output, Option<EndConversationSlot>) {
+    if tool_name != ec::END_CONVERSATION_TOOL_NAME {
+        return (future.await, None);
+    }
+    let request = Arc::new(std::sync::Mutex::new(None));
+    let output = DISPATCH_END_REQUEST.scope(request.clone(), future).await;
+    let captured = request
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    (output, captured)
+}
+
 /// The `EndConversation` tool. `enabled` mirrors claude-code
 /// `isEndConversationToolEnabled` (model floor `NWn` && GB `tengu_umber_kestrel`)
 /// — the composition root computes it; DEFAULT `false` keeps the tool
@@ -72,24 +101,27 @@ impl Default for EndConversationTool {
 }
 
 /// claude-code `lastAssistantTurnCalledEndConversation`: did the assistant turn
-/// PRECEDING the current one call `EndConversation`? The current (in-flight)
-/// assistant message is the last `Assistant` entry in `messages`; this checks
-/// the one before it. A `true` result means the incoming call is the SECOND
-/// consecutive one → actually end (vs. the 1st → return the re-read reminder).
+/// PRECEDING the current one call `EndConversation`? Normal model dispatch
+/// supplies request history separately from the current response. Recovery can
+/// include that response in history, so its identity must be excluded. A `true`
+/// result means the incoming call is the SECOND consecutive one → actually end.
 #[must_use]
-fn prior_assistant_turn_called_end_conversation(messages: &[ConversationMessage]) -> bool {
-    let assistant_calls: Vec<bool> = messages
+fn prior_assistant_turn_called_end_conversation(
+    messages: &[ConversationMessage],
+    current_assistant_id: Option<lingxi_core::types::MessageId>,
+) -> bool {
+    messages
         .iter()
-        .filter_map(|m| match m {
+        .rev()
+        .filter(|message| Some(message.id()) != current_assistant_id)
+        .find_map(|m| match m {
             ConversationMessage::Assistant { content, .. } => Some(content.iter().any(|b| {
                 matches!(b, ContentBlock::ToolUse { name, .. }
                     if name == ec::END_CONVERSATION_TOOL_NAME)
             })),
             _ => None,
         })
-        .collect();
-    // The last assistant entry is the current turn; look at the one before it.
-    assistant_calls.len() >= 2 && assistant_calls[assistant_calls.len() - 2]
+        .unwrap_or(false)
 }
 
 #[async_trait]
@@ -188,13 +220,23 @@ impl Tool for EndConversationTool {
             ));
             return Ok(result);
         }
-        if prior_assistant_turn_called_end_conversation(&ctx.messages) {
+        if prior_assistant_turn_called_end_conversation(&ctx.messages, ctx.assistant_message_id) {
             // SECOND consecutive call → actually end. Raise the slot so the turn
             // loop terminates + surfaces the user-facing finalMessage (k4i). The
             // tool's own `message` returned to the MODEL is the tool RESULT
             // (MWn), NOT the finalMessage — matching 206's
             // `{data:{ended:true, message: MWn}}` + `finalMessage: k4i`.
-            self.end_requested.store(true, Ordering::SeqCst);
+            if DISPATCH_END_REQUEST
+                .try_with(|request| {
+                    *request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(self.end_requested.clone());
+                })
+                .is_err()
+            {
+                self.end_requested.store(true, Ordering::SeqCst);
+            }
             Ok(ToolCallResult::from_data(generated_builtin_result(
                 &json!({
                     "ended": true,
@@ -248,6 +290,7 @@ mod tests {
     fn ctx_with(messages: Vec<ConversationMessage>) -> ToolUseContext {
         let mut c = ToolUseContext::model_seed("x".into());
         c.messages = messages;
+        c.assistant_message = Some(asst_calling_endconv());
         c
     }
 
@@ -321,13 +364,16 @@ mod tests {
 
     #[tokio::test]
     async fn first_call_returns_reminder_and_does_not_end() {
-        // Only the current turn calls EndConversation (no prior) → 1st call.
+        // The current assistant is separate from the request's prior history.
         let t = tool();
         let (tx, _rx) = tool_api::progress::progress_channel();
         let r = t
             .call(
                 source_json("{}"),
-                ctx_with(vec![asst_calling_endconv()]),
+                ctx_with(vec![ConversationMessage::user(
+                    MessageId::new(),
+                    "request".into(),
+                )]),
                 tx,
             )
             .await
@@ -358,7 +404,6 @@ mod tests {
         let msgs = vec![
             asst_calling_endconv(), // prior turn
             ConversationMessage::user(MessageId::new(), "reminder ack".into()),
-            asst_calling_endconv(), // current turn
         ];
         let r = t
             .call(source_json("{}"), ctx_with(msgs), tx)
@@ -385,6 +430,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn intervening_assistant_without_end_resets_confirmation() {
+        let t = tool();
+        let (tx, _rx) = tool_api::progress::progress_channel();
+        let prior_reply = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "ordinary reply".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+            per_turn_effort: None,
+        };
+        let r = t
+            .call(
+                source_json("{}"),
+                ctx_with(vec![
+                    asst_calling_endconv(),
+                    ConversationMessage::user(MessageId::new(), "continue".into()),
+                    prior_reply,
+                    ConversationMessage::user(MessageId::new(), "another request".into()),
+                ]),
+                tx,
+            )
+            .await
+            .expect("first confirmation after an ordinary reply");
+        assert_eq!(
+            r.data
+                .get_property("ended")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(!t.end_requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn orphaned_end_conversation_requires_two_distinct_assistant_turns() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_core::host::permission_gate::PermissionOutcome;
+        use lingxi_core::types::SessionId;
+
+        let root = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(root.path()).unwrap();
+        let session_id = SessionId::new();
+        let path = cwd.join(format!("{}.jsonl", session_id.as_uuid()));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone())),
+        ));
+        let slot = Arc::new(AtomicBool::new(false));
+        let mut tools = tool_api::ToolRegistry::new();
+        tools.register_builtin(Arc::new(EndConversationTool::new(true, slot.clone())));
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_session_id(session_id)
+        .with_jsonl_writer(writer)
+        .with_end_conversation_slot(slot.clone())
+        .without_host_environment_probes();
+        orch.initialize_conversation_mode().await.unwrap();
+
+        for expected_ended in [false, true] {
+            orch.append_external_history_message(ConversationMessage::user(
+                MessageId::new(),
+                "request requiring confirmation".into(),
+            ))
+            .await;
+            let current = asst_calling_endconv();
+            let ConversationMessage::Assistant { content, .. } = &current else {
+                unreachable!();
+            };
+            let ContentBlock::ToolUse { id, .. } = &content[0] else {
+                unreachable!();
+            };
+            let id = id.clone();
+            // A resumed unresolved assistant is already in mounted history.
+            // Exercise the real recovery caller rather than a synthetic ctx.
+            orch.append_external_history_message(current).await;
+            assert!(orch
+                .run_orphaned_permission(
+                    &id,
+                    PermissionOutcome::Allow {
+                        updated_input: None,
+                        permission_updates: Vec::new(),
+                        decision_classification: None,
+                    },
+                )
+                .await
+                .unwrap());
+            assert_eq!(slot.load(Ordering::SeqCst), expected_ended);
+
+            let source = std::fs::read_to_string(&path).unwrap();
+            let result = source
+                .lines()
+                .map(|line| Utf16JsonProjection::parse(line).unwrap())
+                .find(|row| row.string_at("/message/content/0/tool_use_id") == Some(id.as_str()))
+                .expect("recovery durably writes the real tool result");
+            assert_eq!(
+                result
+                    .at_pointer("/toolUseResult/ended")
+                    .and_then(|value| value.as_bool()),
+                Some(expected_ended)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn fork_call_never_ends_and_returns_fork_reflection() {
         // agent_id set (background fork) → 206 branches on `t.agentId` FIRST:
         // even a 2nd-consecutive call must NOT end; returns x4i with ended:false.
@@ -393,7 +555,6 @@ mod tests {
         let mut ctx = ctx_with(vec![
             asst_calling_endconv(),
             ConversationMessage::user(MessageId::new(), "ack".into()),
-            asst_calling_endconv(),
         ]);
         ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         let r = t.call(source_json("{}"), ctx, tx).await.expect("ok");

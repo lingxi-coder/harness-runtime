@@ -603,6 +603,8 @@ impl ReplayedSession {
                 .copied()
                 .collect(),
             virtual_user_message_ids: self.state.virtual_user_messages.iter().copied().collect(),
+            thinking_signature_stripped: self.state.thinking_signature_stripped,
+            thinking_stripped_messages: self.state.thinking_stripped_messages.clone(),
             compacted_user_turns: self.state.compacted_user_turns,
             model_context_excluded_message_ids: self
                 .state
@@ -3542,6 +3544,11 @@ impl ConversationOrchestrator {
             state.transcript_only_messages = replayed.transcript_only_messages;
             state.compact_summary_messages = replayed.compact_summary_messages;
             state.model_context_excluded_messages = replayed.model_context_excluded_messages;
+            // The retained signed history and its durable recovery ranges
+            // belong to the same mounted session. Restore both before the API
+            // clients receive the rejected-thinking projection below.
+            state.thinking_signature_stripped = replayed.thinking_signature_stripped;
+            state.thinking_stripped_messages = replayed.thinking_stripped_messages;
             state.active_goal = replayed.active_goal;
             if !preserve_boot_model && model_recovered {
                 state.model = replayed.model;
@@ -3609,6 +3616,9 @@ impl ConversationOrchestrator {
         self.prompt_runtime
             .restore_prompt_snapshot_append_source(metadata.prompt_snapshot.as_ref());
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        self.prompt_runtime
+            .memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(0);
         *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
@@ -3649,6 +3659,9 @@ impl ConversationOrchestrator {
             self.prompt_runtime
                 .restore_prompt_snapshot_append_source(Some(&snapshot));
             *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
+            self.prompt_runtime
+                .memory_resume_prompt_checked
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         *self
             .transcript
@@ -3680,6 +3693,9 @@ impl ConversationOrchestrator {
         self.prompt_runtime
             .restore_prompt_snapshot_append_source(snapshot.as_ref());
         *self.prompt_runtime.prompt_snapshot.lock().await = snapshot;
+        self.prompt_runtime
+            .memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(active_epoch);
         *self.prompt_runtime.context_rendering_hint.lock().await = rendering;
         self.prompt_runtime
@@ -4602,6 +4618,7 @@ mod exact_history_string_tests {
 
             let first =
                 native_settings_test_orchestrator(config.clone(), session_id, &cwd, writer.clone());
+            first.initialize_conversation_mode().await.unwrap();
             let user_prompt = ConversationMessage::user(MessageId::new(), "start".into());
             first.session.lock().await.history.push(user_prompt.clone());
             first.persist_message_to_jsonl(&user_prompt).await;
@@ -5154,3 +5171,7 @@ mod assistant_resumable_source_tests {
 #[cfg(test)]
 #[path = "nested_memory_resume_287_tests.rs"]
 mod nested_memory_resume_287_tests;
+
+#[cfg(test)]
+#[path = "resume/captured_thinking_recovery_tests.rs"]
+mod captured_thinking_recovery_tests;

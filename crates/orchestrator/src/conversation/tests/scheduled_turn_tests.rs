@@ -33,6 +33,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         ]
     };
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![events(), events()]));
+    let output = Arc::new(MockOutputStream::new());
     let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
@@ -40,7 +41,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         Arc::new(tool_api::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
+        output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     ));
@@ -71,12 +72,168 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
     )
     .await
     .unwrap();
+    assert_eq!(output.turn_start_count().await, 1);
     assert_eq!(orch.session.lock().await.model, before);
     assert_eq!(orch.current_reasoning_selection(), reasoning);
     orch.run_turn_streaming("human prompt").await.unwrap();
     let calls = streaming.captured_calls().await;
     assert_eq!(calls[0].model, "scheduled-model");
     assert_eq!(calls[1].model, before);
+}
+
+#[tokio::test]
+async fn cancelled_scheduled_admission_leaves_no_open_output_lifecycle() {
+    for block_point in ["pre-cancelled", "profile", "storage"] {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
+            request_model: "scheduled-model".into(),
+            provider_id: "test-provider".into(),
+            ..Default::default()
+        }]);
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig::default(),
+                api,
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+        let cancel = CancellationToken::new();
+        let profile = if block_point == "profile" {
+            Some(orch.conversation_context.lock().await)
+        } else {
+            None
+        };
+        let storage = if block_point == "storage" {
+            Some(orch.transcript.storage_pauses.lock().await)
+        } else {
+            None
+        };
+        if block_point == "pre-cancelled" {
+            cancel.cancel();
+        }
+        let scheduled = orch.run_scheduled_turn(
+            source_text("cancel before admission"),
+            "test-provider/scheduled-model",
+            lingxi_core::host::ReasoningSelection::Automatic,
+            cancel.clone(),
+        );
+        tokio::pin!(scheduled);
+        if block_point != "pre-cancelled" {
+            assert!(futures::poll!(scheduled.as_mut()).is_pending());
+            cancel.cancel();
+        }
+        drop(profile);
+        drop(storage);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), scheduled)
+                .await
+                .unwrap()
+                .unwrap(),
+            crate::conversation::TurnOutcome::Cancelled,
+        );
+        assert_eq!(output.turn_start_count().await, 0);
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+        assert!(orch.snapshot_history().await.is_empty());
+        assert!(streaming.captured_calls().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn dropped_scheduled_prompt_does_not_reuse_a_previous_assistant_summary() {
+    let root = tempfile::tempdir().unwrap();
+    let module = root.path().join("drop-scheduled.js");
+    std::fs::write(
+        &module,
+        "export function register(on) { on('prompt.submit', () => ({drop:'skip this saved prompt'})); }",
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "drop-scheduled",
+        root.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let api = Arc::new(MockApiClient::new(Vec::new()));
+    api.set_model_listings(vec![lingxi_core::host::ModelListing {
+        request_model: "scheduled-model".into(),
+        provider_id: "test-provider".into(),
+        ..Default::default()
+    }]);
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig::default(),
+            api,
+            streaming.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry))),
+    );
+    let prior_id = lingxi_core::types::MessageId::new();
+    let expected_session = {
+        let mut session = orch.session.lock().await;
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::Assistant {
+                id: prior_id,
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "previous human answer".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                per_turn_effort: None,
+                resumable: None,
+            });
+        session.session_id
+    };
+    let (outcome, captured_session, summary) = orch
+        .run_scheduled_turn_in_session(
+            expected_session,
+            source_text("saved prompt that the Mod drops"),
+            "test-provider/scheduled-model",
+            lingxi_core::host::ReasoningSelection::Automatic,
+            CancellationToken::new(),
+            async { Ok(()) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::conversation::TurnOutcome::EndTurn);
+    assert_eq!(captured_session, expected_session);
+    assert!(summary.is_empty());
+    assert!(streaming.captured_calls().await.is_empty());
+    assert_eq!(orch.snapshot_history().await[0].id(), prior_id);
+    assert_eq!(output.turn_start_count().await, 1);
+    assert_eq!(
+        output
+            .snapshot()
+            .await
+            .iter()
+            .filter(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. }))
+            .count(),
+        1,
+    );
 }
 
 #[tokio::test]
@@ -220,7 +377,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
             Vec::new(),
             None,
             None,
-            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+            crate::test_support::code_resume_runtime_snapshot(resumed_session),
         );
     tokio::pin!(resume);
     assert!(futures::poll!(resume.as_mut()).is_pending());

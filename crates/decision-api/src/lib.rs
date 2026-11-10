@@ -286,6 +286,16 @@ fn distribution(values: impl Iterator<Item = f64>) -> bool {
 }
 
 impl Response {
+    /// Validate questions and answers against a revision without retaining evidence.
+    pub fn validate_for_questions(
+        &self,
+        state_revision: u64,
+        questions: &BTreeMap<String, Question>,
+    ) -> Result<(), Error> {
+        validate_payload(&[], questions)?;
+        self.validate_answers_for(state_revision, questions)
+    }
+
     /// Check correspondence and numeric domains without inventing confidence.
     pub fn validate_for(&self, request: &Request) -> Result<(), Error> {
         request.validate()?;

@@ -94,10 +94,15 @@ impl Fixture {
             &self.session_id.to_string(),
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let content = self
-            .rows
-            .iter()
-            .map(|row| format!("{row}\n"))
+        let runtime = crate::test_support::code_resume_runtime_snapshot(SessionId::from_uuid(
+            self.session_id,
+        ));
+        let content = runtime
+            .transcript_metadata
+            .into_iter()
+            .flatten()
+            .map(|row| format!("{}\n", row.to_json_string().unwrap()))
+            .chain(self.rows.iter().map(|row| format!("{row}\n")))
             .collect::<String>();
         std::fs::write(path, content).unwrap();
     }

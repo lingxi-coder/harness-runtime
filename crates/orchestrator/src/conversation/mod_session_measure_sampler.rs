@@ -15,6 +15,7 @@ pub(crate) enum ModSessionMeasureReason {
 
 /// One requested sample, retained while another Mod measurement is running.
 pub(crate) struct ModSessionMeasureRequest {
+    epoch: u64,
     reason: ModSessionMeasureReason,
     snapshot: ModSessionMeasureSnapshot,
 }
@@ -29,6 +30,7 @@ impl ModSessionMeasureRequest {
             ModSessionMeasureReason::Limits
         };
         Self {
+            epoch: newer.epoch,
             reason,
             snapshot: newer.snapshot,
         }
@@ -44,6 +46,7 @@ pub(crate) struct ModSessionMeasureSampler {
 
 #[derive(Default)]
 struct SamplerState {
+    epoch: u64,
     running: bool,
     pending: Option<ModSessionMeasureRequest>,
     previous: Option<PreviousMeasure>,
@@ -57,6 +60,18 @@ struct PreviousMeasure {
 }
 
 impl ModSessionMeasureSampler {
+    pub(crate) fn reset(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let epoch = state.epoch.wrapping_add(1);
+        *state = SamplerState {
+            epoch,
+            ..SamplerState::default()
+        };
+    }
+
     /// Enqueue a sample. The caller should dispatch the returned request; a
     /// missing result means it was merged into the in-flight request's tail.
     pub(crate) fn enqueue(
@@ -64,11 +79,39 @@ impl ModSessionMeasureSampler {
         reason: ModSessionMeasureReason,
         snapshot: ModSessionMeasureSnapshot,
     ) -> Option<ModSessionMeasureRequest> {
-        let request = ModSessionMeasureRequest { reason, snapshot };
+        self.enqueue_for_owner(reason, snapshot, None)
+    }
+
+    pub(crate) fn enqueue_if_current(
+        &self,
+        reason: ModSessionMeasureReason,
+        snapshot: ModSessionMeasureSnapshot,
+        owner: &tokio_util::sync::CancellationToken,
+    ) -> Option<ModSessionMeasureRequest> {
+        self.enqueue_for_owner(reason, snapshot, Some(owner))
+    }
+
+    fn enqueue_for_owner(
+        &self,
+        reason: ModSessionMeasureReason,
+        snapshot: ModSessionMeasureSnapshot,
+        owner: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Option<ModSessionMeasureRequest> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Reset retires this token before taking the same mutex. An old
+        // dispatch therefore either lands before reset (and is erased) or is
+        // rejected here; it cannot occupy the replacement epoch's slot.
+        if owner.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let request = ModSessionMeasureRequest {
+            epoch: state.epoch,
+            reason,
+            snapshot,
+        };
         if state.running {
             state.pending = Some(match state.pending.take() {
                 Some(pending) => pending.merge(request),
@@ -82,11 +125,17 @@ impl ModSessionMeasureSampler {
 
     /// Finish one dispatched or suppressed request, returning any coalesced
     /// tail request before releasing the single-flight slot.
-    pub(crate) fn finish_one(&self) -> Option<ModSessionMeasureRequest> {
+    pub(crate) fn finish_one(
+        &self,
+        request: &ModSessionMeasureRequest,
+    ) -> Option<ModSessionMeasureRequest> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if request.epoch != state.epoch {
+            return None;
+        }
         if let Some(pending) = state.pending.take() {
             return Some(pending);
         }
@@ -108,6 +157,9 @@ impl ModSessionMeasureSampler {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if request.epoch != state.epoch {
+            return None;
+        }
 
         let context_changed = state
             .previous
@@ -231,7 +283,7 @@ mod tests {
             sampler.prepare(&first).unwrap()["changed"],
             serde_json::json!(["context", "rateLimits"])
         );
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&first).is_none());
 
         let half_point = sampler
             .enqueue(
@@ -240,7 +292,7 @@ mod tests {
             )
             .unwrap();
         assert!(sampler.prepare(&half_point).is_none());
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&half_point).is_none());
 
         let whole_point = sampler
             .enqueue(
@@ -252,7 +304,7 @@ mod tests {
             sampler.prepare(&whole_point).unwrap()["changed"],
             serde_json::json!(["context", "rateLimits"])
         );
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&whole_point).is_none());
     }
 
     #[test]
@@ -262,7 +314,7 @@ mod tests {
             .enqueue(ModSessionMeasureReason::Turn, snapshot(1, None, None, None))
             .unwrap();
         sampler.prepare(&first).unwrap();
-        sampler.finish_one();
+        sampler.finish_one(&first);
 
         let changed_context = sampler
             .enqueue(ModSessionMeasureReason::Turn, snapshot(2, None, None, None))
@@ -271,7 +323,7 @@ mod tests {
             sampler.prepare(&changed_context).unwrap()["changed"],
             serde_json::json!(["context"])
         );
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&changed_context).is_none());
 
         let limits_only_ignores_that_same_context_change = sampler
             .enqueue(
@@ -282,7 +334,9 @@ mod tests {
         assert!(sampler
             .prepare(&limits_only_ignores_that_same_context_change)
             .is_none());
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler
+            .finish_one(&limits_only_ignores_that_same_context_change)
+            .is_none());
     }
 
     #[test]
@@ -295,7 +349,7 @@ mod tests {
             )
             .unwrap();
         sampler.prepare(&first).unwrap();
-        sampler.finish_one();
+        sampler.finish_one(&first);
 
         let status = sampler
             .enqueue(
@@ -307,7 +361,7 @@ mod tests {
             sampler.prepare(&status).unwrap()["changed"],
             serde_json::json!(["rateLimits"])
         );
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&status).is_none());
     }
 
     #[test]
@@ -333,7 +387,7 @@ mod tests {
             .is_none());
         sampler.prepare(&first);
 
-        let pending = sampler.finish_one().unwrap();
+        let pending = sampler.finish_one(&first).unwrap();
         assert_eq!(pending.reason, ModSessionMeasureReason::Turn);
         assert_eq!(pending.snapshot.input["context"]["version"], 3);
         assert_eq!(pending.snapshot.cost_usd, Some(0.25));
@@ -341,7 +395,7 @@ mod tests {
             sampler.prepare(&pending).unwrap()["changed"],
             serde_json::json!(["context", "rateLimits", "cost"])
         );
-        assert!(sampler.finish_one().is_none());
+        assert!(sampler.finish_one(&pending).is_none());
 
         assert!(sampler
             .enqueue(
@@ -349,5 +403,58 @@ mod tests {
                 snapshot(4, Some(12.0), Some(0.25), Some("allowed")),
             )
             .is_some());
+    }
+
+    #[test]
+    fn reset_retires_in_flight_samples_without_releasing_the_new_slot() {
+        let sampler = ModSessionMeasureSampler::default();
+        let old = sampler
+            .enqueue(ModSessionMeasureReason::Turn, snapshot(1, None, None, None))
+            .unwrap();
+        sampler.prepare(&old).unwrap();
+        sampler.reset();
+        let current = sampler
+            .enqueue(ModSessionMeasureReason::Turn, snapshot(1, None, None, None))
+            .unwrap();
+        assert!(sampler.prepare(&old).is_none());
+        assert!(sampler.finish_one(&old).is_none());
+        assert!(sampler
+            .enqueue(ModSessionMeasureReason::Turn, snapshot(2, None, None, None))
+            .is_none());
+        assert_eq!(
+            sampler.prepare(&current).unwrap()["changed"],
+            serde_json::json!(["context"])
+        );
+        let pending = sampler.finish_one(&current).unwrap();
+        assert_eq!(pending.snapshot.input["context"]["version"], 2);
+        assert!(sampler.finish_one(&pending).is_none());
+    }
+
+    #[test]
+    fn retired_queued_request_cannot_occupy_the_replacement_epoch() {
+        let sampler = ModSessionMeasureSampler::default();
+        let owner = tokio_util::sync::CancellationToken::new();
+        let old = sampler
+            .enqueue_if_current(
+                ModSessionMeasureReason::Turn,
+                snapshot(1, None, None, None),
+                &owner,
+            )
+            .unwrap();
+        owner.cancel();
+        sampler.reset();
+        assert!(sampler
+            .enqueue_if_current(
+                ModSessionMeasureReason::Turn,
+                snapshot(2, None, None, None),
+                &owner,
+            )
+            .is_none());
+        let current = sampler
+            .enqueue(ModSessionMeasureReason::Turn, snapshot(3, None, None, None))
+            .expect("a retired queued request must leave the replacement slot free");
+        assert!(sampler.finish_one(&old).is_none());
+        assert_eq!(sampler.prepare(&current).unwrap()["context"]["version"], 3);
+        assert!(sampler.finish_one(&current).is_none());
     }
 }

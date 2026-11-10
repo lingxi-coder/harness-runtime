@@ -60,6 +60,7 @@ fn fixture(
     let assistant = uuid::Uuid::new_v4();
     let excluded = uuid::Uuid::new_v4();
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
         serde_json::json!({"type":"user","uuid":user,"sessionId":sid,"parentUuid":null,"message":{"role":"user","content":"RAW_USER"}}),
         serde_json::json!({"type":"user","uuid":skill,"sessionId":sid,"parentUuid":user,"isMeta":true,"origin":{"type":"skill_activation","context_epoch":0},"message":{"role":"user","content":"SECRET_SKILL"}}),
         serde_json::json!({"type":"assistant","uuid":assistant,"sessionId":sid,"parentUuid":skill,"message":{"role":"assistant","content":[{"type":"text","text":"RAW_ASSISTANT"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"important"}}]}}),

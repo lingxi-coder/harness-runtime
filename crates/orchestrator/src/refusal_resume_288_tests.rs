@@ -94,7 +94,7 @@ async fn hot_resume_pick_clear_and_neutralized_notice_keep_the_native_sdk_header
         None,
         ResumeRuntimeSnapshot {
             model: MODEL.into(),
-            ..Default::default()
+            ..crate::test_support::code_resume_runtime_snapshot(SessionId::from_uuid(sid))
         },
     )
     .await
@@ -140,7 +140,7 @@ async fn hot_resume_pick_clear_and_neutralized_notice_keep_the_native_sdk_header
         None,
         ResumeRuntimeSnapshot {
             model: MODEL.into(),
-            ..Default::default()
+            ..crate::test_support::code_resume_runtime_snapshot(SessionId::from_uuid(sid))
         },
     )
     .await
@@ -187,9 +187,14 @@ async fn cold_loader_restores_flat_refusal_metadata_and_dispatches_the_sdk_heade
         .unwrap();
     tokio::fs::write(
         &path,
-        rows.iter()
-            .map(|row| serde_json::to_string(row).unwrap() + "\n")
-            .collect::<String>(),
+        format!(
+            "{}\n{}",
+            json!({"type":"fixed-session-mode", "sessionId":sid,
+                "sessionMode":"code", "instructionEpoch":0}),
+            rows.iter()
+                .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                .collect::<String>(),
+        ),
     )
     .await
     .unwrap();
@@ -297,6 +302,7 @@ async fn local_notice_write_fork_projection_and_clear_preserve_the_original_mode
         dir.path().to_owned(),
     )
     .with_bg_session_forker(forker.clone());
+    producer.initialize_conversation_mode().await.unwrap();
     producer.session.lock().await.model_profile = Some("original-profile".into());
     assert!(producer.maybe_swap_to_refusal_fallback().await);
     let notice = producer

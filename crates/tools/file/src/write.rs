@@ -351,13 +351,19 @@ impl Tool for FileWriteTool {
             ));
         }
 
+        let memory_mutation =
+            lingxi_core::host::memory_tool_scope::memory_file_mutation(TOOL_NAME, &input)
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
         // One snapshot of trusted_dirs for both containment checks below (the
         // parent-ancestor probe and the final target check), so they can't
         // straddle a swap between the two calls.
-        let mut trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = memory_mutation.as_ref().map_or_else(
+            || self.ctx.trusted_dirs_for_tool(TOOL_NAME, &input),
+            |scope| vec![scope.directory().to_owned()],
+        );
         if let Some(root) =
             lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
@@ -369,12 +375,16 @@ impl Tool for FileWriteTool {
         // rooted no-follow mkdirat/handle chain. Never call create_dir_all on
         // the model pathname: a retargeted ancestor could create outside the
         // approved tree before the rooted write gets a chance to reject it.
-        let canon = match canonicalize_write_target(&path, &trusted_dirs) {
-            Ok(p) => p,
-            Err(_) => {
-                emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
-                self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::PathBlocked { path });
+        let canon = if let Some(scope) = &memory_mutation {
+            scope.target()
+        } else {
+            match canonicalize_write_target(&path, &trusted_dirs) {
+                Ok(p) => p,
+                Err(_) => {
+                    emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
+                    self.emit_failed(&invocation_id, "path_blocked").await;
+                    return Err(ToolError::PathBlocked { path });
+                }
             }
         };
 
@@ -391,7 +401,12 @@ impl Tool for FileWriteTool {
         // on physical existence (TS `meta !== null`, `FileWriteTool.ts:279`),
         // NOT on the create-vs-update truthiness — an existing-but-empty file
         // still requires a prior Read.
-        let prior_snapshot = match write_rooted_snapshot(&path, &canon, &trusted_dirs) {
+        let snapshot = if let Some(scope) = &memory_mutation {
+            scope.read_file()
+        } else {
+            write_rooted_snapshot(&path, &canon, &trusted_dirs)
+        };
+        let prior_snapshot = match snapshot {
             Ok(snapshot) => Some(snapshot),
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
                 lingxi_core::host::FsError::NotFound(_),
@@ -451,17 +466,23 @@ impl Tool for FileWriteTool {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
-        let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs) else {
-            self.emit_failed(&invocation_id, "path_blocked").await;
-            return Err(ToolError::PathBlocked { path });
+        let result = if let Some(scope) = &memory_mutation {
+            scope.write_file(content.as_bytes())
+        } else {
+            let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs)
+            else {
+                self.emit_failed(&invocation_id, "path_blocked").await;
+                return Err(ToolError::PathBlocked { path });
+            };
+            lingxi_core::host::rooted_fs::write_file_after_permission(
+                &root,
+                &relative,
+                &path,
+                &canon,
+                content.as_bytes(),
+            )
         };
-        let write_result = match lingxi_core::host::rooted_fs::write_file_after_permission(
-            &root,
-            &relative,
-            &path,
-            &canon,
-            content.as_bytes(),
-        ) {
+        let write_result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_write").await;
@@ -506,7 +527,7 @@ impl Tool for FileWriteTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set_with_requested_aliases(
+        tool_api::read_file_state::set_after_write_with_requested_aliases(
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {

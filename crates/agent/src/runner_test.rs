@@ -2452,6 +2452,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         budget: None,
         hook_executor: None,
         agent_spawn_token: None,
+        memory_fork_wire: None,
         stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
         subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
@@ -4821,8 +4822,18 @@ async fn child_step_rewrite_threads_its_own_policy_and_prefix_into_nested_tools(
     ctx.rendered_system_prompt = Some(Arc::new(initial_body.clone()));
     ctx.prompt_policy = Some(initial.policy);
     ctx.prompt_state = Some(Arc::new(state));
+    let wire = Arc::new(crate::memory_fork::MemoryForkProjection {
+        tool_invoker: None,
+        system_prompt_input: Some(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("native frozen prefix"),
+        )),
+        tools: vec![source_tool("old-native-tool", "native description", serde_json::json!({"type":"object"}))],
+        typed_attachment_ids: [MessageId::new()].into_iter().collect(),
+        task_deliveries: Default::default(),
+        model_source: Some("native-wire-model".into()),
+    });
     let request = crate::mod_turn_step::ChildStepRequest {
-        api,
+        api: api.clone(),
         model: "claude-opus-5".into(),
         profile: None,
         prompt_profile: None,
@@ -4833,11 +4844,20 @@ async fn child_step_rewrite_threads_its_own_policy_and_prefix_into_nested_tools(
         tools: Vec::new(),
         effort: None,
         forced_tool: None,
-        call_opts: Default::default(),
+        call_opts: crate::api::SubagentApiCallOpts {
+            memory_fork_wire: Some(wire.clone()),
+            ..Default::default()
+        },
         fallback_target: Default::default(),
         agent_spawn_provenance: Default::default(),
     };
     let stream = request.open("gpt-test-model", None).await.unwrap();
+    let calls = api.physical_calls();
+    let rebound = calls[0].request.opts.memory_fork_wire.as_ref().unwrap();
+    assert!(rebound.system_prompt_input.is_none());
+    assert!(rebound.model_source.is_none());
+    assert!(rebound.tools.is_empty());
+    assert_eq!(rebound.typed_attachment_ids, wire.typed_attachment_ids);
     let (out_tx, _out_rx) = mpsc::channel(64);
     let _attempt = accumulate_agent_stream_live(
         stream,
@@ -12270,6 +12290,140 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
 // thread, so a refusing subagent hops to the fallback model and retries. This
 // port's subagent loop is separate and treated `refusal` as an ordinary
 // terminal stop reason, so the run simply ended.
+
+#[tokio::test]
+async fn memory_fork_wire_survives_refusal_fallback_without_overriding_fallback_model() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("memory complete", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".into()];
+    ctx.query_source_label = Some("auto_dream".into());
+    ctx.memory_fork_wire = Some(Arc::new(crate::memory_fork::MemoryForkProjection {
+        tool_invoker: None,
+        system_prompt_input: Some(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("frozen memory prefix"),
+        )),
+        tools: Vec::new(),
+        typed_attachment_ids: Default::default(),
+        task_deliveries: Default::default(),
+        model_source: Some("original-wire-model".into()),
+    }));
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 2);
+    let original = calls[0].request.opts.memory_fork_wire.as_ref().unwrap();
+    let fallback = calls[1].request.opts.memory_fork_wire.as_ref().unwrap();
+    assert_eq!(
+        original.model_source.as_ref().unwrap().string_at(""),
+        Some("original-wire-model")
+    );
+    assert_eq!(calls[1].request.model, "fallback-model");
+    assert!(fallback.model_source.is_none());
+    assert_eq!(fallback.system_prompt_input, original.system_prompt_input);
+    assert_eq!(fallback.typed_attachment_ids, original.typed_attachment_ids);
+    assert_eq!(fallback.task_deliveries, original.task_deliveries);
+    assert_eq!(
+        calls[0].request.opts.query_source_label.as_deref(),
+        Some("auto_dream")
+    );
+    assert_eq!(
+        calls[1].request.opts.query_source_label.as_deref(),
+        Some("auto_dream")
+    );
+}
+
+#[tokio::test]
+async fn memory_fork_fallback_rebinds_source_wire_when_prompt_bundle_changes() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.agent_definition.model = AgentModel::Explicit("claude-opus-5".into());
+    ctx.refusal_fallback_chain = vec!["gpt-test-model".into()];
+    let initial = crate::prompt_policy::resolve_target(
+        Some(api.as_ref()),
+        "claude-opus-5",
+        None,
+        Default::default(),
+    )
+    .unwrap();
+    let state = crate::prompt_policy::SubagentPromptState {
+        initial_policy: initial.policy.clone(),
+        role: Some("MEMORY ROLE".into()),
+        fork_prefix: None,
+        fork_policy: None,
+        custom_system_prompt: None,
+        append_system_prompt: None,
+        environment: None,
+        cwd: None,
+        addendum: None,
+        operator_suffix: None,
+        tool_registry: None,
+        system_renderer: None,
+        seeded_context: Default::default(),
+        replace_initial_context: false,
+    };
+    ctx.rendered_system_prompt = state.render(&initial).system;
+    ctx.prompt_policy = Some(initial.policy);
+    ctx.prompt_state = Some(Arc::new(state));
+    let wire = Arc::new(crate::memory_fork::MemoryForkProjection {
+        tool_invoker: None,
+        system_prompt_input: Some(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("native frozen memory prefix"),
+        )),
+        tools: vec![source_tool("old-native-tool", "native description", serde_json::json!({"type":"object"}))],
+        typed_attachment_ids: [MessageId::new()].into_iter().collect(),
+        task_deliveries: Default::default(), model_source: Some("native-wire-model".into()),
+    });
+    ctx.memory_fork_wire = Some(wire.clone());
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0]
+            .request
+            .opts
+            .memory_fork_wire
+            .as_ref()
+            .unwrap()
+            .system_prompt_input,
+        wire.system_prompt_input
+    );
+    let rebound = calls[1].request.opts.memory_fork_wire.as_ref().unwrap();
+    assert!(rebound.system_prompt_input.is_none());
+    assert!(rebound.model_source.is_none());
+    assert!(!rebound
+        .tools
+        .iter()
+        .any(|tool| tool.name == "old-native-tool"));
+    assert_eq!(rebound.typed_attachment_ids, wire.typed_attachment_ids);
+    assert_eq!(rebound.task_deliveries, wire.task_deliveries);
+    assert!(calls[1]
+        .request
+        .system
+        .as_ref()
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .contains("software engineering"));
+}
 
 #[tokio::test]
 async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {

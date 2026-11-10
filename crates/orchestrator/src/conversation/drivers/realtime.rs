@@ -1167,6 +1167,9 @@ impl ConversationOrchestrator {
     pub async fn prepare_realtime_agent(&self) -> Result<RealtimeAgentContext, OrchestratorError> {
         self.cancel_idle_compaction();
         let gate = Arc::new(self.turn_gate.clone().lock_owned().await);
+        // A native handoff is automatic continuation, not a human retry of
+        // paused storage. Leave recovery to the next human admission.
+        self.check_storage_pause().await?;
         // Realtime preparation is a query boundary: a profile chosen during a
         // previous turn must be admitted before capturing history or prompts.
         self.admit_conversation_profile(&gate).await?;
@@ -1215,13 +1218,14 @@ impl ConversationOrchestrator {
             .iter()
             .filter_map(realtime_manifest_message)
             .collect::<Vec<_>>();
-        let system = self.provider_system_prompt().await?;
+        let system = self.provider_system_prompt_for_main_request().await?;
         let instructions = Self::system_prompt_source_text(&system)
             .string_at("")
             .map(str::to_owned)
             .ok_or_else(|| failure("realtime system instructions are not a string"))?;
         self.record_context_projection(Some(&system), &manifest_history, &wire_tools)
             .await;
+        self.check_storage_pause().await?;
         Ok(RealtimeAgentContext {
             session_id,
             session_profile_name: profile_name.clone(),
@@ -1422,6 +1426,7 @@ impl ConversationOrchestrator {
         }
         self.cancel_idle_compaction();
         let gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.clone().lock_owned()=>Arc::new(gate)};
+        self.check_storage_pause().await?;
         // Connector creation happens outside the gate. Reject a context
         // captured for another fixed conversation profile.
         // The guard closes already-opened realtime IO on this error path.
@@ -1515,6 +1520,9 @@ impl ConversationOrchestrator {
             }};
         }
         loop {
+            // Stop native work after any failed transcript append. The outer
+            // cleanup still settles tools already accepted by this owner.
+            self.check_storage_pause().await?;
             // After an interrupted owner settles, replay its queued successor
             // before polling later provider events. Cancellation/deadline still
             // take precedence and close the entire transport.
@@ -1549,7 +1557,7 @@ impl ConversationOrchestrator {
                     }
                     if completed.prevent{return Ok(RealtimeAgentEnd::ToolStopped);}
                     // Submit every concurrent result before requesting the next response.
-                    if pending.is_empty(){control.continue_response().map_err(|error|failure(error.to_string()))?;turn.continued();}
+                    if pending.is_empty(){self.check_storage_pause().await?;control.continue_response().map_err(|error|failure(error.to_string()))?;turn.continued();}
                 },
                 input = async { match deferred { Some(input) => Some(input), None => inputs.recv().await } }, if pending_local_input.is_none() && input_capacity=>{
                     let Some(input)=input else{return Ok(RealtimeAgentEnd::Closed);};idle=Instant::now()+limits.idle_timeout;
@@ -1563,6 +1571,8 @@ impl ConversationOrchestrator {
                     match input {
                         RealtimeAgentInput::PlaybackCompleted{item_id}=>{if let Some(text)=ledger.playback(item_id){self.append_realtime_text(text,false).await;}},
                         RealtimeAgentInput::Provider(input)=>{
+                            // Storage can pause while this select is waiting.
+                            self.check_storage_pause().await?;
                             // Hosts cannot bypass the Agent dispatcher with forged results/history.
                             if matches!(input,RealtimeInput::ImportHistory{..}|RealtimeInput::DeleteItem{..}|RealtimeInput::ToolResult{..}|RealtimeInput::ToolResults{..}){return Err(failure("host realtime input cannot replace Agent history or tool results"));}
                             let starts_turn = matches!(&input, RealtimeInput::CommitAudio | RealtimeInput::Text(_));
@@ -1690,6 +1700,7 @@ impl ConversationOrchestrator {
                     match &event {
                         RealtimeEvent::TurnStarted { turn_id } if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse => turn.response_started(turn_id, !pending.is_empty())?,
                         RealtimeEvent::ToolCall{call_id,name,arguments}=>{
+                            self.check_storage_pause().await?;
                             if !seen_calls.insert(call_id.clone()){return Err(failure("provider repeated a realtime tool call identity"));}
                             if pending.len()>=limits.max_pending_tools{return Err(failure("realtime tool queue is full"));}
                             if !allowed.contains(name)||self.find_dispatchable_tool(name).is_none(){return Err(failure("provider requested an unavailable realtime Agent tool"));}
@@ -1827,3 +1838,7 @@ impl ConversationOrchestrator {
 #[cfg(test)]
 #[path = "realtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "realtime_storage_tests.rs"]
+mod storage_tests;

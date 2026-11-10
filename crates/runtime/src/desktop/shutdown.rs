@@ -231,10 +231,10 @@ impl DesktopSessionLifecycle {
             }
         }
         let background_producers_drained = producers_drained;
-        match tokio::time::timeout_at(
-            stage(std::time::Duration::from_secs(2)),
-            self.orchestrator.shutdown_idle_compaction(),
-        )
+        match tokio::time::timeout_at(stage(std::time::Duration::from_secs(2)), async {
+            self.orchestrator.shutdown_background_memory().await;
+            self.orchestrator.shutdown_idle_compaction().await;
+        })
         .await
         {
             Ok(()) => {}
@@ -242,7 +242,7 @@ impl DesktopSessionLifecycle {
                 producers_drained = false;
                 report
                     .errors
-                    .push("idle compaction did not drain within the shutdown budget".into());
+                    .push("background memory and idle compaction did not drain within the shutdown budget".into());
             }
         }
         // Both watcher families can fire hooks that retain the orchestrator or

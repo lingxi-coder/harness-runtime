@@ -13,8 +13,8 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use lingxi_core::host::OutputStream;
 use lingxi_core::host::orchestrator::PartialStreamEventMetadata;
+use lingxi_core::host::OutputStream;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ToolUseId};
 use lingxi_llm_client::protocol::JsonPayload;
@@ -102,9 +102,15 @@ pub async fn dispatch_event(
     suppress_live_thinking: bool,
 ) -> Result<RouterAction, StreamingError> {
     dispatch_event_with_metadata(
-        event, acc, output, suppress_live_text, suppress_live_thinking,
-        &PartialStreamEventMetadata::default(), false,
-    ).await
+        event,
+        acc,
+        output,
+        suppress_live_text,
+        suppress_live_thinking,
+        &PartialStreamEventMetadata::default(),
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn dispatch_event_with_metadata(
@@ -119,7 +125,9 @@ pub(crate) async fn dispatch_event_with_metadata(
     match event {
         // Hosted search consumers inspect this semantic event separately. Main
         // conversation attribution remains in the terminal metadata snapshot.
-        HistoryEvent::WebSearch { .. } | HistoryEvent::NativeStreamFrame { .. } => Ok(RouterAction::Continue),
+        HistoryEvent::WebSearch { .. } | HistoryEvent::NativeStreamFrame { .. } => {
+            Ok(RouterAction::Continue)
+        }
         HistoryEvent::ServerFallback { .. }
         | HistoryEvent::ResponseObserved { .. }
         | HistoryEvent::CostQuoteObserved { .. } => Ok(RouterAction::Continue),
@@ -144,8 +152,14 @@ pub(crate) async fn dispatch_event_with_metadata(
             // stream-json P4: emit the reconstructed SSE event for
             // --include-partial-messages BEFORE the normal handling.
             if !authoritative_frames && output.wants_partial_stream_events() {
-                let event_json = reconstruct_message_start_event_json(&response.id, &response.model, &response.usage);
-                output.emit_stream_event_with_metadata(&event_json, true, metadata).await;
+                let event_json = reconstruct_message_start_event_json(
+                    &response.id,
+                    &response.model,
+                    &response.usage,
+                );
+                output
+                    .emit_stream_event_with_metadata(&event_json, true, metadata)
+                    .await;
             }
             output
                 .emit_message_start(&response.id, &response.model)
@@ -164,7 +178,9 @@ pub(crate) async fn dispatch_event_with_metadata(
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = reconstruct_content_block_event_json(index, &content_block);
-                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
+                output
+                    .emit_stream_event_with_metadata(&event_json, false, metadata)
+                    .await;
             }
             let kind = match &content_block {
                 LlmContentBlock::ProviderContent { protocol, value }
@@ -245,6 +261,15 @@ pub(crate) async fn dispatch_event_with_metadata(
                 | LlmContentBlock::CacheEdits { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
+            if let LlmContentBlock::Reasoning { text, signature } = &content_block {
+                acc.append_text(index, text)?;
+                if let Some(signature) = signature {
+                    acc.set_signature(index, signature)?;
+                }
+                if !text.is_empty() && !suppress_live_thinking {
+                    output.emit_thinking(text, signature.as_deref()).await;
+                }
+            }
             if output.wants_model_output_progress() {
                 output.finish_model_output_block(index);
                 // Some providers send real visible text in the start frame.
@@ -330,7 +355,9 @@ pub(crate) async fn dispatch_event_with_metadata(
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if !authoritative_frames && output.wants_partial_stream_events() {
                 if let Some(event_json) = reconstruct_delta_event_json(index, &delta) {
-                    output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&event_json, false, metadata)
+                        .await;
                 }
             }
             match delta {
@@ -412,7 +439,9 @@ pub(crate) async fn dispatch_event_with_metadata(
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = format!("{{\"type\":\"content_block_stop\",\"index\":{index}}}");
-                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
+                output
+                    .emit_stream_event_with_metadata(&event_json, false, metadata)
+                    .await;
             }
             let completed = acc.stop_block(index)?;
             if output.wants_model_output_progress() {
@@ -476,6 +505,20 @@ pub(crate) async fn dispatch_event_with_metadata(
                 // Low-frequency server-side block preserved verbatim from the
                 // start event — appended to the assistant message unchanged so
                 // resume/replay JSONL bytes stay intact.
+                // A reconciled Completed payload is already translated and
+                // Unicode-repaired. Admit its missing tool through the same
+                // at-most-once stop path as a streamed tool block.
+                CompletedBlock::Preserved(ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                }) => Ok(RouterAction::DispatchToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                }),
                 CompletedBlock::Preserved(block) => Ok(RouterAction::AppendAssistantBlock(block)),
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
@@ -483,8 +526,13 @@ pub(crate) async fn dispatch_event_with_metadata(
         HistoryEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if !authoritative_frames && output.wants_partial_stream_events() {
-                let event_json = reconstruct_message_delta_event_json(delta.stop_reason.as_deref(), usage.as_ref());
-                output.emit_stream_event_with_metadata(&event_json, false, metadata).await;
+                let event_json = reconstruct_message_delta_event_json(
+                    delta.stop_reason.as_deref(),
+                    usage.as_ref(),
+                );
+                output
+                    .emit_stream_event_with_metadata(&event_json, false, metadata)
+                    .await;
             }
             // §0.7 "light up thinking/usage": `message_delta` carries the
             // final usage snapshot. Surface it to the output sink BEFORE
@@ -528,14 +576,15 @@ pub(crate) async fn dispatch_event_with_metadata(
         }
         // NOTE: HistoryEvent has no Ping or Error variants — errors surface as
         // Err(LlmError) from the stream, and keepalives are never forwarded
-        // from the transport layer. The Completed short-circuit terminal is
-        // treated as an end-of-stream signal (the full response is available
-        // in the response field but we forward the already-accumulated blocks).
+        // from the transport layer. The pump reconciles Completed's final
+        // payload into ordinary block/terminal events before reaching here.
         HistoryEvent::MessageStop | HistoryEvent::Completed { .. } => {
             // stream-json P4: emit message_stop for --include-partial-messages.
             if !authoritative_frames && output.wants_partial_stream_events() {
                 let event_json = r#"{"type":"message_stop"}"#;
-                output.emit_stream_event_with_metadata(event_json, false, metadata).await;
+                output
+                    .emit_stream_event_with_metadata(event_json, false, metadata)
+                    .await;
             }
             Ok(RouterAction::EndOfStream)
         }
@@ -580,21 +629,44 @@ fn reconstruct_message_delta_event_json(
 fn reconstruct_content_block_event_json(index: u32, block: &LlmContentBlock) -> String {
     let block_source = match block {
         LlmContentBlock::ProviderContent { value, .. } => value.as_json_source().to_owned(),
-        LlmContentBlock::Text { citations, .. }
-        | LlmContentBlock::TextJsUtf16 { citations, .. } => {
+        LlmContentBlock::Text {
+            text, citations, ..
+        }
+        | LlmContentBlock::TextJsUtf16 {
+            text, citations, ..
+        } => {
             let citations_source = match citations {
                 None => String::new(),
                 Some(None) => ",\"citations\":null".to_owned(),
                 Some(Some(value)) => format!(",\"citations\":{}", value.as_json_source()),
             };
-            format!("{{\"type\":\"text\",\"text\":\"\"{citations_source}}}")
+            let text_source = if let LlmContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } = block
+            {
+                JsonPayload::string_from_utf16_code_units(utf16_code_units)
+                    .as_json_source()
+                    .to_owned()
+            } else {
+                encoded_json(text)
+            };
+            format!("{{\"type\":\"text\",\"text\":{text_source}{citations_source}}}")
         }
-        LlmContentBlock::ToolCall { id, name, .. } => format!(
-            "{{\"type\":\"tool_use\",\"id\":{},\"name\":{},\"input\":{{}}}}",
+        LlmContentBlock::ToolCall { id, name, input } => format!(
+            "{{\"type\":\"tool_use\",\"id\":{},\"name\":{},\"input\":{}}}",
             encoded_json(id),
             encoded_json(name),
+            input.as_json_source(),
         ),
-        LlmContentBlock::Reasoning { .. } => r#"{"type":"thinking","thinking":""}"#.to_owned(),
+        LlmContentBlock::Reasoning { text, signature } => {
+            let signature_source = signature.as_ref().map_or_else(String::new, |signature| {
+                format!(",\"signature\":{}", encoded_json(signature))
+            });
+            format!(
+                "{{\"type\":\"thinking\",\"thinking\":{}{signature_source}}}",
+                encoded_json(text)
+            )
+        }
         LlmContentBlock::RedactedThinking { data } => format!(
             "{{\"type\":\"redacted_thinking\",\"data\":{}}}",
             encoded_json(data),
@@ -816,7 +888,7 @@ mod tests {
         let absent = reconstruct_content_block_event_json(
             0,
             &LlmContentBlock::Text {
-                text: "ignored at start".into(),
+                text: "present at start".into(),
                 citations: None,
                 cache_control: None,
             },
@@ -836,7 +908,55 @@ mod tests {
             .get("citations")
             .unwrap()
             .is_null());
-        assert_eq!(absent["content_block"]["text"], "");
+        assert_eq!(absent["content_block"]["text"], "present at start");
+    }
+
+    #[test]
+    fn native_empty_start_envelopes_keep_their_existing_bytes() {
+        assert_eq!(
+            reconstruct_content_block_event_json(
+                0,
+                &LlmContentBlock::Text {
+                    text: String::new(),
+                    citations: None,
+                    cache_control: None,
+                }
+            ),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+        );
+        assert_eq!(
+            reconstruct_content_block_event_json(
+                0,
+                &LlmContentBlock::TextJsUtf16 {
+                    text: String::new(),
+                    utf16_code_units: vec![],
+                    citations: None,
+                    cache_control: None,
+                }
+            ),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+        );
+        assert_eq!(
+            reconstruct_content_block_event_json(
+                1,
+                &LlmContentBlock::Reasoning {
+                    text: String::new(),
+                    signature: None,
+                }
+            ),
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#
+        );
+        assert_eq!(
+            reconstruct_content_block_event_json(
+                2,
+                &LlmContentBlock::ToolCall {
+                    id: "tool".into(),
+                    name: "Tool".into(),
+                    input: JsonPayload::parse("{}").unwrap(),
+                }
+            ),
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool","name":"Tool","input":{}}}"#
+        );
     }
 
     #[test]

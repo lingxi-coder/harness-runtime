@@ -30,6 +30,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::file_changed_firer::{FileChangedFire, FileChangedFirer};
+#[cfg(test)]
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
 
@@ -38,19 +39,17 @@ use hooks::HookExecutorImpl;
 pub struct OrchestratorFileChangedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `FileChanged` hook payload `cwd` field (the
-    /// session base dir) and the per-hook Command-arm `LINGXI_PROJECT_DIR`
-    /// fallback. Distinct from the fire's `path`, which becomes the wire
-    /// `file_path`.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `FileChanged` hook payload's
-    /// `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorFileChangedFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `FileChanged` hook rides the identical registry /
@@ -59,8 +58,7 @@ impl OrchestratorFileChangedFirer {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 }
@@ -75,14 +73,8 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
             path: fire.path,
             kind: fire.kind,
         };
-        // Context-light: a file change has no live per-turn session here, so we
-        // thread the engine cwd (also the LINGXI_PROJECT_DIR fallback) and the main
-        // session's `transcript_path` (FIX B). Everything else defaults — matching
-        // `OrchestratorCwdChangedFirer`.
-        let ctx = HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
+        let Some(ctx) = self.context_source.current().await else {
+            return Vec::new();
         };
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the
@@ -92,6 +84,7 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
         // cwd (a relative matcher is anchored to cwd, mirroring
         // `resolveWatchPaths`) and return the deduped set for the watcher to
         // fold in and restart.
+        let cwd = ctx.cwd.clone();
         let agg = self.hooks.execute(event, ctx).await;
         let mut out: Vec<PathBuf> = Vec::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -102,7 +95,7 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
             let resolved = if p.is_absolute() {
                 p.to_path_buf()
             } else {
-                self.cwd.join(p)
+                cwd.join(p)
             };
             if seen.insert(resolved.clone()) {
                 out.push(resolved);

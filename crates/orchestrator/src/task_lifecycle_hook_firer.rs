@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hooks::events::HookEvent;
+#[cfg(test)]
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
 use hooks::HookExecutorImpl;
@@ -61,17 +62,17 @@ pub struct OrchestratorTaskLifecycleHookFirer {
     /// The SAME executor the orchestrator fires its other hooks through (and the
     /// SAME one the registry firers wrap).
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the hook payload (`cwd`) and the per-hook
-    /// Command-arm `LINGXI_PROJECT_DIR` fallback.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on every lifecycle hook payload's
-    /// `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorTaskLifecycleHookFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator (and the registry firers) so the tool-path hooks ride the
@@ -80,21 +81,7 @@ impl OrchestratorTaskLifecycleHookFirer {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
-        }
-    }
-
-    /// Build the context-light [`HookContext`] used by every fire here. A task
-    /// lifecycle transition has no live per-turn session, so the engine cwd (also
-    /// the `LINGXI_PROJECT_DIR` fallback) and the main session's `transcript_path`
-    /// (FIX B) are threaded; everything else defaults — matching the
-    /// orchestrator's other context-light firers.
-    fn ctx(&self) -> HookContext {
-        HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 
@@ -106,7 +93,10 @@ impl OrchestratorTaskLifecycleHookFirer {
     /// collect `blockingError`s, and the tool acts only when at least one is
     /// present — exactly the `Some(Block)` arm here.
     async fn run(&self, event: HookEvent) -> Result<(), Utf16JsonProjection> {
-        let agg = self.hooks.execute(event, self.ctx()).await;
+        let Some(ctx) = self.context_source.current().await else {
+            return Ok(());
+        };
+        let agg = self.hooks.execute(event, ctx).await;
         if agg.decision == Some(HookDecision::Block) {
             // claude-code's block case sets `blockingError = reason || "Blocked
             // by hook"` (capital B) uniformly across hook events; the task tool

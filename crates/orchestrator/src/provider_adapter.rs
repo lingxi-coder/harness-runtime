@@ -1402,6 +1402,46 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         &self,
         request: agent::api::SubagentApiRequest,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if matches!(
+            request.opts.query_source_label.as_deref(),
+            Some("extract_memories" | "auto_dream")
+        ) {
+            if let Some(wire) = request.opts.memory_fork_wire.as_ref() {
+                let retained_ids = request
+                    .messages
+                    .iter()
+                    .map(ConversationMessage::id)
+                    .collect::<std::collections::HashSet<_>>();
+                let tools = llm_runtime::convert::to_tool_declarations(wire.tools.clone())?;
+                let mut fork = llm_runtime::MessagesCreateRequest::new(
+                    &request.model,
+                    request.profile.as_deref(),
+                    wire.system_prompt_input.clone(),
+                    request.messages,
+                    tools,
+                );
+                fork.opts.max_output_tokens = request.opts.max_output_tokens;
+                fork.opts.query_source = request.opts.query_source_label;
+                fork.opts.model_attempt = request.opts.model_attempt;
+                fork.opts.model_source = wire.model_source.clone();
+                fork.opts.typed_attachment_ids = wire
+                    .typed_attachment_ids
+                    .iter()
+                    .filter(|id| retained_ids.contains(id))
+                    .copied()
+                    .collect();
+                fork.opts.task_deliveries = wire
+                    .task_deliveries
+                    .iter()
+                    .filter(|(id, _)| retained_ids.contains(id))
+                    .map(|(id, value)| (*id, value.clone()))
+                    .collect();
+                return self
+                    .service
+                    .stream_memory_fork(fork, request.system, request.effort, request.forced_tool)
+                    .await;
+            }
+        }
         self.service
             .stream_with_attempt_opts(
                 &request.model,
@@ -3613,6 +3653,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_fork_wire_matches_frozen_parent_source_vector_tools_and_history_metadata() {
+        use lingxi_core::host::task_delivery::{
+            build_local_shell_task_delivery, TaskDeliveryOutcome, TaskDeliveryPlacement,
+            TaskDeliveryPolicy, TaskDeliveryRequest, TaskDeliveryShellOutput,
+            TaskDeliverySnapshotInput,
+        };
+        use lingxi_core::types::MessageId;
+        use lingxi_llm_client::providers::anthropic::system_prompt::{
+            PromptText, SystemPromptInput, DYNAMIC_BOUNDARY,
+        };
+        let system = SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string("Frozen header α\r\n"),
+                PromptText::from_string(DYNAMIC_BOUNDARY),
+                PromptText::from_string("Frozen memory rules 🧠"),
+            ],
+            Some(PromptText::from_string("Frozen dynamic host context")),
+            None,
+        );
+        let source_tool = lingxi_core::host::SourceToolWireDefinition {
+            name: "Read".into(),
+            description: "Frozen source description 🧠\r\n".into(),
+            input_schema: Utf16JsonProjection::parse(
+                r#"{"type":"object","properties":{"z":{"type":"string"},"a":{"enum":["é","🧠"]}},"required":["z"]}"#,
+            ).unwrap(),
+            strict: false,
+            defer_loading: false,
+        };
+        let attachment_id = MessageId::new();
+        let delivery_id = MessageId::new();
+        let stale_id = MessageId::new();
+        let delivery = build_local_shell_task_delivery(
+            TaskDeliveryPolicy {
+                feature_enabled: true,
+                ..Default::default()
+            },
+            TaskDeliverySnapshotInput {
+                task_id: "native-memory-prefix-task".into(),
+                outcome: TaskDeliveryOutcome::Completed,
+                exit_code: Some(0),
+                start_time_ms: 1_000,
+                end_time_ms: 2_000,
+                output_file: "/tmp/native-memory-prefix.output".into(),
+                output: Some(TaskDeliveryShellOutput {
+                    content_utf16: "preserved task output".encode_utf16().collect(),
+                    omitted_bytes: 0,
+                }),
+                stop_cause: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let delivery = TaskDeliveryRequest {
+            snapshot: delivery.as_projection().clone(),
+            placement: TaskDeliveryPlacement {
+                starts_turn: true,
+                in_drain_position: false,
+                behind_earlier_messages: false,
+                in_human_turn: false,
+            },
+        };
+        let messages = vec![
+            ConversationMessage::user(MessageId::new(), "Frozen parent history".into()),
+            // Native uWr needs an existing usable assistant before it can
+            // project a task-delivery snapshot into a TaskOutput/result pair.
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "Frozen assistant before task completion".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+                per_turn_effort: None,
+            },
+            ConversationMessage::user_meta(attachment_id, "Frozen typed attachment".into()),
+            ConversationMessage::user(delivery_id, "task carrier placeholder".into()),
+            ConversationMessage::user(MessageId::new(), "Memory fork directive".into()),
+        ];
+        let wire = Arc::new(agent::memory_fork::MemoryForkProjection {
+            tool_invoker: None,
+            system_prompt_input: Some(system.clone()),
+            tools: vec![source_tool.clone()],
+            typed_attachment_ids: [attachment_id, stale_id].into_iter().collect(),
+            task_deliveries: [
+                (delivery_id, delivery.clone()),
+                (stale_id, delivery.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            model_source: Some("claude-sonnet-4-wire-probe".into()),
+        });
+        for query_source in ["extract_memories", "auto_dream"] {
+            let expected_transport =
+                FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let expected_adapter = make_adapter(expected_transport.clone());
+            let _ = expected_adapter
+                .service
+                .stream_with_system_prompt(
+                    "claude-sonnet-4-20250514",
+                    Some("anthropic"),
+                    Some(&system),
+                    messages.clone(),
+                    llm_runtime::convert::to_tool_declarations(vec![source_tool.clone()]).unwrap(),
+                    Some(777),
+                    None,
+                    None,
+                    false,
+                    Some(query_source),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    [attachment_id].into_iter().collect(),
+                    [(delivery_id, delivery.clone())].into_iter().collect(),
+                    wire.model_source.clone(),
+                )
+                .await;
+            let expected = expected_transport
+                .seen
+                .lock()
+                .unwrap()
+                .last()
+                .expect("reference dispatch captured")
+                .body_json
+                .clone();
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let adapter = make_adapter(transport.clone());
+            let _ = agent::SubagentApiClient::stream(
+                &adapter,
+                agent::SubagentApiRequest {
+                    model: "claude-sonnet-4-20250514".into(),
+                    profile: Some("anthropic".into()),
+                    system: Some(
+                        "A flattened fallback must not replace the captured source vector".into(),
+                    ),
+                    messages: messages.clone(),
+                    tools: Vec::new(),
+                    forced_tool: None,
+                    effort: None,
+                    opts: agent::api::SubagentApiCallOpts {
+                        memory_fork_wire: Some(wire.clone()),
+                        max_output_tokens: Some(777),
+                        query_source_label: Some(query_source.into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await;
+            let actual = transport
+                .seen
+                .lock()
+                .unwrap()
+                .last()
+                .expect("memory fork dispatch captured")
+                .body_json
+                .clone();
+            for pointer in ["/system", "/tools", "/messages", "/model", "/max_tokens"] {
+                assert_eq!(actual.payload_at(pointer), expected.payload_at(pointer), "{query_source} {pointer}: the source-backed parent prefix must survive exactly");
+            }
+            assert_eq!(
+                actual.string_at("/model"),
+                Some("claude-sonnet-4-wire-probe".to_string())
+            );
+            // TaskOutput returns the Native snapshot as a JSON string inside
+            // a text block. Inspect that source projection rather than the
+            // outer JSON's escaping or serializer-specific text formatting.
+            let actual_source = Utf16JsonProjection::parse(actual.as_json_source()).unwrap();
+            let mut delivered_snapshots = Vec::new();
+            for message_index in 0..actual_source.array_len("/messages").unwrap_or_default() {
+                let content_pointer = format!("/messages/{message_index}/content");
+                for block_index in 0..actual_source
+                    .array_len(&content_pointer)
+                    .unwrap_or_default()
+                {
+                    let block = format!("{content_pointer}/{block_index}");
+                    if actual_source.string_at(&format!("{block}/type")) != Some("tool_result") {
+                        continue;
+                    }
+                    if let Some(text) = actual_source.string_at(&format!("{block}/content/0/text"))
+                    {
+                        if let Ok(snapshot) = Utf16JsonProjection::parse(text) {
+                            delivered_snapshots.push(snapshot);
+                        }
+                    }
+                }
+            }
+            let delivered = delivered_snapshots
+                .iter()
+                .find(|snapshot| snapshot.string_at("/taskId") == Some("native-memory-prefix-task"))
+                .expect("the inherited task-delivery snapshot must become a TaskOutput result");
+            assert_eq!(
+                delivered.string_at("/result/content/0/text"),
+                Some("preserved task output")
+            );
+            assert_eq!(delivered, &delivery.snapshot);
+            assert!(!actual.as_json_source().contains("task carrier placeholder"));
+            assert!(actual
+                .as_json_source()
+                .contains("Frozen source description"));
+            assert!(!actual.as_json_source().contains("flattened fallback"));
+        }
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport.clone());
+        let _ = agent::SubagentApiClient::stream(
+            &adapter,
+            agent::SubagentApiRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                profile: Some("anthropic".into()),
+                system: Some("Ordinary child system".into()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+                forced_tool: None,
+                effort: None,
+                opts: agent::api::SubagentApiCallOpts {
+                    memory_fork_wire: Some(wire),
+                    query_source_label: Some("ordinary-child".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        let ordinary = transport
+            .seen
+            .lock()
+            .unwrap()
+            .last()
+            .expect("ordinary child captured")
+            .body_json
+            .clone();
+        assert!(ordinary.as_json_source().contains("Ordinary child system"));
+        assert!(!ordinary.as_json_source().contains("Frozen"));
+        assert_eq!(
+            ordinary.string_at("/model"),
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn subagent_api_client_seam_forwards_through_trait_object() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
@@ -3653,6 +3932,7 @@ mod tests {
                 forced_tool: None,
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
+                    memory_fork_wire: None,
                     max_output_tokens: Some(777),
                     model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
@@ -3686,6 +3966,7 @@ mod tests {
                 forced_tool: Some("StructuredOutput".into()),
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
+                    memory_fork_wire: None,
                     max_output_tokens: Some(321),
                     model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
@@ -3783,6 +4064,7 @@ mod tests {
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {
+                        memory_fork_wire: None,
                         max_output_tokens: Some(ceiling),
                         model_attempt: None,
                         query_source_label: Some(label.into()),

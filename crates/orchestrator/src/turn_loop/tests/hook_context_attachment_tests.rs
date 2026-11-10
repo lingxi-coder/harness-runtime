@@ -1971,11 +1971,11 @@ impl lingxi_core::host::OutputStream for BlockingAssistantAppendLog {
 }
 
 /// Exercise the actual streaming W1 dispatcher while an assistant's
-/// `session.append` Mod is suspended in `$.log`. A PreToolUse defer writes its
-/// attachment through the same generation guard before the assistant's short
-/// durable commit chooses its parent.
+/// `session.append` Mod is suspended in `$.log`. A PreToolUse defer carries its
+/// attachment to accepted journal publication, so its owning assistant keeps
+/// the stable UUID and commits before the deferred marker.
 #[tokio::test]
-async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit() {
+async fn streaming_w1_defer_commits_after_accepted_assistant_journal_publication() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let module = dir.path().join("session-append.js");
@@ -2110,17 +2110,9 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
     )
     .await
     .expect("actual PreToolUse defer hook started");
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut w1_dispatch)
-            .await
-            .is_err(),
-        "W1's immediate attachment append waits for the session.append log lease"
-    );
-
-    output.release.notify_one();
     let deferred = tokio::time::timeout(std::time::Duration::from_secs(5), &mut w1_dispatch)
         .await
-        .expect("W1 defer finishes after log release")
+        .expect("W1 defer stages its result without waiting for the assistant's durable lease")
         .expect("W1 dispatcher task")
         .expect("W1 dispatch");
     assert!(deferred.prevent_continuation);
@@ -2128,11 +2120,48 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         deferred.results.is_empty(),
         "a deferred tool has no tool_result"
     );
+    assert!(
+        !std::fs::read_to_string(&session_path)
+            .unwrap()
+            .contains("hook_deferred_tool"),
+        "W1 never persists the marker ahead of its pending assistant row"
+    );
+    output.release.notify_one();
     let tool_parents =
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut assistant_write)
             .await
-            .expect("assistant commit follows the queued W1 attachment")
+            .expect("assistant commit retains its prepared identity")
             .expect("assistant persistence task");
+
+    let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+    settlement.record_assistant_row(assistant_id);
+    orch.settle_stream_tool_results(
+        &mut settlement,
+        vec![crate::streaming_executor::DrainedResult {
+            assistant_id,
+            publication_guard: Some(Arc::new(fence)),
+            tool: "Echo".into(),
+            block: None,
+            result_siblings: Vec::new(),
+            prevent_continuation: deferred.prevent_continuation,
+            injected: deferred.injected_messages,
+            modifiers: deferred.context_modifiers,
+            post_tool_batch_calls: deferred.post_tool_batch_calls,
+            publications: deferred.publications,
+            tool_use_result: None,
+        }],
+        &tool_parents,
+        &None,
+    )
+    .await;
+    assert!(
+        !std::fs::read_to_string(&session_path)
+            .unwrap()
+            .contains("hook_deferred_tool"),
+        "accepted Tn metadata waits for the ordered journal flush"
+    );
+    orch.flush_stream_event_journal(&mut settlement, &mut [])
+        .await;
 
     let rows = std::fs::read_to_string(&session_path)
         .expect("read JSONL")
@@ -2140,27 +2169,28 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         .map(|line| serde_json::from_str::<session::jsonl::schema::JsonlMessage>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[1].message_type, "attachment");
+    assert_eq!(rows[1].message_type, "assistant");
+    assert_eq!(rows[1].parent_uuid.as_deref(), Some(rows[0].uuid.as_str()));
+    assert_eq!(rows[2].message_type, "attachment");
     assert_eq!(
-        rows[1]
+        rows[2]
             .attachment_projection
             .as_ref()
             .and_then(|attachment| attachment.string_at("/type")),
         Some("hook_deferred_tool")
     );
-    assert_eq!(rows[2].message_type, "assistant");
     assert_eq!(rows[2].parent_uuid.as_deref(), Some(rows[1].uuid.as_str()));
     assert_eq!(
         output.observed.lock().await.as_slice(),
-        [format!("assistant-row-uuid:{}", rows[2].uuid)],
+        [format!("assistant-row-uuid:{}", rows[1].uuid)],
         "session.append uses the assistant line's stable UUID"
     );
-    assert_eq!(tool_parents.get(&tool_use_id), Some(&rows[2].uuid));
+    assert_eq!(tool_parents.get(&tool_use_id), Some(&rows[1].uuid));
     assert_eq!(
         orch.source_tool_assistant_uuid(&tool_use_id)
             .await
             .as_deref(),
-        Some(rows[2].uuid.as_str())
+        Some(rows[1].uuid.as_str())
     );
 }
 

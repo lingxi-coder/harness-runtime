@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_tools;
+pub mod auto_memory_extract;
 pub mod file;
 pub mod gate;
 pub mod index_cap;
@@ -27,8 +29,9 @@ pub use file::{
 };
 pub use gate::{auto_memory_enabled, AutoMemoryEnv};
 pub use index_cap::{
-    human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured, IndexMeasure,
-    MemoryIndexNotice, TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
+    human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured,
+    truncate_memory_index, IndexMeasure, MemoryIndexNotice, MemoryIndexView,
+    TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
 };
 
 // ------ M3-02 wire-identifier constants ------

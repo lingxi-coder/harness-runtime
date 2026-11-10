@@ -752,7 +752,9 @@ pub(crate) fn profile_header(
 ) -> &'static str {
     match mode {
         lingxi_core::host::session_context::ConversationMode::Code => HEADER,
-        lingxi_core::host::session_context::ConversationMode::Chat => "You are LingXi, a capable assistant for research, writing, learning and getting work done.",
+        lingxi_core::host::session_context::ConversationMode::Chat => {
+            "You are LingXi, a capable assistant for research, writing, learning and getting work done."
+        }
     }
 }
 

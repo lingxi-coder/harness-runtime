@@ -700,12 +700,27 @@ pub fn context_attachments(
             .ok()
         })
         .collect();
-    let has_prior_sections = history
+    let prior_sections = history
         .iter()
         .rev()
         .find(|value| value.string_at("/type") == Some("context_sections"))
-        .is_some_and(is_valid_context_attachment);
-    if !sections.is_empty() && !has_prior_sections {
+        .filter(|value| is_valid_context_attachment(value));
+    let memory_directory = sections
+        .iter()
+        .find(|section| section.string_at("/name") == Some("auto memory"))
+        .and_then(|section| section.string_units("/text"));
+    let previous_memory_directory = prior_sections.and_then(|prior| {
+        (0..prior.array_len("/sections").unwrap_or_default()).find_map(|index| {
+            (prior.string_at(&format!("/sections/{index}/name")) == Some("auto memory"))
+                .then(|| prior.string_units(&format!("/sections/{index}/text")))
+                .flatten()
+        })
+    });
+    // Stable context sections still announce once. A live memory enable or
+    // directory retarget must replace its dynamic directory even when the
+    // standard system protocol is deliberately path-free.
+    let memory_directory_changed = memory_directory != previous_memory_directory;
+    if !sections.is_empty() && (prior_sections.is_none() || memory_directory_changed) {
         if let Ok(attachment) = Utf16JsonProjection::object(vec![
             ("type".into(), Utf16JsonProjection::from("context_sections")),
             (

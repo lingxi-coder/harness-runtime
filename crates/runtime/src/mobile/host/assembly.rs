@@ -404,6 +404,157 @@ pub(super) fn planned_mobile_transcript_path(
     )
 }
 
+fn mobile_memory_project_root(cfg: &MobileConfig) -> std::path::PathBuf {
+    cfg.logical_cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd)))
+}
+
+fn mobile_memory_preferences_provider(
+    config: &MobileConfig,
+    model_cwd: agent::handle::MobileWorkspaceCwdProvider,
+) -> Arc<orchestrator::MemoryPreferencesProvider> {
+    let config_home = config.lingxi_home.clone();
+    let host_root = std::path::PathBuf::from(super::canonical_cwd_string(&config.cwd));
+    let logical_root = config.logical_cwd.clone();
+    let trusted = config.workspace_trusted;
+    let home = config_home.parent().unwrap_or(&config_home).to_path_buf();
+    Arc::new(move |cwd| {
+        let config_home = config_home.clone();
+        let logical_root = model_cwd(Some(&cwd))
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                logical_root.as_ref().and_then(|logical| {
+                    cwd.strip_prefix(&host_root)
+                        .ok()
+                        .map(|relative| logical.join(relative))
+                })
+            });
+        let home = home.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut config = MobileConfig::default();
+                config.lingxi_home = config_home;
+                config.cwd = cwd;
+                config.logical_cwd = logical_root;
+                let effective = super::provider_services::mobile_effective_settings(&config)
+                    .map_err(|error| error.to_string())?;
+                if effective.source_incomplete {
+                    return Err("memory settings sources are incomplete".into());
+                }
+                let setting = effective.auto_memory_directory(trusted);
+                Ok(orchestrator::MemoryPreferences {
+                    directory: memory::memdir::paths::resolve_auto_memory_directory(
+                        &config.lingxi_home,
+                        &mobile_memory_project_root(&config),
+                        &home,
+                        setting.as_deref(),
+                    ),
+                    enabled: effective.settings.auto_memory_enabled,
+                    auto_dream_enabled: effective.settings.auto_dream_enabled,
+                })
+            })
+            .await
+            .map_err(|error| format!("memory settings task: {error}"))?
+        })
+    })
+}
+
+#[cfg(test)]
+mod memory_project_identity_tests {
+    use super::{
+        mobile_memory_preferences_provider, mobile_memory_project_root,
+        planned_mobile_transcript_path,
+    };
+    use crate::mobile::host::MobileConfig;
+    use std::sync::Arc;
+
+    #[test]
+    fn remapped_host_directories_keep_memory_beside_the_same_logical_project_transcripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let mut config = MobileConfig {
+            lingxi_home: root.join("configured-brand-home"),
+            cwd: root.join("mount-a/project"),
+            logical_cwd: Some("/home/user/project".into()),
+            ..Default::default()
+        };
+        let session_id = lingxi_core::types::SessionId::default();
+        let transcript = planned_mobile_transcript_path(&config, None, session_id);
+        let memory = memory::memdir::paths::user_memdir_for_project(
+            &config.lingxi_home,
+            &mobile_memory_project_root(&config),
+        );
+        assert_eq!(memory.parent(), transcript.parent());
+        config.cwd = root.join("mount-b/project");
+        assert_eq!(
+            planned_mobile_transcript_path(&config, None, session_id),
+            transcript
+        );
+        assert_eq!(
+            memory::memdir::paths::user_memdir_for_project(
+                &config.lingxi_home,
+                &mobile_memory_project_root(&config),
+            ),
+            memory
+        );
+    }
+
+    #[tokio::test]
+    async fn live_memory_preferences_preserve_source_trust_and_retarget_without_creating_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let config = MobileConfig {
+            lingxi_home: root.join("configured-brand-home"),
+            cwd: root.join("project"),
+            logical_cwd: Some("/home/user/project".into()),
+            workspace_trusted: false,
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&config.lingxi_home).unwrap();
+        std::fs::create_dir_all(config.cwd.join(branding::DOT_DIR)).unwrap();
+        let first_directory = root.join("first-memory");
+        let second_directory = root.join("second-memory");
+        let project_directory = root.join("project-override");
+        let write_user = |directory: &std::path::Path, enabled| {
+            std::fs::write(config.lingxi_home.join("settings.json"), serde_json::json!({
+                "autoMemoryDirectory":directory, "autoMemoryEnabled":enabled, "autoDreamEnabled":true,
+            }).to_string()).unwrap();
+        };
+        write_user(&first_directory, false);
+        std::fs::write(
+            config.cwd.join(branding::DOT_DIR).join("settings.json"),
+            serde_json::json!({
+                "autoMemoryDirectory":project_directory,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mapping: agent::handle::MobileWorkspaceCwdProvider = Arc::new(|_| None);
+        let provider = mobile_memory_preferences_provider(&config, mapping.clone());
+        let first = provider(config.cwd.clone()).await.unwrap();
+        assert_eq!(first.directory, first_directory);
+        assert_eq!(first.enabled, Some(false));
+        assert_eq!(first.auto_dream_enabled, Some(true));
+        write_user(&second_directory, true);
+        let second = provider(config.cwd.clone()).await.unwrap();
+        assert_eq!(second.directory, second_directory);
+        assert_eq!(second.enabled, Some(true));
+        assert!(!first_directory.exists());
+        assert!(!second_directory.exists());
+        let mut trusted = config.clone();
+        trusted.workspace_trusted = true;
+        let trusted_provider = mobile_memory_preferences_provider(&trusted, mapping);
+        assert_eq!(
+            trusted_provider(config.cwd.clone())
+                .await
+                .unwrap()
+                .directory,
+            project_directory
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn build_mobile_inner_with_ask(
     cfg: MobileConfig,
@@ -520,6 +671,12 @@ pub(super) async fn build_mobile_inner_with_ask(
             })?;
     let transcript_path =
         planned_mobile_transcript_path(&cfg, initial_session.as_ref(), main_session_id);
+    let hook_context_source = Arc::new(orchestrator::HookContextSource::new(hooks::HookContext {
+        session_id: main_session_id,
+        cwd: cwd.clone(),
+        transcript_path: transcript_path.clone(),
+        ..hooks::HookContext::default()
+    }));
     if let Some(initial) = &initial_session {
         // The preflight cannot claim a writer before rejecting a mode mismatch.
         // Recheck the same bytes under the authority before mounting the owner.
@@ -771,7 +928,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         session_writer
             .activate_session_target_with_authority(
                 main_session_id,
-                transcript_path,
+                transcript_path.clone(),
                 logical_cwd.clone(),
                 file_authority,
             )
@@ -840,8 +997,15 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      shared assembler gives API Key precedence over OAuth.
     let has_api_key = false;
     let has_anthropic_oauth = false;
-    let provider_settings = mobile_provider_settings(&cfg)
+    let effective_settings = super::provider_services::mobile_effective_settings(&cfg)
         .map_err(|error| MobileBuildError::Orchestrator(format!("provider settings: {error}")))?;
+    let auto_memory_directory_setting =
+        effective_settings.auto_memory_directory(cfg.workspace_trusted);
+    let provider_settings = super::provider_services::mobile_provider_settings_from_layered(
+        &cfg,
+        effective_settings.settings,
+    )
+    .map_err(|error| MobileBuildError::Orchestrator(format!("provider settings: {error}")))?;
     let vision_delegation_enabled = provider_settings
         .vision_delegation_enabled
         .unwrap_or(cfg.vision_delegation_enabled);
@@ -1085,12 +1249,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         .iter()
         .map(|source| (source.profile_name.clone(), source.credential_id.clone()))
         .collect();
+    let user_agent_environment = UserAgentEnv::from_process_env();
+    let memory_sdk_entrypoint = matches!(
+        user_agent_environment.entrypoint.as_deref(),
+        Some("sdk-ts" | "sdk-py" | "sdk-cli")
+    );
     let api_service = Arc::new(
         llm_runtime::ApiService::new_with_routing(
             llm_runtime,
             llm_transport,
             subscriber_state,
-            UserAgentEnv::from_process_env(),
+            user_agent_environment,
             env!("CARGO_PKG_VERSION"),
             Some(analytics_bus.clone()), // audit fix: API events share the one bus
             None,
@@ -2006,16 +2175,22 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Same blocking TaskCreated/TaskCompleted hook contract as desktop; the
     // transcript path is unavailable before the session mounts (matches the
     // `task_lifecycle_hooks` wiring below).
-    .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        std::path::PathBuf::new(),
-    )))
-    .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        std::path::PathBuf::new(),
-    )));
+    .with_task_completed_firer(Arc::new(
+        orchestrator::OrchestratorTaskCompletedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            std::path::PathBuf::new(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ))
+    .with_task_created_firer(Arc::new(
+        orchestrator::OrchestratorTaskCreatedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            std::path::PathBuf::new(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ));
     task_registry_inner.set_workflow_session_filter(Some(main_session_uuid.clone()));
     let lsp_diagnostics = lsp::LspDiagnosticRegistry::new();
     let typescript_lsp_mode =
@@ -2193,7 +2368,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     if let Some(environment) = mobile_runtime_environment.clone() {
         subagent_spawner_concrete = subagent_spawner_concrete
             .with_mobile_runtime_environment(environment)
-            .with_mobile_workspace_cwd_provider(mobile_workspace_cwd_provider);
+            .with_mobile_workspace_cwd_provider(mobile_workspace_cwd_provider.clone());
     }
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
@@ -2246,6 +2421,15 @@ pub(super) async fn build_mobile_inner_with_ask(
     let command_snapshot_provider = workflow_command_snapshot.provider();
     let local_workflow_invoker =
         Arc::new(crate::mobile::workflow_support::DeferredToolInvoker::new());
+    let memory_invoker = Arc::new(crate::mobile::workflow_support::DeferredToolInvoker::new());
+    let dream_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    tasks::registry::register_dream_handler(
+        &mut task_registry_inner,
+        subagent_spawner.clone(),
+        memory_invoker.clone(),
+        budget_enforcer.clone(),
+        dream_status_sink.clone(),
+    );
     let local_workflow_status_sink = Arc::new(
         crate::mobile::workflow_support::MobileWorkflowStatusSink::new(
             listener.clone(),
@@ -2314,6 +2498,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
+    dream_status_sink.bind(task_registry.clone());
     let audio_service = platform
         .audio_service()
         .map(|audio| match cfg.media_attachment_handle.as_ref() {
@@ -2325,7 +2510,14 @@ pub(super) async fn build_mobile_inner_with_ask(
             None => Ok(audio),
         })
         .transpose()?;
+    let goal_proposal_host = super::goal_proposal::mobile_goal_proposal_host(
+        &cfg,
+        interactive_launch,
+        ask_user_question_tx.clone(),
+        analytics_bus.clone(),
+    );
     let tool_ctx = BuiltinToolContext {
+        goal_proposal_host: Some(goal_proposal_host.clone()),
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         side_chat: false,
@@ -2461,7 +2653,8 @@ pub(super) async fn build_mobile_inner_with_ask(
                 hooks.clone(),
                 cwd.clone(),
                 std::path::PathBuf::new(),
-            ),
+            )
+            .with_context_source(hook_context_source.clone()),
         )),
     };
     // #5 invariant: mobile has no live sandbox runtime, so sandboxing must stay
@@ -2841,6 +3034,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     local_workflow_invoker.set(Arc::new(
         tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
+    memory_invoker.set(Arc::new(
+        tool_api::RegistryToolInvoker::new(tools.clone())
+            .with_gate(perms.clone())
+            .with_read_file_state(read_state_map.clone())
+            .with_background_owned(true),
+    ));
     local_workflow_status_sink.bind(task_registry.clone());
     let parked_agent_restore_inheritance = lingxi_core::host::SubagentInheritance {
         tool_invoker: Arc::new(
@@ -2849,39 +3048,54 @@ pub(super) async fn build_mobile_inner_with_ask(
         budget: budget_enforcer.clone(),
     };
 
-    // MEM-1 ACTIVATION on mobile — the same gate as desktop,
-    // `memory::auto_memory_enabled`, which claude-code defaults ON (`dLt()` ends
-    // `return!0`). When active, wire the memdir-backed memory selector so
-    // relevant project memdir entries surface each turn via the same provider
-    // service and live model/profile as the session's main turn.
-    //
-    // Disable with `autoMemoryEnabled:false` or the `*_DISABLE_AUTO_MEMORY` /
-    // `*_SIMPLE` env killswitches. A failed provider call makes the side query
-    // fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch = if !cfg.app_agent_host
-        && memory::auto_memory_enabled(
-            &memory::AutoMemoryEnv::from_process_env(),
-            provider_settings.auto_memory_enabled,
-        ) {
-        // `cfg.lingxi_home` is the device config dir; the helper re-appends
-        // the config-home segment, so pass its PARENT as `home`.
+    // Keep normal main-session roots available while dormant. The live
+    // auto-memory gate controls recall, writes and model-facing instructions;
+    // disabling memory never creates or reads the memory directory.
+    let memory_runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> =
+        Arc::new(platform_posix_minimal::runtime::PosixRuntime::new());
+    let mut memory_active = memory::auto_memory_enabled(
+        &memory::AutoMemoryEnv::from_process_env(),
+        provider_settings.auto_memory_enabled,
+    );
+    let memory_directory = if !cfg.app_agent_host && !cfg.scheduler_controller {
         let home = cfg
             .lingxi_home
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| cwd.clone());
-        Some(orchestrator::prompt::build_memdir_prefetch(
-            Arc::new(sidequery::ProviderSideQueryClient::from_service(
-                api_service.clone(),
-            )),
-            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+        // The transcript's stable logical project identity survives mobile
+        // mount changes; a host backing-directory path must not create a
+        // second memory namespace for the same conversation project.
+        let memory_project_root = mobile_memory_project_root(&cfg);
+        let directory = memory::memdir::paths::resolve_auto_memory_directory(
+            &cfg.lingxi_home,
+            &memory_project_root,
             &home,
-            &cwd,
-        ))
+            auto_memory_directory_setting.as_deref(),
+        );
+        if memory_active {
+            if let Err(error) = tokio::fs::create_dir_all(&directory).await {
+                tracing::warn!(%error, path = %directory.display(), "auto-memory directory unavailable");
+                memory_active = false;
+            }
+        }
+        Some(directory)
     } else {
         None
     };
+    let memdir_prefetch = memory_directory.as_ref().map(|directory| {
+        let mut roots = memory::memdir::paths::memdir_roots_at(&cfg.lingxi_home, &cwd, false);
+        roots.user_memdir = directory.clone();
+        let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::new(
+            Arc::new(memory::selector::MemorySelector::new(Arc::new(
+                sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
+            ))),
+            memory_runtime.clone(),
+            roots,
+        ));
+        prefetch.set_enabled(memory_active);
+        prefetch
+    });
 
     // Audit fix (#3): autocompaction parity with desktop. Build the real
     // CompactionOrchestrator backed by a forked summary side-query over the SAME
@@ -3087,7 +3301,61 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
-        orch_inner = orch_inner.with_memory_prefetch(prefetch);
+        orch_inner = orch_inner
+            .with_memory_prefetch(prefetch)
+            .with_memory_preferences_provider(mobile_memory_preferences_provider(
+                &cfg,
+                mobile_workspace_cwd_provider,
+            ));
+    }
+    if let Some(directory) = memory_directory {
+        orch_inner = orch_inner.with_auto_memory(Arc::new(orchestrator::AutoMemoryHandle::new(
+            directory.clone(),
+            subagent_spawner.clone(),
+            memory_invoker,
+            budget_enforcer.clone(),
+            memory_runtime.clone(),
+        )));
+        let flag =
+            telemetry::feature_flags::flag_value("tengu_onyx_plover", serde_json::Value::Null);
+        let scheduler = Arc::new(tasks::auto_dream::AutoDreamScheduler::new(
+            Arc::new(tasks::auto_dream::LocalAutoDreamStorage::new(Arc::new(
+                cron::scheduler::pid_alive_check,
+            ))),
+            task_registry.clone(),
+            clock.clone(),
+            memory_runtime,
+        ));
+        orch_inner = orch_inner.with_auto_dream(
+            scheduler,
+            tasks::auto_dream::AutoDreamRunContext {
+                current_session_id: main_session_uuid.clone(),
+                prompt_context: tasks::DreamPromptContext {
+                    memory_directory: memory::memdir::paths::memory_directory_prompt_path(
+                        &directory,
+                    ),
+                    transcript_directory: transcript_path
+                        .parent()
+                        .unwrap_or(&cfg.lingxi_home)
+                        .to_string_lossy()
+                        .into_owned(),
+                    additional_context: None,
+                    team_memory: false,
+                    mcp_memory: false,
+                },
+                gates: tasks::auto_dream::AutoDreamGates {
+                    auto_memory_enabled: memory_active,
+                    setting: provider_settings.auto_dream_enabled,
+                    is_sdk: memory_sdk_entrypoint,
+                    ..Default::default()
+                }
+                .with_flag(&flag),
+                config: tasks::auto_dream::AutoDreamConfig::from_flag(&flag),
+                writes_permitted: true,
+                fork_request: None,
+                fork_wire: None,
+            },
+        );
     }
     // Keep the resolved provider identity when the selected model is shared
     // by multiple profiles. Session initialization does not emit switch hooks.
@@ -3099,6 +3367,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
+    goal_proposal_host.bind(&orch);
     // Install before registry population: any later error or cancelled build
     // must drain this exact composition and break its handler back edges.
     let retirement = super::MobileSessionRetirement::new(
@@ -3202,6 +3471,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
     // orchestrator↔hook-executor reference cycle.
+    hook_context_source.attach(&orch);
     hook_attachment_sink.attach(&orch);
     hook_prompt_runner.attach(&orch);
 
@@ -4040,6 +4310,7 @@ fn build_mobile_engine_on_worker(
     let task_notification_watcher_join = {
         let registry = inner.task_registry.clone();
         let orch = inner.orchestrator.clone();
+        let goal_proposal_dispatcher = inner.dispatcher.clone_shared();
         let permission_gate = inner.permission_gate.clone();
         let session_uuid = inner.active_session_uuid.clone();
         let session_writer = inner.session_writer.clone();
@@ -4083,6 +4354,7 @@ fn build_mobile_engine_on_worker(
                         .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
                             command.is_main_thread()
                                 && (command.uuid.starts_with("goal-retry-")
+                                    || command.uuid.starts_with("goal-proposal:")
                                     || matches!(
                                         command.source,
                                         msgqueue::QueueSource::Cron
@@ -4120,6 +4392,7 @@ fn build_mobile_engine_on_worker(
                             .dequeue_filtered(|command| {
                                 command.is_main_thread()
                                     && (command.uuid.starts_with("goal-retry-")
+                                    || command.uuid.starts_with("goal-proposal:")
                                         || matches!(
                                             command.source,
                                             msgqueue::QueueSource::Cron
@@ -4412,6 +4685,10 @@ fn build_mobile_engine_on_worker(
                     let scheduled_fire_id = scheduled
                         .as_ref()
                         .and_then(|command| command.scheduled_fire_id.clone());
+                    let goal_proposal = scheduled
+                        .as_ref()
+                        .filter(|command| command.uuid.starts_with("goal-proposal:"))
+                        .cloned();
                     let goal_retry_id = scheduled
                         .as_ref()
                         .filter(|c| c.uuid.starts_with("goal-retry-"))
@@ -4489,12 +4766,24 @@ fn build_mobile_engine_on_worker(
                     );
                     let scheduler = loop_scheduler.clone();
                     let reason = cancel_reason.clone();
+                    let goal_dispatcher = goal_proposal_dispatcher.clone_shared();
+                    let goal_dispatch_transition = loop_transition.clone();
                     // The turn task embeds the streaming + Mod lifecycle state
                     // machine. Box it at the spawn boundary so the worker does
                     // not materialize the full queued-turn future inline while
                     // creating the Tokio task.
                     let task = tokio::spawn(child_turn_tasks.track_future(Box::pin(async move {
-                        let result = if let Some((_, inputs)) = mobile_delivery {
+                        let result = if let Some(command) = goal_proposal {
+                            super::goal_proposal::run_queued_goal_proposal(
+                                &orch,
+                                &goal_dispatcher,
+                                command,
+                                task_turn.cancel.clone(),
+                                sink.as_ref(),
+                                goal_dispatch_transition,
+                            ).await
+                        } else {
+                            let result = if let Some((_, inputs)) = mobile_delivery {
                             orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone()).await
                         } else {
                             match prompt {
@@ -4549,6 +4838,8 @@ fn build_mobile_engine_on_worker(
                                 }
                             }
                             }
+                        };
+                            result.map(|_| ())
                         };
                         if let Err(error) = result {
                             message_output.reset_message_buffer().await;

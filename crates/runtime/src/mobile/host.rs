@@ -182,6 +182,7 @@ use automation::{
 
 mod configuration_admin;
 mod fast_mode_preference;
+mod goal_proposal;
 mod model_preference;
 mod permission_preference;
 mod settings_commands;
@@ -390,6 +391,7 @@ impl MobileSessionRetirementState {
             std::time::Duration::from_secs(60),
         )
         .await;
+        orchestrator.shutdown_background_memory().await;
         orchestrator.shutdown_idle_compaction().await;
         // No handler graph is retired while an admitted turn can use it.
         orchestrator.wait_for_turn_idle().await;
@@ -1972,6 +1974,7 @@ impl Drop for MobileEngineHandle {
                 tracing::warn!("mobile turn tasks did not drain within the shutdown budget");
                 turn_tasks.wait().await;
             }
+            producer_orchestrator.shutdown_background_memory().await;
             producer_orchestrator.shutdown_idle_compaction().await;
             let mut side_chat_retry = std::time::Duration::from_secs(1);
             loop {
@@ -3312,6 +3315,21 @@ struct MobileMsgQueueInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueueInput {
+    fn supports_goal_proposals(&self) -> bool {
+        true
+    }
+    async fn enqueue_goal_proposal(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        origin: lingxi_core::session::GoalOrigin,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.queue
+            .enqueue_goal_proposal(id, body, origin, cancel)
+            .await;
+        Ok(())
+    }
     fn supports_goal_retries(&self) -> bool {
         true
     }

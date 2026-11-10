@@ -390,6 +390,8 @@ pub struct SubagentContext {
     /// Admission token for an Agent-tool request. Only the execution owner
     /// reports start and terminal receipts; non-Agent launches leave this empty.
     pub agent_spawn_token: Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
+    /// Parent wire inputs captured before the internal memory worker is spawned.
+    pub memory_fork_wire: Option<Arc<crate::memory_fork::MemoryForkProjection>>,
     pub stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
     /// Session epoch captured at admission. Snapshot publication cannot bind a
     /// retained child to a later restored run or session generation.

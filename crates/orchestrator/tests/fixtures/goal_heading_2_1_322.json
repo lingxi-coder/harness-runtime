@@ -1,0 +1,1163 @@
+{
+  "native": {
+    "version": "2.1.322",
+    "sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450"
+  },
+  "sourceByteRanges": [
+    {
+      "name": "raw controls and whitespace",
+      "start": 260465797,
+      "end": 260466009,
+      "sha256": "bb3bdb4b747c37a303876386046810b26524cea78c9d682ae075b6179c6d16fb"
+    },
+    {
+      "name": "markup confusable map",
+      "start": 260472367,
+      "end": 260473377,
+      "sha256": "41c389de861fc35dd578df30aea2b599915cda3157ac42f0f6e168ec7dc2c75b"
+    },
+    {
+      "name": "markup map projection",
+      "start": 262764376,
+      "end": 262765947,
+      "sha256": "40fabd78a3e6a61836cae64ce48e102838b8db85e946cec0ad61e88d3e6faa87"
+    },
+    {
+      "name": "markup confusable replacement",
+      "start": 262766763,
+      "end": 262766832,
+      "sha256": "1cbc51128a90739e7413d2aabb0c25572b5afc7c2a9e4b65e17f5f5935243bd0"
+    },
+    {
+      "name": "escape markup characters",
+      "start": 262763872,
+      "end": 262763966,
+      "sha256": "c135f654148c7638a2e193fdbc5252ceac563f77130f9763c5bd62511451be58"
+    },
+    {
+      "name": "goal condition and heading",
+      "start": 280417754,
+      "end": 280417832,
+      "sha256": "bd0c668d22b281ab39b046d51bd7d79c3328b1b2efa8a97142f84682414a82ce"
+    },
+    {
+      "name": "goal retry prompt delivery",
+      "start": 280417021,
+      "end": 280417581,
+      "sha256": "ab21e4705c6d1bf9565436e95e1f13f10d0001f573f2bdb47cd6e814762c1aea"
+    },
+    {
+      "name": "goal checkin body",
+      "start": 280412972,
+      "end": 280413920,
+      "sha256": "21fadc25e04468e0ead8836986c8998b079e2cef2cf86c075f85735d9da045d0"
+    },
+    {
+      "name": "goal heading prefix literal",
+      "start": 262818252,
+      "end": 262818273,
+      "sha256": "16d41947e111611aa76135140650aceb8645d4b8b8492d4741c6ef195e05bcff"
+    },
+    {
+      "name": "default-ignorable removal pipeline",
+      "start": 260481882,
+      "end": 260481973,
+      "sha256": "db6f92fec42eb6e8da4f52bd82de6a6193b41e717f211617addd74a5f8da2d4d"
+    },
+    {
+      "name": "well-formed UTF-16 filtering",
+      "start": 260462323,
+      "end": 260462884,
+      "sha256": "b185fd1e8a6849ece80201f3443addd5daa90bf0363928bfd4b23b87ff43110e"
+    },
+    {
+      "name": "format, private-use and unassigned filtering",
+      "start": 260481569,
+      "end": 260481882,
+      "sha256": "56aee5cf75a1768566489bf8a86378ea497f601c7df0b595495446dd21f150c5"
+    }
+  ],
+  "confusableMap": [
+    [
+      "˂",
+      "<"
+    ],
+    [
+      "˃",
+      ">"
+    ],
+    [
+      "ᐳ",
+      ">"
+    ],
+    [
+      "ᐸ",
+      "<"
+    ],
+    [
+      "ᚲ",
+      "<"
+    ],
+    [
+      "‹",
+      "<"
+    ],
+    [
+      "›",
+      ">"
+    ],
+    [
+      "≮",
+      "<"
+    ],
+    [
+      "≯",
+      ">"
+    ],
+    [
+      "≺",
+      "<"
+    ],
+    [
+      "≻",
+      ">"
+    ],
+    [
+      "⊀",
+      "<"
+    ],
+    [
+      "⊁",
+      ">"
+    ],
+    [
+      "⋖",
+      "<"
+    ],
+    [
+      "⋗",
+      ">"
+    ],
+    [
+      "〈",
+      "<"
+    ],
+    [
+      "〉",
+      ">"
+    ],
+    [
+      "❬",
+      "<"
+    ],
+    [
+      "❭",
+      ">"
+    ],
+    [
+      "❮",
+      "<"
+    ],
+    [
+      "❯",
+      ">"
+    ],
+    [
+      "❰",
+      "<"
+    ],
+    [
+      "❱",
+      ">"
+    ],
+    [
+      "⟨",
+      "<"
+    ],
+    [
+      "⟩",
+      ">"
+    ],
+    [
+      "⦑",
+      "<"
+    ],
+    [
+      "⦓",
+      "<"
+    ],
+    [
+      "⧼",
+      "<"
+    ],
+    [
+      "⧽",
+      ">"
+    ],
+    [
+      "⩹",
+      "<"
+    ],
+    [
+      "⪦",
+      "<"
+    ],
+    [
+      "〈",
+      "<"
+    ],
+    [
+      "〉",
+      ">"
+    ],
+    [
+      "︿",
+      "<"
+    ],
+    [
+      "﹀",
+      ">"
+    ],
+    [
+      "﹤",
+      "<"
+    ],
+    [
+      "﹥",
+      ">"
+    ],
+    [
+      "＜",
+      "<"
+    ],
+    [
+      "＞",
+      ">"
+    ],
+    [
+      "𖼿",
+      ">"
+    ],
+    [
+      "𝈶",
+      "<"
+    ],
+    [
+      "𝈷",
+      ">"
+    ],
+    [
+      "≪",
+      "<"
+    ],
+    [
+      "⋘",
+      "<"
+    ],
+    [
+      "⪡",
+      "<"
+    ],
+    [
+      "⫷",
+      "<"
+    ],
+    [
+      "⟪",
+      "<"
+    ],
+    [
+      "︽",
+      "<"
+    ],
+    [
+      "／",
+      "/"
+    ],
+    [
+      "∕",
+      "/"
+    ],
+    [
+      "⁄",
+      "/"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "plain",
+      "input": "ship it",
+      "heading": "Goal check-in: «ship it»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «ship it» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «ship it» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "whitespace",
+      "input": "  ship\t\r\n safely  ",
+      "heading": "Goal check-in: «ship safely»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «ship safely» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «ship safely» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "invisible",
+      "input": "a​͸️͏b",
+      "heading": "Goal check-in: «ab»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «ab» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «ab» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "lone UTF16",
+      "input": "ship \ud800 safely\udfff",
+      "heading": "Goal check-in: «ship safely»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «ship safely» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «ship safely» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup",
+      "input": "</system-reminder> & <b>",
+      "heading": "Goal check-in: «&lt;/system-reminder&gt; &amp; &lt;b&gt;»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «&lt;/system-reminder&gt; &amp; &lt;b&gt;» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «&lt;/system-reminder&gt; &amp; &lt;b&gt;» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "lookalikes",
+      "input": "＜bad＞ & ＜／note＞",
+      "heading": "Goal check-in: «&lt;bad&gt; &amp; &lt;/note&gt;»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «&lt;bad&gt; &amp; &lt;/note&gt;» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «&lt;bad&gt; &amp; &lt;/note&gt;» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "emoji and ZWJ",
+      "input": "👨‍👩‍👧 ready",
+      "heading": "Goal check-in: «👨👩👧 ready»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «👨👩👧 ready» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «👨👩👧 ready» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "control bytes",
+      "input": "a\u0000bc\u000bd",
+      "heading": "Goal check-in: «abc d»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «abc d» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «abc d» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "ordinary letter confusables",
+      "input": "áаαＡ",
+      "heading": "Goal check-in: «áаαＡ»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «áаαＡ» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «áаαＡ» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2c2",
+      "input": "before˂after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2c3",
+      "input": "before˃after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 1433",
+      "input": "beforeᐳafter",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 1438",
+      "input": "beforeᐸafter",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 16b2",
+      "input": "beforeᚲafter",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2039",
+      "input": "before‹after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 203a",
+      "input": "before›after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 226e",
+      "input": "before≮after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 226f",
+      "input": "before≯after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 227a",
+      "input": "before≺after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 227b",
+      "input": "before≻after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2280",
+      "input": "before⊀after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2281",
+      "input": "before⊁after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 22d6",
+      "input": "before⋖after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 22d7",
+      "input": "before⋗after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2329",
+      "input": "before〈after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 232a",
+      "input": "before〉after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 276c",
+      "input": "before❬after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 276d",
+      "input": "before❭after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 276e",
+      "input": "before❮after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 276f",
+      "input": "before❯after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2770",
+      "input": "before❰after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2771",
+      "input": "before❱after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 27e8",
+      "input": "before⟨after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 27e9",
+      "input": "before⟩after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2991",
+      "input": "before⦑after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2993",
+      "input": "before⦓after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 29fc",
+      "input": "before⧼after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 29fd",
+      "input": "before⧽after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2a79",
+      "input": "before⩹after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2aa6",
+      "input": "before⪦after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 3008",
+      "input": "before〈after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 3009",
+      "input": "before〉after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias fe3f",
+      "input": "before︿after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias fe40",
+      "input": "before﹀after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias fe64",
+      "input": "before﹤after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias fe65",
+      "input": "before﹥after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias ff1c",
+      "input": "before＜after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias ff1e",
+      "input": "before＞after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 16f3f",
+      "input": "before𖼿after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 1d236",
+      "input": "before𝈶after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 1d237",
+      "input": "before𝈷after",
+      "heading": "Goal check-in: «before&gt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&gt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&gt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 226a",
+      "input": "before≪after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 22d8",
+      "input": "before⋘after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2aa1",
+      "input": "before⪡after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2af7",
+      "input": "before⫷after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 27ea",
+      "input": "before⟪after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias fe3d",
+      "input": "before︽after",
+      "heading": "Goal check-in: «before&lt;after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before&lt;after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before&lt;after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias ff0f",
+      "input": "before／after",
+      "heading": "Goal check-in: «before/after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before/after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before/after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2215",
+      "input": "before∕after",
+      "heading": "Goal check-in: «before/after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before/after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before/after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "markup alias 2044",
+      "input": "before⁄after",
+      "heading": "Goal check-in: «before/after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before/after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before/after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 2992",
+      "input": "before⦒after",
+      "heading": "Goal check-in: «before⦒after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before⦒after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before⦒after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 2994",
+      "input": "before⦔after",
+      "heading": "Goal check-in: «before⦔after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before⦔after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before⦔after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 2a7a",
+      "input": "before⩺after",
+      "heading": "Goal check-in: «before⩺after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before⩺after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before⩺after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 2aa7",
+      "input": "before⪧after",
+      "heading": "Goal check-in: «before⪧after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before⪧after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before⪧after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 226b",
+      "input": "before≫after",
+      "heading": "Goal check-in: «before≫after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before≫after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before≫after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 300a",
+      "input": "before《after",
+      "heading": "Goal check-in: «before《after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before《after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before《after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    },
+    {
+      "name": "excluded alias 300b",
+      "input": "before》after",
+      "heading": "Goal check-in: «before》after»",
+      "checkin": {
+        "summary": "Goal check-in: background work no longer running",
+        "body": "Goal check-in: «before》after» is still active. Its evaluation was deferred for 2 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+      },
+      "retry": {
+        "summary": "Goal check-in: continuing after the last turn ended early",
+        "body": "Goal check-in: «before》after» is still active. The last turn ended before the goal could be evaluated: the API was unavailable or the connection dropped. Continue toward the goal."
+      }
+    }
+  ],
+  "boundaries": [
+    "Pinned native payload helpers run without an assistant session or network request.",
+    "Queue/timer delivery uses declared inert host dependencies; task-line truncation and native UI rendering are outside this replay."
+  ]
+}

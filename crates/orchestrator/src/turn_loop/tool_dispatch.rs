@@ -23,6 +23,7 @@ use lingxi_core::types::{
 };
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::tool_trait::tool_result_turn_end;
@@ -603,8 +604,7 @@ pub(super) async fn memdir_index_notice_for_tool(
         .prompt_runtime
         .memory_prefetch
         .as_ref()?
-        .user_memdir()?
-        .to_path_buf();
+        .user_memdir()?;
     let target = resolve_tool_file_path(tool_input, &orch.current_cwd())?;
     tokio::task::spawn_blocking(move || {
         let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));
@@ -1403,10 +1403,31 @@ pub(crate) struct ToolResultPublication {
     pub(crate) turn_end: Option<tool_api::tool_trait::ToolResultTurnEnd>,
     pub(crate) denial_kind: Option<String>,
     pub(crate) permission_denial: Option<(String, Utf16JsonProjection)>,
+    pub(crate) end_conversation_request:
+        Option<crate::end_conversation_tool::EndConversationRequest>,
+    pub(crate) hook_attachments: Vec<(Utf16JsonProjection, Option<Arc<dyn HookPublicationGuard>>)>,
+    pub(crate) persisted_hook_attachments: Vec<(Option<MessageId>, Utf16JsonProjection)>,
+    pub(crate) attachment_registrations: Vec<(ConversationMessage, String, serde_json::Value)>,
     pub(crate) frame: Option<ToolResultFramePublication>,
 }
 
 impl ToolResultPublication {
+    fn metadata_only(tool_use_id: &ToolUseId) -> Self {
+        Self {
+            tool_use_id: tool_use_id.clone(),
+            tool_use_result: None,
+            mcp_meta: None,
+            turn_end: None,
+            denial_kind: None,
+            permission_denial: None,
+            end_conversation_request: None,
+            hook_attachments: Vec::new(),
+            persisted_hook_attachments: Vec::new(),
+            attachment_registrations: Vec::new(),
+            frame: None,
+        }
+    }
+
     pub(crate) fn frame_only(
         tool_use_id: &ToolUseId,
         tool: &str,
@@ -1420,6 +1441,10 @@ impl ToolResultPublication {
             turn_end: None,
             denial_kind: None,
             permission_denial: None,
+            end_conversation_request: None,
+            hook_attachments: Vec::new(),
+            persisted_hook_attachments: Vec::new(),
+            attachment_registrations: Vec::new(),
             frame: Some(ToolResultFramePublication {
                 tool: tool.to_owned(),
                 model_text: model_text.into(),
@@ -1430,6 +1455,16 @@ impl ToolResultPublication {
     }
 
     pub(crate) async fn commit_metadata(&self, orch: &ConversationOrchestrator) {
+        self.commit_metadata_kind(orch, true).await;
+    }
+
+    /// Streaming records eager raw attachments in the event journal after the
+    /// owning assistant row. Its Tn boundary only publishes the other sidecars.
+    pub(crate) async fn commit_stream_metadata(&self, orch: &ConversationOrchestrator) {
+        self.commit_metadata_kind(orch, false).await;
+    }
+
+    async fn commit_metadata_kind(&self, orch: &ConversationOrchestrator, persist_eager: bool) {
         if let Some((tool_name, tool_input)) = &self.permission_denial {
             orch.record_permission_denial(tool_name, &self.tool_use_id, tool_input)
                 .await;
@@ -1448,6 +1483,35 @@ impl ToolResultPublication {
         }
         if let Some(turn_end) = self.turn_end {
             orch.record_pending_tool_result_turn_end(&self.tool_use_id, turn_end)
+                .await;
+        }
+        if persist_eager {
+            for (id, attachment) in &self.persisted_hook_attachments {
+                if let Some(id) = id {
+                    orch.persist_hook_attachment_to_jsonl_with_id(*id, attachment.clone())
+                        .await;
+                } else {
+                    orch.persist_hook_attachment_to_jsonl(attachment.clone())
+                        .await;
+                }
+            }
+        }
+        for (attachment, guard) in &self.hook_attachments {
+            orch.queue_hook_attachment(&self.tool_use_id, attachment.clone(), guard.clone())
+                .await;
+        }
+        for (message, kind, origin) in &self.attachment_registrations {
+            if !crate::conversation::ModResultStage::stage_attachment_registration(
+                message, kind, origin,
+            )
+            .await
+            {
+                orch.register_mod_persisted_attachment(message, kind, origin.clone())
+                    .await;
+            }
+        }
+        if let Some(request) = &self.end_conversation_request {
+            orch.record_end_conversation_request(&self.tool_use_id, request.clone())
                 .await;
         }
     }
@@ -3836,7 +3900,9 @@ pub(crate) struct ToolUseDispatchFacts {
 
 /// Linearizes the refusal boundary with the exact pre-tool-call entry. Either
 /// the call wins `Pending -> Started` and may be reported as Interrupted, or
-/// refusal wins `Pending -> Closed` and the physical tool call is suppressed.
+/// refusal closes the boundary and subsequent physical calls are suppressed.
+/// Started remains recorded independently so refusal can classify an already
+/// entered call as Interrupted while preventing a later Mod retry.
 #[derive(Debug, Default)]
 pub(crate) struct RefusalToolCallBoundary(AtomicU8);
 
@@ -3844,36 +3910,62 @@ impl RefusalToolCallBoundary {
     const PENDING: u8 = 0;
     const STARTED: u8 = 1;
     const CLOSED: u8 = 2;
+    const STARTED_CLOSED: u8 = Self::STARTED | Self::CLOSED;
 
     pub(crate) fn mark_started(&self) -> bool {
-        self.0
-            .compare_exchange(
-                Self::PENDING,
-                Self::STARTED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    /// Close a call that has not crossed the physical side-effect boundary.
-    /// Returns whether the call had already crossed that boundary.
-    pub(crate) fn close_for_refusal(&self) -> bool {
         match self.0.compare_exchange(
             Self::PENDING,
-            Self::CLOSED,
+            Self::STARTED,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => false,
-            Err(Self::STARTED) => true,
-            Err(Self::CLOSED) => false,
+            // A Mod may call next() again to retry the same logical tool use.
+            // Retries may proceed only until refusal closes the boundary.
+            Ok(_) | Err(Self::STARTED) => true,
+            Err(Self::CLOSED | Self::STARTED_CLOSED) => false,
             Err(_) => unreachable!("refusal call boundary has a valid state"),
         }
     }
 
+    /// Close all future starts, retaining whether any core run already crossed
+    /// the physical side-effect boundary for interruption classification.
+    pub(crate) fn close_for_refusal(&self) -> bool {
+        match self.0.fetch_or(Self::CLOSED, Ordering::AcqRel) {
+            Self::PENDING | Self::CLOSED => false,
+            Self::STARTED | Self::STARTED_CLOSED => true,
+            _ => unreachable!("refusal call boundary has a valid state"),
+        }
+    }
+
     pub(crate) fn was_started(&self) -> bool {
-        self.0.load(Ordering::Acquire) == Self::STARTED
+        self.0.load(Ordering::Acquire) & Self::STARTED != 0
+    }
+}
+
+#[cfg(test)]
+mod refusal_tool_call_boundary_tests {
+    use super::RefusalToolCallBoundary;
+
+    #[test]
+    fn refusal_before_start_permanently_rejects_core_retries() {
+        let boundary = RefusalToolCallBoundary::default();
+        assert!(!boundary.close_for_refusal());
+        assert!(!boundary.mark_started());
+        assert!(!boundary.mark_started());
+        assert!(!boundary.close_for_refusal());
+        assert!(!boundary.was_started());
+    }
+
+    #[test]
+    fn started_tool_use_retries_until_closed_and_retains_interrupted_status() {
+        let boundary = RefusalToolCallBoundary::default();
+        assert!(boundary.mark_started());
+        assert!(boundary.mark_started());
+        assert!(boundary.close_for_refusal());
+        assert!(!boundary.mark_started());
+        assert!(boundary.close_for_refusal());
+        assert!(!boundary.mark_started());
+        assert!(boundary.was_started());
     }
 }
 
@@ -4284,9 +4376,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 let _ = args.remove_field(field);
                             }
                             let single = vec![(id, name, args, provider_id)];
-                            let (dispatched, mut stage) = with_mod_result_stage(
-                                &single[0].0,
-                                dispatch_tool_uses_tracked_deferred_core(
+                            let (dispatched, stage) = with_mod_result_stage(&single[0].0, async {
+                                let mut dispatched = dispatch_tool_uses_tracked_deferred_core(
                                     orch,
                                     &single,
                                     cancel,
@@ -4298,10 +4389,18 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                     prepared_tool,
                                     inherited_context,
                                     publication_fence,
-                                ),
-                            )
+                                )
+                                .await?;
+                                // Keep every deferred sidecar and client frame
+                                // in this run's task-local stage. Only the
+                                // final Mod result may select and publish it.
+                                for publication in std::mem::take(&mut dispatched.publications) {
+                                    publication.commit(orch).await;
+                                }
+                                Ok::<_, OrchestratorError>(dispatched)
+                            })
                             .await;
-                            let mut dispatched = match dispatched {
+                            let dispatched = match dispatched {
                                 Ok(dispatched) => dispatched,
                                 Err(error) => {
                                     let message = error.to_string();
@@ -4309,31 +4408,6 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                     return Err(hooks::mods::ModError::Hook(message));
                                 }
                             };
-                            // A fenced dispatch carries the raw tool result in
-                            // its deferred publication. The publication is
-                            // committed only after `with_mod_result_stage`
-                            // exits, so `record_tool_use_result` can no longer
-                            // populate this task-local stage. Preserve the
-                            // executor result for `next().result` and for the
-                            // outer result/reuse decision before draining the
-                            // publication below.
-                            if let Some(raw_result) = dispatched
-                                .publications
-                                .iter()
-                                .find(|publication| {
-                                    publication.tool_use_id.as_str() == single[0].0.as_str()
-                                })
-                                .and_then(|publication| publication.tool_use_result.clone())
-                                .or_else(|| stage.tool_use_result.clone())
-                            {
-                                stage.tool_use_result = Some(raw_result);
-                            }
-                            for publication in std::mem::take(&mut dispatched.publications) {
-                                // The active ModResultStage captures these local
-                                // sidecars; the outer wrapper decides whether Tn
-                                // accepts and publishes them.
-                                publication.commit(orch).await;
-                            }
                             let mut result = Vec::new();
                             if let Some(ContentBlock::ToolResult {
                                 content, is_error, ..
@@ -4733,6 +4807,10 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 turn_end: None,
                 denial_kind: None,
                 permission_denial: None,
+                end_conversation_request: None,
+                hook_attachments: Vec::new(),
+                persisted_hook_attachments: Vec::new(),
+                attachment_registrations: Vec::new(),
                 frame: Some(ToolResultFramePublication {
                     tool: name.clone(),
                     model_text: content.clone().into(),
@@ -5007,8 +5085,6 @@ async fn append_mod_tool_context(
         "PostToolUse",
         &exact_lines,
     );
-    orch.queue_hook_attachment(tool_use_id, attachment, publication_fence.clone())
-        .await;
     let body = hooks::ExactHookText::join(&exact_lines, "\n");
     let reminder = hooks::ExactHookText::wrapped(
         "<system-reminder>\ntool.call hook additional context: ",
@@ -5021,18 +5097,23 @@ async fn append_mod_tool_context(
         reminder.display,
         reminder.utf16_code_units,
     );
-    let register = async {
-        orch.register_mod_persisted_attachment(
-            &message,
-            "hook_additional_context",
-            serde_json::json!({"kind":"plugin","event":"tool.call"}),
-        )
-        .await;
-    };
-    if let Some(fence) = publication_fence {
-        fence.commit_if_current(Box::pin(register)).await;
+    let origin = serde_json::json!({"kind":"plugin","event":"tool.call"});
+    if publication_fence.is_some() {
+        let mut publication = ToolResultPublication::metadata_only(tool_use_id);
+        publication
+            .hook_attachments
+            .push((attachment, publication_fence));
+        publication.attachment_registrations.push((
+            message.clone(),
+            "hook_additional_context".into(),
+            origin,
+        ));
+        all.publications.push(publication);
     } else {
-        register.await;
+        orch.queue_hook_attachment(tool_use_id, attachment, None)
+            .await;
+        orch.register_mod_persisted_attachment(&message, "hook_additional_context", origin)
+            .await;
     }
     all.injected_messages.push((message, tool_use_id.clone()));
 }
@@ -5053,7 +5134,9 @@ pub(super) async fn register_mod_persisted_attachment_if_visible(
     origin: serde_json::Value,
     publication_guard: Option<&dyn hooks::attachment::HookPublicationGuard>,
 ) {
-    if !active_mod_result_stage_is_virtual().await {
+    if !crate::conversation::ModResultStage::stage_attachment_registration(message, kind, &origin)
+        .await
+    {
         let registration = orch.register_mod_persisted_attachment(message, kind, origin);
         if let Some(guard) = publication_guard {
             guard.commit_if_current(Box::pin(registration)).await;
@@ -5826,17 +5909,31 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         )
                         .expect("deferred attachment is a host-generated object");
                 }
-                let persistence = orch.persist_hook_attachment_to_jsonl(attachment);
-                if let Some(fence) = publication_fence.as_deref() {
-                    fence.commit_if_current(Box::pin(persistence)).await;
+                if publication_fence.is_some() {
+                    // The streaming assistant row still belongs to Native's
+                    // pending event journal. Carry the marker and this run's
+                    // explicit flush through Tn rather than appending ahead of
+                    // that row while the provider stream is still open.
+                    let mut publication = ToolResultPublication::metadata_only(tool_use_id);
+                    publication
+                        .persisted_hook_attachments
+                        .push((None, attachment));
+                    publication.persisted_hook_attachments.extend(
+                        orch.take_dispatch_hook_attachments(tool_use_id)
+                            .await
+                            .into_iter()
+                            .map(|(attachment, _guard)| (None, attachment)),
+                    );
+                    publications.push(publication);
                 } else {
-                    persistence.await;
+                    orch.persist_hook_attachment_to_jsonl(attachment).await;
+                    // Direct/batched dispatch has already committed its
+                    // assistant row and retains the native eager ordering.
+                    orch.flush_hook_attachments(tool_use_id).await;
                 }
-                // HOOK.1: any PreToolUse additionalContext, ordered AFTER the
-                // deferred-tool record (matching the Block arm). Its attachment
-                // was queued above against this tool id; drain it now, since
-                // the usual post-`tool_result` flush will never run here.
-                orch.flush_hook_attachments(tool_use_id).await;
+                // HOOK.1: the PreToolUse context follows its deferred marker.
+                // Both raw attachments are now either eagerly committed by a
+                // direct caller or carried in the same streaming publication.
                 if let Some(msg) = pre_context_message {
                     injected_messages.push((msg, tool_use_id.clone()));
                 }
@@ -7125,7 +7222,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let interrupt_behavior = tool_handle.interrupt_behavior(&effective_input);
         let dispatch_cancel = ctx.cancel.clone();
         let result_context = ctx.clone();
-        let (execution_record, tool_outcome) = {
+        let (execution_record, tool_outcome, end_conversation_request) = {
             // Hooks and approval may rewrite parameters after the initial
             // gates. Validate the exact input that is about to execute.
             let final_validation = match crate::schema_validation::validate_tool_schema_projected(
@@ -7158,7 +7255,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 Err(error) => Err(error),
             };
             match execution_record {
-                Err(error) => (None, Err(error)),
+                Err(error) => (None, Err(error), None),
                 Ok(record) => {
                     if tool_dispatch_facts
                         .as_ref()
@@ -7192,13 +7289,15 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         trace_attributes,
                     );
                     let trace_context = span.trace_context();
-                    let outcome = telemetry::otel::with_trace_context_future(
+                    let tool_call = telemetry::otel::with_trace_context_future(
                         trace_context.as_ref(),
                         async {
                             // Recheck live authority after approvals and input hooks.
                             let tool_call = async {
                                 orch.tools.check_session_tool_access(tool_handle.as_ref())?;
-                                tool_handle.call(effective_input.clone(), ctx, progress_tx).await
+                                tool_handle
+                                    .call(effective_input.clone(), ctx, progress_tx)
+                                    .await
                             };
                             tokio::pin!(tool_call);
                             match (interrupt_behavior, dispatch_cancel) {
@@ -7212,13 +7311,19 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                 _ => tool_call.await,
                             }
                         },
-                    ).await;
+                    );
+                    let (outcome, end_request) =
+                        crate::end_conversation_tool::capture_end_conversation_request(
+                            tool_handle.name(),
+                            tool_call,
+                        )
+                        .await;
                     span.set_outcome(match &outcome {
                         Err(tool_api::ToolError::Aborted) => "cancelled",
                         Ok(result) if !result.is_error => "success",
                         _ => "error",
                     });
-                    (record, outcome)
+                    (record, outcome, end_request)
                 }
             }
         };
@@ -7482,6 +7587,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         publication.tool_use_result = tool_use_result.clone();
         publication.mcp_meta = mcp_meta.clone();
         publication.turn_end = turn_end;
+        publication.end_conversation_request =
+            end_conversation_request.filter(|_| !is_error).map(|slot| {
+                crate::end_conversation_tool::EndConversationRequest {
+                    slot,
+                    publication_guard: publication_fence.clone(),
+                }
+            });
         publication.denial_kind = denial_kind.clone();
         if let Some(frame) = publication.frame.as_mut() {
             frame.denial_kind = denial_kind;

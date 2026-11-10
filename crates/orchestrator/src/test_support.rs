@@ -15,6 +15,24 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Valid mode metadata for fixtures that mount an existing Code conversation.
+pub fn code_resume_runtime_snapshot(
+    session_id: lingxi_core::types::SessionId,
+) -> lingxi_core::host::ResumeRuntimeSnapshot {
+    lingxi_core::host::ResumeRuntimeSnapshot {
+        transcript_metadata: Some(vec![Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({
+                "type": "fixed-session-mode",
+                "sessionId": session_id.as_uuid(),
+                "sessionMode": "code",
+                "instructionEpoch": 0,
+            }),
+        )
+        .expect("valid fixed conversation mode fixture")]),
+        ..Default::default()
+    }
+}
+
 /// Attach the real forced-compaction pipeline with a deterministic summarizer.
 /// Host integration tests can exercise transcript commits without adding
 /// compaction/sidequery dependency edges or making provider calls.
@@ -478,7 +496,8 @@ pub fn mock_message_response(
 pub struct MockOutputStream {
     tool_result_mcp_meta: Arc<Mutex<Vec<Option<Utf16JsonProjection>>>>,
     partial_stream_events: Arc<Mutex<Vec<String>>>,
-    partial_stream_metadata: Arc<Mutex<Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata>>>,
+    partial_stream_metadata:
+        Arc<Mutex<Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata>>>,
     include_partial_stream_events: bool,
     lifecycle_events: Arc<Mutex<Vec<Utf16JsonProjection>>>,
     model_fallback_frames: Arc<Mutex<Vec<Utf16JsonProjection>>>,
@@ -548,7 +567,9 @@ impl MockOutputStream {
         self.partial_stream_events.lock().await.clone()
     }
 
-    pub async fn partial_stream_metadata_snapshot(&self) -> Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata> {
+    pub async fn partial_stream_metadata_snapshot(
+        &self,
+    ) -> Vec<lingxi_core::host::orchestrator::PartialStreamEventMetadata> {
         self.partial_stream_metadata.lock().await.clone()
     }
 
@@ -640,7 +661,10 @@ impl OutputStream for MockOutputStream {
         is_message_start: bool,
         metadata: &lingxi_core::host::orchestrator::PartialStreamEventMetadata,
     ) {
-        self.partial_stream_metadata.lock().await.push(metadata.clone());
+        self.partial_stream_metadata
+            .lock()
+            .await
+            .push(metadata.clone());
         self.emit_stream_event(event_json, is_message_start).await;
     }
 
@@ -1276,6 +1300,8 @@ pub struct MockOrchestratorHandle {
     workspace_trusted: AtomicBool,
     /// `/goal` hooks-restricted gate.
     hooks_restricted: AtomicBool,
+    goal_hooks_held: AtomicBool,
+    goal_non_interactive: AtomicBool,
     /// Pre-loaded agents list returned by `list_agents`.
     agents_list: StdMutex<Vec<AgentInfo>>,
     /// Pre-loaded doctor report returned by `run_doctor_checks`.
@@ -1366,6 +1392,8 @@ impl MockOrchestratorHandle {
             active_goal: StdMutex::new(None),
             workspace_trusted: AtomicBool::new(true),
             hooks_restricted: AtomicBool::new(false),
+            goal_hooks_held: AtomicBool::new(false),
+            goal_non_interactive: AtomicBool::new(false),
             agents_list: StdMutex::new(Vec::new()),
             doctor_report: StdMutex::new(DoctorReport::default()),
             status_snapshot: StdMutex::new(StatusSnapshot::default()),
@@ -1526,6 +1554,15 @@ impl MockOrchestratorHandle {
     /// Configure the `/goal` hooks-restricted gate.
     pub fn set_hooks_restricted(&self, restricted: bool) {
         self.hooks_restricted.store(restricted, Ordering::SeqCst);
+    }
+
+    pub fn set_goal_hooks_held(&self, held: bool) {
+        self.goal_hooks_held.store(held, Ordering::SeqCst);
+    }
+
+    pub fn set_goal_non_interactive(&self, non_interactive: bool) {
+        self.goal_non_interactive
+            .store(non_interactive, Ordering::SeqCst);
     }
     /// Pre-load the agents list returned by `list_agents`.
     pub fn set_agents(&self, v: Vec<AgentInfo>) {
@@ -1724,6 +1761,14 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn hooks_restricted(&self) -> bool {
         self.hooks_restricted.load(Ordering::SeqCst)
+    }
+
+    async fn goal_hooks_held(&self) -> bool {
+        self.goal_hooks_held.load(Ordering::SeqCst)
+    }
+
+    fn goal_is_non_interactive(&self) -> bool {
+        self.goal_non_interactive.load(Ordering::SeqCst)
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {

@@ -32,6 +32,7 @@ tool-skill = { path = "../tools/skill" }
 # orchestrator; `permission` already carries this same edge.
 tool-file = { path = "../tools/file" }
 memory = { path = "../memory" }
+tasks = { path = "../tasks" }
 # EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch handle/result types
 # (register-but-disable, default OFF) — the per-turn discovery side-channel
 # armed/consumed by the orchestrator, mirroring the `memory` prefetch trio.
@@ -81,6 +82,7 @@ nix = { version = "0.27", features = ["process", "signal"] }
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 bytes.workspace = true
 jsonrpc = { path = "../jsonrpc" }
+tool-shell-mobile = { path = "../tools/shell-mobile" }
 # Reuse the existing tool-api test context for actual native Monitor dispatch fixtures.
 tool-api = { path = "../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

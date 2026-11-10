@@ -33,6 +33,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hooks::cwd_changed_firer::{CwdChangedFire, CwdChangedFirer};
 use hooks::events::HookEvent;
+#[cfg(test)]
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
 
@@ -41,16 +42,7 @@ use hooks::HookExecutorImpl;
 pub struct OrchestratorCwdChangedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `CwdChanged` hook payload `cwd` field (the
-    /// session base dir) and the per-hook Command-arm `LINGXI_PROJECT_DIR`
-    /// fallback. This is distinct from the fire's `old`/`new` shell cwd, which
-    /// becomes the `old_cwd` / `new_cwd` payload fields.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `CwdChanged` hook payload's
-    /// `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
     /// The orchestrator's shared mutable-cwd cell. On every fire (each Bash `cd`
     /// that moved the persistent shell cwd) `fire.new` is written here BEFORE the
     /// hook fires, so the orchestrator's subsequent PreToolUse/PostToolUse/
@@ -70,6 +62,13 @@ pub struct OrchestratorCwdChangedFirer {
 }
 
 impl OrchestratorCwdChangedFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `CwdChanged` hook rides the identical registry /
@@ -83,8 +82,7 @@ impl OrchestratorCwdChangedFirer {
     ) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
             current_cwd,
             watcher_rebinder: None,
         }
@@ -122,14 +120,8 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
             old: fire.old,
             new: fire.new,
         };
-        // Context-light: a cwd change has no live per-turn session here, so we
-        // thread the engine cwd (also the LINGXI_PROJECT_DIR fallback) and the main
-        // session's `transcript_path` (FIX B). Everything else defaults — matching
-        // the `OrchestratorTaskCreatedFirer`.
-        let ctx = HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
+        let Some(ctx) = self.context_source.current().await else {
+            return;
         };
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the

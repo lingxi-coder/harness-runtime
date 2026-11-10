@@ -246,6 +246,8 @@ pub struct SubagentApiRequest {
 /// Optional per-round-trip Fusion / COGS knobs.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
+    /// Exact parent wire inputs for a host-owned memory fork only.
+    pub memory_fork_wire: Option<Arc<crate::memory_fork::MemoryForkProjection>>,
     /// Trusted per-logical-call capability; retries retain this exact context.
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Output token cap for this turn.
@@ -412,6 +414,7 @@ mod tests {
                 forced_tool,
                 effort: Some(serde_json::json!(8192)),
                 opts: SubagentApiCallOpts {
+                    memory_fork_wire: None,
                     model_attempt: Some(attempt.clone()),
                     max_output_tokens: Some(4096),
                     query_source_label: Some("fusion_panel".into()),

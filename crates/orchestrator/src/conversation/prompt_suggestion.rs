@@ -725,7 +725,7 @@ impl ConversationOrchestrator {
         }
     }
 
-    pub(super) async fn spawn_prompt_suggestion(&self) {
+    pub(super) async fn spawn_prompt_suggestion(&self, turn_cancel: Option<CancellationToken>) {
         if !self.output.wants_prompt_suggestions() {
             return;
         }
@@ -740,12 +740,6 @@ impl ConversationOrchestrator {
                 == Some(true)
             || controls::parse_env(std::env::var(branding::SIMPLE_ENV).ok().as_deref())
                 == Some(true)
-            || self
-                .suggestion_settings()
-                .await
-                .at_pointer("/disableAllHooks")
-                .and_then(|value| value.as_bool())
-                == Some(true)
         {
             return;
         }
@@ -757,8 +751,11 @@ impl ConversationOrchestrator {
         {
             return;
         }
+        let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() else {
+            return;
+        };
         self.cancel_prompt_suggestion();
-        let cancel = CancellationToken::new();
+        let cancel = turn_cancel.map_or_else(CancellationToken::new, |token| token.child_token());
         let generation = uuid::Uuid::new_v4();
         self.suggestion_state().active_generation = Some(generation);
         *self
@@ -766,44 +763,18 @@ impl ConversationOrchestrator {
             .suggestion_cancel
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cancel.clone());
-        let background = self.classify_prompt_suggestion_background(&cancel).await;
-        let focus = self.suggestion_state().context.focus.clone();
-        if let Some(reason) = controls::cli_focus_suppression(
-            &focus,
-            Self::suggestion_background_mode(),
-            background.is_some(),
-        ) {
-            self.suppress_suggestion("cli", reason, None).await;
-            self.cancel_prompt_suggestion();
-            return;
-        }
-        let Some(query) = self
-            .prepare_prompt_suggestion(false, background.is_some(), &cancel)
-            .await
-        else {
-            self.cancel_prompt_suggestion();
-            return;
-        };
-        let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() else {
-            self.cancel_prompt_suggestion();
-            return;
-        };
         let observer = self.model_safety_observer().await;
         tokio::spawn(async move {
+            // Settings, classification and query preparation can all await
+            // external work. None of them owns the completed foreground turn.
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => { owner.suppress_suggestion("cli", "aborted", None).await; }
-                result = lingxi_core::host::model_safety::bind_model_safety(observer, query.runner.run(query.request)) => {
-                    match result {
-                        Ok(reply) => {
-                            if cancel.is_cancelled() { owner.suppress_suggestion("cli", "aborted", None).await; }
-                            else if let Some(result) = owner.suggestion_result(reply, "cli").await {
-                                owner.place_prompt_suggestion(result, query.session_id, &cancel, background).await;
-                            }
-                        }
-                        Err(_) => { owner.record_suggestion_feature("tengu_feature_bad", "prompt_suggestion_generate", Some("api_error"), json!({})).await; }
-                    }
+                () = cancel.cancelled() => {
+                    owner.suppress_suggestion("cli", "aborted", None).await;
                 }
+                () = lingxi_core::host::model_safety::bind_model_safety(
+                    observer, owner.run_prompt_suggestion_pipeline(&cancel)
+                ) => {}
             }
             let mut state = owner.suggestion_state();
             if state.active_generation == Some(generation) {
@@ -816,6 +787,53 @@ impl ConversationOrchestrator {
                     .take();
             }
         });
+    }
+
+    async fn run_prompt_suggestion_pipeline(&self, cancel: &CancellationToken) {
+        if self
+            .suggestion_settings()
+            .await
+            .at_pointer("/disableAllHooks")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            return;
+        }
+        let background = self.classify_prompt_suggestion_background(cancel).await;
+        let focus = self.suggestion_state().context.focus.clone();
+        if let Some(reason) = controls::cli_focus_suppression(
+            &focus,
+            Self::suggestion_background_mode(),
+            background.is_some(),
+        ) {
+            self.suppress_suggestion("cli", reason, None).await;
+            return;
+        }
+        let Some(query) = self
+            .prepare_prompt_suggestion(false, background.is_some(), cancel)
+            .await
+        else {
+            return;
+        };
+        match query.runner.run(query.request).await {
+            Ok(reply) => {
+                if !cancel.is_cancelled() {
+                    if let Some(result) = self.suggestion_result(reply, "cli").await {
+                        self.place_prompt_suggestion(result, query.session_id, cancel, background)
+                            .await;
+                    }
+                }
+            }
+            Err(_) => {
+                self.record_suggestion_feature(
+                    "tengu_feature_bad",
+                    "prompt_suggestion_generate",
+                    Some("api_error"),
+                    json!({}),
+                )
+                .await
+            }
+        }
     }
 
     async fn place_prompt_suggestion(

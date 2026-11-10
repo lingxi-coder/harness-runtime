@@ -968,6 +968,7 @@ impl PoolSubagentSpawner {
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
             agent_spawn_token: None,
+            memory_fork_wire: None,
             stop_hook_scope: Default::default(),
             subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
@@ -1185,9 +1186,17 @@ impl PoolSubagentSpawner {
         let safety_observer = safety_budget
             .model_safety_observer()
             .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
-        let rewritten = self
-            .apply_agent_spawn_hook(request, origin_session_id, safety_observer)
-            .await?;
+        // Memory workers are native internal forks, not Agent-tool launches.
+        let internal_memory_fork = matches!(
+            request.query_source_label.as_deref(),
+            Some("extract_memories" | "auto_dream")
+        );
+        let rewritten = if internal_memory_fork {
+            None
+        } else {
+            self.apply_agent_spawn_hook(request, origin_session_id, safety_observer)
+                .await?
+        };
         let request = rewritten.as_ref().unwrap_or(request);
         validate_child_model_profile(request).map_err(SubagentSpawnError::Runtime)?;
 
@@ -1332,6 +1341,9 @@ impl PoolSubagentSpawner {
             request.fork_parent_system_prompt.clone(),
             restored_agent_id.unwrap_or_default(),
         );
+        if internal_memory_fork {
+            ctx.memory_fork_wire = crate::memory_fork::current_wire_snapshot();
+        }
         ctx.structured_output_validator = self.structured_output_validator.clone();
         ctx.agent_spawn_provenance = request.agent_spawn_provenance.clone();
         ctx.agent_spawn_token = request.agent_spawn_token.clone();
@@ -1411,7 +1423,9 @@ impl PoolSubagentSpawner {
             environment: self.subagent_env_renderer.get().cloned(),
             cwd: request.cwd.as_ref().map(std::path::PathBuf::from),
             addendum: request.system_prompt_addendum.clone(),
-            operator_suffix: append_subagent_system_prompt_suffix(),
+            operator_suffix: (!internal_memory_fork)
+                .then(append_subagent_system_prompt_suffix)
+                .flatten(),
             tool_registry: self.tool_registry.get(),
             system_renderer: None,
             seeded_context: Default::default(),
@@ -1474,6 +1488,9 @@ impl PoolSubagentSpawner {
             .hook_executor
             .as_ref()
             .and_then(|executor| executor.subagent_stop_firer(ctx.hook_session_id));
+        if internal_memory_fork {
+            ctx.subagent_stop_firer = None;
+        }
         ctx.hook_cwd = self.hook_cwd.clone();
         // A RESTORE seeds the child from its recovered conversation, replacing
         // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
@@ -1496,6 +1513,10 @@ impl PoolSubagentSpawner {
             // transcript into the `/tmp` placeholder would scatter files a
             // resume could never find.
             ctx.transcript_fs = self.transcript_fs.clone();
+        }
+        // Both native internal memory forks explicitly set skipTranscript.
+        if internal_memory_fork {
+            ctx.transcript_fs = None;
         }
         // Resolve THIS spawn's advertised tools + dispatch allow-list.
         // This child's recursion depth (claude `spawnDepth`): the Agent tool

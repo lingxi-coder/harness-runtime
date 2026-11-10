@@ -441,7 +441,7 @@ impl Tool for GlobTool {
         // effective cwd (base fallback + relativize) comes from `cwd_now()`,
         // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
         // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
-        let trusted = self.ctx.read_roots().await;
+        let trusted = self.ctx.read_roots_for_tool(TOOL_NAME, &input).await;
 
         let pattern = crate::input_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
@@ -580,25 +580,26 @@ impl Tool for GlobTool {
 
         let search_path = base.clone();
         let search_path_for_hook = base.clone();
-        let (mut hits, timed_out) = tokio::task::spawn_blocking(move || {
-            // This is deliberately after the deny overrides have been built
-            // and immediately before the walk is created. The test hook swaps
-            // a symlink at this exact preparation boundary.
-            run_search_preparation_hook(&search_path_for_hook);
-            search_resolution.verify()?;
-            glob_walk(
-                canon_base,
-                overrides,
-                no_ignore,
-                hidden,
-                deadline,
-                search_resolution,
-                read_deny_policy,
-            )
-        })
-        .await
-        .map_err(|e| ToolError::Io(e.to_string().into()))?
-        .map_err(|error| search_resolution_error(&search_path, error))?;
+        let (mut hits, timed_out) =
+            lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
+                // This is deliberately after the deny overrides have been built
+                // and immediately before the walk is created. The test hook swaps
+                // a symlink at this exact preparation boundary.
+                run_search_preparation_hook(&search_path_for_hook);
+                search_resolution.verify()?;
+                glob_walk(
+                    canon_base,
+                    overrides,
+                    no_ignore,
+                    hidden,
+                    deadline,
+                    search_resolution,
+                    read_deny_policy,
+                )
+            })
+            .await
+            .map_err(|e| ToolError::Io(e.to_string().into()))?
+            .map_err(|error| search_resolution_error(&search_path, error))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete); a timeout WITH

@@ -69,18 +69,32 @@ impl Fixture {
         Arc::new(JsonlWriter::new(self.jsonl_path.clone(), self.fs.clone()))
     }
 
+    fn tools(&self, map: tool_api::read_file_state::ReadFileStateMap) -> Arc<ToolRegistry> {
+        let mut context = tool_api::test_support::ctx_for_file_tools(
+            self.fs.clone(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![self.cwd.clone()],
+        );
+        context.read_file_state = map;
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(tool_file::FileReadTool::new(context)));
+        Arc::new(tools)
+    }
+
     fn root(&self) -> Arc<ConversationOrchestrator> {
+        let map = tool_api::read_file_state::new_read_file_state_map();
         let root = Arc::new(
             ConversationOrchestrator::new(
                 OrchestratorConfig::default(),
                 Arc::new(MockApiClient::new(Vec::new())),
-                Arc::new(ToolRegistry::new()),
+                self.tools(map.clone()),
                 noop_hook_executor(),
                 Arc::new(NoOpPermissionGate),
                 Arc::new(MockOutputStream::new()),
                 Arc::new(StaticMemoryProvider::empty()),
                 self.cwd.clone(),
             )
+            .with_read_state_map(map)
             .with_session_id(self.session_id)
             .with_nested_memory_roots(self.home.clone(), None)
             .with_config_home(self.home.clone())
@@ -102,6 +116,7 @@ impl Fixture {
     }
 
     async fn cold(&self) -> Arc<ConversationOrchestrator> {
+        let map = tool_api::read_file_state::new_read_file_state_map();
         let root = Arc::new(
             ConversationOrchestrator::with_resume(
                 OrchestratorConfig::default(),
@@ -110,7 +125,7 @@ impl Fixture {
                 self.cwd.to_string_lossy().into_owned(),
                 self.fs.clone(),
                 Arc::new(MockApiClient::new(Vec::new())),
-                Arc::new(ToolRegistry::new()),
+                self.tools(map.clone()),
                 noop_hook_executor(),
                 Arc::new(NoOpPermissionGate),
                 Arc::new(MockOutputStream::new()),
@@ -120,6 +135,7 @@ impl Fixture {
             )
             .await
             .unwrap()
+            .with_read_state_map(map)
             .with_nested_memory_roots(self.home.clone(), None)
             .with_config_home(self.home.clone()),
         );

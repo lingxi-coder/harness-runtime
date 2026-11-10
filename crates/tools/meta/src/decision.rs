@@ -142,10 +142,11 @@ impl Tool for DecisionTool {
         if cancellation.is_cancelled() {
             return Err(ToolError::Aborted);
         }
+        let questions = input.questions.clone();
         let result = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(Error::Cancelled),
-            result = tokio::time::timeout(TIMEOUT, self.service.evaluate(input.clone(), InvocationContext { timeout:TIMEOUT, cancellation:cancellation.clone() })) => result.unwrap_or(Err(Error::Timeout)),
+            result = tokio::time::timeout(TIMEOUT, self.service.evaluate(input, InvocationContext { timeout:TIMEOUT, cancellation:cancellation.clone() })) => result.unwrap_or(Err(Error::Timeout)),
         };
         cancellation.cancel();
         let response = result.map_err(|error| match error {
@@ -155,7 +156,7 @@ impl Tool for DecisionTool {
             other => ToolError::Io(other.to_string().into()),
         })?;
         response
-            .validate_for_input(&input)
+            .validate_for_questions(0, &questions)
             .map_err(|error| ToolError::Io(error.to_string().into()))?;
         let data = serde_json::to_value(response)
             .map_err(|_| ToolError::Internal("Decision result serialization failed".into()))?;

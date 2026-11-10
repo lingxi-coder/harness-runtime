@@ -2778,6 +2778,30 @@ impl ApiService {
             .set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name: name.into() }));
         self.drive_stream(request).await
     }
+
+    /// Stream a background memory fork through the existing request builder,
+    /// retaining the parent's source vector and identity-keyed prefix metadata.
+    /// Ordinary subagents continue to use `stream_with_attempt_opts`.
+    pub async fn stream_memory_fork(
+        &self,
+        mut request: MessagesCreateRequest,
+        fallback_system: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        effort: Option<serde_json::Value>,
+        forced_tool: Option<String>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if request.system.is_none() {
+            request.system = fallback_system
+                .as_ref()
+                .map(native_custom_system_prompt_source)
+                .transpose()?;
+        }
+        let (mut request, _) = crate::computer::without_computer_request(|| {
+            self.build_main_message_request(request, true)
+        })?;
+        request.set_effort(effort)?;
+        request.set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name }));
+        self.drive_stream(request).await
+    }
     /// Install the host's registered-attempt authority after composition.
     /// Ordinary requests without context never invoke this hook.
     pub fn set_model_attempt_hooks(&self, hooks: Arc<dyn crate::ModelAttemptHooks>) {
@@ -8566,7 +8590,12 @@ impl ApiService {
                 }
                 prepared.before_computer_submit().await?;
                 if let Some(quota) = &self.scope_output_quota {
-                    quota.authorize_dispatch().await?;
+                    if let Err(error) = quota.authorize_dispatch().await {
+                        // Scope revocation is a host admission rejection even
+                        // when it precedes the physical dispatch callback.
+                        admission_rejected |= quota.is_revoked();
+                        return Err(error);
+                    }
                 }
                 let mut api_attempt_reservation = None;
                 let received = conversation_lease
@@ -10683,7 +10712,12 @@ impl ApiService {
                         });
                     }
                     if let Some(quota) = &self.scope_output_quota {
-                        quota.authorize_dispatch().await?;
+                        if let Err(error) = quota.authorize_dispatch().await {
+                            // Preserve unrelated host authorizer errors while
+                            // normalizing revocation through attempt settlement.
+                            admission_rejected |= quota.is_revoked();
+                            return Err(error);
+                        }
                     }
                     request_client
                         .open_shared_stream(prepared, responses_ws_session, &mut || {

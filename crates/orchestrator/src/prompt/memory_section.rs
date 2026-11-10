@@ -1,71 +1,166 @@
-//! Claude Code 2.1.319 single-directory memory protocols.
-//!
-//! Templates come from the hash-pinned `Al`/`ci` native renderers. Citation tags,
-//! team stores and project-skill upkeep remain disabled unless their host support
-//! is explicitly provided. `render_auto_static` and `render_auto_directory` retain
-//! Native's static-instructions/dynamic-directory split.
+//! Claude Code 2.1.319 file-memory protocols, evaluated from the pinned artifact.
+//! LingXi retains its configured directories and instruction-file name.
 #![forbid(unsafe_code)]
 
-/// The fixed index filename the model maintains + the prefetch reads.
+/// Fixed memory index filename.
 pub const MEMORY_INDEX_NAME: &str = "MEMORY.md";
+const AUTO: &str = include_str!("templates/claude-code-2.1.319/memory-auto.md");
+const STATIC: &str = include_str!("templates/claude-code-2.1.319/memory-auto-static.md");
+const LEAN: &str = include_str!("templates/claude-code-2.1.319/memory-lean.md");
+const REWRITE: &str = include_str!("templates/claude-code-2.1.319/memory-lean-rewrite.md");
 
-const AUTO_MEMORY_TEMPLATE: &str = include_str!("templates/claude-code-2.1.319/memory-auto.md");
-const LEAN_MEMORY_TEMPLATE: &str = include_str!("templates/claude-code-2.1.319/memory-lean.md");
-const REWRITE_MEMORY_TEMPLATE: &str =
-    include_str!("templates/claude-code-2.1.319/memory-lean-rewrite.md");
-const AUTO_MEMORY_STATIC_TEMPLATE: &str =
-    include_str!("templates/claude-code-2.1.319/memory-auto-static.md");
-
-/// Single-directory memory protocol, with citations and project skill upkeep disabled.
+/// Native single-directory lean memory protocol.
 #[must_use]
 pub fn render(path: &str) -> String {
     render_with_hygiene(path, false)
 }
 
-/// Native `Al` selects the rewritten hygiene guidance independently of lean layout.
+/// Rewritten memory hygiene is independent of the lean layout selection.
 #[must_use]
 pub fn render_with_hygiene(path: &str, rewrite: bool) -> String {
-    let template = if rewrite {
-        REWRITE_MEMORY_TEMPLATE
-    } else {
-        LEAN_MEMORY_TEMPLATE
-    };
-    template.replacen("{memory_path}", path, 1)
+    (if rewrite { REWRITE } else { LEAN }).replacen("{memory_path}", path, 1)
 }
 
-/// Native `Tji`: stable memory instructions, without a machine-specific directory.
+/// Static instructions used when the host splits stable and dynamic context.
 #[must_use]
 pub fn render_auto_static() -> String {
-    AUTO_MEMORY_STATIC_TEMPLATE.to_owned()
+    STATIC.to_owned()
 }
 
-/// Native `Aji`: the corresponding directory announcement in dynamic context.
+/// Dynamic directory announcement paired with the static instructions.
 #[must_use]
 pub fn render_auto_directory(path: &str) -> String {
     format!("# auto memory\nMemory directory: `{path}`")
 }
 
-/// Render the memory section selected by the resolved prompt profile.
+/// Complete standard memory protocol.
+#[must_use]
+pub fn render_auto(path: &str) -> String {
+    AUTO.replacen("{memory_path}", path, 1)
+}
+
+/// Recognize the source-locked protocol in a resumed snapshot without
+/// recapturing other sections when its store still matches current settings.
+pub(crate) fn snapshot_matches_directory(
+    snapshot: &lingxi_core::host::PromptSnapshot,
+    directory: Option<&std::path::Path>,
+    exclude_dynamic_sections: bool,
+    policy: &lingxi_core::host::prompt_policy::ResolvedPromptPolicy,
+) -> bool {
+    use lingxi_core::host::prompt_policy::MemoryPromptBinding;
+    let has = |text: &str| {
+        snapshot
+            .system_prompt
+            .iter()
+            .any(|section| section.contains(text))
+    };
+    let has_native = || {
+        [AUTO, LEAN, REWRITE, STATIC].iter().any(|template| {
+            has(template
+                .split("{memory_path}")
+                .next()
+                .expect("memory template prefix"))
+        })
+    };
+    let Some(directory) = directory else {
+        return !has_native()
+            && match policy.memory {
+                MemoryPromptBinding::Template(template) => !has(template
+                    .split("{memory_path}")
+                    .next()
+                    .expect("memory template prefix")),
+                MemoryPromptBinding::ClaudeNative => true,
+            };
+    };
+    let path = directory.to_string_lossy();
+    match policy.memory {
+        MemoryPromptBinding::Template(template) => has(&template.replace("{memory_path}", &path)),
+        MemoryPromptBinding::ClaudeNative => {
+            let model = &policy.target.canonical_model;
+            let lean = lingxi_core::host::model_capabilities::claude_lean_prompt_for(model);
+            if exclude_dynamic_sections {
+                if lean {
+                    !has_native()
+                } else {
+                    has(STATIC)
+                }
+            } else if lean {
+                has(&render_with_hygiene(
+                    &path,
+                    lingxi_core::host::model_capabilities::lean_rewrite_for(model),
+                ))
+            } else {
+                has(&render_auto(&path))
+            }
+        }
+    }
+}
+
+/// Select the protocol for the active provider's resolved profile.
 #[must_use]
 pub fn render_for_profile(
     path: &str,
     profile: lingxi_core::host::model_capabilities::PromptProfile,
 ) -> String {
-    match profile {
-        lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean => render(path),
-        lingxi_core::host::model_capabilities::PromptProfile::ClaudeStandard
-        | lingxi_core::host::model_capabilities::PromptProfile::FullHarness => render_auto(path),
-    }
+    render_for_prompt(path, profile, false)
 }
 
-/// Render the complete `# auto memory` protocol.
+/// Native Tji/Aji split only applies to the standard local-file protocol.
 #[must_use]
-pub fn render_auto(path: &str) -> String {
-    AUTO_MEMORY_TEMPLATE.replacen("{memory_path}", path, 1)
+pub fn render_for_prompt(
+    path: &str,
+    profile: lingxi_core::host::model_capabilities::PromptProfile,
+    exclude_dynamic_sections: bool,
+) -> String {
+    match profile {
+        lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean => render(path),
+        _ if exclude_dynamic_sections => render_auto_static(),
+        _ => render_auto(path),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    #[test]
+    fn excluded_standard_memory_keeps_the_system_protocol_identical_across_directories() {
+        use lingxi_core::host::model_capabilities::PromptProfile;
+        for profile in [PromptProfile::ClaudeStandard, PromptProfile::FullHarness] {
+            let a = render_for_prompt("/first/memory/", profile, true);
+            let b = render_for_prompt("/second/memory/", profile, true);
+            assert_eq!(a, render_auto_static());
+            assert_eq!(a, b);
+            assert_ne!(render_for_prompt("/first/memory/", profile, false), a);
+        }
+        assert_eq!(
+            render_for_prompt("/first/memory/", PromptProfile::ClaudeLean, true),
+            render("/first/memory/")
+        );
+    }
+    #[test]
+    fn every_supported_memory_renderer_matches_the_shipped_artifact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/memory_prompts_319.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let path = case["path"].as_str().unwrap();
+            let actual = match case["kind"].as_str().unwrap() {
+                "lean" => render_with_hygiene(path, case["rewrite"].as_bool().unwrap()),
+                "auto" => render_auto(path),
+                _ => unreachable!(),
+            };
+            assert_eq!(actual, case["expected"].as_str().unwrap(), "{case}");
+        }
+        assert_eq!(
+            render_auto_static(),
+            fixture["templates"]["auto_static"].as_str().unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod main_policy_tests {
     use super::*;
 
     #[test]

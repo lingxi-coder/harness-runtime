@@ -631,6 +631,17 @@ pub struct InProcessTeammateHandler {
     plan_approval_mailbox: Option<Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>>,
     plan_approval_gate: Option<Arc<dyn lingxi_core::host::PermissionGate>>,
     transcript: Option<(Arc<dyn lingxi_core::host::FileSystem>, std::path::PathBuf)>,
+    /// Resolve a new teammate's transcript from its captured spawn owner.
+    subagents_dir_for_session_provider: Option<
+        Arc<
+            dyn Fn(
+                    lingxi_core::types::SessionId,
+                    &std::path::Path,
+                ) -> Result<std::path::PathBuf, TaskError>
+                + Send
+                + Sync,
+        >,
+    >,
     /// Model API seam handed to every spawned teammate's runner.
     api_client: Arc<dyn SubagentApiClient>,
     /// Tool dispatch seam inherited by the teammate. `None` means the teammate
@@ -743,6 +754,7 @@ impl InProcessTeammateHandler {
             plan_approval_mailbox: None,
             plan_approval_gate: None,
             transcript: None,
+            subagents_dir_for_session_provider: None,
             api_client,
             tool_invoker: None,
             definitions: Arc::new(DefaultTeammateDefinition),
@@ -1005,6 +1017,37 @@ impl InProcessTeammateHandler {
     ) -> Self {
         self.transcript = Some((fs, directory));
         self
+    }
+
+    /// Pin transcript storage to the owning session/cwd supplied at spawn.
+    pub fn with_subagents_dir_for_session_provider(
+        mut self,
+        provider: Arc<
+            dyn Fn(
+                    lingxi_core::types::SessionId,
+                    &std::path::Path,
+                ) -> Result<std::path::PathBuf, TaskError>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        self.subagents_dir_for_session_provider = Some(provider);
+        self
+    }
+
+    fn apply_spawn_context(
+        &self,
+        context: &mut SubagentContext,
+        request: lingxi_core::host::SubagentSpawnRequest,
+    ) -> Result<(), TaskError> {
+        apply_spawn_context(context, request);
+        if let Some((session_id, provider)) = context
+            .origin_session_id
+            .zip(self.subagents_dir_for_session_provider.as_ref())
+        {
+            context.transcript_subdir = provider(session_id, &context.hook_cwd)?;
+        }
+        Ok(())
     }
 
     pub fn with_definitions(mut self, definitions: Arc<dyn TeammateDefinitionResolver>) -> Self {
@@ -1464,6 +1507,7 @@ impl InProcessTeammateHandler {
             // Coordinator-managed teammates are launched by the team service,
             // not admitted through the Agent tool statistics producer.
             agent_spawn_token: None,
+            memory_fork_wire: None,
             // Swarm identity (claude-code `TeammateContext.agentName` /
             // `.teamName`): the DISPLAY name is always reachable here (it is the
             // spawn input); `team_name` is threaded from the coordinator team via
@@ -1641,6 +1685,16 @@ fn apply_spawn_context(
     context.resumed_history = request.resumed_history;
     context.cwd = request.cwd.map(Into::into);
     context.origin_session_id = request.origin_session_id;
+    // The handler survives foreground session/cwd transitions. Hook ownership
+    // must follow this spawn, just as the tool invocation origin does.
+    context.hook_session_id = context.origin_session_id.unwrap_or(context.hook_session_id);
+    if let Some(cwd) = &context.cwd {
+        context.hook_cwd = cwd.clone();
+    }
+    context.subagent_stop_firer = context
+        .hook_executor
+        .as_ref()
+        .and_then(|executor| executor.subagent_stop_firer(context.hook_session_id));
     context.depth = request.depth;
     // The context builder has already resolved model and profile together.
     // Applying local execution context must not replace that selected route.
@@ -1873,7 +1927,7 @@ impl Task for InProcessTeammateHandler {
             )
             .await?;
         if let Some(request) = spawn_request {
-            apply_spawn_context(&mut subagent_ctx, request);
+            self.apply_spawn_context(&mut subagent_ctx, request)?;
         }
         if let Some(inherit) = inheritance {
             subagent_ctx.tool_invoker = Some(inherit.tool_invoker);

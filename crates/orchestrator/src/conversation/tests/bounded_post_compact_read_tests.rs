@@ -4,7 +4,9 @@ async fn read_fixture(raw: &[u8], max_bytes: usize) -> (String, bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("read.txt");
     std::fs::write(&path, raw).unwrap();
-    read_restored_text_prefix(&path, max_bytes).await.unwrap()
+    let file = std::fs::File::open(path).unwrap();
+    let (content, truncated, _) = read_restored_text_prefix(file, max_bytes).await.unwrap();
+    (content, truncated)
 }
 
 #[tokio::test]

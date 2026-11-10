@@ -24,6 +24,7 @@ pub mod inline_visualization;
 pub mod list_agents;
 pub mod observer_report;
 pub mod private_page;
+pub mod propose_goal;
 pub mod push_notification;
 pub mod report_findings;
 pub mod send_message;
@@ -57,6 +58,7 @@ pub use brief::BriefTool;
 pub use inline_visualization::VisualizationTool;
 pub use list_agents::ListAgentsTool;
 pub use private_page::PageTool;
+pub use propose_goal::ProposeGoalTool;
 pub use push_notification::PushNotificationTool;
 pub use report_findings::ReportFindingsTool;
 pub use send_message::SendMessageTool;
@@ -134,6 +136,7 @@ fn register_with_options(
     ask_resolver: Option<Arc<dyn ask_user_question::AskUserQuestionResolver>>,
 ) {
     reg.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(ProposeGoalTool::new(ctx.clone())));
     if include_send_message {
         reg.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     }

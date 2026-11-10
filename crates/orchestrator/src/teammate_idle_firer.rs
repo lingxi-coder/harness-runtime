@@ -37,7 +37,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hooks::events::HookEvent;
-use hooks::registry::HookContext;
 use hooks::teammate_idle_firer::{TeammateIdleFire, TeammateIdleFirer, TeammateIdleOutcome};
 use hooks::HookExecutorImpl;
 
@@ -46,17 +45,17 @@ use hooks::HookExecutorImpl;
 pub struct OrchestratorTeammateIdleFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `TeammateIdle` hook payload (`cwd`) and the
-    /// per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `TeammateIdle` hook payload's
-    /// `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorTeammateIdleFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `TeammateIdle` hook rides the identical registry /
@@ -65,8 +64,7 @@ impl OrchestratorTeammateIdleFirer {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 }
@@ -80,13 +78,11 @@ impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
         };
         // E_n uses the owning session and the live permission mode, but no
         // tool-use context (therefore no agent_id or effort).
-        let ctx = HookContext {
-            session_id: fire.session_id,
-            permission_mode: Some(fire.permission_mode),
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
+        let Some(mut ctx) = self.context_source.for_session(fire.session_id).await else {
+            return TeammateIdleOutcome::default();
         };
+        ctx.session_id = fire.session_id;
+        ctx.permission_mode = Some(fire.permission_mode);
         let aggregate = self.hooks.execute(event, ctx).await;
         let prevent_continuation = aggregate.prevent_continuation;
         let blocking_feedback = if matches!(

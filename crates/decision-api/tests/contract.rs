@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use decision_api::{Answer, ModelRef, Question, Request, Response, Usage};
+use decision_api::{Answer, Input, ModelRef, Question, Request, Response, Usage};
 
 fn request() -> Request {
     Request {
@@ -77,6 +77,9 @@ fn response() -> Response {
 fn mixed_decisions_preserve_missing_statistics_and_usage() {
     let response = response();
     response.validate_for(&request()).unwrap();
+    response
+        .validate_for_questions(request().state_revision, &request().questions)
+        .unwrap();
     let roundtrip: Response =
         serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap();
     assert_eq!(roundtrip, response);
@@ -96,14 +99,23 @@ fn stale_revision_and_missing_or_extra_questions_are_rejected() {
     let mut stale = response();
     stale.state_revision = 6;
     assert!(stale.validate_for(&request()).is_err());
+    assert!(stale
+        .validate_for_questions(request().state_revision, &request().questions)
+        .is_err());
     let mut missing = response();
     missing.answers.remove("safe");
     assert!(missing.validate_for(&request()).is_err());
+    assert!(missing
+        .validate_for_questions(request().state_revision, &request().questions)
+        .is_err());
     let mut extra = response();
     extra
         .answers
         .insert("other".into(), Answer::Binary { probability: 0.5 });
     assert!(extra.validate_for(&request()).is_err());
+    assert!(extra
+        .validate_for_questions(request().state_revision, &request().questions)
+        .is_err());
 }
 
 #[test]
@@ -118,6 +130,9 @@ fn mismatched_answer_type_and_unknown_choice_are_rejected() {
         },
     );
     assert!(result.validate_for(&request()).is_err());
+    assert!(result
+        .validate_for_questions(request().state_revision, &request().questions)
+        .is_err());
     let mut result = response();
     result.answers.insert(
         "route".into(),
@@ -128,6 +143,9 @@ fn mismatched_answer_type_and_unknown_choice_are_rejected() {
         },
     );
     assert!(result.validate_for(&request()).is_err());
+    assert!(result
+        .validate_for_questions(request().state_revision, &request().questions)
+        .is_err());
 }
 
 #[test]
@@ -138,6 +156,9 @@ fn invalid_probability_values_and_incomplete_distributions_are_rejected() {
             .answers
             .insert("safe".into(), Answer::Binary { probability: value });
         assert!(result.validate_for(&request()).is_err());
+        assert!(result
+            .validate_for_questions(request().state_revision, &request().questions)
+            .is_err());
     }
     for probabilities in [
         BTreeMap::from([("a".into(), 1.0)]),
@@ -153,6 +174,9 @@ fn invalid_probability_values_and_incomplete_distributions_are_rejected() {
             },
         );
         assert!(result.validate_for(&request()).is_err());
+        assert!(result
+            .validate_for_questions(request().state_revision, &request().questions)
+            .is_err());
     }
 }
 
@@ -169,7 +193,78 @@ fn score_domain_and_confidence_are_validated() {
             },
         );
         assert!(result.validate_for(&request()).is_err());
+        assert!(result
+            .validate_for_questions(request().state_revision, &request().questions)
+            .is_err());
     }
+}
+
+#[test]
+fn question_only_validation_checks_schemas_even_for_refusals() {
+    let binary = Question::Binary {
+        instructions: "Check evidence".into(),
+    };
+    let mut schemas = vec![
+        BTreeMap::new(),
+        BTreeMap::from([(" ".into(), binary.clone())]),
+        (0..401)
+            .map(|id| (id.to_string(), binary.clone()))
+            .collect(),
+    ];
+    for question in [
+        Question::Binary {
+            instructions: " ".into(),
+        },
+        Question::Choice {
+            instructions: "Choose".into(),
+            options: BTreeMap::new(),
+        },
+        Question::Choice {
+            instructions: "Choose".into(),
+            options: BTreeMap::from([(" ".into(), "Unnamed option".into())]),
+        },
+        Question::Score {
+            instructions: "Score".into(),
+            levels: vec!["Only level".into()],
+        },
+        Question::Score {
+            instructions: "Score".into(),
+            levels: vec!["Low".into(), " ".into()],
+        },
+    ] {
+        schemas.push(BTreeMap::from([("question".into(), question)]));
+    }
+    for questions in schemas {
+        let result = Response {
+            answers: questions
+                .keys()
+                .map(|id| (id.clone(), Answer::Refused { reason: None }))
+                .collect(),
+            ..response()
+        };
+        assert!(result
+            .validate_for_questions(result.state_revision, &questions)
+            .is_err());
+    }
+}
+
+#[test]
+fn evidence_validation_is_preserved_for_input_and_request() {
+    let mut request = request();
+    request.images.push(decision_api::Image {
+        data_url: "https://example.invalid/image.png".into(),
+    });
+    let result = response();
+    assert!(result.validate_for(&request).is_err());
+    let input = Input {
+        state: request.state,
+        images: request.images,
+        questions: request.questions,
+    };
+    assert!(result.validate_for_input(&input).is_err());
+    result
+        .validate_for_questions(response().state_revision, &input.questions)
+        .unwrap();
 }
 
 #[test]

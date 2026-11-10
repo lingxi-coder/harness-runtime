@@ -663,7 +663,7 @@ mod tests {
             vec![],
             None,
             None,
-            Default::default(),
+            crate::test_support::code_resume_runtime_snapshot(old_session),
         )
         .await
         .unwrap();
@@ -684,7 +684,7 @@ mod tests {
             vec![],
             None,
             None,
-            Default::default()
+            crate::test_support::code_resume_runtime_snapshot(cleared)
         )
         .await
         .is_err());

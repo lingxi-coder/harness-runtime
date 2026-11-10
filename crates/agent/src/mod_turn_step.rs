@@ -44,11 +44,21 @@ impl ChildStepRequest {
         let mut system = self.system.clone();
         let mut messages = self.messages.clone();
         let mut tools = self.tools.clone();
+        let mut call_opts = self.call_opts.clone();
         let mut policy = self
             .prompt_context
             .as_ref()
             .and_then(|context| context.prompt_policy.clone());
         if model != self.model || self.profile != self.prompt_profile {
+            call_opts.memory_fork_wire = call_opts.memory_fork_wire.as_ref().map(|wire| {
+                crate::memory_fork::MemoryForkProjection::rebind_for_route(
+                    wire,
+                    true,
+                    None,
+                    None,
+                    &[],
+                )
+            });
             if let Some(context) = &self.prompt_context {
                 let mode = context
                     .prompt_policy
@@ -79,6 +89,15 @@ impl ChildStepRequest {
                     .map_err(|error| LlmError::InvalidRequest {
                         message: error.to_string(),
                     })?;
+                    call_opts.memory_fork_wire = call_opts.memory_fork_wire.as_ref().map(|wire| {
+                        crate::memory_fork::MemoryForkProjection::rebind_for_route(
+                            wire,
+                            true,
+                            context.prompt_policy.as_deref(),
+                            Some(&target.policy),
+                            &fresh,
+                        )
+                    });
                     let fresh = llm_runtime::convert::to_tool_declarations(fresh)?;
                     for tool in &mut tools {
                         if let Some(replacement) =
@@ -110,7 +129,7 @@ impl ChildStepRequest {
                 tools,
                 forced_tool: self.forced_tool.clone(),
                 effort,
-                opts: self.call_opts.clone(),
+                opts: call_opts,
             }),
         )
         .await?;

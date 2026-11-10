@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod prompt_policy;
+pub mod goal;
 pub mod remote_ui;
 pub mod session_context;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
@@ -449,6 +450,7 @@ pub mod instruction_memory_sanitize;
 /// Shared main/subagent instruction-loading boundary.
 pub mod instructions;
 pub mod invoked_skills;
+pub mod memory_tool_scope;
 
 pub use tool_execution::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,

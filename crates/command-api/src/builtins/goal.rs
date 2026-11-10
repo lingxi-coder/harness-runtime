@@ -1,111 +1,13 @@
-//! `/goal` — set a session-scoped goal Claude checks before stopping, show the
-//! active goal, or clear it early.
+//! Session Goal command, checked against Claude Code 2.1.322.
 //!
-//! Ported from the claude-code v2.1.198 binary. `strings -a` on the shipped
-//! Mach-O turned up TWO command objects sharing the name `"goal"`:
-//!
-//! ```text
-//! {type:"local-jsx",name:"goal",description:"Set a goal Claude checks before
-//!   stopping",argumentHint:"[<condition> | clear]",immediate:!0,load:...}
-//! {type:"local",name:"goal",supportsNonInteractive:!0,thinClientDispatch:
-//!   "post-text",description:"Set a goal — keep working until the condition is
-//!   met",get isHidden(){return!hr()},isEnabled:()=>hr()||Qi(),load:...}
-//! ```
-//! exported as `default` (the interactive `local-jsx` TUI dialog) and the
-//! named export `goalNonInteractive` (the `local`/`supportsNonInteractive`
-//! variant). LingXi is a headless engine, so this handler ports the SECOND
-//! object's body — the plain-text branch function located alongside it:
-//!
-//! ```text
-//! ...`${WMl(o.lastReason)}`:"";return{type:"text",value:
-//!   `Goal active: ${o.condition} (${s})${i}`}}
-//! if(trr(n)){let o=IEt(t);return{type:"text",value:o===null?"No goal set":
-//!   `Goal cleared: ${o}`}}
-//! if(n.length>wEt)return bt("goal_set","too_long"),{type:"text",value:
-//!   `Goal condition is limited to ${wEt} characters (got ${n.length})`};
-//! let r=kEt(n,t);if(r!==null)return{type:"text",value:r};
-//! return{type:"query",value:`Goal set: ${n}`,prompt:nrr(n)};
-//! ```
-//!
-//! `kEt(n,t)` is the trust/hooks-restricted gate (returns a fixed message on
-//! failure, `null` on success); `nrr(n)` builds the model-facing directive
-//! injected once the goal is accepted. `trr(n)` is the case-insensitive
-//! clear-token membership test.
-//!
-//! ## Headless mapping onto `CommandResult`
-//!
-//! The binary's non-interactive result is `{type, value, prompt?}`: `value` is
-//! always a short line for the invoking surface, and a successful `set` ALSO
-//! carries `prompt` — the text queried to the model as the next turn. LingXi's
-//! [`CommandResult`] has no variant carrying both a display line and an
-//! injected turn at once, so the success path follows the explicit spec
-//! instruction and returns [`CommandResult::InjectMessage`] with the directive
-//! text (below), matching the `/review` handler's `InjectMessage`-only
-//! precedent (`commands/core/src/review.rs`) rather than [`CommandResult::Done`].
-//! The `status`/`clear`/`too-long` branches have no `prompt`, so they map onto
-//! `CommandResult::Done` (the `/effort`/`/model` precedent).
-//!
-//! ## Remaining note
-//!
-//! * **`lastReasonSuffix` formatting is NOT byte-verified.** The task's
-//!   locked output-string list gives every OTHER literal verbatim but leaves
-//!   this one as a `${lastReasonSuffix}` placeholder; the one targeted
-//!   `strings` probe that reached it was truncated mid-fragment
-//!   (`` `${WMl(o.lastReason)}` ``) with no confirmed static prefix text. Since
-//!   the binary fragment is incomplete, [`GoalHandler::status`]'s suffix format
-//!   is a best-effort placeholder, clearly marked, not a confirmed port.
-//!
-//! ## PORTED — SLASH-04: auto-clear on an unrecoverable turn error
-//!
-//! claude-code 2.1.238 added `Cqf` (@292182815, statsig `tengu_quartz_pipit`
-//! **default `true`**), which tears the goal down when a turn dies for a
-//! reason the user cannot retry past. It is absent from 2.1.220, so this is
-//! genuine 2.1.238 drift.
-//!
-//! It does NOT live in this file: the trigger is the conversation turn-error
-//! path, so the port lives with the turn loop that owns the terminal reasons —
-//! `orchestrator::turn_loop::clear_goal_after_unrecoverable_error`, called from
-//! all four terminal arms of `execute_one_turn_with_recovery_tracked`
-//! (`PromptTooLong`, `BlockingLimit`, `RapidRefillBreaker` → `context_limit`,
-//! and the graceful api-error `Err(e)` arm → the errorKind switch). The
-//! teardown reuses this command's own clear path
-//! (`clear_active_goal_state_and_hook`), so the Stop hook is removed exactly as
-//! `/goal clear` removes it. The byte-level spec, kept here for reference:
-//!
-//! ```text
-//! if(!it("tengu_quartz_pipit",!0)||!e||t.agentId||t.abortController.signal.aborted||PH(r)!=="main")return;
-//! let o=w4v(n);if(o===null)return;let{label:i,errorCode:s}=v4v[o];
-//! t.sessionHooksRegistry.remove(zt(),"Stop",{type:"prompt",prompt:e.condition}),
-//! cFe(e,o==="context_limit"?"context_limit":"api_error"),de("goal_met",s),
-//! yield{type:"active_goal",value:void 0},yield bOi(!0,e.condition),
-//! yield jBt(`Goal cleared after an unrecoverable error (${i}): "${Yl(e.condition,T4v,!0)}". Run /goal again to continue.`,"warning")
-//! ```
-//!
-//! Preconditions: main agent only (`agentId` unset, `PH(r)==="main"`), not
-//! aborted, a goal is active. `T4v=80` is the condition-truncation width.
-//! Label / telemetry map (`v4v`, @292183854):
-//!
-//! ```text
-//! auth             -> "authentication failed"    / cleared_auth
-//! billing          -> "credit balance too low"   / cleared_billing
-//! context_limit    -> "context limit reached"    / cleared_context_limit
-//! model_unavailable-> "model unavailable"        / cleared_model_unavailable
-//! ```
-//!
-//! Reason -> bucket (`w4v`): `blocking_limit | prompt_too_long |
-//! rapid_refill_breaker` -> `context_limit`; `api_error` -> `null` when
-//! `isTransient`, else by `errorKind`: `authentication_failed |
-//! oauth_org_not_allowed` -> `auth` UNLESS remote (`CLAUDE_CODE_REMOTE ||
-//! j2() || BYt()!==null`), `account_on_hold` -> `auth`, `billing_error` ->
-//! `billing`, `model_not_found` -> `model_unavailable`, and `overloaded |
-//! server_error | max_output_tokens | rate_limit | invalid_request | unknown |
-//! undefined` -> `null`. Every non-`api_error` reason (`image_error`,
-//! `model_error`, `malformed_tool_use_exhausted`, `aborted_streaming`,
-//! `aborted_tools`, `stop_hook_prevented`, `hook_stopped`, `tool_deferred`,
-//! `max_turns`, `background_requested`, `completed`) -> `null` (no clear).
+//! Display and model directive retain their original UTF-16 code units. The
+//! accepted-set display uses the host's system-notice channel; the directive
+//! follows the ordinary injected-turn path. Source receipts and replay cases
+//! live in `scripts/tests/goal_322_oracle.mjs`.
 
 use crate::model::{
-    source_concat, trim_source_text, BuiltinCommandHandler, CommandResult, PromptPart,
+    source_concat, source_from_units, trim_source_text, BuiltinCommandHandler, CommandResult,
+    PromptPart,
 };
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
@@ -144,6 +46,9 @@ const TRUST_GATE_MESSAGE: &str = "/goal is only available in trusted workspaces.
 /// `kEt`'s hooks-restricted failure message, verbatim from the locked
 /// output-string list. The value comes from merged managed/user/project hook
 /// policy through [`OrchestratorHandle::hooks_restricted`].
+const HOOKS_HELD_MESSAGE: &str = "/goal can't run yet: your organization's settings haven't been read, so it isn't known whether it allows hooks.";
+const RELAYED_MESSAGE: &str = "This message was relayed from Slack, Teams or a project thread and may be someone else's, so /goal didn't set, clear or show the goal. To use /goal, send it yourself from the terminal, the Claude app, claude.ai/code or your own Remote Control app.";
+
 const HOOKS_RESTRICTED_MESSAGE: &str = "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).";
 
 /// `bt("goal_set","too_long")` — the binary's own telemetry call on the
@@ -203,63 +108,83 @@ impl GoalHandler {
     /// `Evaluations:` line, and the last reason is truncated to its first line
     /// by `Hr`. The earlier port guessed all three (its module doc flagged the
     /// `lastReason` suffix as unverified); the executable settles them.
-    async fn status(&self) -> String {
-        match self.handle.get_active_goal().await {
-            None => NO_GOAL_SET_USAGE.to_string(),
-            Some(g) => {
-                let evaluations = match g.iterations {
-                    0 => "not yet evaluated".to_string(),
-                    1 => "1 turn".to_string(),
-                    count => format!("{count} turns"),
-                };
-                let last_check = match g
-                    .last_reason
-                    .as_ref()
-                    .and_then(|reason| reason.string_at(""))
-                {
-                    Some(reason) if !reason.is_empty() => {
-                        format!("\nLast check: {}", first_line(trim_js_whitespace(reason)))
-                    }
-                    _ => String::new(),
-                };
-                format!(
-                    "Goal active: {} ({evaluations}){last_check}",
-                    g.condition.string_at("").unwrap_or_default()
-                )
-            }
-        }
+    async fn status(&self) -> Utf16JsonProjection {
+        let Some(goal) = self.handle.get_active_goal().await else {
+            return NO_GOAL_SET_USAGE.into();
+        };
+        let evaluations = match goal.iterations {
+            0 => "not yet evaluated".to_owned(),
+            1 => "1 turn".to_owned(),
+            count => format!("{count} turns"),
+        };
+        let status = source_concat([
+            PromptPart::Text("Goal active: "),
+            PromptPart::Source(&goal.condition),
+            PromptPart::Text(&format!(" ({evaluations})")),
+        ]);
+        let Some(reason) = goal.last_reason.as_ref().filter(|reason| {
+            reason
+                .string_units("")
+                .is_some_and(|units| !units.is_empty())
+        }) else {
+            return status;
+        };
+        let trimmed = trim_source_text(reason);
+        let units = trimmed.string_units("").unwrap_or_default();
+        let first_line_end = units
+            .iter()
+            .position(|unit| *unit == 0x0a)
+            .unwrap_or(units.len());
+        let reason = source_from_units(units[..first_line_end].to_vec());
+        source_concat([
+            PromptPart::Source(&status),
+            PromptPart::Text("\nLast check: "),
+            PromptPart::Source(&reason),
+        ])
     }
 
-    /// The clear-token branch (binary: `o===null?"No goal set":\`Goal
-    /// cleared: ${o}\``).
-    async fn clear(&self) -> String {
+    async fn clear(&self) -> Utf16JsonProjection {
         match self.handle.clear_active_goal().await {
-            None => NO_GOAL_SET.to_string(),
-            Some(g) => {
-                let condition = g.condition.string_at("").unwrap_or_default();
-                telemetry::emit_command_completed(TELEMETRY_STOP_HOOK_REMOVED, condition);
-                format!("Goal cleared: {condition}")
+            None => NO_GOAL_SET.into(),
+            Some(goal) => {
+                telemetry::emit_command_completed(TELEMETRY_STOP_HOOK_REMOVED, "goal");
+                source_concat([
+                    PromptPart::Text("Goal cleared: "),
+                    PromptPart::Source(&goal.condition),
+                ])
             }
         }
     }
 
-    /// The valid-condition branch: gate check, then set + inject the
-    /// directive (binary: `` {type:"query",value:`Goal set: ${n}`,
-    /// prompt:nrr(n)} `` — see the module doc's `CommandResult` mapping note
-    /// for why only the `prompt` half is representable here).
     async fn set(&self, condition: &Utf16JsonProjection) -> CommandResult {
         // 2.1.270 `ust`: hooks restrictions take precedence over trust.
         if self.handle.hooks_restricted().await {
+            self.handle.retire_goal_set_origin(condition).await;
+            telemetry::emit_command_failed(TELEMETRY_GOAL_SET_EVENT, "hooks_gate");
             return CommandResult::Done {
                 display: Some((HOOKS_RESTRICTED_MESSAGE.to_string()).into()),
             };
         }
-        if !self.handle.workspace_trusted().await {
+        if self.handle.goal_hooks_held().await {
+            self.handle.retire_goal_set_origin(condition).await;
+            telemetry::emit_command_failed(TELEMETRY_GOAL_SET_EVENT, "hooks_held");
+            return CommandResult::Done {
+                display: Some(HOOKS_HELD_MESSAGE.into()),
+            };
+        }
+        if !self.handle.goal_is_non_interactive() && !self.handle.workspace_trusted().await {
+            self.handle.retire_goal_set_origin(condition).await;
+            telemetry::emit_command_failed(TELEMETRY_GOAL_SET_EVENT, "trust_gate");
             return CommandResult::Done {
                 display: Some((TRUST_GATE_MESSAGE.to_string()).into()),
             };
         }
         self.handle.set_active_goal(condition).await;
+        let display = source_concat([
+            PromptPart::Text("Goal set: "),
+            PromptPart::Source(condition),
+        ]);
+        self.handle.emit_background_system_notice(&display).await;
         CommandResult::InjectMessage {
             content: directive_for(condition).into(),
         }
@@ -269,6 +194,15 @@ impl GoalHandler {
 #[async_trait]
 impl BuiltinCommandHandler for GoalHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        let source = lingxi_core::host::goal::current_goal_command_source();
+        if source.dispatched_over_bridge
+            && source.submission_verified_slack_human_turn
+            && telemetry::flag_bool("tengu_mellow_sunset", true)
+        {
+            return CommandResult::Done {
+                display: Some(RELAYED_MESSAGE.into()),
+            };
+        }
         let trimmed = trim_source_text(&args.raw_args);
 
         // 1) empty → status.
@@ -277,7 +211,7 @@ impl BuiltinCommandHandler for GoalHandler {
             .is_some_and(|units| units.is_empty())
         {
             return CommandResult::Done {
-                display: Some((self.status().await).into()),
+                display: Some(self.status().await),
             };
         }
 
@@ -287,7 +221,7 @@ impl BuiltinCommandHandler for GoalHandler {
             .is_some_and(|value| CLEAR_TOKENS.contains(&value.to_lowercase().as_str()));
         if is_clear {
             return CommandResult::Done {
-                display: Some((self.clear().await).into()),
+                display: Some(self.clear().await),
             };
         }
 
@@ -318,20 +252,6 @@ impl BuiltinCommandHandler for GoalHandler {
     }
 }
 
-/// Match ECMAScript `String.trim()`, including BOM but excluding U+0085.
-fn trim_js_whitespace(s: &str) -> &str {
-    s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
-}
-
-/// `Hr(t)` = `pt(t,"\n")` (2.1.266 `src_157781101.js`) — everything before the
-/// first newline, so a multi-line evaluator reason renders as ONE line.
-fn first_line(s: &str) -> &str {
-    match s.find('\n') {
-        Some(idx) => &s[..idx],
-        None => s,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,10 +260,11 @@ mod tests {
 
     #[test]
     fn goal_directive_matches_latest_oracle_bytes() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/goal_2_1_270.json")).unwrap();
-        let expected = fixture["directive"]
-            .as_str()
+        let fixture =
+            Utf16JsonProjection::parse(include_str!("../../tests/fixtures/goal_2_1_322.json"))
+                .unwrap();
+        let expected = fixture
+            .string_at("/directive")
             .unwrap()
             .replace("{condition}", "ship it");
         let actual = directive_for(&"ship it".into());
@@ -465,7 +386,7 @@ mod tests {
             }));
             assert_eq!(
                 h.status().await,
-                format!("Goal active: ship (1 turn){suffix}")
+                format!("Goal active: ship (1 turn){suffix}").into()
             );
         }
     }
@@ -588,7 +509,10 @@ mod tests {
             tokens_at_start: 100,
         }));
         let one = h.status().await;
-        assert_eq!(one, "Goal active: ship (1 turn)\nLast check: tests pending");
+        assert_eq!(
+            one,
+            "Goal active: ship (1 turn)\nLast check: tests pending".into()
+        );
 
         handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
             condition: "ship".into(),
@@ -600,7 +524,7 @@ mod tests {
         let many = h.status().await;
         assert_eq!(
             many,
-            "Goal active: ship (2 turns)\nLast check: review pending"
+            "Goal active: ship (2 turns)\nLast check: review pending".into()
         );
 
         // `Hr(t)` keeps only the first line of a multi-line evaluator reason.
@@ -613,7 +537,7 @@ mod tests {
         }));
         assert_eq!(
             h.status().await,
-            "Goal active: ship (3 turns)\nLast check: first line"
+            "Goal active: ship (3 turns)\nLast check: first line".into()
         );
     }
 
@@ -625,5 +549,120 @@ mod tests {
             h.description(),
             "Set a goal — keep working until the condition is met"
         );
+    }
+
+    #[tokio::test]
+    async fn native_322_command_replay_preserves_exact_outputs_and_gate_order() {
+        use lingxi_core::host::goal::{with_goal_command_source, GoalCommandSource};
+
+        let fixture =
+            Utf16JsonProjection::parse(include_str!("../../tests/fixtures/goal_2_1_322.json"))
+                .unwrap();
+        let commands = fixture.at_pointer("/commands").unwrap();
+        for index in 0..commands.array_len().unwrap() {
+            let case = commands.get_index(index).unwrap().to_projection().unwrap();
+            let name = case.string_at("/name").unwrap();
+            let boolean = |path: &str, fallback| {
+                case.at_pointer(path)
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(fallback)
+            };
+            let (handle, handler) = mock_handler();
+            handle.set_hooks_restricted(boolean("/gate/hooksRestricted", false));
+            handle.set_goal_hooks_held(boolean("/gate/hooksHeld", false));
+            handle.set_workspace_trusted(boolean("/gate/trusted", true));
+            handle.set_goal_non_interactive(boolean("/gate/nonInteractive", false));
+            if case
+                .at_pointer("/state")
+                .is_some_and(|state| !state.is_null())
+            {
+                handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
+                    condition: case
+                        .at_pointer("/state/condition")
+                        .unwrap()
+                        .to_projection()
+                        .unwrap(),
+                    set_at: SystemTime::UNIX_EPOCH,
+                    last_reason: case
+                        .at_pointer("/state/lastReason")
+                        .filter(|reason| !reason.is_null())
+                        .map(|reason| reason.to_projection().unwrap()),
+                    iterations: case
+                        .at_pointer("/state/iterations")
+                        .and_then(|value| value.as_number())
+                        .unwrap_or(0.0) as u64,
+                    tokens_at_start: 0,
+                }));
+            }
+            let enabled = boolean("/relay/enabled", true);
+            telemetry::test_set_flag("tengu_mellow_sunset", enabled);
+            let source = GoalCommandSource {
+                dispatched_over_bridge: boolean("/relay/dispatchedOverBridge", false),
+                submission_verified_slack_human_turn: boolean(
+                    "/relay/submissionVerifiedSlackHumanTurn",
+                    false,
+                ),
+            };
+            let args = ParsedSlashCommand {
+                name: "goal".into(),
+                raw_args: case.at_pointer("/args").unwrap().to_projection().unwrap(),
+                positional_args: Vec::new(),
+            };
+            let result = with_goal_command_source(source, handler.handle(&args)).await;
+            telemetry::test_set_flag("tengu_mellow_sunset", true);
+            let expected_value = case
+                .at_pointer("/expected/value")
+                .unwrap()
+                .to_projection()
+                .unwrap();
+            match (case.string_at("/expected/type"), result) {
+                (
+                    Some("text"),
+                    CommandResult::Done {
+                        display: Some(display),
+                    },
+                ) => {
+                    assert_eq!(display, expected_value, "{name}");
+                    assert!(handle.background_notices().is_empty(), "{name}");
+                }
+                (Some("query"), CommandResult::InjectMessage { content }) => {
+                    let expected_prompt = case
+                        .at_pointer("/expected/prompt")
+                        .unwrap()
+                        .to_projection()
+                        .unwrap();
+                    assert_eq!(content, expected_prompt, "{name}");
+                    assert_eq!(handle.background_notices(), vec![expected_value], "{name}");
+                }
+                (_, other) => panic!("{name}: unexpected {other:?}"),
+            }
+            let actual_state = handle.get_active_goal().await;
+            let expected_state = case.at_pointer("/afterState").unwrap();
+            if expected_state.is_null() {
+                assert!(actual_state.is_none(), "{name}: no goal is active");
+            } else {
+                let actual = actual_state.expect(name);
+                let expected_condition = case
+                    .at_pointer("/afterState/condition")
+                    .unwrap()
+                    .to_projection()
+                    .unwrap();
+                assert_eq!(actual.condition, expected_condition, "{name}: condition");
+                let iterations = case
+                    .at_pointer("/afterState/iterations")
+                    .and_then(|value| value.as_number())
+                    .unwrap_or(0.0) as u64;
+                assert_eq!(actual.iterations, iterations, "{name}: iterations");
+                let reason = case
+                    .at_pointer("/afterState/lastReason")
+                    .filter(|value| !value.is_null())
+                    .map(|value| value.to_projection().unwrap());
+                assert_eq!(actual.last_reason, reason, "{name}: last check");
+            }
+            assert_eq!(
+                lingxi_core::host::goal::current_goal_command_source(),
+                GoalCommandSource::default()
+            );
+        }
     }
 }

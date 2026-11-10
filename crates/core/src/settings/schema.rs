@@ -1320,6 +1320,18 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_memory_enabled: Option<bool>,
 
+    /// Custom local auto-memory directory. Native 2.1.319 admits project and
+    /// local overrides only after workspace trust; consumers must select the
+    /// source with [`super::EffectiveSettings::auto_memory_directory`] rather
+    /// than using this merged field directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memory_directory: Option<String>,
+
+    /// Background memory-consolidation preference. This overrides the server
+    /// default only while the auto-dream feature is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_dream_enabled: Option<bool>,
+
     /// Persisted `/effort` default (`effortLevel`). `max` is session-only and
     /// is not written here.
     #[serde(
@@ -2661,6 +2673,25 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_directory_and_dream_preferences_keep_native_wire_keys() {
+        let value =
+            serde_json::json!({"autoMemoryDirectory":"~/memories", "autoDreamEnabled":false});
+        let settings: SettingsJson = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            settings.auto_memory_directory.as_deref(),
+            Some("~/memories")
+        );
+        assert_eq!(settings.auto_dream_enabled, Some(false));
+        let encoded = serde_json::to_value(settings).unwrap();
+        assert_eq!(encoded["autoMemoryDirectory"], "~/memories");
+        assert_eq!(encoded["autoDreamEnabled"], false);
+        assert!(serde_json::from_value::<SettingsJson>(
+            serde_json::json!({"autoDreamEnabled":"false"})
+        )
+        .is_err());
+    }
 
     // Existing execution-parameter tests exercise the leaf config in isolation;
     // this fixture is not the production settings wire format.

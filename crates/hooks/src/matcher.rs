@@ -725,6 +725,9 @@ mod tests {
 
     #[test]
     fn if_public_agent_alias_matches_both_rule_and_event_spelling() {
+        // Native 2.1.322 normalizes the public Task alias on both sides of
+        // the if-condition comparison. This is separate from the low-level
+        // pattern matcher, whose host-supplied query is already canonical.
         let input = json!({ "description": "x" });
         assert!(matches_if_condition("Task", "Agent", &input));
         assert!(matches_if_condition("Task(*)", "Agent", &input));

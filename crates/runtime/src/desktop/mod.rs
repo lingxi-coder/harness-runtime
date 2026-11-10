@@ -45,6 +45,7 @@ mod background_agent;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
+mod goal_proposal;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]
@@ -453,6 +454,15 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    fn fork_for_memory(
+        &self,
+        inherit_reads: bool,
+    ) -> Option<Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.fork_for_memory(inherit_reads))
+    }
+
     fn trusted_session_profile(
         &self,
     ) -> Option<lingxi_core::host::session_context::SessionModeSnapshot> {

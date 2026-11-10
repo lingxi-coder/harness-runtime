@@ -1,17 +1,20 @@
-//! Claude Code 2.1.319 background-memory update announcements.
-//! The host queue owns path discovery; this renderer preserves summary UTF-16
-//! and announces stale loaded copies when a background writer changes a file.
+//! Native 2.1.319 memory-update attachments, including extraction and sync.
+//! The file writer supplies exact changed paths; context membership is resolved
+//! when updates are drained. See scripts/tests/memory_prompts_319_oracle.mjs.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-/// Native memory update sources, including the raw-summary sync announcement.
+/// Native source labels (`Nfo` / `Ffo` in 2.1.319).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryUpdateSource {
     /// `dream` ⇒ `"Background memory consolidation"`.
     Dream,
+    /// Successful automatic file-memory extraction.
     Extract,
-    SyncUnsaved,
+    /// Unknown source labels use Native's generic wording.
     Other,
+    /// Pending local changes already supply the complete reminder body.
+    SyncUnsaved,
 }
 
 impl MemoryUpdateSource {
@@ -30,7 +33,7 @@ impl MemoryUpdateSource {
         match self {
             Self::Dream => "Background memory consolidation",
             Self::Extract => "Background memory extraction",
-            Self::SyncUnsaved | Self::Other => "A background memory process",
+            Self::Other | Self::SyncUnsaved => "A background memory process",
         }
     }
 }
@@ -167,7 +170,9 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
     #[test]
     fn empty_lists_drop_their_lines_but_keep_the_trailer() {
         assert_eq!(
-            render_memory_update(&update(&[], &[])).string_at("").unwrap(),
+            render_memory_update(&update(&[], &[]))
+                .string_at("")
+                .unwrap(),
             format!(
                 "Background memory consolidation updated your memory directory: merged 3 notes\n{AMBIENT_CONTEXT_TRAILER}"
             )
@@ -246,5 +251,45 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
             MemoryUpdateSource::Dream.label(),
             "Background memory consolidation"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_319_tests {
+    use super::*;
+    #[test]
+    fn all_native_update_sources_and_path_branches_match_the_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/memory_prompts_319.json"
+        ))
+        .unwrap();
+        for case in fixture["updates"].as_array().unwrap() {
+            let input = &case["input"];
+            let source = match input["source"].as_str().unwrap() {
+                "dream" => MemoryUpdateSource::Dream,
+                "extract" => MemoryUpdateSource::Extract,
+                "sync_unsaved" => MemoryUpdateSource::SyncUnsaved,
+                _ => MemoryUpdateSource::Other,
+            };
+            let paths = |key: &str| {
+                input[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect()
+            };
+            let body = render_memory_update(&MemoryUpdate {
+                source,
+                summary: input["summary"].as_str().unwrap().into(),
+                paths: paths("paths"),
+                in_context_paths: paths("inContextPaths"),
+            });
+            assert_eq!(
+                body.string_at(""),
+                case["expected"][0]["content"].as_str(),
+                "{case}"
+            );
+        }
     }
 }

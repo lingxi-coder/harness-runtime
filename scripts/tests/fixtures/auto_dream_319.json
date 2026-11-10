@@ -1,0 +1,781 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "source_byte_ranges": [
+    {
+      "label": "availability and settings gate",
+      "start": 278850306,
+      "endExclusive": 278850531,
+      "sha256": "078ce4d1ac3d5c77695a4b7ac93766245008e408fe32a4db064844383becbf15"
+    },
+    {
+      "label": "thresholds, host gates and automatic scheduler",
+      "start": 278856948,
+      "endExclusive": 278862348,
+      "sha256": "2603fcc07f612d80749810e1a809f1782a568461694464ae093876343b1dafe7"
+    },
+    {
+      "label": "local PID lock reader and acquisition",
+      "start": 278540431,
+      "endExclusive": 278541645,
+      "sha256": "dc2295f5e31db2ec29229c343cde7a98a9aa61635b82298d01f87df5286d7d80"
+    },
+    {
+      "label": "local consolidation timestamp rollback",
+      "start": 278541645,
+      "endExclusive": 278541947,
+      "sha256": "dbab4d8c3828f8125801ca35f558dd7b009c7dcb6c7e9e60534902099ced4d51"
+    },
+    {
+      "label": "session UUID filename validator",
+      "start": 260491675,
+      "endExclusive": 260491823,
+      "sha256": "b1f95b92b96a27ce81fdd4443a93572c395bfb33cdcc5ead79eaa494c698095b"
+    },
+    {
+      "label": "local session catalog scan",
+      "start": 277105140,
+      "endExclusive": 277106197,
+      "sha256": "c34cead0eb0b798158208916e0def298fcaedaf4e2809b9fc2a32fd0228a6827"
+    },
+    {
+      "label": "automatic scheduler context template",
+      "start": 278859877,
+      "endExclusive": 278860417,
+      "sha256": "0c1c77b25ae281c09d7e9c609a093434f73c9b2a73d42049deae62b45c757e28"
+    }
+  ],
+  "session_id_cases": [
+    {
+      "input": "00000000-0000-0000-0000-000000000001",
+      "expected": "00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "input": "ABCDEFAB-1234-5678-ABCD-0123456789AB",
+      "expected": "ABCDEFAB-1234-5678-ABCD-0123456789AB"
+    },
+    {
+      "input": "agent-00000000-0000-0000-0000-000000000001",
+      "expected": null
+    },
+    {
+      "input": "newer",
+      "expected": null
+    },
+    {
+      "input": "00000000-0000-0000-0000-00000000000g",
+      "expected": null
+    },
+    {
+      "input": "00000000-0000-0000-0000-000000000001\n",
+      "expected": null
+    }
+  ],
+  "session_scan": {
+    "input": {
+      "since_ms": 1000.25,
+      "files": [
+        {
+          "name": "00000000-0000-0000-0000-000000000001.jsonl",
+          "mtime_ms": 1000
+        },
+        {
+          "name": "00000000-0000-0000-0000-000000000002.jsonl",
+          "mtime_ms": 1001
+        },
+        {
+          "name": "not-a-session.jsonl",
+          "mtime_ms": 2000
+        },
+        {
+          "name": "00000000-0000-0000-0000-000000000003.JSONL",
+          "mtime_ms": 2000
+        },
+        {
+          "name": "00000000-0000-0000-0000-000000000004.jsonl",
+          "mtime_ms": null
+        }
+      ]
+    },
+    "expected": [
+      "00000000-0000-0000-0000-000000000002"
+    ]
+  },
+  "gate_cases": [
+    {
+      "flag": null,
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": null,
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": false,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": null,
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": true,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": true
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": false,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": true,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": true
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": true,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": true,
+        "setting": false,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": true,
+        "setting": true,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": true
+    },
+    {
+      "flag": {
+        "enabled": false,
+        "available": false
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": false,
+        "available": false
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": false,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": false,
+        "available": false
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": true,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": "true",
+        "available": 1
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": "true",
+        "available": 1
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": false,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": "true",
+        "available": 1
+      },
+      "gates": {
+        "server_enabled": false,
+        "server_available": false,
+        "setting": true,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": true,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": true,
+        "memory_read_only": false
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": true,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": true
+      },
+      "expected": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "gates": {
+        "server_enabled": true,
+        "server_available": false,
+        "setting": null,
+        "auto_memory_enabled": false,
+        "is_subagent": false,
+        "is_sdk": false,
+        "memory_read_only": false
+      },
+      "expected": false
+    }
+  ],
+  "threshold_cases": [
+    {
+      "flag": null,
+      "expected": {
+        "min_hours": 24,
+        "min_sessions": 5
+      }
+    },
+    {
+      "flag": {},
+      "expected": {
+        "min_hours": 24,
+        "min_sessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 0,
+        "minSessions": 0
+      },
+      "expected": {
+        "min_hours": 24,
+        "min_sessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": -1,
+        "minSessions": -2
+      },
+      "expected": {
+        "min_hours": 24,
+        "min_sessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": "1",
+        "minSessions": "2"
+      },
+      "expected": {
+        "min_hours": 24,
+        "min_sessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 0.5,
+        "minSessions": 1.5
+      },
+      "expected": {
+        "min_hours": 0.5,
+        "min_sessions": 1.5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 48,
+        "minSessions": 12
+      },
+      "expected": {
+        "min_hours": 48,
+        "min_sessions": 12
+      }
+    }
+  ],
+  "runner_cases": [
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ]
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions",
+        "acquire_lock",
+        "register",
+        "fork",
+        "complete"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600001,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ]
+      },
+      "expected": [
+        "read_lock"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4"
+        ]
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "writes_denied": true
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "lock_held": true
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions",
+        "acquire_lock"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "fork_fails": true
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions",
+        "acquire_lock",
+        "register",
+        "fork",
+        "fail",
+        "rollback"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1"
+        ],
+        "flag": {
+          "enabled": true,
+          "minHours": 1,
+          "minSessions": 1.5
+        }
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current",
+          "s1",
+          "s2"
+        ],
+        "flag": {
+          "enabled": true,
+          "minHours": 1,
+          "minSessions": 1.5
+        }
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions",
+        "acquire_lock",
+        "register",
+        "fork",
+        "complete"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current"
+        ],
+        "second_call_delta_ms": 599999
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions"
+      ],
+      "second_expected": [
+        "read_lock"
+      ]
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "prior_ms": 777600000,
+        "sessions": [
+          "current"
+        ],
+        "second_call_delta_ms": 600000
+      },
+      "expected": [
+        "read_lock",
+        "scan_sessions"
+      ],
+      "second_expected": [
+        "read_lock",
+        "scan_sessions"
+      ]
+    }
+  ],
+  "lock_cases": [
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": null,
+        "existing_text": null,
+        "live_pids": []
+      },
+      "expected": {
+        "previous_ms": 0,
+        "trace": [
+          "mkdir",
+          "write:42"
+        ]
+      }
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": 860400001,
+        "existing_text": "7",
+        "live_pids": [
+          7
+        ]
+      },
+      "expected": {
+        "previous_ms": null,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": 860400000,
+        "existing_text": "7",
+        "live_pids": [
+          7
+        ]
+      },
+      "expected": {
+        "previous_ms": 860400000,
+        "trace": [
+          "mkdir",
+          "write:42"
+        ]
+      }
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": 863999999,
+        "existing_text": "7",
+        "live_pids": []
+      },
+      "expected": {
+        "previous_ms": 863999999,
+        "trace": [
+          "mkdir",
+          "write:42"
+        ]
+      }
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": 864001000,
+        "existing_text": "  +7 rest",
+        "live_pids": [
+          7
+        ]
+      },
+      "expected": {
+        "previous_ms": null,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "now_ms": 864000000,
+        "existing_mtime": null,
+        "existing_text": null,
+        "live_pids": [],
+        "contender_text": "99"
+      },
+      "expected": {
+        "previous_ms": null,
+        "trace": [
+          "mkdir",
+          "write:42"
+        ]
+      }
+    }
+  ],
+  "rollback_cases": [
+    {
+      "prior_ms": 0,
+      "expected": [
+        {
+          "operation": "unlink"
+        }
+      ]
+    },
+    {
+      "prior_ms": 123456789,
+      "expected": [
+        {
+          "operation": "write",
+          "value": ""
+        },
+        {
+          "operation": "utimes",
+          "atime": 123456.789,
+          "mtime": 123456.789
+        }
+      ]
+    }
+  ],
+  "additional_context": {
+    "sessions": [
+      "a",
+      "session space",
+      "unicode-猫"
+    ],
+    "expected": "\n\n**Tool constraints for this run:** Shell access is restricted to read-only commands (`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail`, and similar) plus deleting `.md` files inside the memory directory (outside protected subdirectories like `.git` or `agents`; `rm` takes no flags except `-f`). Anything else that writes, redirects to a file, or modifies state will be denied. Plan your exploration with this in mind.\n\nSessions since last consolidation (3):\n- a\n- session space\n- unicode-猫"
+  }
+}

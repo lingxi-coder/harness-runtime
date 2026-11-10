@@ -140,10 +140,16 @@ pub(super) fn process_visible_response<'a>(
             .lifecycle_runtime
             .session_tool_hook_generation
             .current();
-        let publication_fence = crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
-            generation_root,
-            publication_lock,
-        );
+        let publication_fence =
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                generation_root,
+                publication_lock,
+            )
+            .with_transient_publications(
+                orch.lifecycle_runtime
+                    .session_tool_hook_generation
+                    .transient_publications(),
+            );
         if !orch
             .append_streamed_assistant_to_history(
                 &assistant_msg,

@@ -534,30 +534,45 @@ impl Tool for FileEditTool {
                 return Err(ToolError::InvalidInput(message.into()));
             }
         };
+        let memory_mutation =
+            lingxi_core::host::memory_tool_scope::memory_file_mutation(TOOL_NAME, &input)
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
         // `canonicalize_and_validate` tolerates a nonexistent target (it
         // canonicalizes the parent) so an empty `old_string` can create a file.
-        let mut trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = memory_mutation.as_ref().map_or_else(
+            || self.ctx.trusted_dirs_for_tool(TOOL_NAME, &input),
+            |scope| vec![scope.directory().to_owned()],
+        );
         if let Some(root) =
             lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
             trusted_dirs.push(root);
         }
-        let canon = match canonicalize_and_validate(&path, &trusted_dirs) {
-            Ok(p) => p,
-            Err(_) => {
-                emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
-                self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::PathBlocked { path });
+        let canon = if let Some(scope) = &memory_mutation {
+            scope.target()
+        } else {
+            match canonicalize_and_validate(&path, &trusted_dirs) {
+                Ok(p) => p,
+                Err(_) => {
+                    emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
+                    self.emit_failed(&invocation_id, "path_blocked").await;
+                    return Err(ToolError::PathBlocked { path });
+                }
             }
         };
 
         // Read the approved target once through a fixed rooted handle. The
         // resulting bytes, size, mtime, and mode feed both validation gates and
         // the edit itself; no later pathname reopen can cross a symlink swap.
-        let initial_snapshot = match edit_rooted_snapshot(&path, &canon, &trusted_dirs) {
+        let snapshot = if let Some(scope) = &memory_mutation {
+            scope.read_file()
+        } else {
+            edit_rooted_snapshot(&path, &canon, &trusted_dirs)
+        };
+        let initial_snapshot = match snapshot {
             Ok(snapshot) => Some(snapshot),
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
                 lingxi_core::host::FsError::NotFound(_),
@@ -847,13 +862,19 @@ impl Tool for FileEditTool {
         // UTF-16LE file round-trips byte-for-byte (claude-code
         // `writeTextContent`, file.ts:84-98). `after` is LF-normalized.
         let bytes = crate::file_meta::encode_with_metadata(&after, enc, ending);
-        let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs) else {
-            self.emit_failed(&invocation_id, "path_blocked").await;
-            return Err(ToolError::PathBlocked { path });
+        let result = if let Some(scope) = &memory_mutation {
+            scope.write_file(&bytes)
+        } else {
+            let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs)
+            else {
+                self.emit_failed(&invocation_id, "path_blocked").await;
+                return Err(ToolError::PathBlocked { path });
+            };
+            lingxi_core::host::rooted_fs::write_file_after_permission(
+                &root, &relative, &path, &canon, &bytes,
+            )
         };
-        let write_result = match lingxi_core::host::rooted_fs::write_file_after_permission(
-            &root, &relative, &path, &canon, &bytes,
-        ) {
+        let write_result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_write").await;
@@ -871,7 +892,7 @@ impl Tool for FileEditTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set_with_requested_aliases(
+        tool_api::read_file_state::set_after_write_with_requested_aliases(
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {

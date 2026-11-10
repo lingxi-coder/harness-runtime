@@ -3093,7 +3093,12 @@ async fn build_preload_messages(
     // `agent_type` on EVERY entrypoint (Agent tool, `/fusion`, workflow), so a
     // Fusion run's hook activity is exactly the chokepoint's one pair.
     if let Some(hooks) = &ctx.hook_executor {
-        if !lingxi_core::host::is_fusion_panel_type(&agent_type) {
+        if !lingxi_core::host::is_fusion_panel_type(&agent_type)
+            && !matches!(
+                ctx.query_source_label.as_deref(),
+                Some("extract_memories" | "auto_dream")
+            )
+        {
             let hook_ctx = hooks::registry::HookContext {
                 model_selection: Some(hooks::registry::HookModelSelection {
                     model: resolve_model(ctx),
@@ -3804,6 +3809,7 @@ async fn run_subagent_loop(
     let budget = ctx.budget.clone();
     let mut model = resolve_model(&ctx);
     let mut model_profile = ctx.model_profile.clone();
+    let memory_fork_initial_route = (model.clone(), model_profile.clone());
     // Provider routing may move to an admitted refusal-serving model. Child
     // tools keep the user's logical model/profile unless a tool context
     // modifier explicitly changes them.
@@ -4719,6 +4725,21 @@ async fn run_subagent_loop(
                             }
                         };
                     let call_opts = crate::api::SubagentApiCallOpts {
+                        memory_fork_wire: ctx.memory_fork_wire.as_ref().map(|wire| {
+                            crate::memory_fork::MemoryForkProjection::rebind_for_route(
+                                wire,
+                                (current_model.as_str(), profile)
+                                    != (
+                                        memory_fork_initial_route.0.as_str(),
+                                        memory_fork_initial_route.1.as_deref(),
+                                    ),
+                                ctx.prompt_state
+                                    .as_ref()
+                                    .map(|state| state.initial_policy.as_ref()),
+                                ctx.prompt_policy.as_deref(),
+                                &tool_schemas,
+                            )
+                        }),
                         model_attempt: model_attempt.clone(),
                         max_output_tokens: ctx.max_output_tokens_per_turn,
                         query_source_label: ctx.query_source_label.clone(),
@@ -7574,7 +7595,9 @@ pub(crate) fn validate_request_input_bytes(
         let bytes = measure_serialized_input_unit(messages).serialized_bytes;
         if bytes > max {
             return Err(LlmError::InvalidRequest {
-                message: format!("physical request exceeds max_input_bytes_per_turn after prompt projection ({bytes} > {max})"),
+                message: format!(
+                    "physical request exceeds max_input_bytes_per_turn after prompt projection ({bytes} > {max})"
+                ),
             });
         }
     }

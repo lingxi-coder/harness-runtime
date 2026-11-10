@@ -1137,7 +1137,7 @@ impl Tool for GrepTool {
         // effective cwd (base fallback + relativize) comes from `cwd_now()`,
         // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
         // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
-        let trusted = self.ctx.read_roots().await;
+        let trusted = self.ctx.read_roots_for_tool(TOOL_NAME, &input).await;
 
         // --- Arg parsing (GrepTool.ts:310-326) ---
         let pattern = crate::input_string(&input, "pattern")
@@ -1374,7 +1374,7 @@ impl Tool for GrepTool {
             mut files_matched,
             total_matches,
             timed_out,
-        } = tokio::task::spawn_blocking(move || {
+        } = lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
             // This is deliberately after the deny overrides have been built
             // and immediately before the walk is created. The test hook swaps
             // a symlink at this exact preparation boundary.

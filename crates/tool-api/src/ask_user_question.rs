@@ -92,14 +92,31 @@ pub fn join_answer_labels(labels: &[Utf16JsonProjection]) -> Utf16JsonProjection
         .expect("joined AskUserQuestion labels form a valid root string")
 }
 
-/// One in-flight `AskUserQuestion` round-trip between the tool and the TUI.
-///
-/// Constructed by the host resolver and sent over the app channel. The TUI
-/// fills `resp_tx` with ordered `(question, answer)` pairs when the user
-/// submits, or drops it unsent on cancel/skip (which the resolver maps
-/// to an error the way a dropped permission `resp_tx` maps to `Deny`).
+/// The authoritative owner of an interactive questionnaire. This marker is
+/// created by host code and never accepted from model or client payloads.
+#[derive(Debug, Clone, Default)]
+pub enum AskUserQuestionLifetime {
+    /// The foreground turn owns the question and retires it at turn end.
+    #[default]
+    Turn,
+    /// A Goal proposal remains answerable across turns in this live session.
+    /// The resolver cancels this token when its session-owned future ends.
+    SessionGoalProposal(lingxi_core::host::CancellationToken),
+}
+
+impl AskUserQuestionLifetime {
+    /// Whether this is a still-owned session Goal proposal.
+    #[must_use]
+    pub fn is_live_goal_proposal(&self) -> bool {
+        matches!(self, Self::SessionGoalProposal(cancel) if !cancel.is_cancelled())
+    }
+}
+
+/// One in-flight questionnaire and its host-owned lifetime.
 #[derive(Debug)]
 pub struct AskUserQuestionExchange {
+    /// Turn questions and session Goal proposals have different cleanup owners.
+    pub lifetime: AskUserQuestionLifetime,
     /// The 1-4 questions to walk the user through.
     pub questions: Vec<AskQuestion>,
     /// The idle window before auto-continue, in whole seconds; `None` ⇒

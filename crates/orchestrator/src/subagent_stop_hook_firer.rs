@@ -29,7 +29,12 @@ impl ConversationOrchestrator {
             Arc::new(SessionSubagentStopFirer {
                 owner: Arc::downgrade(self),
                 session_id,
-                fence: ToolDispatchPublicationFence::new(root.child_token(), lock),
+                fence: ToolDispatchPublicationFence::new(root.child_token(), lock)
+                    .with_transient_publications(
+                        self.lifecycle_runtime
+                            .session_tool_hook_generation
+                            .transient_publications(),
+                    ),
                 epoch_id: lingxi_core::types::MessageId::new(),
             }),
         );

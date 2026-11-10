@@ -5033,14 +5033,34 @@ mod read_file_state_tests {
         )
     }
 
+    fn restoration_read_tool(
+        cwd: &std::path::Path,
+        shared: tool_api::read_file_state::ReadFileStateMap,
+    ) -> Arc<dyn Tool> {
+        let mut context = tool_api::test_support::ctx_for_file_tools(
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.to_path_buf())),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![cwd.to_path_buf()],
+        );
+        context.read_file_state = shared;
+        Arc::new(tool_file::FileReadTool::new(context))
+    }
+
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_rebuilds_read_state() {
         use lingxi_core::host::OrchestratorHandle;
         use lingxi_core::types::{ConversationMessage, MessageId};
 
         // Compaction with a tiny threshold so a small seeded history compacts.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let shared = tool_api::read_file_state::new_read_file_state_map();
         let (compactor, slot) = wired_compaction(10);
-        let mut orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        let mut orch = orch_with_tools(
+            cwd.clone(),
+            vec![restoration_read_tool(&cwd, shared.clone())],
+        )
+        .with_read_state_map(shared);
         orch = orch.with_compaction(compactor).with_cache_safe_slot(slot);
         let orch = Arc::new(orch);
 
@@ -5074,7 +5094,6 @@ mod read_file_state_tests {
         // Seed the read-file-state registry with two files at distinct mtimes.
         // P2-12: the restore RE-READS from disk (not the snapshot content), so
         // the files must exist on disk with the asserted content.
-        let dir = tempfile::tempdir().expect("tempdir");
         let old_path = dir.path().join("old.rs");
         let new_path = dir.path().join("new.rs");
         std::fs::write(&old_path, "fn old() {}\n").expect("write old.rs");
@@ -5205,12 +5224,17 @@ mod read_file_state_tests {
         use lingxi_core::types::{ConversationMessage, MessageId};
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
         let shared = tool_api::read_file_state::new_read_file_state_map();
         let (compactor, slot) = wired_compaction(10);
-        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
-            .with_compaction(compactor)
-            .with_cache_safe_slot(slot)
-            .with_read_state_map(shared.clone());
+        let orch = orch_with_tools(
+            cwd.clone(),
+            vec![restoration_read_tool(&cwd, shared.clone())],
+        )
+        .with_compaction(compactor)
+        .with_cache_safe_slot(slot)
+        .with_read_state_map(shared.clone());
         let orch = Arc::new(orch);
 
         {
@@ -5243,7 +5267,6 @@ mod read_file_state_tests {
         // real `FileReadTool` does via its `BuiltinToolContext.read_file_state`).
         // P2-12: the post-compact restore RE-READS from disk, so the file must
         // exist on disk with the asserted content.
-        let dir = tempfile::tempdir().expect("tempdir");
         let tool_read_path = dir.path().join("tool_read.rs");
         std::fs::write(&tool_read_path, "fn tool_read() {}\n").expect("write tool_read.rs");
         tool_api::read_file_state::set(

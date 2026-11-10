@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+permission = { path = "../permission" }
 core = { path = "../core" }
 # Only for `jsonl::path::project_dir_name` — the SAME project-dir sanitizer the
 # session transcripts use, so a project's memories sit beside its sessions
@@ -24,6 +26,7 @@ tracing.workspace = true
 tokio = { version = "1", features = ["sync", "time"] }
 walkdir = "2.5"
 glob = "0.3"
+unicode-normalization = "=0.1.25"
 
 [dev-dependencies]
 tempfile = "3.13"

@@ -216,3 +216,96 @@ async fn partial_dedup_surfaces_only_fresh_skills() {
         .await
         .contains("seen"));
 }
+
+#[derive(Default)]
+struct SkillIntentSource(std::sync::Mutex<Vec<String>>);
+
+#[async_trait]
+impl skill::SkillCandidateSource for SkillIntentSource {
+    async fn discover(&self, query: &str) -> Vec<DiscoveredSkill> {
+        self.0.lock().unwrap().push(query.to_owned());
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn skill_selector_uses_latest_admitted_source_prompt_without_changing_its_units() {
+    let ordinary = "current admitted skill request α"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let mut unpaired = "current admitted skill request "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    unpaired.push(0xd800);
+    unpaired.extend(" question".encode_utf16());
+    for units in [ordinary, unpaired] {
+        let root = tempfile::tempdir().unwrap();
+        let api = Arc::new(MockApiClient::new(vec![
+            crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    citations: None,
+                    cache_control: None,
+                }],
+                Some("end_turn"),
+            ),
+        ]));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(ConversationMessage::user(
+                MessageId::new(),
+                "obsolete prior request".into(),
+            ));
+        let display = String::from_utf16_lossy(&units);
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            display.clone(),
+            units.clone(),
+        )
+        .unwrap();
+        orch.run_turn(source).await.unwrap();
+        let source = Arc::new(SkillIntentSource::default());
+        let orch = orch.with_skill_discovery_prefetch(Arc::new(
+            skill::SkillDiscoveryPrefetch::new(source.clone(), Arc::new(InlineRuntime)),
+        ));
+        push_write_pivot(&orch).await;
+        orch.start_skill_discovery_prefetch().await;
+        let pending = orch
+            .prompt_runtime
+            .pending_skill_prefetch
+            .lock()
+            .await
+            .take()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), pending.take())
+                .await
+                .expect("the real skill candidate source receives the admitted query")
+                .is_empty()
+        );
+        assert_eq!(*source.0.lock().unwrap(), vec![display.clone()]);
+        let requests = api.captured_msgs().await;
+        let admitted = requests[0]
+            .iter()
+            .find(|message| !message.is_meta() && message.text_content() == display)
+            .expect("the current user prompt reaches the real request");
+        let ConversationMessage::User { content, .. } = admitted else {
+            panic!("the admitted prompt is a user row");
+        };
+        assert!(matches!(
+            &content[0],
+            ContentBlock::TextJsUtf16 { utf16_code_units, .. } if utf16_code_units == &units
+        ));
+    }
+}
