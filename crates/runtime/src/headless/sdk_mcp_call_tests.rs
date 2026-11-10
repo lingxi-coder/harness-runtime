@@ -175,29 +175,24 @@ async fn native_322_direct_mcp_calls_replay_process_fixture_through_real_registr
         .iter()
         .find(|frame| frame["method"] == "tools/call")
         .unwrap();
-    // The complete desktop composition performs a second catalog discovery
-    // before this replay. Pin the actual wire requests rather than accepting
-    // a skipped router ID. The minimal initialized cancellation wire fixture
-    // separately pins initialize0/list1/call2 without that desktop discovery.
+    // Cached SDK-only publication must not re-discover the ordinary peer.
     let prelude = requests
         .iter()
-        .take(4)
+        .take(3)
         .map(|frame| serde_json::json!([frame["method"], frame["id"]]))
         .collect::<Vec<_>>();
-    eprintln!("desktop direct MCP fixture wire prelude: {prelude:?}");
     assert_eq!(
         prelude,
         vec![
             serde_json::json!(["initialize", 0]),
             serde_json::json!(["tools/list", 1]),
-            serde_json::json!(["tools/list", 2]),
-            serde_json::json!(["tools/call", 3]),
+            serde_json::json!(["tools/call", 2])
         ]
     );
-    assert_eq!(call["id"], 3);
+    assert_eq!(call["id"], 2);
     assert_eq!(
         call["params"]["_meta"],
-        serde_json::json!({"progressToken":3})
+        serde_json::json!({"progressToken":2})
     );
     runtime.mcp_registry.disconnect("ordinary").await.unwrap();
     runtime.mcp_registry.disconnect("fixture").await.unwrap();

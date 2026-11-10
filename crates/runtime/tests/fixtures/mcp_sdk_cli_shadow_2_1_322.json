@@ -1,0 +1,269 @@
+{
+  "version": "2.1.322",
+  "binarySha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "reference": "cli-host-reference-r9; settled SDK discovery with every outer control ACK; supersedes incomplete r6/r7 handshakes",
+  "receipts": {
+    "stdin.jsonl": "b23bfc0a09a33547cc214ec68c996a441769ce873478abbbed512e4a77514469",
+    "stdout.jsonl": "df01264e54650c118f2693579bd37ed89fd216b45c39caf161383ed78091cd3f",
+    "traffic.json": "45d92cb2bab8495b0cc1416f9b3159e7f38754ee1346f83801a7bdb0319e3ba1",
+    "report.json": "0a21edfaefd389d98416f82f9cffefbea29f5296897d2e3a0fac52a96763bd13"
+  },
+  "normalization": "Only the ephemeral loopback origin is replaced. LingXi clientInfo branding is independently covered and is intentionally host-specific.",
+  "cases": [
+    {
+      "name": "empty",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {}
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"empty\",\"response\":{\"added\":[],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "before",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"before\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"echo\",\"annotations\":{}},{\"name\":\"files\",\"annotations\":{}}]}]}}"
+    },
+    {
+      "name": "replace",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "operator": {
+            "type": "sdk",
+            "name": "operator"
+          }
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"replace\",\"response\":{\"added\":[\"operator\"],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[]}]}}"
+    },
+    {
+      "name": "settled-status-0",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"settled-status-0\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[]}]}}"
+    },
+    {
+      "name": "settled-status-1",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"settled-status-1\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[]}]}}"
+    },
+    {
+      "name": "settled-status-2",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"settled-status-2\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"sdk_echo\",\"annotations\":{\"readOnly\":true}}]}]}}"
+    },
+    {
+      "name": "echo",
+      "request": {
+        "subtype": "mcp_call",
+        "tool": "mcp__operator__echo",
+        "arguments": {
+          "text": "caf\u00e9 + \u03a9/\ud83d\ude00"
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"echo\",\"response\":{\"content\":\"{\\\"ok\\\":true}\",\"structuredContent\":{\"ok\":true}}}"
+    },
+    {
+      "name": "sdk-tool-update",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "operator": {
+            "type": "sdk",
+            "name": "operator",
+            "connectorId": "later-ignored-connector",
+            "tools": [
+              {
+                "name": "sdk_echo",
+                "description": "Fake SDK tool update",
+                "inputSchema": {
+                  "type": "object"
+                },
+                "annotations": {
+                  "readOnlyHint": true
+                }
+              }
+            ]
+          }
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"sdk-tool-update\",\"response\":{\"added\":[],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "sdk-tool-update-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"sdk-tool-update-status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"sdk_echo\",\"annotations\":{\"readOnly\":true}}]}]}}"
+    },
+    {
+      "name": "repeat-sdk",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "operator": {
+            "type": "sdk",
+            "name": "operator"
+          }
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"repeat-sdk\",\"response\":{\"added\":[],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "repeat-sdk-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"repeat-sdk-status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"sdk_echo\",\"annotations\":{\"readOnly\":true}}]}]}}"
+    },
+    {
+      "name": "remove-sdk-shadow",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {}
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"remove-sdk-shadow\",\"response\":{\"added\":[],\"removed\":[\"operator\"],\"errors\":{}}}"
+    },
+    {
+      "name": "remove-sdk-shadow-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"remove-sdk-shadow-status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/mcp\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[]}]}}"
+    },
+    {
+      "name": "add-http-shadow",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "operator": {
+            "type": "http",
+            "url": "http://127.0.0.1:PORT/shadow"
+          }
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"add-http-shadow\",\"response\":{\"added\":[\"operator\"],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "add-http-shadow-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"add-http-shadow-status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/shadow\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"echo\",\"annotations\":{}},{\"name\":\"files\",\"annotations\":{}}]}]}}"
+    },
+    {
+      "name": "repeat-http-shadow",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {
+          "operator": {
+            "type": "http",
+            "url": "http://127.0.0.1:PORT/shadow"
+          }
+        }
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"repeat-http-shadow\",\"response\":{\"added\":[],\"removed\":[],\"errors\":{}}}"
+    },
+    {
+      "name": "repeat-http-shadow-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"repeat-http-shadow-status\",\"response\":{\"mcpServers\":[{\"name\":\"operator\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"fake-local-staging\",\"version\":\"1\"},\"config\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:PORT/shadow\"},\"transport\":\"http\",\"scope\":\"dynamic\",\"source\":\"dynamic\",\"tools\":[{\"name\":\"echo\",\"annotations\":{}},{\"name\":\"files\",\"annotations\":{}}]}]}}"
+    },
+    {
+      "name": "remove-http-shadow",
+      "request": {
+        "subtype": "mcp_set_servers",
+        "servers": {}
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"remove-http-shadow\",\"response\":{\"added\":[],\"removed\":[\"operator\"],\"errors\":{}}}"
+    },
+    {
+      "name": "remove-http-shadow-status",
+      "request": {
+        "subtype": "mcp_status"
+      },
+      "responseJson": "{\"subtype\":\"success\",\"request_id\":\"remove-http-shadow-status\",\"response\":{\"mcpServers\":[]}}"
+    }
+  ],
+  "sdkMessages": [
+    {
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "claude-code",
+          "title": "Claude Code",
+          "description": "Anthropic's agentic coding tool",
+          "websiteUrl": "https://claude.com/claude-code",
+          "version": "2.1.322"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 0
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+    },
+    {
+      "method": "tools/list",
+      "jsonrpc": "2.0",
+      "id": 1
+    }
+  ],
+  "httpMethodIds": [
+    [
+      "server/discover",
+      "server-discover-probe-1"
+    ],
+    [
+      "initialize",
+      0
+    ],
+    [
+      "notifications/initialized",
+      null
+    ],
+    [
+      "tools/list",
+      1
+    ],
+    [
+      "tools/call",
+      2
+    ],
+    [
+      "server/discover",
+      "server-discover-probe-1"
+    ],
+    [
+      "initialize",
+      0
+    ],
+    [
+      "notifications/initialized",
+      null
+    ],
+    [
+      "tools/list",
+      1
+    ]
+  ]
+}

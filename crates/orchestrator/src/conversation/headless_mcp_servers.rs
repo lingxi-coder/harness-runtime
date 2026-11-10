@@ -48,13 +48,11 @@ impl ConversationOrchestrator {
         };
         let registry = self.mcp_registry.as_ref().ok_or_else(not_found)?;
         let config = registry
-            .connections
-            .read()
+            .control_candidates(&units, false)
             .await
-            .values()
-            .map(|state| state.config())
-            .find(|config| config.name_matches_utf16(&units))
-            .cloned()
+            .into_iter()
+            .next()
+            .map(|(_, state)| state.config().clone())
             .ok_or_else(not_found)?;
         if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
             return Err("SDK servers should be handled in print.ts".into());
@@ -89,13 +87,11 @@ impl ConversationOrchestrator {
         };
         let registry = self.mcp_registry.as_ref().ok_or_else(missing)?;
         let config = registry
-            .connections
-            .read()
+            .control_candidates(&units, false)
             .await
-            .values()
-            .map(|state| state.config())
-            .find(|config| config.name_matches_utf16(&units))
-            .cloned()
+            .into_iter()
+            .next()
+            .map(|(_, state)| state.config().clone())
             .ok_or_else(missing)?;
         if !enabled && matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
             // A pending SDK handshake must be retired before taking its
@@ -128,7 +124,7 @@ impl ConversationOrchestrator {
         let Some(registry) = &self.mcp_registry else {
             return Err("MCP registry is unavailable".into());
         };
-        registry.finalize_authored_server_names(&mut incoming).await;
+        registry.finalize_control_server_names(&mut incoming).await;
         for config in &mut incoming {
             if let McpTransportSpec::SdkControl { control_channel_id } = &mut config.spec {
                 *control_channel_id = config.name.clone();
@@ -149,12 +145,17 @@ impl ConversationOrchestrator {
         let current = registry.connections.read().await.clone();
         incoming.retain(|config| {
             let collision = current.values().find(|state| {
-                state
-                    .config()
-                    .name_matches_utf16(&config.authored_name_units())
+                !state.config().metadata.sdk_control_owned
+                    && state
+                        .config()
+                        .name_matches_utf16(&config.authored_name_units())
             });
-            let denied = protected(config, operator_names)
-                || collision.is_some_and(|state| !owned(state.config()));
+            let sdk = config.metadata.sdk_control_owned;
+            let denied = remote && protected(config, operator_names)
+                || !sdk
+                    && collision.is_some_and(|state| {
+                        !owned(state.config()) && !state.config().metadata.cli_owned
+                    });
             if denied {
                 error_field(
                     &mut errors,
@@ -166,35 +167,42 @@ impl ConversationOrchestrator {
         });
         let has_sdk = incoming
             .iter()
-            .any(|config| matches!(config.spec, McpTransportSpec::SdkControl { .. }));
+            .any(|config| config.metadata.sdk_control_owned);
         let mut to_retire = Vec::new();
         for key in current_order {
             let Some(state) = current.get(&key) else {
                 continue;
             };
             let config = state.config();
-            if !owned(config) || protected(config, operator_names) {
+            if remote && protected(config, operator_names) {
                 continue;
             }
-            let sdk = matches!(config.spec, McpTransportSpec::SdkControl { .. });
-            if remote && !has_sdk && sdk {
+            if config.metadata.sdk_control_owned {
+                if remote && !has_sdk {
+                    continue;
+                }
+                let desired = incoming.iter().find(|next| {
+                    next.metadata.sdk_control_owned
+                        && next.name_matches_utf16(&config.authored_name_units())
+                });
+                if desired.is_none() {
+                    to_retire.push((config.clone(), true));
+                }
                 continue;
             }
-            let desired = incoming
-                .iter()
-                .find(|incoming| incoming.name_matches_utf16(&config.authored_name_units()));
-            let changed = desired.is_some_and(|next| {
-                matches!(next.spec, McpTransportSpec::SdkControl { .. }) != sdk
-                    || (!sdk && !same_ordinary_config(config, next))
+            if !owned(config) && !config.metadata.cli_owned {
+                continue;
+            }
+            let desired = incoming.iter().find(|next| {
+                !next.metadata.sdk_control_owned
+                    && next.name_matches_utf16(&config.authored_name_units())
             });
-            if desired.is_none() || changed {
-                to_retire.push((
-                    config.clone(),
-                    desired.is_none()
-                        || desired.is_some_and(|next| {
-                            matches!(next.spec, McpTransportSpec::SdkControl { .. }) != sdk
-                        }),
-                ));
+            if let Some(next) = desired {
+                if !same_ordinary_config(config, next) {
+                    to_retire.push((config.clone(), false));
+                }
+            } else if !config.metadata.cli_owned {
+                to_retire.push((config.clone(), true));
             }
         }
         retire_sdk(
@@ -235,7 +243,12 @@ impl ConversationOrchestrator {
                     && matches!(config.spec, McpTransportSpec::SdkControl { .. })
                 {
                     registry.replace_sdk_control_tools(&config).await;
-                    policies.push(config);
+                    policies.push(
+                        registry
+                            .get_config_by_key(&config.name)
+                            .await
+                            .unwrap_or(config),
+                    );
                     continue;
                 }
                 if same_ordinary_config(&existing, &config) {

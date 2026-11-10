@@ -651,10 +651,23 @@ async fn sdk_control_pending_tools_update_does_not_wait_for_initialize_or_replac
     let registry = McpRegistry::new(transport.clone());
     let mut first = sdk_initialize_config(false);
     first.timeout_ms = Some(1234);
+    assert!(!first.metadata.sdk_control_owned);
     registry
         .seed_sdk_control_pending(first.clone())
         .await
         .unwrap();
+    assert!(
+        registry
+            .get_config_by_key(&first.name)
+            .await
+            .unwrap()
+            .metadata
+            .sdk_control_owned
+    );
+    let mut stale = first.clone();
+    stale.timeout_ms = Some(5678);
+    registry.connect_seeded_sdk_control(stale).await.unwrap();
+    assert_eq!(transport.connect_calls.load(Ordering::SeqCst), 0);
     let mut connect = Box::pin(registry.connect_seeded_sdk_control(first.clone()));
     assert!(futures_util::poll!(connect.as_mut()).is_pending());
     let mut replacement = sdk_initialize_config(true);
@@ -668,6 +681,7 @@ async fn sdk_control_pending_tools_update_does_not_wait_for_initialize_or_replac
     transport.connect_release.notify_one();
     connect.await.unwrap();
     let current = registry.get_config_by_key(&first.name).await.unwrap();
+    assert!(current.metadata.sdk_control_owned);
     assert_eq!(current.timeout_ms, Some(1234));
     assert_eq!(current.tools, replacement.tools);
     registry.retire_control_server(&current).await.unwrap();

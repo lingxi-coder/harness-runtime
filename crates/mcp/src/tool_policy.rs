@@ -290,10 +290,11 @@ pub async fn catalog_snapshot_with_permission_policies(
     gate: Option<&dyn PermissionGate>,
 ) -> std::collections::HashMap<String, crate::McpConnectionState> {
     let _publication = registry.permission_policy_publish_lock.lock().await;
-    let connections = registry.connections.read().await.clone();
+    let mut connections = registry.connections.read().await.clone();
     if let Some(gate) = gate {
         gate.replace_mcp_server_policy_rules(snapshot_permission_rules(registry, &connections));
     }
+    registry.project_control_model_catalog(&mut connections);
     connections
 }
 

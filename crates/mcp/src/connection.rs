@@ -31,6 +31,10 @@ pub struct McpServerMetadata {
     /// ownership). The ordinary MCP JSON schema does not accept this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_source: Option<String>,
+    /// Registered by the actual SDK initialize/set_servers control lane.
+    /// This separates its lifecycle from a same-name ordinary startup client.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sdk_control_owned: bool,
     /// SDK-owned connector identity from initialize/mcp_set_servers. Ordinary
     /// MCP config files cannot populate this trusted settings sidecar.
     #[serde(

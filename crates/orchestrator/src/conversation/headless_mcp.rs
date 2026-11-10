@@ -1,6 +1,6 @@
 //! SDK controls over the session's existing MCP registry and UI roster.
 use super::*;
-use lingxi_core::host::{McpActionState, McpError, McpToolAnnotationsDto, McpTransportSpec};
+use lingxi_core::host::{McpActionState, McpError, McpTransportSpec};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::ToolUseId;
 use serde_json::{json, Value};
@@ -130,20 +130,24 @@ impl ConversationOrchestrator {
             .mcp_registry
             .as_ref()
             .ok_or_else(|| format!("MCP server not connected: {}", parsed.server_name))?;
-        let config = registry
-            .connections
-            .read()
-            .await
-            .values()
-            .map(|state| state.config())
-            .find(|config| {
-                config.name_matches_utf16(&parsed.server_name_units)
-                    || config
-                        .normalized_name_for_mcp()
-                        .encode_utf16()
-                        .eq(parsed.server_name_units.iter().copied())
+        let candidates = registry
+            .control_candidates(&parsed.server_name_units, true)
+            .await;
+        let selected = candidates
+            .iter()
+            .find(|(_, state)| {
+                !state.config().disabled
+                    && matches!(state, mcp::McpConnectionState::Connected { .. })
             })
-            .cloned()
+            .or_else(|| {
+                candidates.iter().find(|(_, state)| {
+                    !state.config().disabled
+                        && matches!(state, mcp::McpConnectionState::Cached { .. })
+                })
+            })
+            .or_else(|| candidates.first());
+        let config = selected
+            .map(|(_, state)| state.config().clone())
             .ok_or_else(|| format!("MCP server not connected: {}", parsed.server_name))?;
         if config.disabled {
             return Err(format!("MCP server not connected: {}", parsed.server_name).into());
@@ -652,7 +656,7 @@ impl ConversationOrchestrator {
     /// Allocate SDK-init private handles against the entire live catalog.
     pub async fn finalize_sdk_mcp_initialize_names(&self, configs: &mut [mcp::McpServerConfig]) {
         if let Some(registry) = &self.mcp_registry {
-            registry.finalize_authored_server_names(configs).await;
+            registry.finalize_control_server_names(configs).await;
         }
         for config in configs {
             if let McpTransportSpec::SdkControl { control_channel_id } = &mut config.spec {
@@ -686,71 +690,104 @@ impl ConversationOrchestrator {
                 Utf16JsonProjection::array(Vec::new()).map_err(source_error)?,
             )]);
         };
+        let order = registry.control_server_names().await;
+        let snapshot = registry.connections.read().await.clone();
+        let mut rows = order
+            .into_iter()
+            .filter_map(|key| snapshot.get(&key).cloned().map(|state| (key, state)))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(_, state)| {
+            matches!(state.config().spec, McpTransportSpec::SdkControl { .. })
+        });
+        let mut seen = std::collections::HashSet::new();
         let mut servers = Vec::new();
-        for name in registry.control_server_names().await {
-            let state = registry.connections.read().await.get(&name).cloned();
-            let Some(state) = state else {
+        for (name, state) in rows {
+            let config = state.config();
+            if name != config.name {
                 continue;
-            };
-            let status = match &state {
-                mcp::McpConnectionState::Connected { .. }
-                | mcp::McpConnectionState::Cached { .. } => "connected",
-                mcp::McpConnectionState::Connecting { .. }
-                | mcp::McpConnectionState::Reconnecting { .. } => "pending",
-                mcp::McpConnectionState::AwaitingOAuth { .. }
-                | mcp::McpConnectionState::NeedsAuth { .. } => "needs-auth",
-                mcp::McpConnectionState::Failed { .. } => "failed",
-                _ => "disconnected",
+            }
+            if !seen.insert(config.authored_name_units()) {
+                continue;
+            }
+            let status = if config.disabled {
+                "disabled"
+            } else {
+                match &state {
+                    mcp::McpConnectionState::Connected { .. }
+                    | mcp::McpConnectionState::Cached { .. } => "connected",
+                    mcp::McpConnectionState::Connecting { .. }
+                    | mcp::McpConnectionState::Reconnecting { .. } => "pending",
+                    mcp::McpConnectionState::AwaitingOAuth { .. }
+                    | mcp::McpConnectionState::NeedsAuth { .. } => "needs-auth",
+                    mcp::McpConnectionState::Failed { .. } => "failed",
+                    _ => "disconnected",
+                }
             };
             let mut server = source_object(vec![
                 (
                     "name".into(),
-                    Utf16JsonProjection::root_string(
-                        state.config().authored_name().as_str().to_owned(),
-                        state.config().authored_name_units(),
-                    )
-                    .map_err(source_error)?,
+                    source_text_units(config.authored_name_units()),
                 ),
                 ("status".into(), source_text(status)),
             ])?;
-            server
-                .set_field(
-                    "transport",
-                    source_text(state.config().metadata.transport.as_deref().unwrap_or_else(
-                        || {
-                            if matches!(state.config().spec, McpTransportSpec::SdkControl { .. }) {
-                                "sdk"
-                            } else {
-                                state.config().spec.kind()
-                            }
-                        },
-                    )),
-                )
-                .map_err(source_error)?;
-            if let Some(info) = registry
-                .server_metadata(&name)
-                .await
-                .and_then(|metadata| metadata.server_info)
-            {
-                server.set_field("serverInfo", info).map_err(source_error)?;
+            if matches!(
+                state,
+                mcp::McpConnectionState::Connected { .. } | mcp::McpConnectionState::Cached { .. }
+            ) {
+                if let Some(info) = registry
+                    .server_metadata(&name)
+                    .await
+                    .and_then(|metadata| metadata.server_info)
+                {
+                    server.set_field("serverInfo", info).map_err(source_error)?;
+                }
             }
             if let mcp::McpConnectionState::Failed { error, .. } = &state {
                 server
                     .set_field("error", source_text(error))
                     .map_err(source_error)?;
             }
-            if matches!(state.config().spec, McpTransportSpec::SdkControl { .. }) {
+            if let Some(public_config) = mcp_control_status_config(config)? {
                 server
-                    .set_field("scope", source_text("dynamic"))
-                    .map_err(source_error)?;
-                server
-                    .set_field("source", source_text("sdk"))
+                    .set_field("config", public_config)
                     .map_err(source_error)?;
             }
-            if let mcp::McpConnectionState::Connected { tools, .. }
-            | mcp::McpConnectionState::Cached { tools, .. } = &state
-            {
-                let definitions = tools
+            let transport = config.metadata.transport.as_deref().unwrap_or_else(|| {
+                if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+                    "sdk"
+                } else {
+                    config.spec.kind()
+                }
+            });
+            server
+                .set_field("transport", source_text(transport))
+                .map_err(source_error)?;
+            let scope = match config.scope {
+                mcp::ConfigScope::Dynamic => "dynamic",
+                mcp::ConfigScope::Agent => "agent",
+                mcp::ConfigScope::ClaudeAi => "claudeai",
+                mcp::ConfigScope::Enterprise => "enterprise",
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "local",
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "user",
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
+            };
+            server
+                .set_field("scope", source_text(scope))
+                .map_err(source_error)?;
+            server
+                .set_field(
+                    "source",
+                    source_text(&mcp::McpServerProvenance::from_config(config).source),
+                )
+                .map_err(source_error)?;
+            if matches!(
+                state,
+                mcp::McpConnectionState::Connected { .. } | mcp::McpConnectionState::Cached { .. }
+            ) {
+                let definitions = registry
+                    .control_status_tools(config)
+                    .await
                     .iter()
                     .map(mcp_tool_status_definition)
                     .collect::<Result<Vec<_>, _>>()?;
@@ -767,6 +804,13 @@ impl ConversationOrchestrator {
             "mcpServers".into(),
             Utf16JsonProjection::array(servers).map_err(source_error)?,
         )])
+    }
+
+    pub async fn sdk_mcp_message_is_connected(&self, units: &[u16]) -> bool {
+        match &self.mcp_registry {
+            Some(registry) => registry.sdk_control_is_connected(units).await,
+            None => false,
+        }
     }
 
     /// Native SDK MCP UI resource read. This shares the live registry and
@@ -948,55 +992,52 @@ impl ConversationOrchestrator {
     }
 }
 
+fn mcp_control_status_config(
+    config: &mcp::McpServerConfig,
+) -> Result<Option<Utf16JsonProjection>, String> {
+    match &config.spec {
+        McpTransportSpec::Http { url, .. } | McpTransportSpec::Sse { url, .. } => {
+            source_object(vec![
+                ("type".into(), source_text(config.spec.kind())),
+                ("url".into(), source_text(url)),
+            ])
+            .map(Some)
+        }
+        McpTransportSpec::Stdio { command, args, .. } => source_object(vec![
+            ("type".into(), "stdio".into()),
+            ("command".into(), source_text(command)),
+            ("args".into(), source_value(json!(args))?),
+        ])
+        .map(Some),
+        _ => Ok(None),
+    }
+}
+
 fn mcp_tool_status_definition(
     tool: &lingxi_core::host::McpToolDto,
 ) -> Result<Utf16JsonProjection, String> {
-    let annotations = match &tool.annotations {
-        Some(annotations) => tool_annotations_projection(annotations)?,
-        None => source_object(Vec::new())?,
-    };
-    let mut definition = source_object(vec![
-        ("name".into(), source_text(&tool.tool_name)),
-        ("description".into(), tool.description.clone()),
-        ("inputSchema".into(), tool.input_schema.clone()),
-        ("annotations".into(), annotations),
-    ])?;
-    if let Some(schema) = &tool.output_schema {
-        definition
-            .set_field("outputSchema", schema.clone())
-            .map_err(source_error)?;
+    let mut fields = Vec::new();
+    if let Some(annotations) = &tool.annotations {
+        for (name, value) in [
+            ("readOnly", annotations.read_only_hint),
+            ("destructive", annotations.destructive_hint),
+            ("openWorld", annotations.open_world_hint),
+        ] {
+            if value == Some(true) {
+                fields.push((name.to_owned(), source_value(json!(true))?));
+            }
+        }
     }
+    let mut definition = source_object(vec![
+        ("name".into(), tool.wire_tool_name_source()),
+        ("annotations".into(), source_object(fields)?),
+    ])?;
     if let Some(meta) = &tool.meta {
         if let Some(meta) = native_tool_ui_meta(meta.clone())? {
             definition.set_field("_meta", meta).map_err(source_error)?;
         }
     }
     Ok(definition)
-}
-
-fn tool_annotations_projection(
-    annotations: &McpToolAnnotationsDto,
-) -> Result<Utf16JsonProjection, String> {
-    let mut result = annotations.extra.clone();
-    result.validate().map_err(source_error)?;
-    if let Some(title) = &annotations.title {
-        result
-            .set_field("title", title.clone())
-            .map_err(source_error)?;
-    }
-    for (field, value) in [
-        ("readOnlyHint", annotations.read_only_hint),
-        ("destructiveHint", annotations.destructive_hint),
-        ("idempotentHint", annotations.idempotent_hint),
-        ("openWorldHint", annotations.open_world_hint),
-    ] {
-        if let Some(value) = value {
-            result
-                .set_field(field, source_value(json!(value))?)
-                .map_err(source_error)?;
-        }
-    }
-    Ok(result)
 }
 
 fn native_tool_ui_meta(meta: Utf16JsonProjection) -> Result<Option<Utf16JsonProjection>, String> {

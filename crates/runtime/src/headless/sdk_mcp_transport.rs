@@ -30,6 +30,8 @@ struct Endpoint {
     metadata: Mutex<Option<McpServerMetadataDto>>,
     manifest: Mutex<Option<Manifest>>,
     handshake_admitted: AtomicBool,
+    initialized_acked: AtomicBool,
+    initialized_changed: tokio::sync::Notify,
 }
 
 struct Manifest {
@@ -232,11 +234,7 @@ impl SdkMcpTransport {
             .values()
             .filter(|endpoint| {
                 !endpoint.closed.is_cancelled()
-                    && endpoint
-                        .metadata
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .is_some()
+                    && endpoint.initialized_acked.load(Ordering::Acquire)
             })
             .map(|endpoint| endpoint.server.clone())
             .collect();
@@ -533,6 +531,7 @@ struct PendingSdkMessage {
     id: String,
     response: oneshot::Receiver<Result<Utf16JsonProjection, String>>,
     initialize: bool,
+    initialized_notification: bool,
     bounded: bool,
 }
 
@@ -548,6 +547,8 @@ async fn prepare_message(
     plane: &StdioControlPlane,
     message: jsonrpc::Message,
 ) -> Result<Option<PendingSdkMessage>, jsonrpc::ConnectionError> {
+    let initialized_notification = matches!(&message, jsonrpc::Message::Notification(notification)
+        if jsonrpc_method_is(&notification.method, "notifications/initialized"));
     match replay_manifest(endpoint, &message) {
         Replay::Response(response) => {
             endpoint
@@ -556,7 +557,13 @@ async fn prepare_message(
                 .map_err(|_| closed())?;
             return Ok(None);
         }
-        Replay::Swallow => return Ok(None),
+        Replay::Swallow => {
+            if initialized_notification {
+                endpoint.initialized_acked.store(true, Ordering::Release);
+                endpoint.initialized_changed.notify_waiters();
+            }
+            return Ok(None);
+        }
         Replay::Forward => {}
     }
     if endpoint.closed.is_cancelled() {
@@ -590,6 +597,7 @@ async fn prepare_message(
         id,
         response,
         initialize,
+        initialized_notification,
         bounded,
     }))
 }
@@ -603,6 +611,7 @@ async fn await_control_reply(
         id,
         response,
         initialize,
+        initialized_notification,
         bounded,
     } = pending;
     let request_id = Utf16JsonProjection::from(id.as_str());
@@ -640,6 +649,10 @@ async fn await_control_reply(
             }
         }
         endpoint.inbound.send(reply).map_err(|_| closed())?;
+    }
+    if initialized_notification {
+        endpoint.initialized_acked.store(true, Ordering::Release);
+        endpoint.initialized_changed.notify_waiters();
     }
     Ok(())
 }
@@ -731,6 +744,8 @@ impl McpTransport for SdkMcpTransport {
                     .remove(server),
             ),
             handshake_admitted: AtomicBool::new(false),
+            initialized_acked: AtomicBool::new(false),
+            initialized_changed: tokio::sync::Notify::new(),
         });
         let reader = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver);
         let sender = endpoint.clone();
@@ -846,6 +861,19 @@ impl McpTransport for SdkMcpTransport {
             .expect("connection handle")
             .notify("notifications/initialized", json!({}))
             .map_err(sdk_error)?;
+        // PTn.send awaits the host's outer control ACK for notifications too.
+        // Keep the SDK connection pending until that ACK, while the writer
+        // remains free to admit independent peer responses concurrently.
+        loop {
+            let changed = endpoint.initialized_changed.notified();
+            if endpoint.initialized_acked.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::select! {
+                () = changed => {},
+                () = endpoint.closed.cancelled() => return Err(sdk_error("MCP connection is closed")),
+            }
+        }
         Ok(capabilities)
     }
     fn server_metadata(&self, id: McpConnectionId) -> Option<McpServerMetadataDto> {
@@ -1104,6 +1132,7 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
         if let Some(mut config) =
             ::mcp::build_server_from_json_entry_utf16(&name, &config, ::mcp::ConfigScope::Dynamic)
         {
+            config.metadata.sdk_control_owned = true;
             if let Some(settings) = settings.as_ref() {
                 ::mcp::apply_sdk_mcp_settings(&mut config, settings);
             }
@@ -1388,6 +1417,8 @@ mod tests {
                 metadata: Mutex::new(None),
                 manifest: Mutex::new(None),
                 handshake_admitted: AtomicBool::new(false),
+                initialized_acked: AtomicBool::new(false),
+                initialized_changed: tokio::sync::Notify::new(),
             },
             receiver,
         )
@@ -1587,6 +1618,82 @@ mod tests {
         plane
             .cancel_request(&Utf16JsonProjection::from(pending.id.as_str()))
             .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sdk_connect_waits_for_initialized_outer_ack() {
+        let (tx, mut outbound) = mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(tx));
+        let platform = Arc::new(platform_posix::PosixMcpTransport::new());
+        let transport = SdkMcpTransport::new(
+            crate::desktop::DesktopMcpServices {
+                transport: platform.clone(),
+                raw_connections: platform,
+            },
+            plane.clone(),
+            PathBuf::from("/tmp"),
+        );
+        let owner = transport.clone();
+        let connect = tokio::spawn(async move {
+            owner
+                .connect_and_initialize(
+                    &McpTransportSpec::SdkControl {
+                        control_channel_id: "fixture".into(),
+                    },
+                    McpConnectOptions {
+                        deadline_ms: 5_000,
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        let OutboundMsg::Line(line) = outbound.recv().await.unwrap() else {
+            panic!("SDK initialize")
+        };
+        let initialize = Utf16JsonProjection::parse(&line).unwrap();
+        assert_eq!(
+            initialize.string_at("/request/message/method"),
+            Some("initialize")
+        );
+        plane.resolve_response(&Utf16JsonProjection::from_serde_value(&json!({
+            "type":"control_response",
+            "response":{"subtype":"success","request_id":initialize.string_at("/request_id").unwrap(),
+                "response":{"mcp_response":{"jsonrpc":"2.0","id":0,"result":{
+                    "protocolVersion":"2025-11-25","capabilities":{"tools":{}},
+                    "serverInfo":{"name":"fixture","version":"1"}
+                }}}}
+        })).unwrap()).await;
+        let OutboundMsg::Line(line) = outbound.recv().await.unwrap() else {
+            panic!("SDK initialized")
+        };
+        let initialized = Utf16JsonProjection::parse(&line).unwrap();
+        assert_eq!(
+            initialized.string_at("/request/message/method"),
+            Some("notifications/initialized")
+        );
+        assert!(
+            !connect.is_finished(),
+            "unacknowledged initialized remains pending"
+        );
+        assert!(
+            outbound.try_recv().is_err(),
+            "no discovery before outer notification ACK"
+        );
+        plane.resolve_response(&Utf16JsonProjection::from_serde_value(&json!({
+            "type":"control_response",
+            "response":{"subtype":"success","request_id":initialized.string_at("/request_id").unwrap(),"response":{}}
+        })).unwrap()).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(result.capabilities.tools);
+        transport
+            .disconnect(result.connection.connection_id)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]

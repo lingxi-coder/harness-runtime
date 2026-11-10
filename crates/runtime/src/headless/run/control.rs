@@ -609,11 +609,7 @@ pub(super) async fn dispatch_control_request(
                 request_projection.subprojection("/message"),
                 control_plane.sdk_mcp_transport(),
             ) {
-                let connected = orchestrator
-                    .sdk_mcp_status()
-                    .await
-                    .ok()
-                    .is_some_and(|status| sdk_message_server_units_are_connected(&status, server));
+                let connected = orchestrator.sdk_mcp_message_is_connected(server).await;
                 if connected {
                     if let Err(error) = transport.deliver_units(server, &message) {
                         tracing::debug!(server = %String::from_utf16_lossy(server), %error, "Ignoring late SDK MCP message");

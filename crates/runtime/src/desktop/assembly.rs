@@ -6076,13 +6076,28 @@ pub async fn build_with_credential_stack(
         let live_tools = tools.clone();
         let live_mcp_tool_ctx = mcp_tool_ctx.clone();
         let live_commands = shared_command_registry.clone();
+        let mut model_tool_changes = mcp_registry.subscribe_model_tool_changes();
         tokio::spawn(async move {
             let mut recovery = std::collections::VecDeque::new();
             loop {
+                let from_recovery = !recovery.is_empty();
                 let change = if let Some(change) = recovery.pop_front() {
                     change
                 } else {
-                    match mcp_catalog_changes.recv().await {
+                    let received = tokio::select! {
+                        received = mcp_catalog_changes.recv() => received,
+                        received = model_tool_changes.recv() => {
+                            if matches!(received, Err(tokio::sync::broadcast::error::RecvError::Closed)) { break; }
+                            let Some(registry) = mcp_registry_weak.upgrade() else { break; };
+                            let mut refreshed = tool_mcp::build_registered_mcp_tools(registry.as_ref(), live_mcp_tool_ctx.clone()).await;
+                            if is_app_chat {
+                                for (_, tools) in &mut refreshed { tools.retain(|tool| tool.supports_persistent_chat()); }
+                            }
+                            live_tools.replace_mcp_tools(refreshed);
+                            continue;
+                        }
+                    };
+                    match received {
                         Ok(change) => change,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             let Some(registry) = mcp_registry_weak.upgrade() else {
@@ -6126,7 +6141,8 @@ pub async fn build_with_credential_stack(
                     break;
                 };
 
-                if change.retired_connection_id.is_some() {
+                let cached_publication = !from_recovery && change.telemetry_cause.is_none();
+                if change.retired_connection_id.is_some() || cached_publication {
                     let refreshed = tool_mcp::build_registered_mcp_tools(
                         registry.as_ref(),
                         live_mcp_tool_ctx.clone(),
@@ -6149,6 +6165,10 @@ pub async fn build_with_credential_stack(
                         refreshed
                     };
                     live_tools.replace_mcp_tools(refreshed);
+                    if cached_publication {
+                        reconcile_mcp_prompt_catalog(registry.as_ref(), &live_commands).await;
+                        continue;
+                    }
                 }
 
                 tracing::debug!(

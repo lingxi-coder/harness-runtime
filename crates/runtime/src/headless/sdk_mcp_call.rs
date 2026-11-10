@@ -22,6 +22,10 @@ mod schema;
 #[path = "sdk_mcp_call_tests.rs"]
 mod control_tests;
 
+#[cfg(all(test, unix))]
+#[path = "sdk_mcp_shadow_tests.rs"]
+mod shadow_tests;
+
 /// A synced file and the source revision actually read by a staged call.
 #[derive(Debug)]
 pub struct McpStagedFile {

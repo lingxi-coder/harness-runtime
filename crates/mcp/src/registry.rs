@@ -64,6 +64,8 @@ use diagnostics::tool_call_auth_error_code;
 mod name_storage;
 #[path = "registry/sdk_auth.rs"]
 mod sdk_auth;
+#[path = "registry/sdk_control.rs"]
+mod sdk_control;
 use diagnostics::tools_listed_payload;
 #[cfg(test)]
 use diagnostics::xaa_flow_failure_stage;
@@ -677,6 +679,8 @@ pub struct McpRegistry {
     /// transport's initialize is still holding its lifecycle lock.
     sdk_control_tools:
         Arc<StdMutex<HashMap<String, Vec<lingxi_core::host::McpConfiguredToolPolicyDto>>>>,
+    sdk_control_catalog_owners: Arc<StdMutex<HashMap<String, Option<String>>>>,
+    model_tool_changes: broadcast::Sender<()>,
     /// Single-flight guard for the XAA token resolve chain, keyed by
     /// `oauth::server_key`. Mirrors the oracle's `_refreshInProgress`
     /// promise-sharing guard on `tokens()`/`xaaRefresh()` (@182213696, §26b
@@ -1090,6 +1094,8 @@ impl McpRegistry {
             permission_policy_publish_lock: Arc::clone(&self.permission_policy_publish_lock),
             sdk_initialize_permission_rules: Arc::clone(&self.sdk_initialize_permission_rules),
             sdk_control_tools: Arc::clone(&self.sdk_control_tools),
+            sdk_control_catalog_owners: Arc::clone(&self.sdk_control_catalog_owners),
+            model_tool_changes: self.model_tool_changes.clone(),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
             clients: Arc::clone(&self.clients),
             failure_diagnostics: Arc::clone(&self.failure_diagnostics),
@@ -1136,6 +1142,7 @@ impl McpRegistry {
     #[must_use]
     pub fn new(transport: Arc<dyn McpTransport>) -> Self {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
+        let (model_tool_changes, _unused_model_rx) = broadcast::channel(64);
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             plugin_server_owners: Arc::new(RwLock::new(HashMap::new())),
@@ -1146,6 +1153,8 @@ impl McpRegistry {
             permission_policy_publish_lock: Arc::new(Mutex::new(())),
             sdk_initialize_permission_rules: Arc::new(StdMutex::new(Default::default())),
             sdk_control_tools: Arc::new(StdMutex::new(HashMap::new())),
+            sdk_control_catalog_owners: Arc::new(StdMutex::new(HashMap::new())),
+            model_tool_changes,
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
             clients: Arc::new(RwLock::new(IndexMap::new())),
             failure_diagnostics: Arc::new(RwLock::new(HashMap::new())),
@@ -1987,9 +1996,15 @@ impl McpRegistry {
     async fn public_server_key(&self, name: &str) -> Option<String> {
         let units = name.encode_utf16().collect::<Vec<_>>();
         let connections = self.connections.read().await;
-        if let Some((key, _)) = connections.iter().find(|(key, state)| {
-            *key == &state.config().name && state.config().name_matches_utf16(&units)
-        }) {
+        if let Some((key, _)) = connections
+            .iter()
+            .filter(|(key, state)| {
+                *key == &state.config().name && state.config().name_matches_utf16(&units)
+            })
+            .min_by_key(|(_, state)| {
+                matches!(state.config().spec, McpTransportSpec::SdkControl { .. })
+            })
+        {
             return Some(key.clone());
         }
         if connections.contains_key(name) {
@@ -1998,12 +2013,15 @@ impl McpRegistry {
         let normalized = normalize_name_for_mcp(name);
         let configured = connections
             .iter()
-            .find(|(key, state)| {
+            .filter(|(key, state)| {
                 (if state.config().metadata.authored_name.is_some() {
                     state.config().normalized_name_for_mcp()
                 } else {
                     normalize_name_for_mcp(key)
                 }) == normalized
+            })
+            .min_by_key(|(_, state)| {
+                matches!(state.config().spec, McpTransportSpec::SdkControl { .. })
             })
             .map(|(key, _)| key.clone());
         if configured.is_some() {
@@ -2042,11 +2060,16 @@ impl McpRegistry {
     /// never removes a previous ask/deny; duplicates therefore accumulate
     /// into the strictest effective policy. First registration and later policy
     /// merges share one lifecycle lock, including concurrent initialize calls.
-    pub async fn register_sdk_initialize(&self, incoming: McpServerConfig) -> Result<(), McpError> {
+    pub async fn register_sdk_initialize(
+        &self,
+        mut incoming: McpServerConfig,
+    ) -> Result<(), McpError> {
+        incoming.metadata.sdk_control_owned = true;
         let lifecycle = self.lifecycle_lock(&incoming.name);
         let _guard = lifecycle.lock().await;
         let mut connections = self.connections.write().await;
         let Some(state) = connections.get_mut(&incoming.name) else {
+            self.claim_sdk_model_namespace(&incoming);
             drop(connections);
             let name = incoming.name.clone();
             let result = self.connect_locked(incoming, None).await.map(|_| ());
@@ -2071,7 +2094,11 @@ impl McpRegistry {
 
     /// Stage a new host SDK entry before its initialize control response.
     /// The caller starts its real connection only after publishing that reply.
-    pub async fn seed_sdk_control_pending(&self, config: McpServerConfig) -> Result<(), McpError> {
+    pub async fn seed_sdk_control_pending(
+        &self,
+        mut config: McpServerConfig,
+    ) -> Result<(), McpError> {
+        config.metadata.sdk_control_owned = true;
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
         Self::validate_connectable_config(&config)?;
@@ -2079,6 +2106,7 @@ impl McpRegistry {
             return Err(refusal.as_mcp_error());
         }
         self.remember_server_order(&config.name);
+        self.claim_sdk_model_namespace(&config);
         self.sdk_control_tools
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2097,8 +2125,13 @@ impl McpRegistry {
     /// config when its post-reply connection task finally gets scheduled.
     pub async fn connect_seeded_sdk_control(
         &self,
-        config: McpServerConfig,
+        mut config: McpServerConfig,
     ) -> Result<(), McpError> {
+        // seed_sdk_control_pending stamps this host-owned role internally;
+        // callers may retain the otherwise identical pre-seed value. Compare
+        // the same admitted role on both sides without weakening the remaining
+        // registration snapshot check.
+        config.metadata.sdk_control_owned = true;
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
         let current = self
@@ -2132,6 +2165,7 @@ impl McpRegistry {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(incoming.name.clone(), incoming.tools.clone());
                 state.config_mut().tools = incoming.tools.clone();
+                self.claim_sdk_model_namespace(state.config());
             }
         }
     }
@@ -2163,6 +2197,7 @@ impl McpRegistry {
             .remove_without_revoking_auth_if_config(&expected.name, expected)
             .await?;
         if removed {
+            self.clear_sdk_model_namespace(expected);
             self.sdk_control_tools
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3765,6 +3800,7 @@ impl McpRegistry {
                 connected_at: SystemTime::now(),
             },
         );
+        self.record_control_catalog_publication(key, config);
         if let Some(client) = discovery.client.clone() {
             clients.insert(
                 key.to_string(),
