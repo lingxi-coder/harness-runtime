@@ -529,8 +529,17 @@ pub fn claude_lean_prompt_allowed(
 
 /// Session environment defaults. Route-level served observations use the pure gate.
 #[must_use]
+pub fn prompt_capabilities_environment() -> Option<String> {
+    super::env::var_with_legacy(
+        branding::MODEL_CAPABILITIES_ENV,
+        "CLAUDE_CODE_MODEL_CAPABILITIES",
+    )
+}
+
+/// Session environment defaults. Route-level served observations use the pure gate.
+#[must_use]
 pub fn claude_lean_prompt_for(model_id: &str) -> bool {
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = prompt_capabilities_environment();
     let simple = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT")
         .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"))
         .ok();
@@ -580,7 +589,7 @@ pub fn lean_rewrite_allowed(model_id: &str, input: LeanRewriteInputs<'_>) -> boo
 /// Rewritten text is independently gated from the lean prompt itself.
 #[must_use]
 pub fn lean_rewrite_for(model_id: &str) -> bool {
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = prompt_capabilities_environment();
     lean_rewrite_allowed(
         model_id,
         LeanRewriteInputs {
@@ -637,7 +646,7 @@ pub fn prompt_system_turns_allowed(
 
 #[must_use]
 pub fn prompt_system_turns_for(model_id: &str) -> bool {
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = prompt_capabilities_environment();
     let force = std::env::var("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM").ok();
     prompt_system_turns_allowed(
         model_id,

@@ -33,6 +33,43 @@ fn normalize_absolute_lexical_read_path(path: &std::path::Path) -> std::path::Pa
 }
 
 impl ConversationOrchestrator {
+    /// Main requests advertise and dispatch against their own physical route.
+    /// Outside that scope (including child invokers), retain the owning
+    /// session's model gate rather than the most recently rendered child.
+    pub(crate) fn tool_static_context(&self) -> tool_api::tool_trait::ToolStaticContext {
+        let current_route = crate::query_model::current();
+        let route = super::prompt_selection::PROMPT_POLICY_OVERRIDE
+            .try_with(|(policy_route, policy)| {
+                current_route
+                    .as_ref()
+                    .is_none_or(|route| route == policy_route)
+                    .then(|| crate::query_model::ModelRoute {
+                        model: policy.target.request_model.clone(),
+                        profile: policy.target.profile_name.clone(),
+                    })
+            })
+            .ok()
+            .flatten()
+            .or(current_route);
+        let model = route
+            .map(|route| {
+                let context =
+                    self.model_resolution_context_provider
+                        .as_ref()
+                        .and_then(|provider| {
+                            provider
+                                .context_for_route(&route.model, route.profile.as_deref())
+                                .ok()
+                        });
+                canonical_main_loop_model(&route.model, context.as_ref()).unwrap_or(route.model)
+            })
+            .or_else(|| self.tools.main_loop_model());
+        tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: model,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn refresh_main_loop_model_for_route(&self, model: &str, profile: Option<&str>) {
         let context = self
             .model_resolution_context_provider
@@ -638,18 +675,21 @@ impl ConversationOrchestrator {
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
-        let session_id = self.session.lock().await.session_id;
+        let (session_id, owning_model, owning_profile) = {
+            let session = self.session.lock().await;
+            (
+                session.session_id,
+                session.model.clone(),
+                session.model_profile.clone(),
+            )
+        };
         let prompt_policy = self.current_prompt_policy().await?;
         let model = prompt_policy.target.request_model.clone();
         let model_profile = prompt_policy.target.profile_name.clone();
-        // Same snapshot, one turn earlier than it used to be taken: claude-code
-        // registers the main-loop model as a LIVE accessor (`Dx(()=>HR(rt()))`,
-        // read back by `J$e()`), so the `OO()` todo/task tool gate must see the
-        // current `/model`. Republishing from THIS snapshot — rather than from
-        // inside `filtered_available_tools` — keeps the advertise path free of a
-        // second `session` lock, which would deadlock the callers that already
-        // hold one.
-        self.refresh_main_loop_model_for_route(&model, model_profile.as_deref());
+        // The registry remains the owning-session fallback for child gates.
+        // A Mod/fallback's physical route belongs only to this request's
+        // static context; publishing it globally races buffered responses.
+        self.refresh_main_loop_model_for_route(&owning_model, owning_profile.as_deref());
         let model_source = self
             .main_model_source_for_request(&model, model_profile.as_deref())
             .await;
@@ -1245,15 +1285,13 @@ impl ConversationOrchestrator {
     pub(crate) async fn filtered_available_tools(
         &self,
     ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
-        use tool_api::tool_trait::ToolStaticContext;
-
         // `eZf()` — refresh the registry's synchronous pending-server mirror
         // before the enable-filter runs, so `WaitForMcpServersTool::is_enabled`
         // observes the live state. See `apply_wait_for_mcp_servers_gate`.
         if let Some(registry) = self.mcp_registry.as_ref() {
             registry.refresh_pending_servers().await;
         }
-        let mut tools = self.tools.available_tools(&ToolStaticContext::default());
+        let mut tools = self.tools.available_tools(&self.tool_static_context());
         let deny_context = self.perms.native_mcp_deny_context().await;
         *self
             .tool_pool_deny_context

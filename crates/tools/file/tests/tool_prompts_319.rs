@@ -19,6 +19,7 @@ impl Drop for PromptEnv {
 #[tokio::test]
 async fn dispatched_claude_file_prompts_match_the_319_artifact() {
     let keys = [
+        "LINGXI_MODEL_CAPABILITIES",
         "CLAUDE_CODE_MODEL_CAPABILITIES",
         "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT",
         "LINGXI_SIMPLE_SYSTEM_PROMPT",

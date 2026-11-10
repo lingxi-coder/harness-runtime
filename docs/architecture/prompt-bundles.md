@@ -7,8 +7,9 @@ using the capabilities and context available to that request.
 
 This applies to Chat and Code conversations and their child Agents. Compaction,
 titles, suggestions and other dedicated tasks retain their separate prompts.
-The Claude bundles pin the conversation-prompt baseline to Claude Code 2.1.319;
-that bundle version does not declare parity for every Claude Code feature.
+The Claude bundles pin the upstream conversation-prompt baseline to Claude Code
+2.1.319. Their host revision is versioned separately in the bundle version; it
+does not declare parity for every Claude Code feature.
 
 ## Boundaries and data flow
 
@@ -115,10 +116,10 @@ validated built-in registry. It includes the target, `bundle_id`,
 
 | Mode | Target | Bundle ID | Version |
 | --- | --- | --- | --- |
-| Code | Recognized Claude, all providers | `claude-code` | `2.1.319` |
-| Chat | Recognized Claude, all providers | `claude-chat` | `2.1.319` |
-| Code | Mode fallback | `generic-code-lean-v1` | `1` |
-| Chat | Mode fallback | `generic-chat-lean-v1` | `1` |
+| Code | Recognized Claude, all providers | `claude-code` | `2.1.319-lingxi.1` |
+| Chat | Recognized Claude, all providers | `claude-chat` | `2.1.319-lingxi.1` |
+| Code | Mode fallback | `generic-code-lean-v1` | `2` |
+| Chat | Mode fallback | `generic-chat-lean-v1` | `2` |
 
 The Claude Code bundle keeps the synchronized standard/Lean selection,
 rewrite and tool capability gates. Claude Chat preserves its Chat body and the
@@ -144,8 +145,11 @@ Synchronized Claude bodies remain in their versioned renderer/template locations
 | `ReminderPromptBinding::ClaudeNative` | Keep the native reminder producers and model gates |
 | `ReminderPromptBinding::Portable { base, overrides }` | Look up a reminder by kind, checking overrides before the base |
 
-The portable reminder base currently defines `subagent_consent` and
-`subagent_notes`. A template key is consumed at an existing runtime trigger;
+The portable reminder base defines `subagent_consent`, `subagent_notes` and
+background-session templates. The background renderer consumes the job directory,
+isolation setting and admitted tool names. It emits EnterWorktree and automatic
+git instructions only when the corresponding tools are available, while retaining
+temporary-file, durable-output and protected-branch constraints. A template key is consumed at an existing runtime trigger;
 registering an unused key does not create a new reminder producer or capability.
 
 Dynamic fields use explicit renderers. Actual environment and model facts come
@@ -162,7 +166,34 @@ appended text retain exact UTF-16 units. Claude source vectors, shared/session
 section scopes, dynamic context separation and provider cache grouping remain
 the responsibility of the existing assembler and provider adapter.
 
+
+Product capability overrides use `LINGXI_MODEL_CAPABILITIES`, with
+`CLAUDE_CODE_MODEL_CAPABILITIES` as a compatibility fallback only when the product
+variable is absent. Empty and explicit negative product values retain precedence.
+Initial token-budget and later attachment gates share JavaScript string
+truthiness: any non-empty `LINGXI_DISABLE_ATTACHMENTS` or `LINGXI_SIMPLE` value
+suppresses attachments. The initial budget also accepts their upstream aliases.
+
 ## Request, retry and resume lifecycle
+
+A teammate selects its mode before rendering: inherited trusted mode, handler
+trusted mode, then the host renderer's live owning-session mode. Language and
+output-style deltas apply to admitted teammates across providers; ordinary-child,
+bare-fork and isolated-context admission rules still apply.
+
+Main tool advertising and dispatch use the physical request's route through the
+existing tool-model normalization. The shared registry retains the owning-session
+model for child gates. Buffered and concurrent Mod responses cannot replace each
+other's model gate.
+
+Input caps preserve the initial task, latest non-environment tool/message unit
+and exact environment seed, even when fallback appended that seed at the end.
+They count compact JSON bytes and reject a mandatory set that cannot fit. A Mod
+rewrite validates its final projection again before calling the provider.
+
+The Claude host revision and portable version 2 invalidate preceding prompt
+snapshots on the same route, retaining history and separately saved append sources.
+The pinned upstream artifact and default Claude body bytes remain unchanged.
 
 The main orchestrator resolves a successful policy once per
 `(requested model, optional profile, mode)` inside the request's `OnceCell` map.

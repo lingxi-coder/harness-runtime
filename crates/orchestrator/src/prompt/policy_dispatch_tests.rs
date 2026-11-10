@@ -234,3 +234,161 @@ fn registered_future_bundle_replaces_system_memory_and_reminder_components() {
         "future-exact"
     );
 }
+
+#[test]
+fn prompt_product_environment_controls_and_alias_precedence() {
+    use lingxi_core::host::model_capabilities as capabilities;
+    const MARKER: &str = "LINGXI_PROMPT_REVIEW_ENV_CASE";
+    if let Ok(case) = std::env::var(MARKER) {
+        let enabled = case == "enabled";
+        assert_eq!(
+            capabilities::claude_lean_prompt_for("claude-sonnet-4-6"),
+            enabled
+        );
+        assert_eq!(capabilities::lean_rewrite_for("claude-sonnet-4-6"), enabled);
+        assert_eq!(
+            capabilities::prompt_system_turns_for("claude-opus-5"),
+            enabled
+        );
+        assert_eq!(
+            body_sections::is_communicating_model("claude-opus-5"),
+            enabled
+        );
+        assert_eq!(silent_turn::is_enabled("claude-opus-5"), enabled);
+        assert_eq!(
+            total_tokens::resolve_mode_for_model("claude-opus-5", None)
+                != total_tokens::TotalTokensMode::Off,
+            enabled
+        );
+        return;
+    }
+    let allow = "lean_prompt,temporal_hare,mid_conv_system,fable_5_mitigations,silent_turn_reminder,total_tokens_reminder";
+    let deny = "-lean_prompt,-temporal_hare,-mid_conv_system,-fable_5_mitigations,-silent_turn_reminder,-total_tokens_reminder";
+    for (product, legacy, expected) in [
+        (Some(allow), None, "enabled"),
+        (None, Some(allow), "enabled"),
+        (Some(deny), Some(allow), "disabled"),
+    ] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "prompt::policy_dispatch_tests::prompt_product_environment_controls_and_alias_precedence", "--nocapture"])
+            .env(MARKER, expected);
+        for key in [
+            branding::MODEL_CAPABILITIES_ENV,
+            "CLAUDE_CODE_MODEL_CAPABILITIES",
+            "LINGXI_SIMPLE_SYSTEM_PROMPT",
+            "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "CLAUDE_CODE_SILENT_TURN_REMINDER",
+            "CLAUDE_CODE_TOTAL_TOKENS_REMINDER",
+        ] {
+            command.env_remove(key);
+        }
+        if let Some(value) = product {
+            command.env(branding::MODEL_CAPABILITIES_ENV, value);
+        }
+        if let Some(value) = legacy {
+            command.env("CLAUDE_CODE_MODEL_CAPABILITIES", value);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn prompt_budget_obeys_product_attachment_gates() {
+    const MARKER: &str = "LINGXI_PROMPT_REVIEW_BUDGET_CASE";
+    if let Ok(case) = std::env::var(MARKER) {
+        let enabled = case == "enabled";
+        let body = assemble_system_prompt(&context("claude-opus-5"));
+        assert_eq!(body.contains("<total_tokens>"), enabled, "{body}");
+        return;
+    }
+    for (product, legacy) in [
+        (
+            branding::DISABLE_ATTACHMENTS_ENV,
+            "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+        ),
+        (branding::SIMPLE_ENV, "CLAUDE_CODE_SIMPLE"),
+    ] {
+        for value in ["1", "false", ""] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "prompt::policy_dispatch_tests::prompt_budget_obeys_product_attachment_gates",
+                    "--nocapture",
+                ])
+                .env(
+                    MARKER,
+                    if value.is_empty() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                );
+            for key in [
+                branding::DISABLE_ATTACHMENTS_ENV,
+                branding::SIMPLE_ENV,
+                "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+                "CLAUDE_CODE_SIMPLE",
+                branding::MODEL_CAPABILITIES_ENV,
+                "CLAUDE_CODE_MODEL_CAPABILITIES",
+                "CLAUDE_CODE_TOTAL_TOKENS_REMINDER",
+            ] {
+                command.env_remove(key);
+            }
+            command.env(product, value).env(legacy, "1");
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}
+
+#[test]
+fn prompt_generic_background_constraints_reach_chat_and_code_bodies() {
+    const MARKER: &str = "LINGXI_PROMPT_REVIEW_BACKGROUND";
+    if std::env::var_os(MARKER).is_some() {
+        for (model, provider) in [("gpt-5.5", "openai"), ("kimi-k2.5", "kimi")] {
+            for mode in [ConversationMode::Chat, ConversationMode::Code] {
+                let mut ctx = context(model);
+                ctx.prompt_policy = Some(routed(mode, provider, model));
+                ctx.tool_names = vec![
+                    "Read".into(),
+                    "Write".into(),
+                    "EnterWorktree".into(),
+                    "Bash".into(),
+                ];
+                let body = assemble_system_prompt(&ctx);
+                for marker in [
+                    "# Background Session",
+                    "/jobs/review/tmp",
+                    "somewhere durable",
+                    "Call EnterWorktree as your first action",
+                    "Never push to main/master, force-push, or merge.",
+                ] {
+                    assert!(body.contains(marker), "{model} {mode:?}: {marker}");
+                }
+                assert!(!body.contains("{isolation_guidance}"));
+            }
+        }
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "prompt::policy_dispatch_tests::prompt_generic_background_constraints_reach_chat_and_code_bodies", "--nocapture"])
+        .env(MARKER, "1").env("LINGXI_SESSION_KIND", "bg")
+        .env("LINGXI_JOB_DIR", "/jobs/review").env("LINGXI_BG_ISOLATION", "worktree")
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

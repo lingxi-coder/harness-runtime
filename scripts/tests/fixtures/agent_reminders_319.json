@@ -81,6 +81,12 @@
       "sha256": "e05cfe1e54d5c1f8c064d5e3fc8861e5c14aafc3657c5d521582ecdce49ec344"
     },
     {
+      "label": "turn companion predicate",
+      "start": 274545564,
+      "endExclusive": 274545677,
+      "sha256": "92474927c514399a6d0d633c3ccc772fbf4c08bc4ece82e9bd9812b0d5c3e1ab"
+    },
+    {
       "label": "silent-turn scan and producer",
       "start": 272872791,
       "endExclusive": 272874212,
@@ -617,6 +623,124 @@
           "text": "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan."
         }
       ]
+    },
+    {
+      "name": "time-companion-does-not-reset-clock",
+      "messages": [
+        {
+          "type": "user",
+          "isMeta": false,
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": {
+            "content": "task"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-01-01T00:00:01.000Z",
+          "message": {
+            "id": "1",
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Bash"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "isMeta": true,
+          "turnCompanion": true,
+          "timestamp": "2026-01-01T00:00:09.000Z",
+          "message": {
+            "content": "limit notice"
+          }
+        },
+        {
+          "type": "user",
+          "isMeta": false,
+          "timestamp": "2026-01-01T00:00:09.500Z",
+          "message": {
+            "content": [
+              {
+                "type": "tool_result"
+              }
+            ]
+          }
+        }
+      ],
+      "environment": {
+        "CLAUDE_CODE_SILENT_TURN_REMINDER_SECONDS": 5
+      },
+      "nowMs": 1767225610000,
+      "stretch": {
+        "turnsSinceLastReminder": 1,
+        "remindersInStretch": 0,
+        "silentSince": "2026-01-01T00:00:00.000Z"
+      },
+      "attachments": [
+        {
+          "type": "silent_turn_reminder",
+          "text": "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan."
+        }
+      ]
+    },
+    {
+      "name": "time-ordinary-meta-resets-clock",
+      "messages": [
+        {
+          "type": "user",
+          "isMeta": false,
+          "timestamp": "2026-01-01T00:00:00.000Z",
+          "message": {
+            "content": "task"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-01-01T00:00:01.000Z",
+          "message": {
+            "id": "1",
+            "content": [
+              {
+                "type": "tool_use",
+                "name": "Bash"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "isMeta": true,
+          "timestamp": "2026-01-01T00:00:09.000Z",
+          "message": {
+            "content": "new instructions"
+          }
+        },
+        {
+          "type": "user",
+          "isMeta": false,
+          "timestamp": "2026-01-01T00:00:09.500Z",
+          "message": {
+            "content": [
+              {
+                "type": "tool_result"
+              }
+            ]
+          }
+        }
+      ],
+      "environment": {
+        "CLAUDE_CODE_SILENT_TURN_REMINDER_SECONDS": 5
+      },
+      "nowMs": 1767225610000,
+      "stretch": {
+        "turnsSinceLastReminder": 1,
+        "remindersInStretch": 0,
+        "silentSince": "2026-01-01T00:00:09.000Z"
+      },
+      "attachments": []
     },
     {
       "name": "time-too-short",

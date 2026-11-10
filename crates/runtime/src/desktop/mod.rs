@@ -607,6 +607,17 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 
 #[async_trait::async_trait]
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
+    async fn conversation_mode(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::ConversationMode> {
+        let orchestrator = self.orchestrator.upgrade()?;
+        Some(
+            OrchestratorHandle::conversation_mode(orchestrator.as_ref())
+                .await
+                .mode,
+        )
+    }
+
     async fn render_prompt_context_for_target(
         &self,
         target: &agent::handle::SubagentPromptTarget,

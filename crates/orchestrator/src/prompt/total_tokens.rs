@@ -142,7 +142,7 @@ pub fn resolve_mode(settings_mode: Option<&str>) -> TotalTokensMode {
 #[must_use]
 pub fn resolve_mode_for_model(model: &str, settings_mode: Option<&str>) -> TotalTokensMode {
     let mode_override = std::env::var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER").ok();
-    let capabilities = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let capabilities = lingxi_core::host::model_capabilities::prompt_capabilities_environment();
     resolve_mode_for_facts(
         model,
         settings_mode,
@@ -179,8 +179,18 @@ fn resolve_mode_for_facts(
 /// `G_n` / `W_n`: the initial prefix budget, before any request usage is charged.
 #[must_use]
 pub fn system_prompt_section(model: &str) -> Option<String> {
-    for key in ["CLAUDE_CODE_DISABLE_ATTACHMENTS", "CLAUDE_CODE_SIMPLE"] {
-        if lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref()) {
+    for (product, legacy) in [
+        (
+            branding::DISABLE_ATTACHMENTS_ENV,
+            "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+        ),
+        (branding::SIMPLE_ENV, "CLAUDE_CODE_SIMPLE"),
+    ] {
+        // These attachment gates use JS string truthiness in the live
+        // reminder path: every defined non-empty value disables attachments.
+        if lingxi_core::host::env::var_os_with_legacy(product, legacy)
+            .is_some_and(|value| !value.is_empty())
+        {
             return None;
         }
     }

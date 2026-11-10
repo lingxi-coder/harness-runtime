@@ -90,6 +90,12 @@ impl ChildStepRequest {
                 }
             }
         }
+        if let Some(context) = &self.prompt_context {
+            crate::runner::validate_request_input_bytes(
+                &messages,
+                context.max_input_bytes_per_turn,
+            )?;
+        }
         let capture = policy.map(|policy| crate::prompt_policy::CapturedRequestPrompt {
             policy,
             system: system.clone(),

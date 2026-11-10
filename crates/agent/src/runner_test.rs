@@ -144,27 +144,39 @@ async fn native_settings_runner_uses_exact_agent_identity_and_option_gates() {
     };
     assert_eq!(message.string_at("/attachment/type"), Some("language"));
 
-    let mut teammate = fresh_subagent_ctx();
-    teammate.native_settings_prompt_provider = Some(
-        provider.clone() as Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>
-    );
-    teammate.native_settings_prompt_context = NativeSettingsPromptContext {
-        agent_context: AgentContext::Teammate,
-        bare_fork: None,
-        isolated_context: None,
-    };
-    let (out_tx, _rx) = mpsc::channel(4);
-    let mut history = Vec::new();
-    let mut written = 0;
-    append_native_settings_prompt_attachments(
-        &mut teammate,
-        &mut history,
-        None,
-        &mut written,
-        &out_tx,
-    )
-    .await;
-    assert_eq!(history.len(), 1);
+    for model in ["claude-opus-5", "gpt-5.5", "kimi-k2.5"] {
+        let mut teammate = fresh_subagent_ctx();
+        teammate.prompt_policy = Some(
+            crate::prompt_policy::resolve_target(
+                None,
+                model,
+                None,
+                lingxi_core::host::session_context::ConversationMode::Chat,
+            )
+            .unwrap()
+            .policy,
+        );
+        teammate.native_settings_prompt_provider =
+            Some(provider.clone()
+                as Arc<dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider>);
+        teammate.native_settings_prompt_context = NativeSettingsPromptContext {
+            agent_context: AgentContext::Teammate,
+            bare_fork: None,
+            isolated_context: None,
+        };
+        let (out_tx, _rx) = mpsc::channel(4);
+        let mut history = Vec::new();
+        let mut written = 0;
+        append_native_settings_prompt_attachments(
+            &mut teammate,
+            &mut history,
+            None,
+            &mut written,
+            &out_tx,
+        )
+        .await;
+        assert_eq!(history.len(), 1);
+    }
 
     for context in [
         NativeSettingsPromptContext {
@@ -215,8 +227,8 @@ async fn native_settings_runner_uses_exact_agent_identity_and_option_gates() {
     let contexts = provider.contexts.lock().unwrap();
     assert_eq!(
         contexts.len(),
-        2,
-        "only main-session and teammate passed the gate"
+        4,
+        "main-session and teammates of all providers passed the gate"
     );
     assert_eq!(
         contexts[0].agent_context,
@@ -11311,7 +11323,7 @@ fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
     // that pair atomically, rather than trimming one half to satisfy a
     // per-message approximation.
     let max = serde_json::to_vec(&history).unwrap().len() as u64;
-    let capped = super::cap_input_bytes(&history, Some(max)).expect("cap fits");
+    let capped = super::cap_input_bytes(&history, Some(max), &[]).expect("cap fits");
 
     let has_tool_use = capped.iter().any(|m| {
         matches!(m, ConversationMessage::Assistant { content, .. }
@@ -11356,7 +11368,7 @@ fn cap_input_bytes_rejects_task_plus_latest_pair_over_the_exact_cap() {
         .map(|unit| u64::try_from(serde_json::to_vec(unit).unwrap().len()).unwrap())
         .sum();
     super::reset_cap_input_measurements();
-    let error = super::cap_input_bytes(&history, Some(cap))
+    let error = super::cap_input_bytes(&history, Some(cap), &[])
         .expect_err("the mandatory task/latest pair is one serialized byte over cap");
     assert!(error.contains("mandatory latest tool/message unit exceeds"));
     assert_eq!(
@@ -11400,7 +11412,7 @@ fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
     // Room for the prompt plus exactly the NEWEST pair, not both pairs.
     let max = prompt_bytes + newest_pair_bytes + 16;
 
-    let capped = super::cap_input_bytes(&history, Some(max)).expect("cap fits");
+    let capped = super::cap_input_bytes(&history, Some(max), &[]).expect("cap fits");
     let joined = format!("{capped:?}");
     assert!(
         joined.contains("TASK-MARKER"),
@@ -11440,7 +11452,7 @@ fn cap_input_bytes_rejects_when_the_task_prompt_alone_exceeds_the_cap() {
     // prompt too.
     let max = pair_bytes + 32;
 
-    let error = super::cap_input_bytes(&history, Some(max))
+    let error = super::cap_input_bytes(&history, Some(max), &[])
         .expect_err("an oversized mandatory prompt must be rejected before sending");
     assert!(
         error.contains("mandatory initial prompt exceeds"),
@@ -11480,7 +11492,7 @@ fn cap_input_bytes_rejects_an_oversized_head_without_sending_it() {
     )
     .unwrap();
     super::reset_cap_input_measurements();
-    let error = super::cap_input_bytes(&history, Some(max))
+    let error = super::cap_input_bytes(&history, Some(max), &[])
         .expect_err("an oversized mandatory prompt must be rejected before sending");
     assert!(error.contains("mandatory initial prompt exceeds"));
     assert_eq!(
@@ -11506,7 +11518,7 @@ fn cap_input_bytes_preserves_legacy_selection_and_order() {
     let expected = vec![head, older, newest];
     let max = serde_json::to_vec(&expected).unwrap().len() as u64;
 
-    let capped = super::cap_input_bytes(&history, Some(max)).expect("golden selection fits");
+    let capped = super::cap_input_bytes(&history, Some(max), &[]).expect("golden selection fits");
     assert_eq!(
         serde_json::to_vec(&capped).unwrap(),
         serde_json::to_vec(&expected).unwrap(),
@@ -11635,13 +11647,13 @@ fn cap_input_bytes_matches_legacy_for_unicode_and_tool_pairs() {
     caps.dedup();
 
     assert_eq!(
-        super::cap_input_bytes(&history, None),
+        super::cap_input_bytes(&history, None, &[]),
         legacy_cap_input_bytes_reference(&history, None),
         "uncapped input changed"
     );
     for max in caps {
         let expected = legacy_cap_input_bytes_reference(&history, Some(max));
-        let actual = super::cap_input_bytes(&history, Some(max));
+        let actual = super::cap_input_bytes(&history, Some(max), &[]);
         assert_eq!(
             actual, expected,
             "optimized cap changed Unicode/tool-pair output or error at {max} bytes"
@@ -11684,7 +11696,7 @@ fn cap_input_bytes_measurement_work_is_linear_for_many_pairs() {
     let max = serde_json::to_vec(&history).unwrap().len() as u64;
 
     super::reset_cap_input_measurements();
-    let capped = super::cap_input_bytes(&history, Some(max))
+    let capped = super::cap_input_bytes(&history, Some(max), &[])
         .expect("the complete Unicode/tool-pair history fits");
     assert_eq!(
         super::cap_input_measurements(),
@@ -15019,6 +15031,193 @@ async fn full_review_live_dispatch_calls_private_mcp_handles_and_enforces_their_
                 }
                 assert_eq!(parent_calls.load(Ordering::SeqCst), 0);
                 assert_eq!(private_calls.load(Ordering::SeqCst), usize::from(!denied));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn prompt_native_environment_survives_runner_input_cap() {
+    let target = crate::prompt_policy::resolve_target(
+        None,
+        "claude-opus-5",
+        None,
+        lingxi_core::host::session_context::ConversationMode::Code,
+    )
+    .unwrap();
+    let task = ConversationMessage::user(MessageId::new(), "KEEP ASSIGNMENT".into());
+    let mut history = vec![task.clone()];
+    let seed = crate::prompt_policy::inject_context(&mut history, &["# Environment\nPrimary working directory: /work\n\nYou are powered by the model claude-opus-5.\n\nToday's date is 2026-11-09.".into()], true);
+    let environment = history[1].clone();
+    let latest = ConversationMessage::user(MessageId::new(), "LATEST".into());
+    history.push(ConversationMessage::user(
+        MessageId::new(),
+        "OPTIONAL".repeat(500),
+    ));
+    history.push(latest.clone());
+    let required = vec![task, environment, latest];
+    let cap = serde_json::to_vec(&required).unwrap().len() as u64;
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+    let mut context = loop_ctx(api.clone(), None, 1);
+    context.agent_definition.model = AgentModel::Explicit(target.model.clone());
+    // Isolate the environment budget from the independent instruction-date
+    // announcement, as an already prepared Inline child request does.
+    context.instruction_context_is_override = true;
+    context.instruction_context.rendering =
+        lingxi_core::host::instructions::InstructionRendering::Inline;
+    context.prompt_messages = history;
+    context.prompt_policy = Some(target.policy.clone());
+    context.prompt_state = Some(Arc::new(crate::prompt_policy::SubagentPromptState {
+        initial_policy: target.policy,
+        role: Some("ROLE".into()),
+        fork_prefix: None,
+        fork_policy: None,
+        custom_system_prompt: None,
+        append_system_prompt: None,
+        environment: None,
+        cwd: None,
+        addendum: None,
+        operator_suffix: None,
+        tool_registry: None,
+        system_renderer: None,
+        seeded_context: seed,
+        replace_initial_context: false,
+    }));
+    context.max_input_bytes_per_turn = Some(cap);
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    run_subagent(context, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(api.call_count(), 1, "{events:?}");
+    assert_eq!(api.last_messages(), required);
+    assert_eq!(
+        serde_json::to_vec(&api.last_messages()).unwrap().len() as u64,
+        cap
+    );
+}
+
+#[test]
+fn prompt_fallback_environment_at_end_never_replaces_latest_tool_pair() {
+    let task = ConversationMessage::user(MessageId::new(), "TASK".into());
+    let tool_id = ToolUseId::new();
+    let pair = vec![
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id, &"LATEST RESULT".repeat(100)),
+    ];
+    let mut history = vec![task.clone()];
+    history.extend(pair.clone());
+    let seed = crate::prompt_policy::inject_context(
+        &mut history,
+        &["# Environment\nCURRENT ENVIRONMENT".into()],
+        true,
+    );
+    let environment = history.last().unwrap().clone();
+    let too_small = serde_json::to_vec(&vec![task, environment]).unwrap().len() as u64;
+    assert!(cap_input_bytes(&history, Some(too_small), &seed.system_messages).is_err());
+    let exact = serde_json::to_vec(&history).unwrap().len() as u64;
+    assert_eq!(
+        cap_input_bytes(&history, Some(exact), &seed.system_messages).unwrap(),
+        history
+    );
+    assert!(cap_input_bytes(&history, Some(exact - 1), &seed.system_messages).is_err());
+}
+
+#[tokio::test]
+async fn prompt_child_mod_rewrite_checks_final_environment_against_input_cap() {
+    for inline in [false, true] {
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+        let initial = crate::prompt_policy::resolve_target(
+            Some(api.as_ref()),
+            "gpt-5.5",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let target = crate::prompt_policy::resolve_target(
+            Some(api.as_ref()),
+            "claude-opus-5",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let state = crate::prompt_policy::SubagentPromptState {
+            initial_policy: initial.policy.clone(),
+            role: Some("ROLE".into()),
+            fork_prefix: None,
+            fork_policy: None,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+            environment: Some(Arc::new(|_, _| crate::handle::SubagentPromptContext {
+                additional_context: vec!["# Environment\nLARGER NATIVE ENVIRONMENT".repeat(40)],
+                system_suffix: None,
+            })),
+            cwd: None,
+            addendum: None,
+            operator_suffix: None,
+            tool_registry: None,
+            system_renderer: None,
+            seeded_context: Default::default(),
+            replace_initial_context: false,
+        };
+        let mut context = loop_ctx(api.clone(), None, 1);
+        context.prompt_policy = Some(initial.policy);
+        context.prompt_state = Some(Arc::new(state.clone()));
+        if inline {
+            context.instruction_context.rendering =
+                lingxi_core::host::instructions::InstructionRendering::Inline;
+            context
+                .instruction_context
+                .set_user_context_text("instructions", "KEEP PROJECT POLICY")
+                .unwrap();
+        }
+        let task = ConversationMessage::user(MessageId::new(), "KEEP TASK".into());
+        let messages =
+            instruction_request_messages(&[task], &context.instruction_context, None, None)
+                .unwrap();
+        let mut projected = messages.clone();
+        state.project_context(&mut projected, &state.render(&target));
+        let exact = serde_json::to_vec(&projected).unwrap().len() as u64;
+        for cap in [exact - 1, exact] {
+            context.max_input_bytes_per_turn = Some(cap);
+            let request = crate::mod_turn_step::ChildStepRequest {
+                api: api.clone(),
+                model: "gpt-5.5".into(),
+                profile: None,
+                prompt_profile: None,
+                prompt_context: Some(context.clone()),
+                prompt_captures: Default::default(),
+                system: None,
+                messages: messages.clone(),
+                tools: vec![],
+                effort: None,
+                forced_tool: None,
+                call_opts: Default::default(),
+                fallback_target: Default::default(),
+                agent_spawn_provenance: Default::default(),
+            };
+            let result = request.open("claude-opus-5", None).await;
+            if cap < exact {
+                assert!(matches!(
+                    result,
+                    Err(llm_runtime::LlmError::InvalidRequest { .. })
+                ));
+                assert_eq!(api.call_count(), 0, "reject before provider call");
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(api.call_count(), 1);
+                assert_eq!(
+                    serde_json::to_vec(&api.last_messages()).unwrap().len() as u64,
+                    exact
+                );
+                assert!(api
+                    .last_messages()
+                    .iter()
+                    .any(|message| message.text_content().contains("KEEP TASK")));
+                if inline {
+                    assert!(api.last_messages()[0]
+                        .text_content()
+                        .contains("KEEP PROJECT POLICY"));
+                }
             }
         }
     }

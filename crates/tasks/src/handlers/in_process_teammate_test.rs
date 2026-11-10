@@ -1694,6 +1694,7 @@ async fn teammate_alias_uses_immediate_parent_profile_with_shared_model_id() {
             Some("shared-parent"),
             Some("provider-b"),
             None,
+            None,
             definition,
         )
         .await
@@ -1752,6 +1753,7 @@ async fn teammate_environment_model_resolves_before_definition_and_call_profile(
                 None,
                 None,
                 Some("openai/gpt-4o"),
+                None,
                 definition,
             )
             .await
@@ -1805,6 +1807,7 @@ async fn teammate_same_tier_and_bedrock_region_follow_parent_policy() {
                 "lead",
                 "",
                 &description,
+                None,
                 None,
                 None,
                 None,
@@ -3957,4 +3960,192 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
         Some(expected.to_str().unwrap())
     );
     handler.kill(&handle.task_id, context).await.unwrap();
+}
+
+struct ModePromptRenderer(AtomicBool);
+
+#[async_trait]
+impl TeammateSystemPromptRenderer for ModePromptRenderer {
+    async fn conversation_mode(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::ConversationMode> {
+        Some(if self.0.load(Ordering::SeqCst) {
+            lingxi_core::host::session_context::ConversationMode::Chat
+        } else {
+            lingxi_core::host::session_context::ConversationMode::Code
+        })
+    }
+    async fn render_default_system_prompt(
+        &self,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        panic!("target is required")
+    }
+    async fn render_system_prompt_for_target(
+        &self,
+        target: &lingxi_core::host::prompt_policy::PromptTarget,
+    ) -> Result<Utf16JsonProjection, lingxi_core::settings::SettingsError> {
+        use lingxi_core::host::prompt_policy::{resolve_prompt_policy, SystemPromptBinding};
+        let body = match resolve_prompt_policy(target.clone()).system {
+            SystemPromptBinding::Template(body) => body,
+            SystemPromptBinding::ClaudeChat => "NATIVE CHAT BODY",
+            SystemPromptBinding::ClaudeCode => "NATIVE CODE BODY",
+        };
+        Ok(body.into())
+    }
+}
+
+#[derive(Default)]
+struct ModeCaptureApi(StdMutex<Vec<agent::api::SubagentApiRequest>>);
+
+#[async_trait]
+impl SubagentApiClient for ModeCaptureApi {
+    async fn stream(
+        &self,
+        request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        self.0.lock().unwrap().push(request);
+        Ok(futures::stream::iter(
+            llm_runtime::stream_accumulator::response_to_stream_events(text_response("done"))
+                .into_iter()
+                .map(Ok),
+        )
+        .boxed())
+    }
+}
+
+struct ModeTestBudget;
+#[async_trait]
+impl lingxi_core::host::budget::BudgetEnforcerHandle for ModeTestBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::budget::BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+}
+
+#[tokio::test]
+async fn prompt_chat_teammates_select_mode_before_rendering_and_keep_it_on_fallback() {
+    use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
+    for model in ["claude-opus-5", "claude-sonnet-4-6", "gpt-5.5", "kimi-k2.5"] {
+        for inherited in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+            let runtime = Arc::new(MockRuntimeSpawner::default());
+            let api = Arc::new(ModeCaptureApi::default());
+            // The production handler's invoker has no trusted profile. The
+            // renderer supplies live Chat, or inheritance overrides live Code.
+            let renderer = Arc::new(ModePromptRenderer(AtomicBool::new(!inherited)));
+            let handler = InProcessTeammateHandler::new(
+                Arc::new(StateMachinePool::new(runtime.clone(), 8)),
+                Arc::new(TaskOutputManager::new(directory.path().into(), fs.clone())),
+                api.clone(),
+            )
+            .with_default_model(model)
+            .with_hook_context(
+                lingxi_core::types::SessionId::nil(),
+                directory.path().into(),
+            )
+            .with_tool_invoker(Arc::new(
+                tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(
+                    tool_api::ToolRegistry::new(),
+                )),
+            ))
+            .with_system_prompt_renderer(renderer.clone());
+            let inheritance =
+                inherited.then(|| lingxi_core::host::subagent_spawn::SubagentInheritance {
+                    tool_invoker: Arc::new(
+                        tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(
+                            tool_api::ToolRegistry::new(),
+                        ))
+                        .with_trusted_session(
+                            Some(SessionModeSnapshot {
+                                session_id: lingxi_core::types::SessionId::nil().to_string(),
+                                mode: ConversationMode::Chat,
+                            }),
+                            None,
+                        ),
+                    ),
+                    budget: Arc::new(ModeTestBudget),
+                });
+            let task_context = ctx(fs, runtime);
+            let task = handler
+                .spawn(
+                    TaskSpawnInput::InProcessTeammate {
+                        spawn_request: None,
+                        inheritance,
+                        agent_id: lingxi_core::types::AgentId::new(),
+                        name: "worker".into(),
+                        team_name: String::new(),
+                        description: "KEEP CHAT TASK".into(),
+                    },
+                    task_context.clone(),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while api.0.lock().unwrap().is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let request = api.0.lock().unwrap()[0].clone();
+            let body = request.system.unwrap();
+            let text = body.string_at("").unwrap();
+            assert!(
+                text.contains(if model.starts_with("claude-") {
+                    "NATIVE CHAT BODY"
+                } else {
+                    "research, writing, learning"
+                }),
+                "{model} inherited={inherited}: {text}"
+            );
+            handler.kill(&task.task_id, task_context).await.unwrap();
+        }
+        let renderer = Arc::new(ModePromptRenderer(AtomicBool::new(true)));
+        let handler = model_test_handler(Some(model)).with_system_prompt_renderer(renderer);
+        let definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "worker")
+            .await
+            .unwrap();
+        let context = handler
+            .build_context(
+                lingxi_core::types::AgentId::new(),
+                "worker",
+                "team",
+                "task",
+                definition,
+            )
+            .await
+            .unwrap();
+        let state = context.prompt_state.unwrap();
+        assert_eq!(state.initial_policy.target.mode, ConversationMode::Chat);
+        for fallback in ["claude-sonnet-4-6", "gpt-5.5", "kimi-k2.5"] {
+            let target = agent::prompt_policy::resolve_target(
+                context.api_client.as_deref(),
+                fallback,
+                None,
+                state.initial_policy.target.mode,
+            )
+            .unwrap();
+            let rendered = state.render_for_route(&target).await.unwrap();
+            assert_eq!(rendered.policy.target.mode, ConversationMode::Chat);
+            let body = rendered.system.unwrap();
+            assert!(body
+                .string_at("")
+                .unwrap()
+                .contains(if fallback.starts_with("claude-") {
+                    "NATIVE CHAT BODY"
+                } else {
+                    "research, writing, learning"
+                }));
+        }
+    }
 }

@@ -320,6 +320,13 @@ pub fn teammate_message_envelope(from: &str, text: &Utf16JsonProjection) -> Utf1
 /// assembled default system prompt without depending on the orchestrator.
 #[async_trait]
 pub trait TeammateSystemPromptRenderer: Send + Sync {
+    /// Live owning-session mode for coordinator spawns without inheritance.
+    async fn conversation_mode(
+        &self,
+    ) -> Option<lingxi_core::host::session_context::ConversationMode> {
+        None
+    }
+
     /// Render the default (not main-thread overridden) system prompt.
     async fn render_default_system_prompt(
         &self,
@@ -1108,6 +1115,7 @@ impl InProcessTeammateHandler {
             None,
             None,
             environmental_model.as_deref(),
+            None,
             definition,
         )
         .await
@@ -1125,6 +1133,7 @@ impl InProcessTeammateHandler {
         parent_model_override: Option<&str>,
         parent_profile_override: Option<&str>,
         environmental_model: Option<&str>,
+        inherited_mode: Option<lingxi_core::host::session_context::ConversationMode>,
         mut definition: AgentDefinition,
     ) -> Result<
         (
@@ -1300,11 +1309,18 @@ impl InProcessTeammateHandler {
             definition.model = AgentModel::Explicit(selection.model.clone());
             child_selection = Some(selection);
         }
-        let prompt_mode = self
-            .tool_invoker
-            .as_ref()
-            .and_then(|invoker| invoker.trusted_session_profile())
-            .map_or(Default::default(), |profile| profile.mode);
+        let prompt_mode = match inherited_mode.or_else(|| {
+            self.tool_invoker
+                .as_ref()
+                .and_then(|invoker| invoker.trusted_session_profile())
+                .map(|profile| profile.mode)
+        }) {
+            Some(mode) => mode,
+            None => match self.system_prompt_renderer.get() {
+                Some(renderer) => renderer.conversation_mode().await.unwrap_or_default(),
+                None => Default::default(),
+            },
+        };
         let prompt_model = child_selection
             .as_ref()
             .map(|selection| selection.model.clone())
@@ -1849,6 +1865,10 @@ impl Task for InProcessTeammateHandler {
                     .as_ref()
                     .and_then(|request| request.parent_model_profile_override.as_deref()),
                 environmental_model.as_deref(),
+                inheritance
+                    .as_ref()
+                    .and_then(|inherit| inherit.tool_invoker.trusted_session_profile())
+                    .map(|profile| profile.mode),
                 definition,
             )
             .await?;

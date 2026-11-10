@@ -102,7 +102,7 @@ fn enabled_with_override(model: &str, raw: Option<&str>) -> bool {
     if raw.is_some() {
         return lingxi_core::host::env::is_env_truthy(raw);
     }
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = lingxi_core::host::model_capabilities::prompt_capabilities_environment();
     lingxi_core::host::model_capabilities::prompt_feature_enabled(
         model,
         "silent_turn_reminder",
@@ -417,11 +417,18 @@ fn row_for(msg: &ConversationMessage) -> Row {
             spoke: assistant_spoke(content),
         },
         ConversationMessage::User {
-            content, is_meta, ..
+            content,
+            is_meta,
+            turn_companion,
+            ..
         } => {
             if !carries_tool_result(content) {
                 if *is_meta {
-                    Row::MetaUser
+                    if *turn_companion == Some(Some(true)) {
+                        Row::Other
+                    } else {
+                        Row::MetaUser
+                    }
                 } else {
                     Row::RealUser
                 }
@@ -840,7 +847,19 @@ mod tests {
                         continue;
                     }
                     "user" if row["message"]["content"].is_array() => tool_result_user(),
-                    "user" => real_user(),
+                    "user" => {
+                        let mut message = real_user();
+                        if let ConversationMessage::User {
+                            is_meta,
+                            turn_companion,
+                            ..
+                        } = &mut message
+                        {
+                            *is_meta = row["isMeta"].as_bool().unwrap_or(false);
+                            *turn_companion = row["turnCompanion"].as_bool().map(Some);
+                        }
+                        message
+                    }
                     "assistant" => {
                         let id = *ids
                             .entry(row["message"]["id"].as_str().unwrap().to_owned())

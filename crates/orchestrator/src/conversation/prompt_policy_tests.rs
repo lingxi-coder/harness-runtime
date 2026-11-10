@@ -216,6 +216,18 @@ async fn prompt_policy_invalidates_legacy_and_changed_snapshots_without_changing
         orch.prompt_runtime.prompt_snapshot.lock().await.as_ref(),
         Some(&snapshot)
     );
+    // Same route restored from the preceding host renderer must rebuild even
+    // though the pinned upstream Claude source remains 2.1.319.
+    let mut old_native = native.as_ref().clone();
+    old_native.bundle_version = "2.1.319";
+    snapshot.prompt_policy = Some(old_native.metadata());
+    *orch.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot.clone());
+    orch.prompt_runtime
+        .prompt_snapshot_resume
+        .store(true, Ordering::Release);
+    orch.reconcile_prompt_snapshot_policy(&native).await;
+    assert!(orch.prompt_runtime.prompt_snapshot.lock().await.is_none());
+    assert!(!orch.prompt_snapshot_resume());
     let portable = orch
         .prompt_policy_for_route("alias", Some("kimi-channel"))
         .await

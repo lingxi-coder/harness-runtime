@@ -24,6 +24,7 @@ pub mod memory_update;
 pub mod mid_turn_input;
 pub mod nested_memory;
 pub mod plan_reminder;
+pub(crate) mod portable_background;
 pub mod sanitize;
 pub mod silent_turn;
 pub mod skill_listing;
@@ -727,19 +728,14 @@ pub(crate) fn named_prompt_sections_for_mode(
                 PromptSectionScope::Session,
             ));
         }
-        if std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg") {
-            if let (Some(template), Ok(directory)) = (
-                policy.reminders.template_for("bg-session"),
-                std::env::var("LINGXI_JOB_DIR"),
-            ) {
-                if !directory.is_empty() {
-                    sections.push(PromptSection::new(
-                        "bg-session",
-                        template.replace("{job_dir}", &directory),
-                        PromptSectionScope::Session,
-                    ));
-                }
-            }
+        if let Some(background) =
+            portable_background::portable_from_env(policy.reminders, &ctx.tool_names)
+        {
+            sections.push(PromptSection::new(
+                "bg-session",
+                background,
+                PromptSectionScope::Session,
+            ));
         }
     }
     sections

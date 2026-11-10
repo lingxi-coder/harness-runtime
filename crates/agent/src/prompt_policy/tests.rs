@@ -312,3 +312,76 @@ fn changed_route_projects_fresh_context_without_mutating_history_or_instructions
     assert!(text.contains("PRESERVE TASK"));
     assert!(text.contains("PROJECT INSTRUCTIONS"));
 }
+
+#[test]
+fn cold_restore_removes_standard_and_rewritten_environment_envelopes() {
+    let target = resolve_target(
+        Some(&Routes),
+        "shared-model",
+        Some("kimi-messages"),
+        ConversationMode::Code,
+    )
+    .unwrap();
+    for system_turns in [false, true] {
+        for rewritten in [false, true] {
+            let assignment = ConversationMessage::user_meta_js_utf16(
+                MessageId::new(),
+                "KEEP TASK �".into(),
+                "KEEP TASK ".encode_utf16().chain([0xd800]).collect(),
+            );
+            let mut history = vec![assignment.clone()];
+            let sections = vec![
+                "# Environment\nPrimary working directory: /old".into(),
+                format!(
+                    "You are {}powered by the model old-model.",
+                    if rewritten { "currently " } else { "" }
+                ),
+                "Today's date is 2026-01-01.".into(),
+            ];
+            inject_context(&mut history, &sections, system_turns);
+            history.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                "PROJECT POLICY".into(),
+            ));
+            let durable = history.clone();
+            let mut restored = state(&target);
+            restored.replace_initial_context = true;
+            restored.environment = Some(Arc::new(|_, _| SubagentPromptContext {
+                additional_context: vec![
+                    "# Environment\nPrimary working directory: /new".into(),
+                    "Model ID: kimi-k2.5.".into(),
+                    "Today's date is 2026-11-09.".into(),
+                ],
+                system_suffix: None,
+            }));
+            let rendered = restored.render(&target);
+            let projected = restored.project_context(&mut history, &rendered);
+            let wire = serde_json::to_string(&history).unwrap();
+            assert!(!wire.contains("Primary working directory: /old"), "{wire}");
+            assert!(!wire.contains("old-model"), "{wire}");
+            assert!(!wire.contains("2026-01-01"));
+            assert_eq!(wire.matches("Primary working directory: /new").count(), 1);
+            assert!(wire.contains("PROJECT POLICY"));
+            let source_blocks = match &assignment {
+                ConversationMessage::User { content, .. } => content,
+                _ => unreachable!(),
+            };
+            let restored_blocks = match history
+                .iter()
+                .find(|message| message.id() == assignment.id())
+                .unwrap()
+            {
+                ConversationMessage::User { content, .. } => content,
+                _ => unreachable!(),
+            };
+            assert!(
+                restored_blocks.ends_with(source_blocks),
+                "assignment UTF-16 sidecar survives exactly"
+            );
+            assert_eq!(durable.len(), if system_turns { 3 } else { 2 });
+            let retry = history.clone();
+            projected.project_context(&mut history, &rendered);
+            assert_eq!(retry, history);
+        }
+    }
+}

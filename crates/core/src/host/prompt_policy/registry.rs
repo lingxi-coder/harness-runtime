@@ -173,6 +173,22 @@ impl PromptRegistry {
 
 const PORTABLE_REMINDERS: &[PromptTemplateOverride] = &[
     PromptTemplateOverride {
+        key: "bg-session",
+        template: include_str!("../prompt_templates/generic-background.md"),
+    },
+    PromptTemplateOverride {
+        key: "bg-worktree-first",
+        template: include_str!("../prompt_templates/generic-background-worktree-first.md"),
+    },
+    PromptTemplateOverride {
+        key: "bg-before-edits",
+        template: include_str!("../prompt_templates/generic-background-before-edits.md"),
+    },
+    PromptTemplateOverride {
+        key: "bg-git",
+        template: include_str!("../prompt_templates/generic-background-git.md"),
+    },
+    PromptTemplateOverride {
         key: "subagent_consent",
         template: include_str!("../prompt_templates/subagent-consent.md"),
     },
@@ -185,7 +201,7 @@ const PORTABLE_REMINDERS: &[PromptTemplateOverride] = &[
 const BUNDLES: &[PromptBundle] = &[
     PromptBundle {
         id: "claude-code",
-        version: "2.1.319",
+        version: "2.1.319-lingxi.1",
         system: SystemPromptBinding::ClaudeCode,
         tools: ToolPromptBinding::ClaudeNative,
         memory: MemoryPromptBinding::ClaudeNative,
@@ -193,7 +209,7 @@ const BUNDLES: &[PromptBundle] = &[
     },
     PromptBundle {
         id: "claude-chat",
-        version: "2.1.319",
+        version: "2.1.319-lingxi.1",
         system: SystemPromptBinding::ClaudeChat,
         tools: ToolPromptBinding::ClaudeNative,
         memory: MemoryPromptBinding::ClaudeNative,
@@ -201,7 +217,7 @@ const BUNDLES: &[PromptBundle] = &[
     },
     PromptBundle {
         id: "generic-code-lean-v1",
-        version: "1",
+        version: "2",
         system: SystemPromptBinding::Template(include_str!(
             "../prompt_templates/generic-code-lean.md"
         )),
@@ -216,7 +232,7 @@ const BUNDLES: &[PromptBundle] = &[
     },
     PromptBundle {
         id: "generic-chat-lean-v1",
-        version: "1",
+        version: "2",
         system: SystemPromptBinding::Template(include_str!(
             "../prompt_templates/generic-chat-lean.md"
         )),

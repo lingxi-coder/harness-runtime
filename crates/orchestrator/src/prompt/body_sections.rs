@@ -72,7 +72,7 @@ fn feature(model: &str, capability: &str) -> bool {
     if model_capabilities::prompt_profile_for(model) == PromptProfile::FullHarness {
         return false;
     }
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = model_capabilities::prompt_capabilities_environment();
     model_capabilities::prompt_feature_enabled(
         model,
         capability,
@@ -86,7 +86,7 @@ fn capability(model: &str, name: &str) -> bool {
     if model_capabilities::prompt_profile_for(model) == PromptProfile::FullHarness {
         return false;
     }
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = model_capabilities::prompt_capabilities_environment();
     model_capabilities::prompt_capability(model, name, environment.as_deref(), None) == Some(true)
 }
 
@@ -105,7 +105,7 @@ pub(crate) fn is_communicating_model(model: &str) -> bool {
     if model_capabilities::prompt_profile_for(model) == PromptProfile::FullHarness {
         return false;
     }
-    let environment = std::env::var("CLAUDE_CODE_MODEL_CAPABILITIES").ok();
+    let environment = model_capabilities::prompt_capabilities_environment();
     model_capabilities::prompt_capability(
         model,
         "fable_5_mitigations",

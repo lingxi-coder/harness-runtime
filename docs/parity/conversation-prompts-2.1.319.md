@@ -234,3 +234,37 @@ Final compilation used a dedicated target cache after detecting another
 worktree's metadata in the shared cache. Direct test binaries use the same
 16 MiB stack setting as Cargo. Logs, request captures and source manifests are
 retained under `artifacts/prompts-319-fixes-20261109/work/` in the parent workspace.
+
+## Full-review fixes: route and context lifetime
+
+The full-review follow-up addresses all nine reported issues:
+
+| Area | Result and regression coverage |
+| --- | --- |
+| Teammate mode | Inherited trusted mode is selected before rendering; a live host renderer supplies the owning mode when inheritance is absent. Actual spawn tests cover Opus, Sonnet, GPT and Kimi, with and without inheritance, and fallback keeps Chat. |
+| Main tool gates | Advertising, dispatch and parent-tool deny checks use the physical request route through the existing tool-model normalization. Buffered Mod calls and concurrent routes cannot overwrite each other's gate; child gates retain the owning-session model. |
+| Input cap | The task, latest non-environment unit and exact environment seed remain mandatory, including `[task, latest tool pair, environment]` placement. Compact JSON bytes are counted, and a Mod rewrite checks its final projection before the provider call. Exact-cap and one-byte-under cases cover Inline instructions too. |
+| Cold restore | Both standard and rewritten environment envelopes are removed from User and API-System history before fresh context is projected. Assignment UTF-16 sidecars and project instructions survive. |
+| Common settings | Admitted generic teammates receive language and output-style deltas. Ordinary-child, bare-fork, isolated-context and attachment admission boundaries remain intact. |
+| Capability settings | `LINGXI_MODEL_CAPABILITIES` takes precedence over the upstream compatibility alias. Lean, rewrite, system-turn, communication, silence and budget selectors share the same reader. |
+| Background jobs | Portable bundles register background templates with actual job paths, durable-output guidance and isolation/Git constraints, selected using the admitted EnterWorktree and shell tools. Chat and Code cover GPT and Kimi. |
+| Silent clocks | Meta `turnCompanion` rows do not restart the silence clock. New positive and negative fixtures use the fixed artifact's real `U3` predicate. |
+| Initial budget | Product attachment/simple controls suppress the initial budget consistently with later attachments, using raw JavaScript string truthiness. Empty product values retain precedence over legacy aliases. |
+
+Claude host bundle versions are now `2.1.319-lingxi.1`; generic bundle versions
+are `2`. A same-route snapshot from the preceding renderer is invalidated while
+history and separately saved append sources remain available. The upstream
+artifact, SDK pin and default native body bytes are unchanged.
+
+Verification passed: 671 prompt tests across 13 packages and 110 additional
+lifecycle tests (781 distinct unit tests), five request byte-lock integration
+tests and the file-tool integration, seven pinned source oracles, six complete
+native bodies, eleven standalone policy tests and three captured native child
+fixtures. Sixteen real teammate-runtime requests against a mock API cover four
+models through initial language selection, a change, clearing and an unchanged
+follow-up; each request retains Chat and the assignment. Desktop/Mobile
+composition passed `cargo check`. These checks do not claim paid-provider or
+physical-device acceptance.
+
+Commands, source digests, request captures and verification logs are retained in
+`artifacts/prompts-319-review-fixes-20261109/work/` in the parent workspace.

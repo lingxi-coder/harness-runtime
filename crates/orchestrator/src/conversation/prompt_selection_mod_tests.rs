@@ -596,3 +596,165 @@ async fn changed_profile_rebuilds_tools_with_frozen_mode_and_preserves_custom_so
         .contains("You can access any file directly by using this tool."));
     assert_eq!(orch.session.lock().await.history, history);
 }
+
+#[tokio::test]
+async fn prompt_mod_buffered_tool_calls_dispatch_with_their_physical_model() {
+    for first_model in ["gpt-5.5", "claude-opus-5"] {
+        let second_model = if first_model == "gpt-5.5" {
+            "claude-opus-5"
+        } else {
+            "gpt-5.5"
+        };
+        let (directory, hooks) = mod_host(&[first_model, second_model]).await;
+        let mut first = mock_message_response(vec![serde_json::from_value(serde_json::json!({
+            "type":"tool_call", "id":"create_task", "name":"TaskCreate",
+            "input":{"subject":"Scoped task", "description":"route regression", "activeForm":"Working"}
+        })).unwrap()], Some("tool_use"));
+        first.id = "first-call".into();
+        first.model = first_model.into();
+        let api = Arc::new(MockApiClient::new(vec![first, answer(second_model)]));
+        let context = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            Vec::new(),
+        );
+        let mut tools = tool_api::ToolRegistry::new();
+        tools.register_builtin(Arc::new(
+            tool_task::TaskCreateTool::new(context.clone())
+                .with_config_home(directory.path().join("config")),
+        ));
+        tools.register_builtin(Arc::new(
+            tool_task::TaskUpdateTool::new(context)
+                .with_config_home(directory.path().join("config")),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new(
+                OrchestratorConfig {
+                    model: "gpt-5.5".into(),
+                    ..Default::default()
+                },
+                api.clone(),
+                Arc::new(tools),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                directory.path().to_path_buf(),
+            )
+            .with_hook_registry(hooks),
+        );
+        orch.run_turn("Create the task").await.unwrap();
+        let calls = api.captured_requests().await;
+        assert_eq!(calls.len(), 2);
+        for (call, model) in calls.iter().zip([first_model, second_model]) {
+            let OrchestratorApiRequest::Main(call) = call else {
+                panic!("main request")
+            };
+            assert_eq!(
+                call.tools.iter().any(|tool| tool.name == "TaskCreate"),
+                model == "gpt-5.5"
+            );
+        }
+        let events = format!("{:?}", output.snapshot().await);
+        assert_eq!(
+            events.contains("Task #1 created successfully: Scoped task"),
+            first_model == "gpt-5.5",
+            "{events}"
+        );
+        assert_eq!(
+            events.contains("No such tool available: TaskCreate"),
+            first_model != "gpt-5.5",
+            "{events}"
+        );
+        assert_eq!(
+            orch.tools.main_loop_model().as_deref(),
+            Some("gpt-5.5"),
+            "child gate remains the owning session model"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prompt_concurrent_routes_keep_tool_advertising_and_dispatch_in_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig {
+            model: "gpt-5.5".into(),
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(vec![])),
+        task_registry(),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        directory.path().to_path_buf(),
+    );
+    let barrier = tokio::sync::Barrier::new(2);
+    let check = |model: &'static str| {
+        let orch = &orch;
+        let barrier = &barrier;
+        async move {
+            let route = crate::query_model::ModelRoute {
+                model: model.into(),
+                profile: None,
+            };
+            let policy = orch.prompt_policy_for_route(model, None).await.unwrap();
+            crate::query_model::ROUTE
+                .scope(
+                    Some(route.clone()),
+                    PROMPT_POLICY_OVERRIDE.scope((route, policy), async {
+                        let (wire, _) = orch.build_wire_tools().await.unwrap();
+                        assert_eq!(
+                            wire.iter().any(|tool| tool.name == "TaskCreate"),
+                            model == "gpt-5.5"
+                        );
+                        barrier.wait().await;
+                        assert_eq!(
+                            orch.find_dispatchable_tool("TaskCreate").is_some(),
+                            model == "gpt-5.5"
+                        );
+                    }),
+                )
+                .await;
+        }
+    };
+    tokio::join!(check("gpt-5.5"), check("claude-opus-5"));
+}
+
+#[test]
+fn prompt_initial_budget_and_durable_attachment_gates_agree() {
+    const MARKER: &str = "LINGXI_PROMPT_REVIEW_LIVE_GATES";
+    if std::env::var_os(MARKER).is_some() {
+        let initial = crate::prompt::total_tokens::system_prompt_section("claude-opus-5").is_some();
+        let durable =
+            crate::conversation::native_policy_attachments::NativeProactivityGates::current(false)
+                .attachments_enabled;
+        assert_eq!(initial, durable);
+        return;
+    }
+    for key in [branding::DISABLE_ATTACHMENTS_ENV, branding::SIMPLE_ENV] {
+        for value in ["1", "false", "0", ""] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "conversation::prompt_selection::physical_request_tests::prompt_initial_budget_and_durable_attachment_gates_agree", "--nocapture"]).env(MARKER, "1");
+            for key in [
+                branding::SIMPLE_ENV,
+                branding::DISABLE_ATTACHMENTS_ENV,
+                "CLAUDE_CODE_SIMPLE",
+                "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+                branding::MODEL_CAPABILITIES_ENV,
+                "CLAUDE_CODE_MODEL_CAPABILITIES",
+                "CLAUDE_CODE_TOTAL_TOKENS_REMINDER",
+            ] {
+                command.env_remove(key);
+            }
+            let output = command.env(key, value).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}

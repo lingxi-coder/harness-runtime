@@ -377,37 +377,27 @@ pub(crate) fn remove_native_environment_context(messages: &mut Vec<ConversationM
             .collect::<Vec<_>>()
             .join("\n");
         !(text.starts_with("# Environment\n")
-            && text.contains("\n\nYou are powered by the model")
+            && (text.contains("\n\nYou are powered by the model")
+                || text.contains("\n\nYou are currently powered by the model"))
             && text.contains("\n\nToday's date is "))
     });
     for message in messages {
         let ConversationMessage::User { content, .. } = message else {
             continue;
         };
-        let prefix = [
-            "<system-reminder>\n# Environment\n",
-            "<system-reminder>\nYou are powered by the model",
-            "<system-reminder>\nToday's date is ",
-        ];
-        let matches = content.len() >= prefix.len()
-            && content
-                .iter()
-                .zip(prefix)
-                .all(|(block, expected)| match block {
-                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
-                        text.starts_with(expected)
-                    }
-                    _ => false,
-                });
-        if matches {
-            content.drain(..prefix.len());
-        } else if content.len() >= 3
+        if content.len() >= 3
             && content[0]
                 .visible_text()
                 .is_some_and(|text| text.starts_with("<system-reminder>\n# Environment\n"))
-            && content[1]
-                .visible_text()
-                .is_some_and(|text| text.starts_with("<system-reminder>\nModel ID: "))
+            && content[1].visible_text().is_some_and(|text| {
+                [
+                    "<system-reminder>\nYou are powered by the model",
+                    "<system-reminder>\nYou are currently powered by the model",
+                    "<system-reminder>\nModel ID: ",
+                ]
+                .iter()
+                .any(|prefix| text.starts_with(prefix))
+            })
             && content[2]
                 .visible_text()
                 .is_some_and(|text| text.starts_with("<system-reminder>\nToday's date is "))

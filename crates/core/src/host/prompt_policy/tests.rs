@@ -179,7 +179,7 @@ fn default_matrix_keeps_claude_across_supported_transports() {
             let policy = resolve_prompt_policy(target);
             assert!(policy.tools.is_native(), "{provider}: {model}");
             assert!(policy.reminders.is_native());
-            assert_eq!(policy.bundle_version, "2.1.319");
+            assert_eq!(policy.bundle_version, "2.1.319-lingxi.1");
             assert_eq!(
                 policy.system,
                 if mode == ConversationMode::Chat {
@@ -305,7 +305,7 @@ fn fingerprint_fences_mode_provider_profile_model_version_and_template_content()
     changed.target.request_model = "another-model".into();
     assert_ne!(original, changed.fingerprint());
     changed = policy.clone();
-    changed.bundle_version = "2";
+    changed.bundle_version = "3";
     assert_ne!(original, changed.fingerprint());
     changed = policy.clone();
     changed.system = SystemPromptBinding::Template("Changed template");

@@ -3404,12 +3404,7 @@ async fn append_native_settings_prompt_attachments(
     let Some(provider) = ctx.native_settings_prompt_provider.clone() else {
         return;
     };
-    if !ctx.native_settings_prompt_context.is_admitted()
-        || ctx
-            .prompt_policy
-            .as_ref()
-            .is_some_and(|policy| !policy.reminders.is_native())
-    {
+    if !ctx.native_settings_prompt_context.is_admitted() {
         return;
     }
     let rows = provider
@@ -4688,6 +4683,10 @@ async fn run_subagent_loop(
                         &model_snapshot,
                         &ctx.instruction_context,
                         ctx.max_input_bytes_per_turn,
+                        prompt_context
+                            .prompt_state
+                            .as_ref()
+                            .map(|state| &state.seeded_context),
                     ) {
                         Ok(messages) => messages,
                         Err(message) => {
@@ -7450,6 +7449,7 @@ fn append_serialized_input_unit(current_bytes: u64, unit: &SerializedInputUnit) 
 fn cap_input_bytes(
     messages: &[lingxi_core::types::ConversationMessage],
     max_bytes: Option<u64>,
+    mandatory_context: &[MessageId],
 ) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
     let Some(max) = max_bytes else {
         return Ok(messages.to_vec());
@@ -7477,9 +7477,15 @@ fn cap_input_bytes(
     // result pair) and is also mandatory. Reject when preserving it together
     // with the seed would exceed the cap rather than silently sending stale,
     // incomplete history. Older units may be dropped as whole units.
-    let mut selected_tail: Vec<&[lingxi_core::types::ConversationMessage]> = Vec::new();
+    let mut selected = vec![false; units.len()];
+    selected[0] = true;
     let mut selected_bytes = head_bytes;
-    if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
+    if let Some((newest_index, newest)) =
+        units.iter().enumerate().skip(1).rev().find(|(_, unit)| {
+            unit.iter()
+                .any(|row| !mandatory_context.contains(&row.id()))
+        })
+    {
         let newest_measurement = measure_serialized_input_unit(newest);
         let head_and_newest_bytes =
             append_serialized_input_unit(selected_bytes, &newest_measurement);
@@ -7489,37 +7495,76 @@ fn cap_input_bytes(
                 "mandatory latest tool/message unit exceeds max_input_bytes_per_turn when combined with the initial prompt ({head_bytes} + {newest_bytes} > {max})"
             ));
         }
-        selected_tail.push(newest);
+        selected[newest_index] = true;
         selected_bytes = head_and_newest_bytes;
+    }
+
+    // A mid-conversation API-system environment seed carries the current
+    // model, cwd and date. Preserve its exact unit and ordering just like the
+    // task and latest continuation; dropping it would silently change meaning.
+    for (index, unit) in units.iter().enumerate().skip(1) {
+        if selected[index] || !unit.iter().any(|row| mandatory_context.contains(&row.id())) {
+            continue;
+        }
+        let measurement = measure_serialized_input_unit(unit);
+        let candidate_bytes = append_serialized_input_unit(selected_bytes, &measurement);
+        if candidate_bytes > max {
+            return Err(format!(
+                "mandatory environment context exceeds max_input_bytes_per_turn when combined with the initial prompt and latest unit ({candidate_bytes} > {max})"
+            ));
+        }
+        selected[index] = true;
+        selected_bytes = candidate_bytes;
     }
 
     // Fill from the newest older unit backwards, keeping each tool_use /
     // tool_result pair atomic. A unit that does not fit is dropped and the
     // search continues; no over-cap fallback is permitted. Each optional unit
     // is measured only when reached, once, in newest-to-oldest order.
-    if units.len() > 2 {
-        for unit in units[1..units.len() - 1].iter().rev().copied() {
+    if units.len() > 1 {
+        for index in (1..units.len()).rev() {
+            if selected[index] {
+                continue;
+            }
+            let unit = units[index];
             let measurement = measure_serialized_input_unit(unit);
             let candidate_bytes = append_serialized_input_unit(selected_bytes, &measurement);
             if candidate_bytes <= max {
-                selected_tail.push(unit);
+                selected[index] = true;
                 selected_bytes = candidate_bytes;
             }
         }
     }
 
-    selected_tail.reverse();
-    let mut out =
-        Vec::with_capacity(head.len() + selected_tail.iter().map(|unit| unit.len()).sum::<usize>());
-    out.extend(head.iter().cloned());
-    for unit in selected_tail {
-        out.extend(unit.iter().cloned());
-    }
+    let out = units
+        .iter()
+        .zip(selected)
+        .filter(|(_, keep)| *keep)
+        .flat_map(|(unit, _)| unit.iter().cloned())
+        .collect();
     debug_assert!(
         selected_bytes <= max,
         "cap_input_bytes must never return an over-cap request"
     );
     Ok(out)
+}
+
+/// A physical Mod rewrite can grow the environment after the runner trimmed
+/// history. Validate the final projection without trimming it again: its first
+/// row may now be the Inline instruction prefix, rather than the task seed.
+pub(crate) fn validate_request_input_bytes(
+    messages: &[ConversationMessage],
+    max_bytes: Option<u64>,
+) -> Result<(), LlmError> {
+    if let Some(max) = max_bytes {
+        let bytes = measure_serialized_input_unit(messages).serialized_bytes;
+        if bytes > max {
+            return Err(LlmError::InvalidRequest {
+                message: format!("physical request exceeds max_input_bytes_per_turn after prompt projection ({bytes} > {max})"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Inline runQuery receives userContext separately from durable messages.
@@ -7528,12 +7573,14 @@ fn instruction_request_messages(
     history: &[ConversationMessage],
     context: &lingxi_core::host::instructions::InstructionContext,
     max_bytes: Option<u64>,
+    seed: Option<&crate::prompt_policy::PromptContextSeed>,
 ) -> Result<Vec<ConversationMessage>, String> {
+    let mandatory = seed.map_or(&[][..], |seed| seed.system_messages.as_slice());
     if context.rendering != lingxi_core::host::instructions::InstructionRendering::Inline {
-        return cap_input_bytes(history, max_bytes);
+        return cap_input_bytes(history, max_bytes, mandatory);
     }
     let Some(reminder) = context.reminder_source() else {
-        return cap_input_bytes(history, max_bytes);
+        return cap_input_bytes(history, max_bytes, mandatory);
     };
     let reminder_units = reminder
         .string_units("")
@@ -7544,7 +7591,7 @@ fn instruction_request_messages(
         reminder_units,
     );
     if history.is_empty() {
-        return cap_input_bytes(&[prefix], max_bytes);
+        return cap_input_bytes(&[prefix], max_bytes, mandatory);
     }
     // Reserve the prefix bytes without making it the trimming algorithm's
     // mandatory task unit; the actual initial task must remain mandatory too.
@@ -7557,7 +7604,7 @@ fn instruction_request_messages(
                 .ok_or_else(|| "instruction context exceeds max_input_bytes_per_turn".to_string())
         })
         .transpose()?;
-    let history = cap_input_bytes(history, history_cap)?;
+    let history = cap_input_bytes(history, history_cap, mandatory)?;
     let mut messages = Vec::with_capacity(history.len() + 1);
     messages.push(prefix);
     messages.extend(history);

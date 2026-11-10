@@ -179,6 +179,9 @@ extern crate self as lingxi_llm_client;
 extern crate self as llm_runtime;
 extern crate self as branding;
 pub const DOT_DIR: &str = ".lingxi";
+pub const MODEL_CAPABILITIES_ENV: &str = "LINGXI_MODEL_CAPABILITIES";
+pub const DISABLE_ATTACHMENTS_ENV: &str = "LINGXI_DISABLE_ATTACHMENTS";
+pub const SIMPLE_ENV: &str = "LINGXI_SIMPLE";
 pub mod providers {pub mod anthropic {pub mod system_prompt {pub type PromptText = ();}}}
 pub mod model {pub mod context_window {
 pub fn context_window_for_model(_: &str, _: &[String]) -> u64 {panic!("countdown is outside this padded/default replay matrix")}
@@ -213,8 +216,13 @@ pub mod effort {
     for name in ["new", "id_units", "id_equals_ascii", "id_base_units", "id_base_equals_ascii"]:
         source += extract(mod_path, mod_source, name) + "\n"
     source += "}\n"
-    for name in ["locked_templates", "body_sections", "env_block", "memory_section", "bg_session", "total_tokens"]:
+    for name in ["locked_templates", "body_sections", "env_block", "memory_section", "bg_session", "portable_background", "total_tokens"]:
         source += module_path(name, PROMPT / (name + ".rs"))
+    silent_path = PROMPT / "silent_turn.rs"
+    silent_source = read_source(silent_path)
+    source += "pub mod silent_turn {\n"
+    source += extract(silent_path, silent_source, "is_enabled") + "\n"
+    source += extract(silent_path, silent_source, "enabled_with_override") + "\n}\n"
     source += "pub mod env_meta {\n"
     source += extract(env_meta_path, env_meta_source, "marketing_name_for_model") + "\n"
     source += extract(env_meta_path, env_meta_source, "knowledge_cutoff_for_model") + "\n}\n"
