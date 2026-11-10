@@ -63,6 +63,12 @@ pub struct HookContext {
     pub publication_guard: Option<Arc<dyn crate::attachment::HookPublicationGuard>>,
     /// Live history for prompt evaluation; never serialized into command/HTTP input.
     pub prompt_transcript: Option<crate::PromptHookTranscript>,
+    /// Provenance from the actual MCP tool catalog entry. Never populate this
+    /// by splitting a tool name: configured names can impersonate SDK prefixes.
+    pub mcp_server: Option<crate::hook_payload::HookMcpServerProvenance>,
+    /// Host-classified tool cancellation, supplied to PostToolUseFailure.
+    /// A known non-interruption is serialized as false, independently of errors.
+    pub tool_was_interrupted: Option<bool>,
     /// Session this event belongs to.
     pub session_id: SessionId,
     /// Active agent at the moment of dispatch (`None` for engine-global

@@ -399,6 +399,15 @@ impl Tool for SeamTool {
     fn is_mcp(&self) -> bool {
         self.mcp
     }
+    fn mcp_server_provenance(&self) -> Option<&mcp::McpServerProvenance> {
+        static SERVER: std::sync::OnceLock<mcp::McpServerProvenance> = std::sync::OnceLock::new();
+        self.mcp.then(|| {
+            SERVER.get_or_init(|| mcp::McpServerProvenance {
+                name: "wire audit".into(),
+                source: "dynamic".into(),
+            })
+        })
+    }
     fn requires_user_interaction(&self) -> bool {
         self.requires_ui
     }
@@ -545,6 +554,166 @@ async fn dispatch(
     };
     let inputs = seen.lock().unwrap().clone();
     (text, inputs)
+}
+
+#[tokio::test]
+async fn native_322_mcp_provenance_reaches_tool_and_permission_hooks() {
+    type Seen = Arc<
+        Mutex<
+            Vec<(
+                HookEventType,
+                Option<hooks::HookMcpServerProvenance>,
+                Option<hooks::hook_payload::EffortLevel>,
+            )>,
+        >,
+    >;
+    struct Capture(Seen);
+    #[async_trait]
+    impl hooks::BuiltinHookHandler for Capture {
+        fn id(&self) -> &str {
+            "capture-mcp-provenance"
+        }
+        async fn handle(
+            &self,
+            event: &hooks::HookEvent,
+            ctx: &hooks::HookContext,
+        ) -> hooks::HookResult {
+            self.0.lock().unwrap().push((
+                event.event_type(),
+                ctx.mcp_server.clone(),
+                ctx.effort.clone(),
+            ));
+            let mut response = hooks::HookResponse::default();
+            if event.event_type() == HookEventType::PermissionRequest {
+                response.permission_request_result = Some(hooks::PermissionRequestResult::Allow {
+                    updated_input: None,
+                    updated_permissions: None,
+                });
+            }
+            hooks::HookResult {
+                outcome: hooks::HookOutcome::Success,
+                stdout: "".into(),
+                stderr: "".into(),
+                exit_code: Some(0),
+                response: Some(response),
+            }
+        }
+    }
+    for (mcp, ask) in [(false, false), (true, false), (false, true), (true, true)] {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks_registry = hooks::HookRegistry::new();
+        hooks_registry.register(hooks::HookDefinition {
+            id: HookId::new(),
+            name: "capture-mcp-provenance".into(),
+            events: vec![
+                HookEventType::PreToolUse,
+                HookEventType::PermissionRequest,
+                HookEventType::PostToolUse,
+            ],
+            if_condition: None,
+            executor: hooks::HookExecutor::Builtin {
+                handler_id: "capture-mcp-provenance".into(),
+            },
+            source: hooks::HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+            on_failure: None,
+        });
+        let mut executor = hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(hooks_registry)),
+            Arc::new(UnusedHookHttp),
+            Arc::new(UnusedHookRuntime),
+        );
+        executor.register_builtin(Arc::new(Capture(seen.clone())));
+        let tool_seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SeamTool {
+            coerce: false,
+            ask,
+            mcp,
+            workflow_read_ask: false,
+            requires_ui: false,
+            seen: tool_seen.clone(),
+            seen_context: None,
+        }));
+        let api = Arc::new(MockApiClient::new(vec![]));
+        api.set_effort_command_snapshot(Some(lingxi_core::host::effort::EffortCommandSnapshot {
+            model: "claude-sonnet-4-6".into(),
+            settings_key: "claude-sonnet-4-6".into(),
+            session: Default::default(),
+            primary: None,
+            capabilities: lingxi_core::host::effort::EffortCapabilities {
+                supported: true,
+                max: true,
+                ..Default::default()
+            },
+            state: lingxi_core::host::effort::EffortState {
+                hook: Some(json!("max")),
+                settings_cap: Some("medium".into()),
+                ..Default::default()
+            },
+            user_settings_path: None,
+            save_default: false,
+            organization_start_effort: None,
+        }));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(registry),
+            Arc::new(executor),
+            Arc::new(PromptSpyGate { rule_source: None }),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        dispatch_tool_uses_tracked(
+            &orch,
+            &[(
+                ToolUseId::new(),
+                "Seam".into(),
+                tool_api::tool_trait::generated_builtin_result(&json!({"timeout":1})),
+                None,
+            )],
+            None,
+        )
+        .await
+        .unwrap();
+        // This test tool's ask is an explicit sandbox override. A hook cannot
+        // bypass that manual approval, but its PermissionRequest still receives
+        // the same metadata as the pre-hook and successful post-hook.
+        assert_eq!(tool_seen.lock().unwrap().len(), usize::from(!ask));
+        let captured = seen.lock().unwrap();
+        assert_eq!(
+            captured
+                .iter()
+                .map(|(event, _, _)| event.clone())
+                .collect::<Vec<_>>(),
+            if ask {
+                vec![HookEventType::PreToolUse, HookEventType::PermissionRequest]
+            } else {
+                vec![HookEventType::PreToolUse, HookEventType::PostToolUse]
+            }
+        );
+        let expected = mcp.then(|| hooks::HookMcpServerProvenance {
+            name: "wire audit".into(),
+            source: "dynamic".into(),
+        });
+        assert!(
+            captured
+                .iter()
+                .all(|(_, server, effort)| *server == expected
+                    && effort
+                        .as_ref()
+                        .is_some_and(|effort| effort.level == "medium")),
+            "{captured:?}"
+        );
+    }
 }
 
 #[tokio::test]

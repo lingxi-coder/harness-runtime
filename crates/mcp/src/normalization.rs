@@ -72,6 +72,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalization_322_matches_native_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_2_1_322.json"))
+                .expect("native MCP fixture");
+        for case in fixture["normalizationCases"].as_array().expect("cases") {
+            assert_eq!(
+                normalize_name_for_mcp(case["input"].as_str().unwrap()),
+                case["expected"].as_str().unwrap(),
+            );
+        }
+    }
+
+    #[test]
     fn reserved_names_match_normalizer_and_raw() {
         assert!(is_reserved_mcp_server_name("claude-in-chrome"));
         assert!(is_reserved_mcp_server_name("computer-use"));

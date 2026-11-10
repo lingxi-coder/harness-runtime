@@ -442,7 +442,8 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
 
 /// Schema version tag written into every persisted entry (`v` in the oracle
 /// schema `B`, literal `1` there — this port's own numbering, bumped to `2`
-/// for the full catalog and `3` for source schema-drop diagnostics; see
+/// for the full catalog, `3` for source schema-drop diagnostics, and `4` for
+/// full source descriptions used by the separate inline/ToolSearch budgets; see
 /// [`DiscoveryCacheEntry`]).
 /// A version this store doesn't recognize is treated as
 /// [`EntryLookup::Corrupt`] — never trusted, never an error. A `v1` entry
@@ -451,7 +452,7 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
 /// are rejected by the explicit `entry.version != CACHE_SCHEMA_VERSION` check in
 /// [`DiscoveryCacheStore::load`], never trusted with a silently-defaulted
 /// (empty) catalog.
-pub const CACHE_SCHEMA_VERSION: u32 = 3;
+pub const CACHE_SCHEMA_VERSION: u32 = 4;
 
 /// The feature opt-in env var (oracle `MCP_DISCOVERY_CACHE`, read through a
 /// boolean-coerced env schema — `a.MCP_DISCOVERY_CACHE===true`/`===false`).
@@ -922,7 +923,7 @@ pub struct DiscoveryCacheServerInfo {
 
 /// One persisted discovery-cache entry.
 ///
-/// Schema v3: carries the FULL catalog and schema-drop diagnostics a cache hit
+/// Schema v4: carries the FULL catalog and schema-drop diagnostics a cache hit
 /// would need to serve a server without dialing
 /// (tools/resources/resource_templates/prompts + capabilities), not just the
 /// metadata v1 needed to make the fresh/stale/miss decision. Still narrower
@@ -2446,11 +2447,12 @@ mod tests {
     fn store_load_wrong_schema_version_is_corrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
-        // Otherwise-complete v2 shape, but an outdated version — must be
+        // Otherwise-complete v3 shape, whose descriptions may already have
+        // been irreversibly truncated to the old budget — must be
         // Corrupt via the explicit version check, not the parse-failure path
         // (unlike the v1-shape test below).
         let bad = serde_json::json!({
-            "v": 2,
+            "v": 3,
             "cache_key": "k",
             "saved_at_ms": 1,
             "consecutive_refresh_failures": 0,

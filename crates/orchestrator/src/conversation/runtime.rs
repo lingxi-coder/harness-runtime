@@ -381,9 +381,9 @@ pub(crate) struct ModPromptContextCache {
 pub(crate) struct ModToolDescribeCache {
     pub(crate) generation: u64,
     /// Each tool is described once for its exact source text, default defer
-    /// flag, provider identity, and loaded Mod catalog.
+    /// flag, provider identity, loading mode, and loaded Mod catalog.
     pub(crate) answers: std::collections::HashMap<
-        String,
+        (String, bool),
         (
             lingxi_core::types::utf16_json::Utf16JsonProjection,
             (u64, u64),

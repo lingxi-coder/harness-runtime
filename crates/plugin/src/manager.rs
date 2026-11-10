@@ -3633,6 +3633,13 @@ fn extract_frontmatter(raw: &str) -> Option<&str> {
 
 fn stamp_plugin_mcp_metadata(config: &mut McpServerConfig) {
     config.metadata.agent_source = Some(mcp::McpAgentSource::Plugin);
+    // Hook provenance describes ownership of this MCP config. `agent_source`
+    // also appears on inline servers from plugin-authored agents and cannot
+    // alone establish that the MCP config itself belongs to a plugin.
+    config
+        .metadata
+        .provenance_source
+        .get_or_insert_with(|| "plugin".into());
 }
 
 /// Installed plugin identity used for `pluginConfigs` and plugin-secret
@@ -4568,6 +4575,11 @@ mod unload_tests {
 
         assert_eq!(cfg.metadata.transport.as_deref(), Some("sdk"));
         assert_eq!(cfg.metadata.agent_source, Some(mcp::McpAgentSource::Plugin));
+        assert_eq!(cfg.metadata.provenance_source.as_deref(), Some("plugin"));
+        assert_eq!(mcp::McpServerProvenance::from_config(&cfg).source, "plugin");
+        cfg.metadata.provenance_source = Some("builtin".into());
+        stamp_plugin_mcp_metadata(&mut cfg);
+        assert_eq!(cfg.metadata.provenance_source.as_deref(), Some("builtin"));
     }
 
     struct FailOnceDisconnectTransport {

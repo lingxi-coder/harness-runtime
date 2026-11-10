@@ -220,13 +220,23 @@ pub struct HookSessionCron {
     pub prompt: Utf16JsonProjection,
 }
 
+/// Authored MCP server identity supplied by the tool catalog, never inferred
+/// from a tool-name prefix. `source` is an open set so an unknown configured
+/// source cannot accidentally acquire SDK trust (Claude Code 2.1.322 `QIr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookMcpServerProvenance {
+    #[serde(with = "super::response::raw_exact_hook_text")]
+    pub name: ExactHookText,
+    #[serde(with = "super::response::raw_exact_hook_text")]
+    pub source: ExactHookText,
+}
+
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
 /// Field meanings track claude-code exactly; see the schema reference above.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PreToolUsePayload {
-    pub hook_event_name: HookEventNamePre,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -245,10 +255,14 @@ pub struct PreToolUsePayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+    pub hook_event_name: HookEventNamePre,
     pub tool_name: String,
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub tool_input: HookJson,
     pub tool_use_id: String,
+    /// Present only for a catalog-backed MCP tool; appended after event fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_server: Option<HookMcpServerProvenance>,
 }
 
 /// Wire-format `PostToolUse` payload (1:1 with `coreSchemas.ts:436-446`).
@@ -257,7 +271,6 @@ pub struct PreToolUsePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PostToolUsePayload {
-    pub hook_event_name: HookEventNamePost,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -272,6 +285,7 @@ pub struct PostToolUsePayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+    pub hook_event_name: HookEventNamePost,
     pub tool_name: String,
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub tool_input: HookJson,
@@ -283,6 +297,9 @@ pub struct PostToolUsePayload {
     /// permission-prompt and hook time.").
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub duration_ms: Option<u64>,
+    /// Present only for a catalog-backed MCP tool; appended after event fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_server: Option<HookMcpServerProvenance>,
 }
 
 /// Wire-format `Stop` payload (1:1 with `coreSchemas.ts:513-527`
@@ -571,7 +588,6 @@ pub struct StopFailurePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PostToolUseFailurePayload {
-    pub hook_event_name: HookEventNamePostToolUseFailure,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -586,6 +602,7 @@ pub struct PostToolUseFailurePayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+    pub hook_event_name: HookEventNamePostToolUseFailure,
     pub tool_name: String,
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub tool_input: HookJson,
@@ -598,6 +615,9 @@ pub struct PostToolUseFailurePayload {
     /// `is_interrupt`; schema `.number().optional()`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub duration_ms: Option<u64>,
+    /// Present only for a catalog-backed MCP tool; appended after event fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_server: Option<HookMcpServerProvenance>,
 }
 
 /// Wire-format `SessionEnd` payload (1:1 with `coreSchemas.ts:758-765`
@@ -910,7 +930,6 @@ pub struct NotificationPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PermissionRequestPayload {
-    pub hook_event_name: HookEventNamePermissionRequest,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -925,6 +944,7 @@ pub struct PermissionRequestPayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+    pub hook_event_name: HookEventNamePermissionRequest,
     pub tool_name: String,
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub tool_input: HookJson,
@@ -935,6 +955,9 @@ pub struct PermissionRequestPayload {
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
     pub permission_suggestions: Option<HookJson>,
+    /// Present only for a catalog-backed MCP tool; appended after event fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_server: Option<HookMcpServerProvenance>,
 }
 
 /// Wire-format `PermissionDenied` payload (1:1 with `coreSchemas.ts:461-471`
@@ -947,7 +970,6 @@ pub struct PermissionRequestPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PermissionDeniedPayload {
-    pub hook_event_name: HookEventNamePermissionDenied,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -962,12 +984,16 @@ pub struct PermissionDeniedPayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+    pub hook_event_name: HookEventNamePermissionDenied,
     pub tool_name: String,
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub tool_input: HookJson,
     pub tool_use_id: String,
     #[serde(with = "crate::definition::hook_if_pattern_source")]
     pub reason: Utf16JsonProjection,
+    /// Present only for a catalog-backed MCP tool; appended after event fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_server: Option<HookMcpServerProvenance>,
 }
 
 /// Wire-format `Setup` payload (1:1 with `coreSchemas.ts:504-511`
@@ -2061,13 +2087,14 @@ pub fn parse_response_projection(
             ExactHookText::from_json_projection(projection, "/terminalSequence");
     }
 
-    // Legacy top-level decision uses a JS truthiness guard: empty string is
-    // skipped, but an unrecognized non-empty string rejects the response.
+    // The native output schema validates enum membership before its result
+    // processor runs, so an empty spelling is invalid despite the later JS
+    // processor's truthiness guard.
     match obj
         .get_property("decision")
         .and_then(|value| value.as_str())
     {
-        None | Some("") => {}
+        None => {}
         Some("block") => resp.decision = Some(HookDecision::Block),
         Some("approve") => resp.decision = Some(HookDecision::Approve),
         Some(other) => {
@@ -2103,31 +2130,138 @@ pub fn parse_response_projection(
             });
         }
 
-        if expected_event != "PermissionRequest" {
+        if !matches!(
+            name,
+            "PreToolUse"
+                | "UserPromptSubmit"
+                | "UserPromptExpansion"
+                | "SessionStart"
+                | "Setup"
+                | "PreModelSwitch"
+                | "PostModelSwitch"
+                | "SubagentStart"
+                | "PostToolUse"
+                | "PostToolUseFailure"
+                | "PostToolBatch"
+                | "Stop"
+                | "SubagentStop"
+                | "PermissionDenied"
+                | "Notification"
+                | "PermissionRequest"
+                | "Elicitation"
+                | "ElicitationResult"
+                | "CwdChanged"
+                | "FileChanged"
+                | "WorktreeCreate"
+                | "MessageDisplay"
+        ) {
+            return Err(HookResponseParseError::Schema {
+                field: "hookSpecificOutput.hookEventName".into(),
+                expected: "supported hook output event",
+                actual: "invalid value",
+            });
+        }
+        if name == "WorktreeCreate" {
+            validate_required_field_type_at(
+                hs,
+                "worktreePath",
+                "hookSpecificOutput.worktreePath",
+                "string",
+                is_json_string,
+            )?;
+        }
+
+        // Each member belongs to one arm of the native output union. A
+        // field authored for another event is unknown and stripped, rather
+        // than validated or allowed to mutate this event's response.
+        if expected_event == "PreToolUse" {
             validate_optional_nested_field_type(hs, "updatedInput", "object", is_json_object)?;
         }
-        validate_optional_nested_field_type(hs, "classifierContext", "string", is_json_string)?;
-        validate_optional_nested_field_type(hs, "additionalContext", "string", is_json_string)?;
-        validate_optional_nested_field_type(hs, "retry", "boolean", is_json_boolean)?;
-        validate_optional_nested_field_type(hs, "permissionDecision", "string", is_json_string)?;
-        validate_optional_nested_field_type(
-            hs,
-            "permissionDecisionReason",
-            "string",
-            is_json_string,
-        )?;
-        validate_optional_nested_field_type(hs, "action", "string", is_json_string)?;
-        validate_optional_nested_field_type(hs, "sessionTitle", "string", is_json_string)?;
-        validate_optional_nested_field_type(
-            hs,
-            "suppressOriginalPrompt",
-            "boolean",
-            is_json_boolean,
-        )?;
-        validate_optional_nested_field_type(hs, "displayContent", "string", is_json_string)?;
-        validate_optional_string_array(hs, "watchPaths")?;
-        validate_optional_nested_field_type(hs, "initialUserMessage", "string", is_json_string)?;
-        validate_optional_nested_field_type(hs, "reloadSkills", "boolean", is_json_boolean)?;
+        if expected_event == "PostToolUse" {
+            validate_optional_nested_field_type(hs, "classifierContext", "string", is_json_string)?;
+        }
+        let accepts_context = matches!(
+            expected_event,
+            "PreToolUse"
+                | "UserPromptSubmit"
+                | "UserPromptExpansion"
+                | "SessionStart"
+                | "Setup"
+                | "PostModelSwitch"
+                | "SubagentStart"
+                | "PostToolUse"
+                | "PostToolUseFailure"
+                | "PostToolBatch"
+                | "Stop"
+                | "SubagentStop"
+                | "Notification"
+        );
+        if accepts_context {
+            validate_optional_nested_field_type(hs, "additionalContext", "string", is_json_string)?;
+        }
+        if expected_event == "PermissionDenied" {
+            validate_optional_nested_field_type(hs, "retry", "boolean", is_json_boolean)?;
+        }
+        if matches!(expected_event, "PreToolUse" | "PreModelSwitch") {
+            validate_optional_nested_field_type(
+                hs,
+                "permissionDecision",
+                "string",
+                is_json_string,
+            )?;
+            validate_optional_nested_field_type(
+                hs,
+                "permissionDecisionReason",
+                "string",
+                is_json_string,
+            )?;
+        }
+        if matches!(expected_event, "Elicitation" | "ElicitationResult") {
+            validate_optional_nested_field_type(hs, "action", "string", is_json_string)?;
+            validate_optional_nested_field_type(hs, "content", "object", is_json_object)?;
+            if let Some(action) = hs
+                .get_property("action")
+                .and_then(|value| value.as_str())
+                .filter(|_| matches!(expected_event, "Elicitation" | "ElicitationResult"))
+            {
+                if !matches!(action, "accept" | "decline" | "cancel") {
+                    return Err(HookResponseParseError::Schema {
+                        field: "hookSpecificOutput.action".into(),
+                        expected: "\"accept\" | \"decline\" | \"cancel\"",
+                        actual: "invalid value",
+                    });
+                }
+            }
+        }
+        if matches!(expected_event, "UserPromptSubmit" | "SessionStart") {
+            validate_optional_nested_field_type(hs, "sessionTitle", "string", is_json_string)?;
+        }
+        if matches!(expected_event, "UserPromptSubmit" | "UserPromptExpansion") {
+            validate_optional_nested_field_type(
+                hs,
+                "suppressOriginalPrompt",
+                "boolean",
+                is_json_boolean,
+            )?;
+        }
+        if expected_event == "MessageDisplay" {
+            validate_optional_nested_field_type(hs, "displayContent", "string", is_json_string)?;
+        }
+        if matches!(
+            expected_event,
+            "CwdChanged" | "FileChanged" | "SessionStart"
+        ) {
+            validate_optional_string_array(hs, "watchPaths")?;
+        }
+        if expected_event == "SessionStart" {
+            validate_optional_nested_field_type(
+                hs,
+                "initialUserMessage",
+                "string",
+                is_json_string,
+            )?;
+            validate_optional_nested_field_type(hs, "reloadSkills", "boolean", is_json_boolean)?;
+        }
 
         if expected_event == "PermissionRequest" {
             validate_permission_request_decision(hs)?;
@@ -2198,7 +2332,7 @@ pub fn parse_response_projection(
                 }
                 _ => unreachable!("validated PermissionRequest behavior"),
             }
-        } else if hs.get_property("updatedInput").is_some() {
+        } else if expected_event == "PreToolUse" && hs.get_property("updatedInput").is_some() {
             resp.updated_input = Some(
                 projection
                     .subprojection("/hookSpecificOutput/updatedInput")
@@ -2215,12 +2349,20 @@ pub fn parse_response_projection(
                 );
             }
             if let Some(output) = hs.get_property("updatedMCPToolOutput") {
-                if !output.is_null() {
+                if output.as_bool() != Some(false)
+                    && !output.is_null()
+                    && output.as_str() != Some("")
+                    && output
+                        .as_number()
+                        .is_none_or(|number| number != 0.0 && !number.is_nan())
+                {
                     resp.updated_mcp_tool_output = Some(
                         projection
                             .subprojection("/hookSpecificOutput/updatedMCPToolOutput")
                             .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
                     );
+                } else {
+                    resp.legacy_mcp_rewrite_suppressed = true;
                 }
             }
             if let Some(context) = hs
@@ -2238,6 +2380,7 @@ pub fn parse_response_projection(
 
         if let Some(context) = hs
             .get_property("additionalContext")
+            .filter(|_| accepts_context)
             .and_then(|value| value.as_str())
         {
             let _ = context;
@@ -2257,7 +2400,7 @@ pub fn parse_response_projection(
                 .get_property("permissionDecision")
                 .and_then(|value| value.as_str())
             {
-                None | Some("") => {}
+                None => {}
                 Some("allow") => resp.decision = Some(HookDecision::Approve),
                 Some("deny") => resp.decision = Some(HookDecision::Block),
                 Some("ask") => resp.decision = Some(HookDecision::Ask),
@@ -2271,7 +2414,7 @@ pub fn parse_response_projection(
                 }
             }
         }
-        if expected_event != "PermissionRequest"
+        if matches!(expected_event, "PreToolUse" | "PreModelSwitch")
             && hs.get_property("permissionDecisionReason").is_some()
         {
             resp.reason = ExactHookText::from_json_projection(
@@ -2280,7 +2423,11 @@ pub fn parse_response_projection(
             );
         }
 
-        if let Some(action) = hs.get_property("action").and_then(|value| value.as_str()) {
+        if let Some(action) = hs
+            .get_property("action")
+            .and_then(|value| value.as_str())
+            .filter(|_| matches!(expected_event, "Elicitation" | "ElicitationResult"))
+        {
             let content = if hs.get_property("content").is_some() {
                 Some(
                     projection
@@ -2299,13 +2446,15 @@ pub fn parse_response_projection(
             }
         }
 
-        if expected_event == "UserPromptSubmit" {
+        if matches!(expected_event, "UserPromptSubmit" | "SessionStart") {
             if hs.get_property("sessionTitle").is_some() {
                 resp.session_title = ExactHookText::from_json_projection(
                     projection,
                     "/hookSpecificOutput/sessionTitle",
                 );
             }
+        }
+        if matches!(expected_event, "UserPromptSubmit" | "UserPromptExpansion") {
             if let Some(suppress) = hs
                 .get_property("suppressOriginalPrompt")
                 .and_then(|value| value.as_bool())
@@ -2319,7 +2468,12 @@ pub fn parse_response_projection(
                 "/hookSpecificOutput/displayContent",
             );
         }
-        if let Some(paths) = hs.get_property("watchPaths") {
+        if let Some(paths) = hs.get_property("watchPaths").filter(|_| {
+            matches!(
+                expected_event,
+                "CwdChanged" | "FileChanged" | "SessionStart"
+            )
+        }) {
             let length = paths
                 .array_len()
                 .expect("watchPaths was validated as an array");

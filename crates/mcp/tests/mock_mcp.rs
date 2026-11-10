@@ -349,10 +349,10 @@ async fn initialize_stores_server_capabilities() {
 
 #[tokio::test]
 async fn initialize_truncates_long_server_instructions() {
-    // Build a >2048-char instructions blob; assert the stored value is
+    // Build a description above the native ordinary budget; assert the stored value is
     // capped at MAX_MCP_DESCRIPTION_LENGTH and ends with the U+2026
     // " [truncated]" suffix that claude-code uses.
-    let long_text: String = "x".repeat(3000);
+    let long_text: String = "x".repeat(mcp::MAX_MCP_DESCRIPTION_LENGTH + 1000);
     let long_text_for_responder = long_text.clone();
     let (client, _captured, _h) = make_client_against_mock(
         "filesystem",
@@ -383,10 +383,10 @@ async fn initialize_truncates_long_server_instructions() {
         stored_text.ends_with("\u{2026} [truncated]"),
         "instructions must end with the literal truncation suffix, got: {stored:?}",
     );
-    // Truncated value must be strictly shorter than the original 3000-char input.
+    // Truncated value must be strictly shorter than the original input.
     assert!(
         stored_text.chars().count() < long_text.chars().count(),
-        "truncated value must be shorter than original 3000-char input ({} chars)",
+        "truncated value must be shorter than original input ({} chars)",
         stored_text.chars().count(),
     );
 }
@@ -700,11 +700,10 @@ async fn call_tool_full_name_validation_rejects_wrong_prefix() {
 }
 
 #[tokio::test]
-async fn list_tools_truncates_oversized_descriptions() {
-    // 2049-char description (above MAX_MCP_DESCRIPTION_LENGTH) must come
-    // back truncated with the `… [truncated]` sentinel — locks the
-    // MAX_MCP_DESCRIPTION_LENGTH contract against accidental drift.
-    let long = "x".repeat(2049);
+async fn list_tools_preserves_full_description_for_prompt_budget_selection() {
+    // Native description() exposes the full value. Its prompt() applies the
+    // ordinary or deferred budget later, after tool-search policy is known.
+    let long = "x".repeat(mcp::MAX_DEFERRED_MCP_DESCRIPTION_LENGTH + 1);
     let long_clone = long.clone();
     let (client, _cap, _h) = make_client_against_mock(
         "filesystem",
@@ -737,15 +736,7 @@ async fn list_tools_truncates_oversized_descriptions() {
         .description()
         .string_units("")
         .expect("MCP tool description is a source string");
-    let suffix = "\u{2026} [truncated]".encode_utf16().collect::<Vec<_>>();
-    assert!(
-        description.ends_with(&suffix),
-        "must end with truncation sentinel"
-    );
-    assert!(
-        description.len() <= mcp::MAX_MCP_DESCRIPTION_LENGTH + suffix.len(),
-        "must not exceed MAX_MCP_DESCRIPTION_LENGTH + sentinel length",
-    );
+    assert_eq!(description, long.encode_utf16().collect::<Vec<_>>());
 }
 
 #[tokio::test]

@@ -150,12 +150,7 @@ fn truncate_source_description_at_limit(
         return source.clone();
     }
     let mut end = limit;
-    if end > 0
-        && (0xD800..=0xDBFF).contains(&units[end - 1])
-        && units
-            .get(end)
-            .is_some_and(|next| (0xDC00..=0xDFFF).contains(next))
-    {
+    if end > 0 && (0xD800..=0xDBFF).contains(&units[end - 1]) {
         end -= 1;
     }
     units.truncate(end);
@@ -164,7 +159,20 @@ fn truncate_source_description_at_limit(
 }
 
 pub(crate) fn truncate_source_description(source: &Utf16JsonProjection) -> Utf16JsonProjection {
-    truncate_source_description_at_limit(source, mcp_description_length_limit())
+    truncate_description_source(source, false)
+}
+
+/// Apply the Claude Code 2.1.322 UTF-16 description budget. Deferred MCP
+/// descriptions retain 16,384 units; ordinary descriptions and server
+/// instructions retain 4,096. A valid host override applies to both.
+#[must_use]
+pub fn truncate_description_source(
+    source: &Utf16JsonProjection,
+    deferred: bool,
+) -> Utf16JsonProjection {
+    let key = format!("{}MAX_MCP_DESCRIPTION_LENGTH", branding::ENV_PREFIX);
+    let limit = description_length_limit_from_env(std::env::var(key).ok().as_deref(), deferred);
+    truncate_source_description_at_limit(source, limit)
 }
 
 fn deserialize_required_source_string<'de, D>(
@@ -259,9 +267,10 @@ fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
     }
 }
 
-/// Default UTF-16 length limit for free-form MCP descriptions/instructions.
-/// Claude Code 2.1.286 `sB()` permits a positive configured override.
-pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
+/// Claude Code 2.1.322 ordinary MCP description/instruction UTF-16 budget.
+pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 4096;
+/// Description budget used when a tool is loaded through MCP tool search.
+pub const MAX_DEFERRED_MCP_DESCRIPTION_LENGTH: usize = 16_384;
 
 fn mcp_description_length_limit() -> usize {
     let key = format!("{}MAX_MCP_DESCRIPTION_LENGTH", branding::ENV_PREFIX);
@@ -269,6 +278,10 @@ fn mcp_description_length_limit() -> usize {
 }
 
 fn mcp_description_length_limit_from_env(value: Option<&str>) -> usize {
+    description_length_limit_from_env(value, false)
+}
+
+fn description_length_limit_from_env(value: Option<&str>, deferred: bool) -> usize {
     let parsed = value.and_then(|value| {
         let value = value.trim_matches(|character| {
             matches!(character,
@@ -290,7 +303,11 @@ fn mcp_description_length_limit_from_env(value: Option<&str>) -> usize {
         }
         Some(digits.parse::<usize>().unwrap_or(usize::MAX))
     });
-    parsed.unwrap_or(MAX_MCP_DESCRIPTION_LENGTH)
+    parsed.unwrap_or(if deferred {
+        MAX_DEFERRED_MCP_DESCRIPTION_LENGTH
+    } else {
+        MAX_MCP_DESCRIPTION_LENGTH
+    })
 }
 
 /// Truncate using the configured UTF-16 code-unit budget, preserving complete
@@ -319,6 +336,36 @@ mod description_truncation_tests {
     use super::*;
 
     #[test]
+    fn descriptions_322_match_native_json_bytes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mcp_2_1_322.json"))
+                .expect("native MCP fixture");
+        for case in fixture["descriptionCases"].as_array().expect("cases") {
+            let pattern: Vec<u16> = case["inputUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+                .collect();
+            let units = pattern.repeat(usize::try_from(case["repeat"].as_u64().unwrap()).unwrap());
+            let source = source_string_units(units);
+            let env = case["envLimit"].as_u64().map(|value| value.to_string());
+            let limit = description_length_limit_from_env(
+                env.as_deref(),
+                case["deferred"].as_bool().unwrap(),
+            );
+            assert_eq!(limit as u64, case["expectedLimit"].as_u64().unwrap());
+            let actual = truncate_source_description_at_limit(&source, limit);
+            assert_eq!(
+                actual.to_json_string().unwrap(),
+                case["expectedJson"].as_str().unwrap(),
+                "limit={limit} input={:?}",
+                case["inputUnits"],
+            );
+        }
+    }
+
+    #[test]
     fn description_limit_matches_typed_positive_integer_env() {
         for value in [
             None,
@@ -331,7 +378,7 @@ mod description_truncation_tests {
         ] {
             assert_eq!(
                 mcp_description_length_limit_from_env(value),
-                2048,
+                MAX_MCP_DESCRIPTION_LENGTH,
                 "{value:?}"
             );
         }
@@ -350,7 +397,7 @@ mod description_truncation_tests {
         );
         assert_eq!(
             mcp_description_length_limit_from_env(Some(&"9".repeat(400))),
-            2048
+            MAX_MCP_DESCRIPTION_LENGTH
         );
     }
 
@@ -1660,7 +1707,9 @@ impl McpClient {
                 Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
-                    description: truncate_source_description(&description),
+                    // Native description() retains the complete value; only
+                    // prompt() selects the ordinary or tool-search budget.
+                    description,
                     input_schema: decision.schema,
                     output_schema: t.output_schema,
                     annotations: t.annotations,

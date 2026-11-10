@@ -1,0 +1,876 @@
+{
+  "prototypeInterpreter": {
+    "nativeReplay": "Node.js vm; Bun builtin function formatting corroborated locally",
+    "candidateFallback": "Existing capability-free QuickJS sandbox; builtin native-function whitespace normalized to Bun text; 1s interpreter deadline, 8MiB heap"
+  },
+  "version": "2.1.322",
+  "native_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "ranges": [
+    {
+      "name": "expand",
+      "start": 274544022,
+      "end": 274544540,
+      "sha256": "8250e16bb7019ef79782f2c991cd7f878a2190dc51d97595dc81e02210e864b7"
+    },
+    {
+      "name": "provenance",
+      "start": 267958047,
+      "end": 267958226,
+      "sha256": "0ad085f489f47119bf703b055496c3053f864b5a6b73dc69936133a0eb1e3372"
+    },
+    {
+      "name": "aliases",
+      "start": 260524923,
+      "end": 260525179,
+      "sha256": "25978d4c319fce41eba5ea8ad98b1362a7691c918861f7281940961c2dadf969"
+    },
+    {
+      "name": "rewriteFold",
+      "start": 274691245,
+      "end": 274691556,
+      "sha256": "4b0bd6b0e361d7ca08bce8d46cc617df7f935731d706c2e4ee128917cc5cb743"
+    },
+    {
+      "name": "outputSchema",
+      "start": 263111312,
+      "end": 263119537,
+      "sha256": "3bd4011accf3a704f5b4e724d33fd14db3f05bb26cd5cacfd0d8164a48e8ff8e"
+    },
+    {
+      "name": "response",
+      "start": 274592937,
+      "end": 274599187,
+      "sha256": "3128673ddff40ef84bfdce800e222f393c692563f2991c3776b6f84f45424fed"
+    }
+  ],
+  "templateCases": [
+    {
+      "name": "template-0",
+      "input_json": "{\"value\":\"${tool_input.text}\",\"nested\":[\"${tool_input.text}\",{\"again\":\"${tool_input.text}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"a\\ud800z\",\"nested\":[\"a\\ud800z\",{\"again\":\"a\\ud800z\"}]}"
+    },
+    {
+      "name": "template-1",
+      "input_json": "{\"value\":\"before:${tool_input.text}:after\",\"nested\":[\"before:${tool_input.text}:after\",{\"again\":\"before:${tool_input.text}:after\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"before:a\\ud800z:after\",\"nested\":[\"before:a\\ud800z:after\",{\"again\":\"before:a\\ud800z:after\"}]}"
+    },
+    {
+      "name": "template-2",
+      "input_json": "{\"value\":\"${tool_input.nil}\",\"nested\":[\"${tool_input.nil}\",{\"again\":\"${tool_input.nil}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-3",
+      "input_json": "{\"value\":\"${tool_input.absent}\",\"nested\":[\"${tool_input.absent}\",{\"again\":\"${tool_input.absent}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-4",
+      "input_json": "{\"value\":\"${tool_input.record}\",\"nested\":[\"${tool_input.record}\",{\"again\":\"${tool_input.record}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"{\\\"z\\\":1,\\\"a\\\":2}\",\"nested\":[\"{\\\"z\\\":1,\\\"a\\\":2}\",{\"again\":\"{\\\"z\\\":1,\\\"a\\\":2}\"}]}"
+    },
+    {
+      "name": "template-5",
+      "input_json": "{\"value\":\"${tool_input.items}\",\"nested\":[\"${tool_input.items}\",{\"again\":\"${tool_input.items}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"[\\\"zero\\\",\\\"one\\\"]\",\"nested\":[\"[\\\"zero\\\",\\\"one\\\"]\",{\"again\":\"[\\\"zero\\\",\\\"one\\\"]\"}]}"
+    },
+    {
+      "name": "template-6",
+      "input_json": "{\"value\":\"${tool_input.items.0}\",\"nested\":[\"${tool_input.items.0}\",{\"again\":\"${tool_input.items.0}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"zero\",\"nested\":[\"zero\",{\"again\":\"zero\"}]}"
+    },
+    {
+      "name": "template-7",
+      "input_json": "{\"value\":\"${tool_input.items.1}\",\"nested\":[\"${tool_input.items.1}\",{\"again\":\"${tool_input.items.1}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"one\",\"nested\":[\"one\",{\"again\":\"one\"}]}"
+    },
+    {
+      "name": "template-8",
+      "input_json": "{\"value\":\"${tool_input.items.01}\",\"nested\":[\"${tool_input.items.01}\",{\"again\":\"${tool_input.items.01}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-9",
+      "input_json": "{\"value\":\"${tool_input.items.length}\",\"nested\":[\"${tool_input.items.length}\",{\"again\":\"${tool_input.items.length}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"2\",\"nested\":[\"2\",{\"again\":\"2\"}]}"
+    },
+    {
+      "name": "template-10",
+      "input_json": "{\"value\":\"${tool_input.items.length.length}\",\"nested\":[\"${tool_input.items.length.length}\",{\"again\":\"${tool_input.items.length.length}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-11",
+      "input_json": "{\"value\":\"${tool_input..leaf}\",\"nested\":[\"${tool_input..leaf}\",{\"again\":\"${tool_input..leaf}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"empty-key\",\"nested\":[\"empty-key\",{\"again\":\"empty-key\"}]}"
+    },
+    {
+      "name": "template-12",
+      "input_json": "{\"value\":\"${tool_input.empty}\",\"nested\":[\"${tool_input.empty}\",{\"again\":\"${tool_input.empty}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-13",
+      "input_json": "{\"value\":\"${tool_input.flag}\",\"nested\":[\"${tool_input.flag}\",{\"again\":\"${tool_input.flag}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"false\",\"nested\":[\"false\",{\"again\":\"false\"}]}"
+    },
+    {
+      "name": "template-14",
+      "input_json": "{\"value\":\"${tool_input.n}\",\"nested\":[\"${tool_input.n}\",{\"again\":\"${tool_input.n}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"0\",\"nested\":[\"0\",{\"again\":\"0\"}]}"
+    },
+    {
+      "name": "template-15",
+      "input_json": "{\"value\":\"${tool_input.text.length}\",\"nested\":[\"${tool_input.text.length}\",{\"again\":\"${tool_input.text.length}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-16",
+      "input_json": "{\"value\":\"${tool_input.text.0}\",\"nested\":[\"${tool_input.text.0}\",{\"again\":\"${tool_input.text.0}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-17",
+      "input_json": "{\"value\":\"${tool_input.text\",\"nested\":[\"${tool_input.text\",{\"again\":\"${tool_input.text\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${tool_input.text\",\"nested\":[\"${tool_input.text\",{\"again\":\"${tool_input.text\"}]}"
+    },
+    {
+      "name": "template-18",
+      "input_json": "{\"value\":\"${tool_input.text-}\",\"nested\":[\"${tool_input.text-}\",{\"again\":\"${tool_input.text-}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${tool_input.text-}\",\"nested\":[\"${tool_input.text-}\",{\"again\":\"${tool_input.text-}\"}]}"
+    },
+    {
+      "name": "template-19",
+      "input_json": "{\"value\":\"${ tool_input.text}\",\"nested\":[\"${ tool_input.text}\",{\"again\":\"${ tool_input.text}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${ tool_input.text}\",\"nested\":[\"${ tool_input.text}\",{\"again\":\"${ tool_input.text}\"}]}"
+    },
+    {
+      "name": "template-20",
+      "input_json": "{\"value\":\"${0}\",\"nested\":[\"${0}\",{\"again\":\"${0}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${0}\",\"nested\":[\"${0}\",{\"again\":\"${0}\"}]}"
+    },
+    {
+      "name": "template-21",
+      "input_json": "{\"value\":\"${}\",\"nested\":[\"${}\",{\"again\":\"${}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${}\",\"nested\":[\"${}\",{\"again\":\"${}\"}]}"
+    },
+    {
+      "name": "template-22",
+      "input_json": "{\"value\":\"${tool_input.中文}\",\"nested\":[\"${tool_input.中文}\",{\"again\":\"${tool_input.中文}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${tool_input.中文}\",\"nested\":[\"${tool_input.中文}\",{\"again\":\"${tool_input.中文}\"}]}"
+    },
+    {
+      "name": "template-23",
+      "input_json": "{\"value\":\"${tool_input.\\ud800}\",\"nested\":[\"${tool_input.\\ud800}\",{\"again\":\"${tool_input.\\ud800}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${tool_input.\\ud800}\",\"nested\":[\"${tool_input.\\ud800}\",{\"again\":\"${tool_input.\\ud800}\"}]}"
+    },
+    {
+      "name": "template-24",
+      "input_json": "{\"value\":\"${bad${tool_input.text}}\",\"nested\":[\"${bad${tool_input.text}}\",{\"again\":\"${bad${tool_input.text}}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"${bada\\ud800z}\",\"nested\":[\"${bada\\ud800z}\",{\"again\":\"${bada\\ud800z}\"}]}"
+    },
+    {
+      "name": "template-25",
+      "input_json": "{\"value\":\"${mcp_server.name}/${mcp_server.source}\",\"nested\":[\"${mcp_server.name}/${mcp_server.source}\",{\"again\":\"${mcp_server.name}/${mcp_server.source}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"audit/user\",\"nested\":[\"audit/user\",{\"again\":\"audit/user\"}]}"
+    },
+    {
+      "name": "template-26",
+      "input_json": "{\"value\":\"${mcp_server..name}\",\"nested\":[\"${mcp_server..name}\",{\"again\":\"${mcp_server..name}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-27",
+      "input_json": "{\"value\":\"${tool_input.constructor}\",\"nested\":[\"${tool_input.constructor}\",{\"again\":\"${tool_input.constructor}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"function Object() { [native code] }\",\"nested\":[\"function Object() { [native code] }\",{\"again\":\"function Object() { [native code] }\"}]}"
+    },
+    {
+      "name": "template-28",
+      "input_json": "{\"value\":\"${tool_input.toString}\",\"nested\":[\"${tool_input.toString}\",{\"again\":\"${tool_input.toString}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"function toString() { [native code] }\",\"nested\":[\"function toString() { [native code] }\",{\"again\":\"function toString() { [native code] }\"}]}"
+    },
+    {
+      "name": "template-29",
+      "input_json": "{\"value\":\"${tool_input.__proto__}\",\"nested\":[\"${tool_input.__proto__}\",{\"again\":\"${tool_input.__proto__}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"{}\",\"nested\":[\"{}\",{\"again\":\"{}\"}]}"
+    },
+    {
+      "name": "template-30",
+      "input_json": "{\"value\":\"${tool_input.__proto__.constructor}\",\"nested\":[\"${tool_input.__proto__.constructor}\",{\"again\":\"${tool_input.__proto__.constructor}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"function Object() { [native code] }\",\"nested\":[\"function Object() { [native code] }\",{\"again\":\"function Object() { [native code] }\"}]}"
+    },
+    {
+      "name": "template-31",
+      "input_json": "{\"value\":\"${tool_input.__proto__.__proto__}\",\"nested\":[\"${tool_input.__proto__.__proto__}\",{\"again\":\"${tool_input.__proto__.__proto__}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-32",
+      "input_json": "{\"value\":\"${tool_input.constructor.name}\",\"nested\":[\"${tool_input.constructor.name}\",{\"again\":\"${tool_input.constructor.name}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"\",\"nested\":[\"\",{\"again\":\"\"}]}"
+    },
+    {
+      "name": "template-33",
+      "input_json": "{\"value\":\"${tool_input.items.map}\",\"nested\":[\"${tool_input.items.map}\",{\"again\":\"${tool_input.items.map}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"function map() { [native code] }\",\"nested\":[\"function map() { [native code] }\",{\"again\":\"function map() { [native code] }\"}]}"
+    },
+    {
+      "name": "template-34",
+      "input_json": "{\"value\":\"${tool_input.items.__proto__}\",\"nested\":[\"${tool_input.items.__proto__}\",{\"again\":\"${tool_input.items.__proto__}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"[]\",\"nested\":[\"[]\",{\"again\":\"[]\"}]}"
+    },
+    {
+      "name": "template-35",
+      "input_json": "{\"value\":\"${tool_input.items.__proto__.length}\",\"nested\":[\"${tool_input.items.__proto__.length}\",{\"again\":\"${tool_input.items.__proto__.length}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"0\",\"nested\":[\"0\",{\"again\":\"0\"}]}"
+    },
+    {
+      "name": "prototype-assignment-36",
+      "input_json": "{\"__proto__\":{\"marker\":\"${mcp_server.name}\"},\"value\":\"kept\"}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"value\":\"kept\"}"
+    },
+    {
+      "name": "prototype-assignment-37",
+      "input_json": "{\"nested\":{\"__proto__\":\"ignored\",\"value\":\"${tool_input.text}\"}}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"nested\":{\"value\":\"a\\ud800z\"}}"
+    },
+    {
+      "name": "prototype-assignment-38",
+      "input_json": "{\"nested\":[{\"__proto__\":null,\"constructor\":\"${tool_input.n}\"}]}",
+      "payload_json": "{\"tool_input\":{\"text\":\"a\\ud800z\",\"nil\":null,\"record\":{\"z\":1,\"a\":2},\"items\":[\"zero\",\"one\"],\"\":{\"leaf\":\"empty-key\"},\"empty\":\"\",\"flag\":false,\"n\":0},\"mcp_server\":{\"name\":\"audit\",\"source\":\"user\"}}",
+      "expanded_json": "{\"nested\":[{\"constructor\":\"0\"}]}"
+    }
+  ],
+  "provenanceCases": [
+    {
+      "input_json": "{\"serverName\":\"sdk-lookalike\",\"scope\":\"user\"}",
+      "expected_json": "{\"name\":\"sdk-lookalike\",\"source\":\"user\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"sdk\",\"serverType\":\"sdk\",\"scope\":\"dynamic\"}",
+      "expected_json": "{\"name\":\"sdk\",\"source\":\"sdk\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"plugin\",\"serverType\":\"sdk\",\"pluginTelemetry\":{}}",
+      "expected_json": "{\"name\":\"plugin\",\"source\":\"plugin\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"explicit\",\"source\":\"future-source\",\"serverType\":\"sdk\"}",
+      "expected_json": "{\"name\":\"explicit\",\"source\":\"future-source\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"dynamic\"}",
+      "expected_json": "{\"name\":\"dynamic\",\"source\":\"dynamic\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"project\",\"scope\":\"project\"}",
+      "expected_json": "{\"name\":\"project\",\"source\":\"project\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"managed\",\"scope\":\"managed\"}",
+      "expected_json": "{\"name\":\"managed\",\"source\":\"managed\"}"
+    },
+    {
+      "input_json": "{\"serverName\":\"name\\ud800\",\"source\":\"user\"}",
+      "expected_json": "{\"name\":\"name\\ud800\",\"source\":\"user\"}"
+    }
+  ],
+  "responseCases": [
+    {
+      "name": "legacy-null",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":null,\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"legacyMcpRewriteSuppressed\":true,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-false",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":false,\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"legacyMcpRewriteSuppressed\":true,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-0",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":0,\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"legacyMcpRewriteSuppressed\":true,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-\"\"",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":\"\",\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"legacyMcpRewriteSuppressed\":true,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-[]",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":[],\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"updatedMCPToolOutput\":[],\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-{}",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":{},\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"updatedMCPToolOutput\":{},\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "legacy-\"rewritten\"",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":\"rewritten\",\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"updatedMCPToolOutput\":\"rewritten\",\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "direct-null",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":null,\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"updatedToolOutput\":null,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "direct-wins-pair",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":{\"safe\":true},\"updatedMCPToolOutput\":false,\"classifierContext\":\"claim\"}}",
+      "expected_json": "{\"updatedToolOutput\":{\"safe\":true},\"legacyMcpRewriteSuppressed\":true,\"classifierContext\":\"claim\"}"
+    },
+    {
+      "name": "session-title",
+      "event": "SessionStart",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"sessionTitle\":\"new title\",\"watchPaths\":[\".env\"],\"reloadSkills\":true}}",
+      "expected_json": "{\"sessionTitle\":\"new title\",\"watchPaths\":[\".env\"],\"reloadSkills\":true}"
+    },
+    {
+      "name": "expansion-suppression",
+      "event": "UserPromptExpansion",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptExpansion\",\"additionalContext\":\"note\",\"suppressOriginalPrompt\":true}}",
+      "expected_json": "{\"additionalContext\":\"note\",\"suppressOriginalPrompt\":true}"
+    },
+    {
+      "name": "permission-allow",
+      "event": "PreToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"pwd\"}}}",
+      "expected_json": "{\"permissionBehavior\":\"allow\",\"updatedInput\":{\"command\":\"pwd\"}}"
+    },
+    {
+      "name": "permission-deny",
+      "event": "PreToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"policy\"}}",
+      "expected_json": "{\"permissionBehavior\":\"deny\"}"
+    },
+    {
+      "name": "permission-defer",
+      "event": "PreToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"defer\"}}",
+      "expected_json": "{\"permissionBehavior\":\"defer\"}"
+    },
+    {
+      "name": "elicitation-result",
+      "event": "ElicitationResult",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"ElicitationResult\",\"action\":\"accept\",\"content\":{\"text\":\"a\\ud800\"}}}",
+      "expected_json": "{\"elicitationResultResponse\":{\"action\":\"accept\",\"content\":{\"text\":\"a\\ud800\"}}}"
+    },
+    {
+      "name": "elicitation-cancel",
+      "event": "Elicitation",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"Elicitation\",\"action\":\"cancel\"}}",
+      "expected_json": "{\"elicitationResponse\":{\"action\":\"cancel\"}}"
+    },
+    {
+      "name": "ignored-output-fields",
+      "event": "PostToolUse",
+      "input_json": "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedInput\":{\"x\":true},\"action\":\"decline\",\"watchPaths\":[\".env\"],\"permissionDecisionReason\":\"ignored\"}}",
+      "expected_json": "{}"
+    }
+  ],
+  "rewriteSequences": [
+    {
+      "name": "same-hook-direct-and-legacy",
+      "outputs_json": [
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":{\"direct\":true},\"updatedMCPToolOutput\":{\"legacy\":true}}}"
+      ],
+      "expected_rewrites_json": "[{\"value\":{\"direct\":true},\"legacy_mcp_only\":false}]"
+    },
+    {
+      "name": "earlier-direct-later-legacy",
+      "outputs_json": [
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":{\"first\":true}}}",
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":{\"last\":true}}}"
+      ],
+      "expected_rewrites_json": "[{\"value\":{\"first\":true},\"legacy_mcp_only\":false},{\"value\":{\"last\":true},\"legacy_mcp_only\":true}]"
+    },
+    {
+      "name": "earlier-legacy-later-direct",
+      "outputs_json": [
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":{\"first\":true}}}",
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":{\"last\":true}}}"
+      ],
+      "expected_rewrites_json": "[{\"value\":{\"first\":true},\"legacy_mcp_only\":true},{\"value\":{\"last\":true},\"legacy_mcp_only\":false}]"
+    },
+    {
+      "name": "later-falsy-legacy",
+      "outputs_json": [
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":{\"first\":true}}}",
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":false}}"
+      ],
+      "expected_rewrites_json": "[{\"value\":{\"first\":true},\"legacy_mcp_only\":false}]"
+    },
+    {
+      "name": "direct-null",
+      "outputs_json": [
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":{\"first\":true}}}",
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedToolOutput\":null}}"
+      ],
+      "expected_rewrites_json": "[{\"value\":{\"first\":true},\"legacy_mcp_only\":true},{\"value\":null,\"legacy_mcp_only\":false}]"
+    }
+  ],
+  "outputShapes": [
+    {
+      "event": "PreToolUse",
+      "fields": [
+        {
+          "name": "permissionDecision",
+          "type": "enum",
+          "optional": false,
+          "values": [
+            "allow",
+            "deny",
+            "ask",
+            "defer"
+          ]
+        },
+        {
+          "name": "permissionDecisionReason",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "updatedInput",
+          "type": "record",
+          "optional": false
+        },
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "permissionDisplay",
+          "type": "object",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "UserPromptSubmit",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "sessionTitle",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "suppressOriginalPrompt",
+          "type": "boolean",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "UserPromptExpansion",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "suppressOriginalPrompt",
+          "type": "boolean",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "SessionStart",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "initialUserMessage",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "sessionTitle",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "watchPaths",
+          "type": "array",
+          "optional": false
+        },
+        {
+          "name": "reloadSkills",
+          "type": "boolean",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "Setup",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PreModelSwitch",
+      "fields": [
+        {
+          "name": "permissionDecision",
+          "type": "enum",
+          "optional": false,
+          "values": [
+            "allow",
+            "deny",
+            "ask"
+          ]
+        },
+        {
+          "name": "permissionDecisionReason",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PostModelSwitch",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "SubagentStart",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PostToolUse",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "classifierContext",
+          "type": "string",
+          "optional": false
+        },
+        {
+          "name": "updatedToolOutput",
+          "type": "unknown",
+          "optional": false
+        },
+        {
+          "name": "updatedMCPToolOutput",
+          "type": "unknown",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PostToolUseFailure",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PostToolBatch",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "Stop",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "SubagentStop",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PermissionDenied",
+      "fields": [
+        {
+          "name": "retry",
+          "type": "boolean",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "Notification",
+      "fields": [
+        {
+          "name": "additionalContext",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "PermissionRequest",
+      "fields": [
+        {
+          "name": "decision",
+          "type": "union",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "Elicitation",
+      "fields": [
+        {
+          "name": "action",
+          "type": "enum",
+          "optional": false,
+          "values": [
+            "accept",
+            "decline",
+            "cancel"
+          ]
+        },
+        {
+          "name": "content",
+          "type": "record",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "ElicitationResult",
+      "fields": [
+        {
+          "name": "action",
+          "type": "enum",
+          "optional": false,
+          "values": [
+            "accept",
+            "decline",
+            "cancel"
+          ]
+        },
+        {
+          "name": "content",
+          "type": "record",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "CwdChanged",
+      "fields": [
+        {
+          "name": "watchPaths",
+          "type": "array",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "FileChanged",
+      "fields": [
+        {
+          "name": "watchPaths",
+          "type": "array",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "WorktreeCreate",
+      "fields": [
+        {
+          "name": "worktreePath",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "event": "MessageDisplay",
+      "fields": [
+        {
+          "name": "displayContent",
+          "type": "string",
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "publicAliases": [
+    [
+      "Task",
+      "Agent"
+    ],
+    [
+      "KillShell",
+      "TaskStop"
+    ],
+    [
+      "KillBash",
+      "TaskStop"
+    ],
+    [
+      "ListPeers",
+      "ListAgents"
+    ],
+    [
+      "Brief",
+      "SendUserMessage"
+    ],
+    [
+      "ListMcpResources",
+      "ListMcpResourcesTool"
+    ],
+    [
+      "ReadMcpResource",
+      "ReadMcpResourceTool"
+    ],
+    [
+      "ReadMcpResourceDir",
+      "ReadMcpResourceDirTool"
+    ]
+  ],
+  "legacyAliasGroups": [
+    {
+      "canonical": "Agent",
+      "legacy": [
+        "Task"
+      ]
+    },
+    {
+      "canonical": "TaskStop",
+      "legacy": [
+        "KillShell",
+        "KillBash"
+      ]
+    },
+    {
+      "canonical": "ListAgents",
+      "legacy": [
+        "ListPeers"
+      ]
+    },
+    {
+      "canonical": "SendUserMessage",
+      "legacy": [
+        "Brief"
+      ]
+    },
+    {
+      "canonical": "ListMcpResourcesTool",
+      "legacy": [
+        "ListMcpResources"
+      ]
+    },
+    {
+      "canonical": "ReadMcpResourceTool",
+      "legacy": [
+        "ReadMcpResource"
+      ]
+    },
+    {
+      "canonical": "ReadMcpResourceDirTool",
+      "legacy": [
+        "ReadMcpResourceDir"
+      ]
+    }
+  ],
+  "topDecisionValues": [
+    "approve",
+    "block"
+  ],
+  "scope": "Controlled replay of native MCP hook interpolation, catalog provenance selection and parsed hook-result processing. Output union shapes are recorded by native schema-builder replay with descriptor-only stubs; this does not execute Zod validation. replay stubs only attachment/telemetry helpers. No transport execution or provider access.",
+  "unknowns": [
+    "Internal permissionDisplay cards, served/cloud hook policy and WorktreeCreate worktreePath routing are outside these fixtures."
+  ]
+}

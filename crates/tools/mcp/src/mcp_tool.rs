@@ -889,6 +889,8 @@ pub struct MCPTool {
     mcp_role: Option<String>,
     /// Actual host config and discovered definition; never derived from aliases.
     capability_identity: Option<tool_api::McpToolIdentity>,
+    /// Original host configuration provenance for native tool-hook inputs.
+    server_provenance: Option<mcp::McpServerProvenance>,
     session_tool_lease: std::sync::RwLock<Option<tool_api::SessionToolGrantLease>>,
 }
 
@@ -930,6 +932,7 @@ impl MCPTool {
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
+            server_provenance: None,
             session_tool_lease: std::sync::RwLock::new(None),
         }
     }
@@ -978,6 +981,7 @@ impl MCPTool {
             bound_server_key: None,
             mcp_role: None,
             capability_identity: None,
+            server_provenance: None,
             session_tool_lease: std::sync::RwLock::new(None),
         }
     }
@@ -986,6 +990,14 @@ impl MCPTool {
     #[must_use]
     pub fn with_capability_identity(mut self, identity: tool_api::McpToolIdentity) -> Self {
         self.capability_identity = Some(identity);
+        self
+    }
+
+    /// Bind the server's original configuration key/source before its tool
+    /// names are normalized for the model or an agent-scoped registry slot.
+    #[must_use]
+    pub fn with_server_provenance(mut self, config: &mcp::McpServerConfig) -> Self {
+        self.server_provenance = Some(mcp::McpServerProvenance::from_config(config));
         self
     }
 
@@ -1670,6 +1682,16 @@ impl Tool for MCPTool {
         self.capability_identity.as_ref()
     }
 
+    fn mcp_server_provenance(&self) -> Option<&mcp::McpServerProvenance> {
+        self.server_provenance.as_ref()
+    }
+
+    fn prompt_for_loading_mode(&self, loaded_through_tool_search: bool) -> Option<UJP> {
+        self.bound_desc.as_ref().map(|description| {
+            mcp::truncate_description_source(description, loaded_through_tool_search)
+        })
+    }
+
     fn bind_session_tool_lease(&self, lease: tool_api::SessionToolGrantLease) {
         *self
             .session_tool_lease
@@ -1943,10 +1965,11 @@ impl Tool for MCPTool {
         }
     }
     async fn prompt(&self, _: &PromptOptions) -> UJP {
-        // The system-prompt `<tools>` blurb is the same exact source description
-        // as the per-tool wire entry (client.ts:1786-1794).
+        // Native keeps the source description for UI use and applies the
+        // inline budget here; ToolSearch loads select their separate budget.
         self.bound_desc
-            .clone()
+            .as_ref()
+            .map(|description| mcp::truncate_description_source(description, false))
             .unwrap_or_else(|| "Use MCP to dispatch to an MCP-server-provided tool.".into())
     }
 
@@ -3744,6 +3767,7 @@ pub async fn build_registered_mcp_tools(
                         registry.output_schema_parser_handle(table_key, &dto.full_name),
                     )
                     .with_bound_server_key(table_key.clone())
+                    .with_server_provenance(config)
                     .with_capability_identity(
                         tool_api::McpToolIdentity::from_config_tool(config, dto),
                     );
@@ -3799,6 +3823,65 @@ mod tests {
 
     fn fixture_json(source: &str) -> UJP {
         UJP::parse(source).expect("test JSON source is valid")
+    }
+
+    #[tokio::test]
+    async fn native_322_mcp_description_budgets_reach_loaded_wire() {
+        // The live 2.1.322 oracle observes 4,096 and 16,384 UTF-16 units
+        // before the same 13-unit suffix. Discovery must retain the source.
+        let description = format!("{}😀{}", "a".repeat(4095), "z".repeat(17_000));
+        let tool: Arc<dyn Tool> = Arc::new(MCPTool::new_for_tool(
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            ),
+            "mcp__wire_audit__echo".into(),
+            description.clone().into(),
+            fixture_json(r#"{"type":"object"}"#),
+            None,
+            None,
+            None,
+            false,
+            false,
+        ));
+        assert_eq!(
+            tool.description(
+                &fixture_json("{}"),
+                &DescriptionOptions {
+                    is_non_interactive_session: true
+                },
+            )
+            .await,
+            description,
+        );
+        let options = PromptOptions::default();
+        let inline = tool_api::wire::tool_to_wire(tool.as_ref(), &options).await;
+        assert_eq!(
+            inline.description.string_at(""),
+            Some(format!("{}… [truncated]", "a".repeat(4095)).as_str())
+        );
+        let expected = format!("{}😀{}… [truncated]", "a".repeat(4095), "z".repeat(12_287));
+        let deferred = tool_api::wire::tool_to_wire_deferred(tool.as_ref(), &options, true).await;
+        assert_eq!(deferred.description.string_at(""), Some(expected.as_str()));
+        assert!(deferred.defer_loading);
+
+        let tools = vec![tool];
+        let state =
+            tool_api::defer::DeferralState::new(tool_api::defer::ToolSearchMode::Enabled, false);
+        state.mark_loaded(["mcp__wire_audit__echo".to_owned()]);
+        let mut wire = vec![inline.clone()];
+        tool_api::wire::apply_defer_loading(&mut wire, &tools, &state);
+        assert!(wire[0].defer_loading);
+        assert_eq!(wire[0].description, inline.description);
+        // A registered Mod's replacement remains authoritative across loading.
+        let mut overridden = vec![inline];
+        overridden[0].description = "custom Mod description".into();
+        tool_api::wire::apply_defer_loading(&mut overridden, &tools, &state);
+        assert_eq!(
+            overridden[0].description.string_at(""),
+            Some("custom Mod description")
+        );
     }
 
     #[tokio::test]
@@ -6602,6 +6685,14 @@ mod resource_tool_gating_tests {
         ctx.mcp_registry = Some(registry.clone());
         let built = build_registered_mcp_tools(&registry, ctx.clone()).await;
         assert_eq!(built[0].1[0].mcp_tool_identity(), Some(&identity));
+        assert_eq!(
+            built[0].1[0].mcp_server_provenance(),
+            Some(&mcp::McpServerProvenance {
+                name: "server/a".into(),
+                source: "user".into()
+            }),
+            "hook provenance keeps the original config key rather than its normalized alias",
+        );
         let tool = MCPTool::new_for_tool(
             ctx,
             definition.full_name,

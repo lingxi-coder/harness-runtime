@@ -4675,7 +4675,8 @@ async fn build_agent_mcp_tool_set(
                 dto.search_hint.clone(),
                 dto.always_load.unwrap_or(false),
                 dto.requires_user_interaction,
-            );
+            )
+            .with_server_provenance(&entry_config);
             let tool = if let Some(ceiling) =
                 tool_mcp::configured_permission_ceiling(&entry_config, &dto.tool_name)
             {

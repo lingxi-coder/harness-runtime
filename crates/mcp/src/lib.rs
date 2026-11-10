@@ -92,6 +92,7 @@ pub mod normalization;
 pub mod oauth;
 pub mod projects_session;
 pub mod protocol_negotiation;
+pub mod provenance;
 pub mod raw_conn;
 pub mod registry;
 pub mod server_gate;
@@ -104,7 +105,8 @@ pub mod xaa;
 pub mod xaa_idp;
 
 pub use client::{
-    truncate_description, McpClient, McpClientError, McpDirectoryEntry, MAX_MCP_DESCRIPTION_LENGTH,
+    truncate_description, truncate_description_source, McpClient, McpClientError,
+    McpDirectoryEntry, MAX_DEFERRED_MCP_DESCRIPTION_LENGTH, MAX_MCP_DESCRIPTION_LENGTH,
     MAX_MCP_DIRECTORY_PAGES,
 };
 pub use connection::{
@@ -144,6 +146,7 @@ pub use mcp_output_storage::{
     RawResourceContent as RawResourceContentRich,
 };
 pub use native_message_schema::decode_native_mcp_frame;
+pub use provenance::McpServerProvenance;
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
     McpCatalogChanged, McpCatalogKind, McpRegistry, McpToolOutputSchemaParserHandle,

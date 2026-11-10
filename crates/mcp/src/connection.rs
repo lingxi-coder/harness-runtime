@@ -19,6 +19,10 @@ use std::time::SystemTime;
 /// persists an LLM provider credential, profile, or account identifier.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerMetadata {
+    /// Explicit host-owned provenance (for example a registered mod's plugin
+    /// ownership). The ordinary MCP JSON schema does not accept this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_source: Option<String>,
     /// Current per-server initialize capability choice. Only the ordinary
     /// stdio/SSE/HTTP/WS config schemas declare this optional boolean.
     #[serde(

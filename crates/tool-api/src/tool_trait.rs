@@ -79,6 +79,21 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Configured MCP server that owns this tool. Hook inputs use the raw
+    /// configuration key and source, independently of normalized tool aliases.
+    fn mcp_server_provenance(&self) -> Option<&mcp::McpServerProvenance> {
+        None
+    }
+
+    /// Tool-owned prompt for an inline or ToolSearch-loaded definition. MCP
+    /// servers have separate budgets for these two descriptions.
+    fn prompt_for_loading_mode(
+        &self,
+        _loaded_through_tool_search: bool,
+    ) -> Option<Utf16JsonProjection> {
+        None
+    }
+
     /// Bind a restricted invocation lease to transport-backed tools.
     /// Ordinary builtin dispatch is checked by the registry and invoker.
     fn bind_session_tool_lease(&self, _lease: crate::SessionToolGrantLease) {}

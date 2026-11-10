@@ -5499,7 +5499,28 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // attribute, so a PreToolUse/PostToolUse hook's output joins to OTel
         // events at prompt grain.
         let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
+        let effort = (|| {
+            let snapshot = orch
+                .api
+                .effort_command_snapshot(
+                    &ctx.options.main_loop_model,
+                    ctx.options.model_profile.as_deref(),
+                )
+                .ok()??;
+            snapshot.capabilities.supported.then(|| {
+                hooks::hook_payload::EffortLevel::new(
+                    snapshot.displayed(std::env::var(branding::EFFORT_LEVEL_ENV).ok().as_deref()),
+                )
+            })
+        })();
         let hook_ctx = HookContext {
+            effort,
+            mcp_server: tool_handle.mcp_server_provenance().map(|server| {
+                hooks::HookMcpServerProvenance {
+                    name: server.name.clone().into(),
+                    source: server.source.clone().into(),
+                }
+            }),
             prompt_transcript: Some(orch.prompt_hook_transcript().await),
             model_selection: Some(hooks::HookModelSelection {
                 model: ctx.options.main_loop_model.clone(),
@@ -7484,8 +7505,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             tool_name = %name,
         );
         telemetry::otel::emit_hook_lifecycle("post", "started", name, None);
-        let post_agg =
-            super::boxed_turn_future(|| orch.hooks.execute(post_event, hook_ctx.clone())).await;
+        let post_ctx = HookContext {
+            tool_was_interrupted: Some(is_abort),
+            ..hook_ctx.clone()
+        };
+        let post_agg = super::boxed_turn_future(|| orch.hooks.execute(post_event, post_ctx)).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
@@ -7688,64 +7712,55 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             injected_messages.push((message, tool_use_id.clone()));
         }
 
-        // PostToolUse `updatedToolOutput` (#38, all-tools) + `updatedMCPToolOutput`
-        // (legacy, MCP-only) may REPLACE a SUCCESSFUL tool's output. claude yields
-        // all-tools first, MCP second so MCP overrides (BIN off 202157140); applies
-        // only if `outputSchema` is absent or validates (BIN off 202169384), else
-        // keeps original + emits `hook_error_during_execution` (BIN off 202465455).
-        // The substituted JSON passes through the tool's own result mapper.
-        // No-op when unset. Outer `Some` = key set even to `null` (`!== void 0`).
-        let replacement: Option<Utf16JsonProjection> = if is_error {
-            None
-        } else {
-            let mut repl = post_agg.updated_tool_output.clone();
-            if tool_handle.is_mcp() {
-                if let Some(mcp) = post_agg.updated_mcp_tool_output.clone() {
-                    repl = Some(mcp);
+        // Native 2.1.322 yields one rewrite per completed hook: the direct
+        // field wins within a hook, while later hooks can replace earlier
+        // values. Invalid later output keeps the last accepted replacement.
+        let mut content = content;
+        let mut mcp_output_mutated = false;
+        if !is_error {
+            for rewrite in &post_agg.output_rewrites {
+                if rewrite.legacy_mcp_only && !tool_handle.is_mcp() {
+                    continue;
                 }
-            }
-            repl
-        };
-        let (content, mcp_output_mutated) = match replacement {
-            Some(new_output) => {
+                let new_output = &rewrite.value;
                 // Validate against the tool's output schema when one exists
                 // (`e.outputSchema?.safeParse(...)?.success!==!1`): substitute
                 // unless validation EXPLICITLY fails. No schema → substitute.
                 let schema_ok = match tool_handle.output_schema() {
                     None => Ok(()),
-                    Some(schema) => match Utf16JsonConsumer::new_for_json_decoded_sources(&[
-                        schema,
-                        &new_output,
-                    ]) {
-                        Ok(consumer) => tool_api::output_schema::validate(
-                            &consumer.values()[0],
-                            &consumer.values()[1],
-                        )
-                        .map_err(|detail| {
-                            consumer
-                                .restore(&serde_json::Value::String(detail))
-                                .unwrap_or_else(|_| {
-                                    source_text_from_units(
-                                        "could not restore output schema diagnostic"
-                                            .encode_utf16()
-                                            .collect(),
-                                    )
-                                })
-                        }),
-                        Err(error) => Err(source_text_from_units(
-                            format!("could not inspect output schema: {error}")
-                                .encode_utf16()
-                                .collect(),
-                        )),
-                    },
+                    Some(schema) => {
+                        match Utf16JsonConsumer::new_for_json_decoded_sources(&[schema, new_output])
+                        {
+                            Ok(consumer) => tool_api::output_schema::validate(
+                                &consumer.values()[0],
+                                &consumer.values()[1],
+                            )
+                            .map_err(|detail| {
+                                consumer
+                                    .restore(&serde_json::Value::String(detail))
+                                    .unwrap_or_else(|_| {
+                                        source_text_from_units(
+                                            "could not restore output schema diagnostic"
+                                                .encode_utf16()
+                                                .collect(),
+                                        )
+                                    })
+                            }),
+                            Err(error) => Err(source_text_from_units(
+                                format!("could not inspect output schema: {error}")
+                                    .encode_utf16()
+                                    .collect(),
+                            )),
+                        }
+                    }
                 };
                 match schema_ok {
-                    Ok(()) => (
-                        tool_handle
-                            .map_result_text(&new_output)
-                            .unwrap_or_else(|| source_tool_result_text(&new_output)),
-                        true,
-                    ),
+                    Ok(()) => {
+                        content = tool_handle
+                            .map_result_text(new_output)
+                            .unwrap_or_else(|| source_tool_result_text(new_output));
+                        mcp_output_mutated = true;
+                    }
                     Err(detail) => {
                         // Schema MISMATCH: keep the ORIGINAL output and surface
                         // the `hook_error_during_execution` meta message
@@ -7781,12 +7796,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             publication_fence.clone(),
                         )
                         .await;
-                        (content, false)
                     }
                 }
             }
-            None => (content, false),
-        };
+        }
 
         // HOOK.1: BOTH the PreToolUse and the PostToolUse `additionalContext`
         // ride the `injected` channel as their OWN messages — neither is folded

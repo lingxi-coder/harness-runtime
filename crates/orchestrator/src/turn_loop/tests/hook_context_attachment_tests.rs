@@ -2366,3 +2366,291 @@ async fn pre_tool_use_additional_context_is_queued_and_rendered_as_meta() {
         "the PreToolUse rendering is isMeta too"
     );
 }
+
+mod native_322_ordered_rewrites {
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    /// Keep the same advertised name for both cases so rewrite eligibility
+    /// comes from the tool implementation, never a model-authored prefix.
+    struct RewriteEcho {
+        mcp: bool,
+    }
+
+    #[async_trait]
+    impl Tool for RewriteEcho {
+        fn name(&self) -> &str {
+            "Echo"
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            EchoTool.input_schema()
+        }
+        fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+            EchoTool.output_schema()
+        }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            EchoTool.input_repair_metadata()
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn is_mcp(&self) -> bool {
+            self.mcp
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+            result.subprojection("/out").ok()
+        }
+        async fn validate_input(
+            &self,
+            input: &Utf16JsonProjection,
+            ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            EchoTool.validate_input(input, ctx).await
+        }
+        async fn check_permissions(
+            &self,
+            input: &Utf16JsonProjection,
+            ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            EchoTool.check_permissions(input, ctx).await
+        }
+        async fn description(
+            &self,
+            _input: &Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "Ordered native hook rewrite fixture".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            String::new().into()
+        }
+        async fn call(
+            &self,
+            input: Utf16JsonProjection,
+            ctx: ToolUseContext,
+            tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            EchoTool.call(input, ctx, tx).await
+        }
+    }
+
+    struct OrderedPostHook {
+        id: String,
+        index: usize,
+        response: HookResponse,
+        seen: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl BuiltinHookHandler for OrderedPostHook {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            self.seen.lock().unwrap().push(self.index);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new().into(),
+                stderr: String::new().into(),
+                exit_code: Some(0),
+                response: Some(self.response.clone()),
+            }
+        }
+    }
+
+    fn orchestrator(
+        mcp: bool,
+        responses: Vec<HookResponse>,
+    ) -> (ConversationOrchestrator, Arc<Mutex<Vec<usize>>>) {
+        let count = responses.len();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::new();
+        let mut handlers = Vec::new();
+        // Deliberately register backwards. Distinct priorities establish the
+        // completed-hook order without sleeps or scheduler assumptions.
+        for (index, response) in responses.into_iter().enumerate().rev() {
+            let id = format!("native-322-rewrite-{index}");
+            hooks.register(HookDefinition {
+                id: HookId::new(),
+                name: id.clone(),
+                events: vec![HookEventType::PostToolUse],
+                if_condition: None,
+                executor: DefHookExecutor::Builtin {
+                    handler_id: id.clone(),
+                },
+                source: HookSource::Session,
+                blocking: true,
+                timeout: None,
+                priority: i32::try_from(count - index).unwrap(),
+                once: false,
+                status_message: None,
+                async_rewake: false,
+                async_timeout: None,
+                rewake_message: None,
+                on_failure: None,
+            });
+            handlers.push(OrderedPostHook {
+                id,
+                index,
+                response,
+                seen: seen.clone(),
+            });
+        }
+        let mut executor = HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(hooks)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        for handler in handlers {
+            executor.register_builtin(Arc::new(handler));
+        }
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(RewriteEcho { mcp }));
+        let orchestrator = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            Arc::new(executor),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        (orchestrator, seen)
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_output_rewrites_follow_native_completion_order() {
+        // Native 2.1.322's per-result fold yields a direct replacement or,
+        // only when absent, a legacy MCP replacement. Different hooks still
+        // compete in completion order. Schema rejection preserves the last
+        // accepted output instead of resetting to the original tool result.
+        for (name, mcp, outputs, expected, invalid_count) in [
+            (
+                "same-hook-direct-wins",
+                true,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"direct"},"updatedMCPToolOutput":{"out":"legacy"}}"#,
+                ],
+                "direct",
+                0,
+            ),
+            (
+                "later-legacy-overrides-earlier-direct",
+                true,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"direct"}}"#,
+                    r#"{"updatedMCPToolOutput":{"out":"legacy"}}"#,
+                ],
+                "legacy",
+                0,
+            ),
+            (
+                "later-direct-overrides-earlier-legacy",
+                true,
+                vec![
+                    r#"{"updatedMCPToolOutput":{"out":"legacy"}}"#,
+                    r#"{"updatedToolOutput":{"out":"direct"}}"#,
+                ],
+                "direct",
+                0,
+            ),
+            (
+                "ordinary-tool-ignores-later-legacy",
+                false,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"direct"}}"#,
+                    r#"{"updatedMCPToolOutput":{"out":"legacy"}}"#,
+                ],
+                "direct",
+                0,
+            ),
+            (
+                "later-invalid-direct-retains-earlier-valid",
+                true,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"accepted"}}"#,
+                    r#"{"updatedToolOutput":{"unexpected":true}}"#,
+                ],
+                "accepted",
+                1,
+            ),
+            (
+                "later-invalid-legacy-retains-earlier-valid",
+                true,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"accepted"}}"#,
+                    r#"{"updatedMCPToolOutput":{"unexpected":true}}"#,
+                ],
+                "accepted",
+                1,
+            ),
+            (
+                "later-falsy-legacy-is-suppressed",
+                true,
+                vec![
+                    r#"{"updatedToolOutput":{"out":"accepted"}}"#,
+                    r#"{"updatedMCPToolOutput":false}"#,
+                ],
+                "accepted",
+                0,
+            ),
+        ] {
+            let count = outputs.len();
+            let responses = outputs
+                .into_iter()
+                .map(|fields| {
+                    let fields = fields.strip_prefix('{').unwrap();
+                    let raw = format!(
+                        r#"{{"hookSpecificOutput":{{"hookEventName":"PostToolUse",{fields}}}"#
+                    );
+                    hooks::parse_response(&raw, "PostToolUse").unwrap()
+                })
+                .collect();
+            let (orch, seen) = orchestrator(mcp, responses);
+            let calls = uses();
+            let (results, prevent, injected, _) = dispatch_tool_uses_tracked(&orch, &calls, None)
+                .await
+                .unwrap();
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &results[0]
+            else {
+                panic!("{name}: expected a tool result");
+            };
+            assert_ne!(*is_error, Some(true), "{name}");
+            assert!(!prevent, "{name}");
+            assert_eq!(content.string_at(""), Some(expected), "{name}");
+            assert_eq!(
+                *seen.lock().unwrap(),
+                (0..count).collect::<Vec<_>>(),
+                "{name}"
+            );
+            assert!(
+                !injected
+                    .iter()
+                    .any(|(message, _)| message.text_content().contains("does not match")),
+                "{name}"
+            );
+            let attachments = orch.take_queued_hook_attachments(&calls[0].0).await;
+            assert_eq!(
+                attachments
+                    .iter()
+                    .filter(|(value, _)| value.string_at("/type")
+                        == Some("hook_error_during_execution"))
+                    .count(),
+                invalid_count,
+                "{name}"
+            );
+        }
+    }
+}
