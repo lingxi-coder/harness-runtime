@@ -61,6 +61,9 @@ pub fn encode_questions(request: &Request, protocol: Protocol) -> Value {
     }
 }
 pub fn openai_input(request: &Request) -> Value {
+    if request.images.is_empty() && request.state.is_string() {
+        return request.state.clone();
+    }
     let evidence = if request.state.is_string() {
         json!({"type":"input_text","text":request.state})
     } else if request.state.is_object() || request.state.is_array() {
@@ -68,9 +71,6 @@ pub fn openai_input(request: &Request) -> Value {
     } else {
         json!({"type":"input_text","text":request.state.to_string()})
     };
-    if request.images.is_empty() && request.state.is_string() {
-        return request.state.clone();
-    }
     let mut content = vec![evidence];
     content.extend(
         request
