@@ -16,7 +16,7 @@ use tool_api::{
     },
 };
 
-const DESCRIPTION: &str = "Evaluate supplied evidence using the Desktop's globally configured Decision service. Ask named binary probability, finite-choice or rubric-score questions. Returns predictions and available statistics, not authorization or verified facts. Uses the saved backend; does not execute actions. For question design and interpretation, load the decision skill.";
+const DESCRIPTION: &str = include_str!("decision/prompt.md");
 const TIMEOUT: Duration = Duration::from_secs(30);
 static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     generated_builtin_schema(&json!({
