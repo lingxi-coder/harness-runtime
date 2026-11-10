@@ -1,3 +1,5 @@
+//! Native 2.1.322 prompt, schema, and mutation-output contract regressions.
+
 use std::sync::Arc;
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;

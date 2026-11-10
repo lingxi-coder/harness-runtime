@@ -896,7 +896,13 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
         let mut sb = SearcherBuilder::new();
         sb.multi_line(multiline);
         sb.line_number(content_mode);
-        sb.binary_detection(BinaryDetection::convert(0));
+        // The bundled rg skips binary data found during directory discovery,
+        // but explicit files remain searchable with NUL bytes converted to LF.
+        sb.binary_detection(if single_file {
+            BinaryDetection::convert(0)
+        } else {
+            BinaryDetection::quit(0)
+        });
         if let Some(b) = ctx_before {
             sb.before_context(b);
         }
@@ -1301,8 +1307,8 @@ impl Tool for GrepTool {
         // must be probed as the host directory that actually backs it. In
         // `validate_input` it ran on the UNTRANSLATED path, so guest Grep failed
         // its own path check on the main dispatch path.
-        if crate::input_string(&input, "path").is_some() {
-            crate::dir_validate::validate_grep_path(&base.to_string_lossy(), &self.cwd_now())
+        if let Some(requested_path) = crate::input_string(&input, "path") {
+            crate::dir_validate::validate_grep_path_at(requested_path, &base, &self.cwd_now())
                 .map_err(|e| ToolError::InvalidInput(e.0))?;
         }
         let canon_base = match canonicalize_and_validate(&base, &trusted) {

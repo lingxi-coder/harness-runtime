@@ -1,12 +1,11 @@
-//! `FileReadTool` — read a UTF-8 file with size guard + binary detection.
+//! `FileReadTool` — Claude Code 2.1.322 file-reading contracts.
 //!
-//! Wire-locked constants:
-//! - `MAX_FILE_READ_SIZE = 262_144` bytes (256 KB) per spec §7.
-//! - Binary detection scans first `NUL_SCAN_WINDOW = 8 * 1024` bytes for NUL.
-//! - Default encoding UTF-8 (BOM-aware) per spec §7.
-//! - 1-based line indexing on tool input/output per spec §7.
-//! - Errors carry byte-locked human strings (see [`format_too_large`],
-//!   [`format_binary`]).
+//! The ordinary byte cap is 262,144; trusted context room can raise it for an
+//! explicit `allow_large` request. Text uses UTF-8 or BOM-selected UTF-16LE,
+//! LF-delimited ranges and UTF-16 token estimates. Unsupported text encodings
+//! return a warning; mutation tools refuse them. NUL classification examines
+//! the first 8,000 bytes. Legacy unchanged-file results remain readable, while
+//! current calls always perform fresh I/O.
 
 use crate::shared::NUL_SCAN_WINDOW;
 use crate::Utf16JsonProjection;
@@ -36,7 +35,7 @@ use tool_api::util::path_validation::{
 };
 use tool_api::BuiltinToolContext;
 
-/// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
+/// Ordinary Read byte limit; `allow_large` can raise it from trusted context room.
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
 
 /// Prompt-advertised default line count — byte-locked to claude-code `LQe`
@@ -51,8 +50,8 @@ pub const MAX_LINES_TO_READ: u64 = 2000;
 
 /// Default per-read output token budget — byte-locked to claude-code
 /// `DEFAULT_MAX_OUTPUT_TOKENS` (`FileReadTool/limits.ts:18`). A full text read
-/// whose estimated token count exceeds this errors with
-/// [`format_max_tokens_exceeded`].
+/// whose estimated token count exceeds this returns a partial first page;
+/// explicit ranges fail with [`format_max_tokens_exceeded`].
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 
 /// LingXi env tier for Claude-compatible per-call file-reading limits.
@@ -625,7 +624,12 @@ async fn read_text_range_streaming<R: Read>(
             } else if selecting {
                 selected_bytes = selected_bytes.saturating_add(character.len_utf8());
                 check_selected_range_size(
-                    selected_bytes.saturating_add(selected.len()),
+                    // A terminal CR is removed at LF/EOF. Defer charging
+                    // that single pending byte until another character makes
+                    // it part of the selected content.
+                    selected_bytes
+                        .saturating_sub(usize::from(character == '\r'))
+                        .saturating_add(selected.len()),
                     max_selected_bytes,
                 )?;
                 line.push(character);
@@ -1150,49 +1154,18 @@ fn lingxi_config_home_dir() -> PathBuf {
 // The former `CYBER_RISK_MITIGATION_REMINDER` const, `MITIGATION_EXEMPT_MODELS`,
 // and `should_include_file_read_mitigation` were deleted accordingly.
 
-/// Model-facing Read-dedup (`file_unchanged`) LONG form — byte-locked to
-/// claude-code `FOg` (2.1.220 binary offset 229141593; `tld` in older builds).
-///
-/// **DETECT-ONLY in 2.1.220.** `FOg` has NO PRODUCER in the current binary:
-/// `LC_ALL=C grep -abo -F 'FOg'` yields exactly two hits in the readable-JS
-/// region — its own definition (@229141593) and the detector
-/// `joo(e){return e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)}`
-/// (@229139264, `FOg` reference @229139291). It is retained solely to recognise
-/// dedup stubs written into transcripts by OLDER versions. The live producer is
-/// [`FILE_UNCHANGED_SHORT`] (`Sou`, @229141759) via `Eou(){return Sou}`
-/// (@229139080), selected by the result renderer at @235742950.
+/// Legacy long-form unchanged-file text retained for transcript replay and
+/// context filtering. Claude Code 2.1.322 no longer produces this result.
 pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
 
-/// Short-form Read dedup message — byte-locked to claude-code `Sou`
-/// (2.1.220 binary offset 229141759), returned by `Eou(){return Sou}`
-/// (@229139080). This is the ONLY string the non-seeded `file_unchanged` branch
-/// emits in 2.1.220 (renderer @235742950:
-/// `content: e.source==="seeded" ? vou(...) : Eou()`). The em-dash is U+2014,
-/// matching the binary literal exactly.
+/// Legacy short-form unchanged-file text (U+2014 em dash), retained for replay.
 pub const FILE_UNCHANGED_SHORT: &str = "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead.";
 
-/// `Tou` (2.1.220 binary offset 229141864) — the constant PREFIX of the SEEDED
-/// dedup stub built by
-/// ``vou(e){return `${Tou} (see "Contents of ${e}" above) and has not changed on
-/// disk. Use that content instead of re-reading.</system-reminder>`}`` (@229139106).
-///
-/// PRODUCED by the seeded Read-dedup branch via
-/// [`format_file_unchanged_seeded`], and matched by [`is_dedup_result`] so the
-/// detector stays a 1:1 port of `joo`.
+/// Legacy seeded-context stub prefix, recognized when reading older results.
 pub const FILE_UNCHANGED_SEEDED_PREFIX: &str =
     "<system-reminder>This file is already in your context";
 
-/// `vou(e)` (2.1.220 @229139106) — the SEEDED `file_unchanged` stub:
-///
-/// ```text
-/// vou(e){return `${Tou} (see "Contents of ${e}" above) and has not changed on
-///                disk. Use that content instead of re-reading.</system-reminder>`}
-/// ```
-///
-/// where `Tou` = [`FILE_UNCHANGED_SEEDED_PREFIX`]. The result renderer
-/// (@235742950) calls it as `vou(e.file.filePath)`, i.e. with the SAME
-/// `fullFilePath` the dedup branch put into `data.file.filePath` — the
-/// canonicalized absolute path on the Rust side.
+/// Render an older seeded-context result using its original model-visible path.
 #[must_use]
 pub fn format_file_unchanged_seeded(path: &std::path::Path) -> String {
     format!(
@@ -1201,12 +1174,8 @@ pub fn format_file_unchanged_seeded(path: &std::path::Path) -> String {
     )
 }
 
-/// `joo(e)` (2.1.220 binary offset 229139264) — byte-locked dedup detector:
-/// `e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)`, i.e. the legacy
-/// long form ([`FILE_UNCHANGED_STUB`]), the live short form
-/// ([`FILE_UNCHANGED_SHORT`]) or the seeded-stub prefix
-/// ([`FILE_UNCHANGED_SEEDED_PREFIX`]). Used to detect a dedup response in
-/// tool-result filtering / context compaction that must not re-expand.
+/// Recognize the three legacy unchanged-file result forms during replay and
+/// context filtering. New Read invocations do not produce these forms.
 #[must_use]
 pub fn is_dedup_result(s: &str) -> bool {
     s.starts_with(FILE_UNCHANGED_STUB)
@@ -1495,14 +1464,9 @@ impl FileReadTool {
         self.ctx.bus.log_event(READ_FAILED, md).await;
     }
 
-    /// `tengu_file_read_reread` (#13) — fired when reading a file that already
-    /// has a read-file-state entry, BEFORE the dedup short-circuit. 2.1.220
-    /// @235740900:
-    /// `if(m)M("tengu_file_read_reread",{priorOp:Te(m.seededFromContext?"seeded"
-    /// :m.offset===void 0?"edit_write":"read")})` — a THREE-way with `seeded`
-    /// tested FIRST. `prior_op` is `"seeded"` for a memory-seeded entry,
-    /// `"read"` for a prior Read-origin entry, `"edit_write"` for a prior
-    /// Edit/Write-origin entry.
+    /// Attribution for an existing read-state entry. Seeded context is tested
+    /// first, followed by prior Read and mutation provenance. Every invocation
+    /// still performs fresh I/O.
     async fn emit_file_read_reread(&self, prior_op: &'static str) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -2115,10 +2079,8 @@ impl Tool for FileReadTool {
         let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
         check_read_cancelled(&ctx)?;
-        // Raw input values, preserved verbatim for the read-state registry
-        // (TS `readFileState.set` stores the `offset`/`limit` as provided —
-        // `undefined` when absent). `offset` below defaults to `1` only for
-        // slicing; the registry records the un-defaulted `Option`.
+        // Native defaults offset to one before dispatch and state recording.
+        // An absent limit reads to EOF; notebook dispatch resets both values.
         let input_offset = crate::input_u64(&input, "offset");
         let input_limit = crate::input_u64(&input, "limit");
         let offset = input_offset.unwrap_or(1);
@@ -2422,12 +2384,9 @@ impl Tool for FileReadTool {
         // the generic 256 KB cap below so a >100 MB notebook reports the
         // notebook message, not the generic one.
         //
-        // Divergence recorded, NOT fixed here: upstream the notebook branch also
-        // preempts the generic `maxSizeBytes` cap entirely (it compares the
-        // SERIALIZED cells JSON, not the file size — see the `cells_json_bytes`
-        // check further down). LingXi still applies the generic cap to `.ipynb`
-        // at `size > MAX_FILE_READ_SIZE` below; realigning that ordering is a
-        // separate finding.
+        // Notebook source files have their own physical-size guard. Their
+        // serialized cells, rather than the source bytes, receive the ordinary
+        // text byte/token limits below.
         if is_notebook && size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE {
             self.emit_failed(&invocation_id, "notebook_too_large").await;
             return Err(ToolError::Io(
@@ -2698,14 +2657,7 @@ impl Tool for FileReadTool {
             self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
                 .await;
 
-            // Record the read — TS stores the serialized cells JSON as the
-            // entry `content` (`FileReadTool.ts:842-847`) with the DEFAULTED
-            // offset/limit. To keep the registry's full-view discriminator
-            // (used by the staleness guard + dedup) consistent with the rest of
-            // the Rust port, a no-range notebook read records `offset`/`limit`
-            // as the verbatim (un-defaulted) input — `None` for a full read —
-            // matching `read.rs`'s text path. The stored `content` is the
-            // cells JSON (so a same-range re-read dedups byte-for-byte).
+            // Native stores serialized cells, offset one and no line limit.
             check_read_cancelled(&ctx)?;
             tool_api::read_file_state::set_with_requested_aliases(
                 &self.ctx.read_file_state,
@@ -2812,8 +2764,8 @@ impl Tool for FileReadTool {
         // `readFileState.set(fullFilePath, {content, timestamp, offset,
         // limit})` (`FileReadTool.ts:1032`). `content` is the range-limited
         // slice TS stores (from `readFileInRange`), `mtime_ms` is floored, and
-        // `offset`/`limit` are the verbatim (un-defaulted) input values. The
-        // key is Native's normalized absolute model route (`fullFilePath`).
+        // `offset` is defaulted; a partial first page records its returned line
+        // count as `limit`. The key is the normalized absolute model route.
         // Canonical identity remains for permission and rooted I/O; the source
         // route and translated host spelling are captured together.
         check_read_cancelled(&ctx)?;
@@ -2829,9 +2781,7 @@ impl Tool for FileReadTool {
                 } else {
                     input_limit
                 },
-                // This entry is the product of a `Read` — the dedup gate
-                // (`FileReadTool.ts:550` `offset !== undefined`) only short-
-                // circuits against Read-sourced entries.
+                // Retain Read provenance for mutation freshness checks.
                 from_read: true,
                 // A Read never seeds; only the orchestrator's
                 // `seed_memory_read_state` does.
@@ -3334,6 +3284,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn streaming_range_charges_normalized_crlf_bytes_at_the_cap() {
+        for content in ["a\r\n", "a\r"] {
+            let result =
+                read_text_range_streaming(content.as_bytes(), Path::new("text.txt"), 1, 1, None, 1)
+                    .await
+                    .expect("one normalized byte fits exactly");
+            assert_eq!(result.content, "a");
+        }
+        assert!(
+            read_text_range_streaming("a\r\r\n".as_bytes(), Path::new("text.txt"), 1, 1, None, 1,)
+                .await
+                .is_err(),
+            "the earlier CR remains content and must be charged"
+        );
+    }
+
     #[test]
     fn tool_name_is_read() {
         assert_eq!(TOOL_NAME, "Read");
@@ -3641,7 +3608,7 @@ mod tests {
             .expect("ranged read of an oversize file must succeed");
         assert_eq!(
             crate::test_data(&result.data)["file"]["content"],
-            "second\nthird\n"
+            "second\nthird"
         );
     }
 
@@ -3661,10 +3628,12 @@ mod tests {
                 fresh_tx(),
             )
             .await
-            .expect_err("oversize single-line range must fail without loading the whole line");
+            .expect_err("over-budget single-line range must fail its token gate");
         let msg = source_text(&err.model_facing_message());
-        assert!(msg.contains("line longer than"), "got: {msg}");
-        assert!(msg.contains("Use Grep"), "got: {msg}");
+        assert_eq!(
+            msg,
+            format_max_tokens_exceeded(65_792, DEFAULT_MAX_OUTPUT_TOKENS)
+        );
     }
 
     #[tokio::test]
@@ -3694,10 +3663,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_binary_file() {
-        // Extensionless file with a NUL byte in the first 8 KB => NUL-scan
-        // fallback path (no binary extension to short-circuit on). The TS message
-        // renders the (empty) extension.
+    async fn extensionless_nul_content_returns_encoding_warning() {
+        // Native returns the decoded view and warns that mutations will
+        // refuse the NUL-bearing source; extension rejection is a separate gate.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("bin");
         let mut data = vec![b'A'; 100];
@@ -3705,16 +3673,24 @@ mod tests {
         std::fs::write(&target, &data).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
-        let err = tool
+        let result = tool
             .call(
                 crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .unwrap_err();
-        assert!(source_text(&err.model_facing_message())
-            .contains("This tool cannot read binary files."));
+            .unwrap();
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"]
+                .as_str()
+                .unwrap()
+                .as_bytes(),
+            data
+        );
+        assert!(crate::test_model_text(result.model_content.as_ref())
+            .unwrap()
+            .ends_with(&crate::file_meta::NotText::Nul.read_warning()));
     }
 
     #[tokio::test]
@@ -3797,10 +3773,10 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("L2500\n"));
-        // startLine = 1, numLines = 2500 (lines returned); totalLines = 2501
-        // (trailing-newline phantom line).
+        // Both counts include the terminal empty line; content still has
+        // exactly 2500 nonempty lines and no runtime line cap.
         assert_eq!(crate::test_data(&result.data)["file"]["startLine"], 1);
-        assert_eq!(crate::test_data(&result.data)["file"]["numLines"], 2500);
+        assert_eq!(crate::test_data(&result.data)["file"]["numLines"], 2501);
         assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 2501);
         // NO truncation note of any kind.
         let mc = crate::test_model_text(result.model_content.as_ref()).unwrap();
@@ -3954,11 +3930,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line1\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line1");
         // cat -n numbers from offset=1. No cyber-risk reminder (verdict 12/14).
         assert_eq!(
             crate::test_model_text(result.model_content.as_ref()).unwrap(),
-            "1\tline1\n2\t"
+            "1\tline1"
         );
     }
 
@@ -3979,12 +3955,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line2\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line2");
         // Numbering starts at the requested offset (2), not 1. No cyber-risk
         // reminder (verdict 12/14).
         assert_eq!(
             crate::test_model_text(result.model_content.as_ref()).unwrap(),
-            "2\tline2\n3\t"
+            "2\tline2"
         );
     }
 
@@ -4055,7 +4031,7 @@ mod tests {
             tool_api::read_file_state::get(&map, &key).expect("registry entry recorded on read");
         // Content is the range-limited slice (TS stores `readFileInRange`'s
         // output), and offset/limit are the verbatim input values.
-        assert_eq!(entry.content, "line2\n");
+        assert_eq!(entry.content, "line2");
         assert_eq!(entry.offset, Some(2));
         assert_eq!(entry.limit, Some(1));
         // mtime recorded as a non-negative floor-truncated millisecond value.
@@ -4063,7 +4039,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_without_offset_limit_records_none() {
+    async fn read_without_offset_limit_records_default_offset() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("b.txt");
         std::fs::write(&target, "alpha\nbeta\n").unwrap();
@@ -4080,7 +4056,7 @@ mod tests {
         .unwrap();
         let entry = tool_api::read_file_state::get(&map, &key).unwrap();
         assert_eq!(entry.content, "alpha\nbeta\n");
-        assert_eq!(entry.offset, None);
+        assert_eq!(entry.offset, Some(1));
         assert_eq!(entry.limit, None);
     }
 
@@ -4381,7 +4357,7 @@ mod tests {
         // TUI payload `content` stays the raw (empty) slice; the model sees the
         // empty-file warning instead of an empty string.
         assert_eq!(crate::test_data(&result.data)["file"]["content"], "");
-        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 0);
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 1);
         assert_eq!(
             crate::test_model_text(result.model_content.as_ref()).unwrap(),
             EMPTY_FILE_WARNING
@@ -4509,14 +4485,12 @@ mod tests {
         .await
         .unwrap();
         let entry = tool_api::read_file_state::get(&map, &key).expect("notebook read recorded");
-        // A no-range notebook read is a full view (offset/limit None) and is
-        // flagged as Read-sourced so the staleness guard accepts a follow-up
-        // NotebookEdit and the dedup gate sees a Read entry.
-        assert_eq!(entry.offset, None);
+        // Notebook reads record the default first line with no limit and
+        // retain their Read provenance for the mutation freshness guard.
+        assert_eq!(entry.offset, Some(1));
         assert_eq!(entry.limit, None);
         assert!(entry.from_read);
-        // Stored content is the serialized cells JSON (so a same-range re-read
-        // dedups byte-for-byte).
+        // Stored content is the serialized cells JSON.
         assert!(entry.content.contains("\"cellType\""));
     }
 
@@ -4680,7 +4654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_file_reread_does_not_dedup() {
+    async fn changed_file_reread_returns_updated_content() {
         use filetime::{set_file_mtime, FileTime};
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("changed.txt");
@@ -4716,9 +4690,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn different_range_reread_does_not_dedup() {
+    async fn different_range_reread_returns_requested_line() {
         // First read full, then a ranged re-read of the same (unchanged) file:
-        // the range differs, so dedup must NOT fire.
+        // each range is returned directly from the file.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("range.txt");
         std::fs::write(&target, "l1\nl2\nl3\n").unwrap();
@@ -4742,7 +4716,7 @@ mod tests {
             .await
             .unwrap();
         // Different range → real content, no stub.
-        assert_eq!(crate::test_data(&ranged.data)["file"]["content"], "l2\n");
+        assert_eq!(crate::test_data(&ranged.data)["file"]["content"], "l2");
         assert_eq!(
             crate::test_data(&ranged.data)["type"],
             "text",
@@ -4751,10 +4725,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_then_read_does_not_dedup_against_post_write_entry() {
+    async fn write_then_read_fetches_post_write_content() {
         // A Write records a post-write registry entry with `from_read=false`.
-        // A subsequent Read of the same path must NOT dedup against it (TS gates
-        // dedup on `offset !== undefined`, i.e. Read-sourced entries only).
+        // A subsequent Read fetches the on-disk result of the mutation.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("wr.txt");
         let (ctx, _sink) = make_ctx(&tmp);
@@ -4791,7 +4764,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // Real content returned (the write entry is not a dedup candidate).
+        // The fresh Read returns the post-write content.
         assert_eq!(crate::test_data(&result.data)["file"]["content"], "seed\n");
         assert_eq!(
             crate::test_data(&result.data)["type"],
@@ -4804,7 +4777,7 @@ mod tests {
 
     #[test]
     fn rough_token_estimate_byte_locked() {
-        // Round-half-up over byte length, bpt=4 for non-json: (len+2)/4.
+        // Round-half-up over UTF-16 units, bpt=4 for non-JSON: (len+2)/4.
         assert_eq!(rough_token_count_estimation_for_file_type("", None), 0);
         assert_eq!(rough_token_count_estimation_for_file_type("ab", None), 1); // (2+2)/4
         assert_eq!(
@@ -5527,7 +5500,7 @@ mod tests {
             .expect("small slice of a huge file passes the token gate");
         assert_eq!(
             crate::test_data(&result.data)["file"]["content"],
-            "first\nsecond\n"
+            "first\nsecond"
         );
     }
 
@@ -5600,7 +5573,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_file_read_fires_on_normal_text_read_with_counts() {
-        // A normal (non-dedup, non-session) text read fires tengu_session_file_read
+        // A normal text read fires tengu_session_file_read
         // with the right line/byte counts and the only-if-present `ext`, and the
         // omitted `messageID` / false session flags.
         let tmp = TempDir::new().unwrap();
@@ -5628,9 +5601,8 @@ mod tests {
         let md = &ev.metadata;
         // totalLines = 4 (trailing-newline phantom final line, TS readFileInRange).
         assert!(matches!(md.get("totalLines"), Some(AnalyticsValue::Int(4))));
-        // readLines = number of selected lines = total lines of the full read = 3
-        // (split_inclusive over 3 newlines → 3 fragments).
-        assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(3))));
+        // A full read includes the terminal empty line: readLines = 4.
+        assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(4))));
         // totalBytes = full content byte length; readBytes = selected slice bytes;
         // a full read makes them equal (17 bytes).
         assert!(matches!(
@@ -5680,10 +5652,10 @@ mod tests {
             .metadata;
         assert!(matches!(md.get("offset"), Some(AnalyticsValue::Int(2))));
         assert!(matches!(md.get("limit"), Some(AnalyticsValue::Int(2))));
-        // 2 selected lines ("l2\nl3\n").
+        // 2 selected line bodies are joined as "l2\nl3".
         assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(2))));
-        // readBytes = bytes of "l2\nl3\n" = 6; totalBytes = full file = 12.
-        assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(6))));
+        // readBytes = 5; totalBytes = the full file's 12 bytes.
+        assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(5))));
         assert!(matches!(
             md.get("totalBytes"),
             Some(AnalyticsValue::Int(12))
@@ -5692,18 +5664,7 @@ mod tests {
         assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "txt"));
     }
 
-    // ─────────────────── SEEDED Read dedup (source:"seeded") ────────────────
-    //
-    // Oracle @235741459:
-    //   if(_&&_.seededFromContext&&!_.isPartialView&&t===1&&r===void 0)
-    //     if(await b0e(f)===_.timestamp){
-    //       let b=vq(f);
-    //       return M("tengu_file_read_dedup",{source:Te("seeded"),...b!==void 0&&{ext:b}}),
-    //              {data:{type:"file_unchanged",file:{filePath:f},source:"seeded"}}}
-    //
-    // Note `t===1` is the DEFAULTED offset (`call({file_path:e,offset:t=1,…})`
-    // @235740900), so an explicit `offset:1` still dedups — unlike the
-    // non-seeded branch, whose `rangeMatch` compares the raw `offset`.
+    // Seeded context, partial views and changed mtimes all receive fresh reads.
 
     /// Seed `path` into the tool's read-state exactly as
     /// `ConversationOrchestrator::seed_memory_read_state` does.
@@ -5734,7 +5695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeded_dedup_refuses_ranged_reads() {
+    async fn seeded_context_ranged_read_returns_fresh_data() {
         // T3: `t===1 && r===void 0` — any other offset, or ANY limit, skips
         // the seeded branch and returns the full/ranged content.
         let tmp = TempDir::new().unwrap();
@@ -5766,9 +5727,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeded_dedup_refuses_a_partial_view() {
+    async fn seeded_partial_view_receives_full_read() {
         // T4: `!_.isPartialView` — a memory file whose recorded content differs
-        // from disk (frontmatter/HTML comments stripped) must NOT dedup; the
+        // from disk (frontmatter/HTML comments stripped) must be reread; the
         // model never saw the on-disk bytes.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("cond.md");
@@ -5791,7 +5752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeded_dedup_refuses_when_mtime_changed() {
+    async fn seeded_context_changed_mtime_returns_fresh_data() {
         // T5: `await b0e(f)===_.timestamp`.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("LINGXI.md");

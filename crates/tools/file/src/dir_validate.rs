@@ -95,8 +95,19 @@ pub(crate) fn validate_no_null_bytes(
 /// `Directory does not exist: …`) or is a non-directory (errorCode 2,
 /// `Path is not a directory: …`); `Ok(())` when the path is a UNC path, a real
 /// directory, or fails `stat` for a non-ENOENT reason.
+#[cfg(test)]
 pub(crate) fn validate_glob_directory(path: &str, cwd: &Path) -> Result<(), ValidationError> {
-    let (cwd, resolved) = match resolve_for_validation(path, cwd) {
+    validate_glob_directory_at(path, Path::new(path), cwd)
+}
+
+/// Probe the normalized/translated path while preserving the caller's spelling
+/// in native error messages (`Har` uses `stat(ht(path))` and prints `path`).
+pub(crate) fn validate_glob_directory_at(
+    path: &str,
+    probe_path: &Path,
+    cwd: &Path,
+) -> Result<(), ValidationError> {
+    let (cwd, resolved) = match resolve_for_validation(&probe_path.to_string_lossy(), cwd) {
         Some(pair) => pair,
         // UNC / network path — validation skipped entirely.
         None => return Ok(()),
@@ -123,8 +134,18 @@ pub(crate) fn validate_glob_directory(path: &str, cwd: &Path) -> Result<(), Vali
 /// Grep's `validateInput({path})` — the path may be a file OR a directory
 /// (`rg PATH`), so the ONLY rejection is ENOENT, and its wording is
 /// `Path does not exist: …` (not Glob's `Directory does not exist: …`).
+#[cfg(test)]
 pub(crate) fn validate_grep_path(path: &str, cwd: &Path) -> Result<(), ValidationError> {
-    let (cwd, resolved) = match resolve_for_validation(path, cwd) {
+    validate_grep_path_at(path, Path::new(path), cwd)
+}
+
+/// Grep's normalized probe has the same raw-display contract as Glob (`Kar`).
+pub(crate) fn validate_grep_path_at(
+    path: &str,
+    probe_path: &Path,
+    cwd: &Path,
+) -> Result<(), ValidationError> {
+    let (cwd, resolved) = match resolve_for_validation(&probe_path.to_string_lossy(), cwd) {
         Some(pair) => pair,
         None => return Ok(()),
     };
@@ -224,6 +245,31 @@ fn suggest_sibling_dir(resolved: &Path, cwd: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn normalized_probe_keeps_the_raw_error_spelling() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing");
+        for (lead, result) in [
+            (
+                "Directory does not exist",
+                validate_glob_directory_at("  missing  ", &missing, tmp.path()),
+            ),
+            (
+                "Path does not exist",
+                validate_grep_path_at("  missing  ", &missing, tmp.path()),
+            ),
+        ] {
+            let expected = format!(
+                "{lead}:   missing  . Note: your current working directory is {}.",
+                std::fs::canonicalize(tmp.path()).unwrap().display()
+            );
+            assert_eq!(result.unwrap_err().0.string_at(""), Some(expected.as_str()));
+        }
+        std::fs::create_dir(&missing).unwrap();
+        assert!(validate_glob_directory_at("  missing  ", &missing, tmp.path()).is_ok());
+        assert!(validate_grep_path_at("  missing  ", &missing, tmp.path()).is_ok());
+    }
 
     #[test]
     fn absent_path_is_ok() {

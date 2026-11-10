@@ -597,8 +597,8 @@ impl Tool for GlobTool {
         // must be probed as the host directory that actually backs it. In
         // `validate_input` it ran on the UNTRANSLATED path, so guest Glob failed
         // its own directory check on the main dispatch path.
-        if crate::input_string(&input, "path").is_some() {
-            crate::dir_validate::validate_glob_directory(&base.to_string_lossy(), &self.cwd_now())
+        if let Some(requested_path) = crate::input_string(&input, "path") {
+            crate::dir_validate::validate_glob_directory_at(requested_path, &base, &self.cwd_now())
                 .map_err(|e| ToolError::InvalidInput(e.0))?;
         }
         let canon_base = match canonicalize_and_validate(&base, &trusted) {
@@ -755,7 +755,7 @@ impl Tool for GlobTool {
             "countIsComplete": !timed_out,
         }));
         if timed_out {
-            data.set_field("timedOut", "true".into())
+            data.set_field("timedOut", crate::generated_result(&json!(true)))
                 .expect("Glob result is an object");
         }
         let model_content = map_glob_result_text(&data);
@@ -869,8 +869,12 @@ mod tests {
                 case["name"]
             );
             let mut valid = input.clone();
-            valid.set_field("durationMs", "0".into()).unwrap();
-            valid.set_field("numFiles", "0".into()).unwrap();
+            valid
+                .set_field("durationMs", crate::generated_result(&json!(0)))
+                .unwrap();
+            valid
+                .set_field("numFiles", crate::generated_result(&json!(0)))
+                .unwrap();
             let parsed = tool.parse_output(&valid).await.unwrap();
             assert_eq!(
                 parsed

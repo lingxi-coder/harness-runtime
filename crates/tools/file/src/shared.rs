@@ -340,8 +340,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nul_scan_window_is_8kb() {
-        assert_eq!(NUL_SCAN_WINDOW, 8 * 1024);
+    fn nul_scan_window_is_decimal_8kb() {
+        assert_eq!(NUL_SCAN_WINDOW, 8000);
     }
 
     #[test]
@@ -353,13 +353,8 @@ mod tests {
 
     #[test]
     fn looks_binary_ignores_nul_outside_window() {
-        // Deviation from plan: plan wrote `vec![b'A'; NUL_SCAN_WINDOW + 10]`
-        // and then `buf[9000] = 0`, but 9000 > 8202 → OOB panic. Resize
-        // buffer so the NUL at offset 9000 is in-bounds but past the
-        // 8192-byte scan window.
-        let mut buf = vec![b'A'; NUL_SCAN_WINDOW + 1000];
-        // NUL at position 9000 (past the 8192-byte window) → not binary
-        buf[9000] = 0;
+        let mut buf = vec![b'A'; NUL_SCAN_WINDOW + 1];
+        buf[NUL_SCAN_WINDOW] = 0;
         assert!(!looks_binary(&buf));
     }
 

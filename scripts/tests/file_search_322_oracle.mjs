@@ -166,7 +166,8 @@ await addSearch('unterminated double carriage return', 'hit\r\r', {});
 await addSearch('empty matching line', '\n', { pattern: '^$' });
 await addSearch('context override retains raw grouping gate', 'hit\ngap\nhit\n', { context: 0, '-B': 1 });
 
-await addSearch('NUL separates matching lines and adds binary notice', 'hit\nnone\0hit\nhit\n', {});
+await addSearch('directory-discovered binary is skipped before its first match', 'hit\nnone\0hit\nhit\n', {});
+await addSearch('directory binary after buffered matches retains hits and notice', 'hit\n' + 'a'.repeat(70000) + '\0rest\n', {});
 await addSearch('single file binary notice', 'hit\0rest\n', {}, true);
 await addSearch('NUL without matches stays empty', 'none\0rest\n', {});
 
