@@ -391,9 +391,6 @@ impl ForkedAgentRunner {
         };
 
         let suggestion = req.query_source == QuerySource::PromptSuggestion;
-        // Native MC defaults to 50 model turns. Suggestion's canUseTool always
-        // denies; the next model turn receives the exact denial string.
-        let max_turns = if suggestion { 50 } else { 1 };
         let mut result = ForkedAgentResult {
             final_text: Utf16JsonProjection::from(""),
             candidates: Vec::new(),
@@ -406,27 +403,36 @@ impl ForkedAgentRunner {
             usage_observer,
             ..Default::default()
         };
-        for turn in 0..max_turns {
+        if !suggestion {
+            let fork = client
+                .query_fork(request, options)
+                .await
+                .map_err(ForkError::Api)?;
+            result.generation_request_id = fork.request_id;
+            result.usage.add(&fork.response.usage);
+            result.final_text = fork
+                .response
+                .text
+                .unwrap_or_else(|| Utf16JsonProjection::from(""));
+            result.candidates = fork.candidates;
+            result.tool_calls = fork.response.tool_calls;
+            return Ok(result);
+        }
+
+        // Native MC defaults to 50 model turns. Suggestion's canUseTool always
+        // denies; the next model turn receives the exact denial string.
+        for turn in 0..50 {
             let fork = match client.query_fork(request.clone(), options.clone()).await {
                 Ok(response) => response,
                 // Native I skips an API-error assistant but retains candidates
                 // emitted before it; a later failure must not discard them.
-                Err(_) if suggestion && turn > 0 => break,
+                Err(_) if turn > 0 => break,
                 Err(error) => return Err(ForkError::Api(error)),
             };
             if turn == 0 {
                 result.generation_request_id = fork.request_id;
             }
             result.usage.add(&fork.response.usage);
-            if !suggestion {
-                result.final_text = fork
-                    .response
-                    .text
-                    .unwrap_or_else(|| Utf16JsonProjection::from(""));
-                result.candidates = fork.candidates;
-                result.tool_calls = fork.response.tool_calls;
-                break;
-            }
             result.candidates.extend(fork.candidates);
             let denials: Vec<_> = fork
                 .assistant_content
@@ -473,13 +479,11 @@ impl ForkedAgentRunner {
                 turn_origin: None,
             });
         }
-        if suggestion {
-            result.final_text = result
-                .candidates
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Utf16JsonProjection::from(""));
-        }
+        result.final_text = result
+            .candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Utf16JsonProjection::from(""));
         Ok(result)
     }
 }
@@ -528,6 +532,7 @@ mod tests {
 
     struct ToolCallClient {
         seen: Mutex<Option<SideQueryRequest>>,
+        calls: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -536,6 +541,7 @@ mod tests {
             &self,
             request: SideQueryRequest,
         ) -> Result<SideQueryResponse, SideQueryError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.seen.lock().unwrap() = Some(request);
             Ok(SideQueryResponse {
                 text: None,
@@ -1157,9 +1163,10 @@ mod tests {
     async fn one_shot_runner_preserves_tool_calls_for_callers_to_deny() {
         let client = Arc::new(ToolCallClient {
             seen: Mutex::new(None),
+            calls: std::sync::atomic::AtomicUsize::new(0),
         });
-        let runner =
-            ForkedAgentRunner::new().with_side_query_client(client, "claude-sonnet-4-6".into());
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "claude-sonnet-4-6".into());
         let result = runner
             .run(request_with(vec![], vec![user_msg("question")], Some(128)))
             .await
@@ -1168,6 +1175,11 @@ mod tests {
         assert_eq!(result.final_text.string_at(""), Some(""));
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].string_at("/name"), Some("Read"));
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one-shot forks leave tool continuation to their caller"
+        );
     }
 
     #[tokio::test]

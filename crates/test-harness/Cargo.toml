@@ -107,7 +107,7 @@ command-api = { path = "../command-api", features = ["builtin-handlers"] }
 sha2 = "0.10"
 # Used by the M5-14 parity driver (parity_orchestrator) to exercise the
 # ConversationOrchestrator turn loop + TurnOutcome + run_turn_with_cancel.
-orchestrator = { path = "../orchestrator" }
+orchestrator = { path = "../orchestrator", features = ["test-support"] }
 # Production prompt-style resolution for Claude 2.1.220 body manifests.
 outputstyles = { path = "../outputstyles" }
 tokio-util = { workspace = true, features = ["rt"] }

@@ -63,7 +63,7 @@ builtin-handlers = [
 
 [dev-dependencies]
 tempfile = "3"
-orchestrator = { path = "../orchestrator" }
+orchestrator = { path = "../orchestrator", features = ["test-support"] }
 tool-api = { path = "../tool-api" }
 llm-runtime = { path = "../llm-runtime" }
 compaction = { path = "../compaction" }

@@ -672,9 +672,8 @@ impl CompactionOrchestrator {
         // #58: the preserved tail the autocompact layer carries out, if any.
         // Empty unless autocompact fires AND `DRn` selected a preservable tail.
         let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
-        let estimate_after_micro = crate::grouping::estimate_tokens_for_range(&messages);
         let over_threshold = crate::threshold_calc::should_auto_compact(
-            context_tokens.unwrap_or(estimate_after_micro),
+            context_tokens.unwrap_or_else(|| crate::grouping::estimate_tokens_for_range(&messages)),
             // Snip removed messages but the surviving usage estimate above
             // already reflects the post-snip set, so no extra subtraction is
             // applied here (snip_freed = 0). The freed total still carries the

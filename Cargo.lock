@@ -3042,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=b14c43a37d00d66565255f04eec182858959a927#b14c43a37d00d66565255f04eec182858959a927"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3061,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=b14c43a37d00d66565255f04eec182858959a927#b14c43a37d00d66565255f04eec182858959a927"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
 dependencies = [
  "futures-util",
  "http",
@@ -3078,7 +3078,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.21"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=b14c43a37d00d66565255f04eec182858959a927#b14c43a37d00d66565255f04eec182858959a927"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3100,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=b14c43a37d00d66565255f04eec182858959a927#b14c43a37d00d66565255f04eec182858959a927"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3128,7 +3128,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.29"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=b14c43a37d00d66565255f04eec182858959a927#b14c43a37d00d66565255f04eec182858959a927"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4343,6 +4343,7 @@ dependencies = [
  "mobile-linux-api",
  "nix 0.27.1",
  "once_cell",
+ "orchestrator",
  "outputstyles",
  "permission",
  "platform-posix",

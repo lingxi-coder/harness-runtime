@@ -448,12 +448,14 @@ pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> Plan
         let Some(boundary_uuid) = last_boundary_uuid.as_deref() else {
             return PlanOutcome::Abort(PlanAbort::PreservedWalkBroken);
         };
-        let source = source_lines
-            .iter()
-            .map(|line| strip_leading_nuls(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let routed = crate::jsonl::reader::route_lines(&source);
+        // The router trims the native per-row whitespace (including BOMs),
+        // so the same normalized line views can be routed without joining a
+        // second complete copy of the transcript.
+        let routed = crate::jsonl::reader::route_line_seq(
+            source_lines
+                .iter()
+                .flat_map(|line| strip_leading_nuls(line).lines()),
+        );
         let Some(stage_ids) =
             crate::jsonl::loader::exact_native_staged_anchors(&routed, boundary_uuid)
         else {
@@ -988,6 +990,63 @@ mod tests {
             marker,
             user(after, Some(b), false),
         ];
+        // The previous joined source is the oracle for routing normalized
+        // views. Keep BOM handling, NUL healing and exact stage validation
+        // equivalent when the compactor routes the iterator directly.
+        let decorated = std::iter::once("\0\u{FEFF}{\"type\":\"fixed-session-mode\"}".to_string())
+            .chain(rows.iter().map(|row| format!("\0{row}")))
+            .collect::<Vec<_>>();
+        let joined = decorated
+            .iter()
+            .map(|line| strip_leading_nuls(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let legacy = crate::jsonl::reader::route_lines(&joined);
+        let streamed = crate::jsonl::reader::route_line_seq(
+            decorated
+                .iter()
+                .flat_map(|line| strip_leading_nuls(line).lines()),
+        );
+        let bytes = |loaded: &crate::jsonl::reader::LoadedTranscript| {
+            loaded
+                .messages_in_order
+                .iter()
+                .map(|row| crate::jsonl::exact_json::native_message_bytes(row).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bytes(&streamed), bytes(&legacy));
+        assert_eq!(streamed.malformed_line_count, legacy.malformed_line_count);
+        assert_eq!(
+            crate::jsonl::loader::exact_native_staged_anchors(&streamed, boundary),
+            crate::jsonl::loader::exact_native_staged_anchors(&legacy, boundary)
+        );
+        let decorated_plan = match build_compact_plan(decorated.iter().map(String::as_str)) {
+            PlanOutcome::Plan(plan) => plan,
+            _ => panic!("normalized exact source must remain compactable"),
+        };
+        let emitted = decorated
+            .iter()
+            .enumerate()
+            .flat_map(|(index, line)| decorated_plan.apply(index, line))
+            .map(strip_leading_nuls)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = crate::jsonl::reader::route_lines(&emitted);
+        assert_eq!(
+            build_conversation_chain(&normalized, &owner)
+                .0
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                boundary.as_str(),
+                announce.as_str(),
+                summary.as_str(),
+                a.as_str(),
+                b.as_str(),
+                after.as_str()
+            ]
+        );
         let write = |rows: &[Value]| {
             std::fs::write(
                 &path,

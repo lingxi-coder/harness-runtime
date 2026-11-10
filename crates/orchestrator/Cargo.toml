@@ -79,6 +79,8 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 nix = { version = "0.27", features = ["process", "signal"] }
 
 [dev-dependencies]
+# Integration tests link the library without `cfg(test)`.
+orchestrator = { path = ".", features = ["test-support"] }
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 bytes.workspace = true
 jsonrpc = { path = "../jsonrpc" }

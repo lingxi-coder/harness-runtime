@@ -98,18 +98,12 @@ pub mod transcript_paths;
 pub mod turn_loop;
 mod vision_model_call;
 
-// test_support carries the HookExecutor / PermissionGate trait definitions
-// that ConversationOrchestrator's signature uses; it MUST be available in
-// production builds (the plan's `#[cfg(any(test, feature = "test-support"))]`
-// guard would hide those traits from production). M5-05 / M5-06 will move
-// the traits to lingxi-permission / lingxi-hooks; until then they live in
-// test_support unconditionally.
+// Preserve runtime hook/permission aliases and fixed-memory helpers at their
+// existing paths; the module gates its scripted clients and recording mocks.
 pub mod test_support;
 
 /// Streaming-path test fixtures (`MockStreamingApiClient`, `scripted!`).
-/// Compiled unconditionally — mirrors `test_support` (M5-02 made that
-/// module unconditional; this one follows the same convention so
-/// integration tests can use the fixtures without a feature flag).
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support_stream;
 
 pub use config::{

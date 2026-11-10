@@ -287,18 +287,32 @@ fn compact_authoritative_target(
     };
     use lingxi_core::host::rooted_fs::{atomic_write_stream_pinned_checked, AtomicWriteOptions};
     use sha2::{Digest, Sha256};
-    use std::io::Write;
+    use std::io::{Read, Write};
     let authority = durable
         .transcript_authority()
         .ok_or_else(|| FsError::Io("transcript authority disappeared".into()))?;
     if authority.path() != path {
         return Err(FsError::Io("compaction target differs from captured authority".into()).into());
     }
-    let source = authority.read_checked()?;
-    let source_revision: [u8; 32] = Sha256::digest(&source).into();
+    // Admit the exact descriptor before checking the floor, without reading
+    // and hashing a young transcript that cannot be rewritten yet.
+    let mut source_file = authority.open_checked()?;
+    if source_file
+        .metadata()
+        .map_err(|error| FsError::Io(error.to_string()))?
+        .len()
+        < MIN_COMPACT_FILE_BYTES
+    {
+        return Ok(CompactOutcome::Skipped);
+    }
+    let mut source = Vec::new();
+    source_file
+        .read_to_end(&mut source)
+        .map_err(|error| FsError::Io(error.to_string()))?;
     if source.len() < MIN_COMPACT_FILE_BYTES as usize {
         return Ok(CompactOutcome::Skipped);
     }
+    let source_revision: [u8; 32] = Sha256::digest(&source).into();
     if source.last() != Some(&b'\n') {
         return Ok(CompactOutcome::Failed(CompactFailure::SnapshotMidLine));
     }
@@ -3251,6 +3265,81 @@ impl JsonlWriter {
             true,
         )
         .await
+    }
+
+    /// Recover native rows in order with one duplicate scan and one pinned
+    /// session transaction. An error reports only the durably acknowledged
+    /// prefix, so callers retain the suffix for an idempotent retry.
+    pub async fn append_native_messages_once(
+        &self,
+        messages: &[&JsonlMessage],
+    ) -> Result<(), (usize, TranscriptWriterError)> {
+        let Some(first) = messages.first() else {
+            return Ok(());
+        };
+        let session_id = SessionId::parse_prefixed(&first.session_id).ok_or_else(|| {
+            (
+                0,
+                TranscriptWriterError::Fs(FsError::Io(
+                    "native row has an invalid session id".into(),
+                )),
+            )
+        })?;
+        let mut payloads = Vec::with_capacity(messages.len());
+        for message in messages {
+            if SessionId::parse_prefixed(&message.session_id) != Some(session_id) {
+                return Err((
+                    0,
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "native recovery batch crosses session owners".into(),
+                    )),
+                ));
+            }
+            let stamped = stamp_session_kind(message);
+            payloads.push(
+                native_message_projection(stamped.as_ref().unwrap_or(message))
+                    .map_err(|error| (0, TranscriptWriterError::from(error)))?,
+            );
+        }
+        let _guard = self.lock.lock().await;
+        self.flush_queue_operations_locked()
+            .await
+            .map_err(|error| (0, queue_journal_error(error)))?;
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    0,
+                    TranscriptWriterError::Fs(FsError::Io(format!(
+                        "durable transcript target is not bound for session {session_id}"
+                    ))),
+                )
+            })?;
+        let identity_store = self.identity_store.clone();
+        tokio::task::spawn_blocking(move || {
+            target
+                .writer
+                .with_transaction(|transaction| {
+                    let (root, identity, relative, admitted) =
+                        durable_target_parts(&target.writer, &target.path)?;
+                    Ok(transaction.append_native_json_batch_once_at_identity(
+                        &root,
+                        &identity,
+                        &relative,
+                        payloads,
+                        admitted,
+                        &identity_store,
+                        &target.path,
+                    ))
+                })
+                .map_err(|error| (0, error))?
+        })
+        .await
+        .map_err(|error| (0, TranscriptWriterError::Fs(FsError::Io(error.to_string()))))?
     }
 
     /// Persist one transcript row from a durable pending prompt exactly once. The
@@ -7585,7 +7674,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), native);
         let loaded = crate::jsonl::reader::route_lines(native);
         assert_eq!(
-            loaded.by_uuid["native-user"].message.string_at("/content"),
+            loaded
+                .by_uuid
+                .get("native-user")
+                .unwrap()
+                .message
+                .string_at("/content"),
             Some("updated"),
             "Native JSONL keeps last-write-wins content while Host identity keeps first index"
         );
@@ -7928,6 +8022,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_recovery_batch_scans_once_and_preserves_exact_duplicate_payloads() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let mut rows = batch_test_rows(session);
+        rows[1].extra = Utf16JsonProjection::parse(r#"{"\ud800":"\udfff","wide":42}"#).unwrap();
+        writer.append_native_message_once(&rows[0]).await.unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let before = durable.duplicate_scan_count_for_test();
+        let replay = [&rows[0], &rows[1], &rows[1], &rows[2]];
+        writer.append_native_messages_once(&replay).await.unwrap();
+        assert_eq!(durable.duplicate_scan_count_for_test(), before + 1);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(&original));
+        let loaded = crate::jsonl::reader::route_lines(std::str::from_utf8(&bytes).unwrap());
+        assert_eq!(
+            loaded.messages_in_order.len(),
+            3,
+            "repeated UUID is not appended twice"
+        );
+        assert_eq!(
+            loaded
+                .by_uuid
+                .get(&rows[2].uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
+            Some(&rows[1].uuid)
+        );
+        let stamped = stamp_session_kind(&rows[1]);
+        assert_eq!(
+            native_message_bytes(loaded.by_uuid.get(&rows[1].uuid).unwrap()).unwrap(),
+            native_message_bytes(stamped.as_ref().unwrap_or(&rows[1])).unwrap()
+        );
+        writer.append_native_messages_once(&replay).await.unwrap();
+        assert_eq!(durable.duplicate_scan_count_for_test(), before + 2);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        let mut different = rows[1].clone();
+        different.extra = Utf16JsonProjection::parse(r#"{"\ud800":"\ufffd","wide":42}"#).unwrap();
+        let (prefix, error) = writer
+            .append_native_messages_once(&[&rows[0], &different, &rows[2]])
+            .await
+            .unwrap_err();
+        assert_eq!(prefix, 1);
+        assert!(matches!(
+            error,
+            TranscriptWriterError::DeliveryConflict { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn native_recovery_batch_reports_partial_write_prefix_and_retries_once() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let rows = batch_test_rows(session);
+        let replay = rows.iter().collect::<Vec<_>>();
+        let before = std::fs::read(&path).unwrap();
+        durable.fail_append_after_writes_for_test(1);
+        let (prefix, _) = writer
+            .append_native_messages_once(&replay)
+            .await
+            .unwrap_err();
+        assert_eq!(prefix, 1);
+        assert_eq!(durable.duplicate_scan_count_for_test(), 1);
+        let partial = std::fs::read(&path).unwrap();
+        assert!(partial.starts_with(&before));
+        let loaded = crate::jsonl::reader::route_lines(std::str::from_utf8(&partial).unwrap());
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        assert_eq!(loaded.messages_in_order[0].uuid, rows[0].uuid);
+
+        // An uncertain caller can retry the entire batch, including the
+        // acknowledged prefix, without duplicating it or its identity index.
+        writer.append_native_messages_once(&replay).await.unwrap();
+        assert_eq!(durable.duplicate_scan_count_for_test(), 2);
+        let complete = std::fs::read(&path).unwrap();
+        assert!(complete.starts_with(&partial));
+        let loaded = crate::jsonl::reader::route_lines(std::str::from_utf8(&complete).unwrap());
+        assert_eq!(loaded.messages_in_order.len(), 3);
+        let identities = writer
+            .read_session_message_identity_snapshot(&path)
+            .await
+            .unwrap();
+        assert_eq!(identities.next_message_index, 3);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(identities.by_uuid[&row.uuid], index as u64);
+            assert_eq!(
+                loaded.by_uuid.get(&row.uuid).unwrap().parent_uuid,
+                row.parent_uuid
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_recovery_batch_rejects_source_replacement_after_shared_scan() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let sidecar = path
+            .parent()
+            .unwrap()
+            .join(message_identity::log_path(&path).unwrap());
+        let identities = std::fs::read(&sidecar).unwrap();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        durable.install_authority_test_gate(false, (reached_tx, release_rx));
+        let operation = tokio::spawn({
+            let writer = writer.clone();
+            async move {
+                let rows = batch_test_rows(session);
+                writer
+                    .append_native_messages_once(&rows.iter().collect::<Vec<_>>())
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            reached_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        release_tx.send(()).unwrap();
+        let (prefix, _) = operation.await.unwrap().unwrap_err();
+        assert_eq!(prefix, 0);
+        assert_eq!(durable.duplicate_scan_count_for_test(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), identities);
+    }
+
+    #[tokio::test]
+    async fn authoritative_compact_floor_skips_body_but_still_requires_exact_identity() {
+        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        writer
+            .initialize_fixed_session_mode(
+                &session.as_uuid().to_string(),
+                ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
+        // A below-floor transcript is skipped even when its body would not
+        // qualify for rewriting. No replacement inode is published.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"unterminated young transcript").unwrap();
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+        let authority = writer.active_transcript_authority().unwrap();
+        assert!(matches!(
+            durable
+                .with_transaction(|_| compact_authoritative_target(&durable, &path))
+                .unwrap(),
+            CompactOutcome::Skipped
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(writer.active_transcript_authority(), Some(authority));
+
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &before).unwrap();
+        assert!(durable
+            .with_transaction(|_| compact_authoritative_target(&durable, &path))
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&saved).unwrap(), before);
+    }
+
+    #[tokio::test]
     async fn durable_batch_preserves_chain_and_reserves_identities_before_failed_write() {
         let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
         writer
@@ -7972,7 +8261,10 @@ mod tests {
         }
         let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
         for row in rows {
-            assert_eq!(loaded.by_uuid[&row.uuid].parent_uuid, row.parent_uuid);
+            assert_eq!(
+                loaded.by_uuid.get(&row.uuid).unwrap().parent_uuid,
+                row.parent_uuid
+            );
         }
         assert_eq!(durable.duplicate_scan_count_for_test(), 0);
     }
@@ -8014,7 +8306,12 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(loaded.messages_in_order.len(), 3, "prefix was not retried");
         assert_eq!(
-            loaded.by_uuid[&rows[2].uuid].parent_uuid.as_ref(),
+            loaded
+                .by_uuid
+                .get(&rows[2].uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
             Some(&rows[1].uuid)
         );
     }

@@ -56,32 +56,29 @@ pub const COMPACTION_CONVERSATION_TOO_LONG: &str =
 ///    survives; bail with `None` if that leaves nothing to drop.
 /// 5. Drop those oldest groups; if the surviving head is now assistant-first,
 ///    prepend a [`PTL_RETRY_MARKER`] meta user message.
-// `messages` is taken by value to mirror the spec'd signature the orchestrator
-// PTL-recovery loop calls (it hands over its history snapshot); the body only
-// borrows + reslices it, hence the `needless_pass_by_value` allow.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::needless_pass_by_value
+    clippy::cast_sign_loss
 )]
 #[must_use]
 pub fn truncate_head_for_ptl_retry(
-    messages: Vec<ConversationMessage>,
+    mut messages: Vec<ConversationMessage>,
     token_gap: u64,
 ) -> Option<Vec<ConversationMessage>> {
     // 2.1.261 `B0e` strips only its own meta marker. User-authored text with
     // identical bytes remains part of the first API-round group.
-    let input: &[ConversationMessage] = match messages.first() {
+    let marker_count = match messages.first() {
         Some(ConversationMessage::User {
             is_meta: true,
             content,
             ..
         }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text, .. }] if text == PTL_RETRY_MARKER) => {
-            &messages[1..]
+            1
         }
-        _ => &messages[..],
+        _ => 0,
     };
+    let input = &messages[marker_count..];
 
     // (2) Group remaining messages; need at least 2 to drop one safely
     // (`compact.ts:257-258`).
@@ -117,18 +114,21 @@ pub fn truncate_head_for_ptl_retry(
     // (5) Drop the oldest `drop_count` groups via their message ranges. The
     // surviving head begins at the start index of the first kept group
     // (`compact.ts:278` — `groups.slice(dropCount).flat()`).
-    let survive_start = groups[drop_count].start;
-    let mut sliced: Vec<ConversationMessage> = input[survive_start..].to_vec();
+    let survive_start = marker_count + groups[drop_count].start;
+    messages.drain(..survive_start);
 
     // Assistant-first head is invalid to send; prepend the marker
     // (`compact.ts:284-289`).
-    if matches!(sliced.first(), Some(ConversationMessage::Assistant { .. })) {
-        sliced.insert(
+    if matches!(
+        messages.first(),
+        Some(ConversationMessage::Assistant { .. })
+    ) {
+        messages.insert(
             0,
             ConversationMessage::user_meta(MessageId::new(), PTL_RETRY_MARKER.to_string()),
         );
     }
-    Some(sliced)
+    Some(messages)
 }
 
 #[cfg(test)]
@@ -262,6 +262,66 @@ mod tests {
         // 0. Groups 1-3 survive (6 messages), assistant-first → marker prepended.
         assert_eq!(out.first().unwrap().text_content(), PTL_RETRY_MARKER);
         assert_eq!(out.len(), 1 + 6);
+    }
+
+    #[test]
+    fn retry_moves_retained_rows_and_text_buffers_without_changing_projection() {
+        for prior_marker in [false, true] {
+            for gap in [0, u64::MAX] {
+                let mut messages = three_round_history();
+                let Some(ConversationMessage::User { content, .. }) = messages.last_mut() else {
+                    panic!("fixture ends with a user row");
+                };
+                content.push(ContentBlock::Text {
+                    text: "retained 😀 text ".repeat(4096),
+                    citations: None,
+                });
+                if prior_marker {
+                    messages.insert(
+                        0,
+                        ConversationMessage::user_meta(MessageId::new(), PTL_RETRY_MARKER.into()),
+                    );
+                }
+                let marker_count = usize::from(prior_marker);
+                let groups = group_messages_by_api_round(&messages[marker_count..]);
+                let drop_count = if gap == 0 { 1 } else { groups.len() - 1 };
+                let kept_start = marker_count + groups[drop_count].start;
+                let expected_rows = serde_json::to_vec(&messages[kept_start..]).unwrap();
+                let original_allocation = messages.as_ptr();
+                let Some(ConversationMessage::User { content, .. }) = messages.last() else {
+                    unreachable!();
+                };
+                let Some(ContentBlock::Text { text, .. }) = content.last() else {
+                    unreachable!();
+                };
+                let original_text = text.as_ptr();
+
+                let result = truncate_head_for_ptl_retry(messages, gap).unwrap();
+                assert_eq!(
+                    result.as_ptr(),
+                    original_allocation,
+                    "reuse the owned vector"
+                );
+                assert_eq!(result[0].text_content(), PTL_RETRY_MARKER);
+                assert!(result[0].is_meta());
+                assert_eq!(
+                    serde_json::to_vec(&result[1..]).unwrap(),
+                    expected_rows,
+                    "retained UUIDs and native projections must be identical"
+                );
+                let Some(ConversationMessage::User { content, .. }) = result.last() else {
+                    unreachable!();
+                };
+                let Some(ContentBlock::Text { text, .. }) = content.last() else {
+                    unreachable!();
+                };
+                assert_eq!(
+                    text.as_ptr(),
+                    original_text,
+                    "move retained text rather than cloning it"
+                );
+            }
+        }
     }
 
     /// 20% fallback with 10 groups drops `floor(10 * 0.2) = 2`.

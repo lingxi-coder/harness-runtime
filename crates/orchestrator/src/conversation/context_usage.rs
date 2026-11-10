@@ -263,11 +263,25 @@ fn server_cleared_tokens(
 
 /// Native auto-compact admission count: retained context plus server-cleared
 /// input tokens (`mxr`'s `Ff + Nre`).
+#[cfg(test)]
 pub(crate) fn context_tokens_for_compaction(
     history: &[ConversationMessage],
     metadata: &NativeRequestHistoryMetadata,
 ) -> u64 {
-    live_context_tokens(history, metadata).saturating_add(server_cleared_tokens(history, metadata))
+    context_token_counts_for_compaction(history, metadata).1
+}
+
+/// Retained and admission counts for one snapshot, sharing the retained-context
+/// estimate while keeping server-cleared input exclusive to admission.
+pub(crate) fn context_token_counts_for_compaction(
+    history: &[ConversationMessage],
+    metadata: &NativeRequestHistoryMetadata,
+) -> (u64, u64) {
+    let live = live_context_tokens(history, metadata);
+    (
+        live,
+        live.saturating_add(server_cleared_tokens(history, metadata)),
+    )
 }
 
 fn synthetic_first_text(content: &[ContentBlock]) -> bool {
@@ -581,6 +595,19 @@ mod tests {
                 )
             });
             assert_eq!(anchor, expected_anchor, "{} anchor", case["name"]);
+            let (live, admission) = context_token_counts_for_compaction(&history, &metadata);
+            assert_eq!(
+                live,
+                expected["liveTokens"].as_u64().unwrap(),
+                "{} retained pair",
+                case["name"]
+            );
+            assert_eq!(
+                admission,
+                expected["triggerTokens"].as_u64().unwrap(),
+                "{} admission pair",
+                case["name"]
+            );
             assert_eq!(
                 live_context_tokens(&history, &metadata),
                 expected["liveTokens"].as_u64().unwrap(),
@@ -600,6 +627,25 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    #[test]
+    fn shared_compaction_counts_saturate_server_cleared_input() {
+        let id = MessageId::new();
+        let history = vec![assistant(id, "tiny")];
+        let mut metadata = NativeRequestHistoryMetadata::default();
+        metadata.assistant_usage.insert(
+            id,
+            Source::parse(
+                r#"{"usage":{"input_tokens":18446744073709551615,"output_tokens":0},"contextManagement":{"applied_edits":[{"type":"clear_tool_uses_20250919","cleared_input_tokens":500}]}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(server_cleared_tokens(&history, &metadata), 500);
+        assert_eq!(
+            context_token_counts_for_compaction(&history, &metadata),
+            (u64::MAX, u64::MAX)
+        );
     }
 
     #[tokio::test]

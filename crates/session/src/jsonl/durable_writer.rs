@@ -18,6 +18,7 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -319,6 +320,21 @@ struct TranscriptIdentity {
 struct TranscriptExpectation {
     projection: Utf16JsonProjection,
     delivery_id: Option<String>,
+}
+
+struct TranscriptProbe {
+    delivery_id: String,
+    message_uuid: String,
+    expected: TranscriptExpectation,
+    comparison_policy: DuplicatePayloadPolicy,
+    matching: Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
+}
+
+struct AdmittedTranscript {
+    file: Option<std::fs::File>,
+    file_present: bool,
+    missing_final_delimiter: bool,
+    last_uuid: Option<String>,
 }
 
 struct IdentitySeed<'a> {
@@ -931,8 +947,7 @@ impl DurableTranscriptWriter {
         }
         // Keep the admitted file handle for both the scan and the append. A
         // later pathname replacement cannot redirect the write to a sibling.
-        let mut admitted_file =
-            self.open_authoritative_target(transcript_root, transcript_relative)?;
+        let admitted_file = self.open_authoritative_target(transcript_root, transcript_relative)?;
         let scan_file = match admitted_file.as_ref() {
             Some(file) => Ok(file
                 .try_clone()
@@ -957,6 +972,150 @@ impl DurableTranscriptWriter {
             Err(FsError::NotFound(_)) => (false, false, None, None),
             Err(error) => return Err(error.into()),
         };
+        let mut admitted = AdmittedTranscript {
+            file: admitted_file,
+            file_present,
+            missing_final_delimiter,
+            last_uuid,
+        };
+        let (outcome, _) = self.append_scanned_json_once(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            &message_uuid,
+            payload,
+            existing_match,
+            identity_registration,
+            &mut admitted,
+        )?;
+        Ok((outcome, admitted.last_uuid))
+    }
+
+    fn append_native_json_batch_once_at_locked(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        payloads: Vec<Utf16JsonProjection>,
+        file: Option<std::fs::File>,
+        identity_store: &IdentityLogStore,
+        transcript_path: &Path,
+    ) -> Result<(), (usize, TranscriptWriterError)> {
+        let mut probes = Vec::with_capacity(payloads.len());
+        let mut pending_identities: HashMap<String, Vec<usize>> = HashMap::new();
+        for payload in payloads {
+            if payload.object_entries().is_none() {
+                return Err((0, TranscriptWriterError::PayloadNotObject));
+            }
+            if payload.contains_property("deliveryId") {
+                return Err((0, TranscriptWriterError::NativeDeliveryIdField));
+            }
+            let message_uuid = payload
+                .string_at("/uuid")
+                .filter(|uuid| !uuid.is_empty())
+                .ok_or((0, TranscriptWriterError::MissingMessageUuid))?
+                .to_string();
+            pending_identities
+                .entry(message_uuid.clone())
+                .or_default()
+                .push(probes.len());
+            probes.push(TranscriptProbe {
+                delivery_id: message_uuid.clone(),
+                message_uuid,
+                expected: TranscriptExpectation {
+                    projection: payload,
+                    delivery_id: None,
+                },
+                comparison_policy: DuplicatePayloadPolicy::Exact,
+                matching: None,
+            });
+        }
+        if probes.is_empty() {
+            return Ok(());
+        }
+        let scan_file = match file.as_ref() {
+            Some(file) => file
+                .try_clone()
+                .map_err(|error| FsError::Io(error.to_string())),
+            None => open_read_file_pinned(
+                transcript_root,
+                transcript_relative,
+                Some(transcript_identity),
+            ),
+        };
+        let (file_present, missing_final_delimiter, last_uuid) = match scan_file {
+            Ok(file) => {
+                let (missing_delimiter, last_uuid) = self
+                    .scan_existing_probes(file, &mut probes)
+                    .map_err(|error| (0, error))?;
+                (true, missing_delimiter, last_uuid)
+            }
+            Err(FsError::NotFound(_)) => (false, false, None),
+            Err(error) => return Err((0, error.into())),
+        };
+        let mut admitted = AdmittedTranscript {
+            file,
+            file_present,
+            missing_final_delimiter,
+            last_uuid,
+        };
+        for index in 0..probes.len() {
+            let probe = &mut probes[index];
+            let message_uuid = probe.message_uuid.clone();
+            let (outcome, written) = self
+                .append_scanned_json_once(
+                    transcript_root,
+                    transcript_identity,
+                    transcript_relative,
+                    &message_uuid,
+                    probe.expected.projection.clone(),
+                    probe.matching.take(),
+                    Some((identity_store, transcript_path)),
+                    &mut admitted,
+                )
+                .map_err(|error| (index, error))?;
+            if outcome == TranscriptAppendOutcome::Appended {
+                let repeated = pending_identities
+                    .get(&message_uuid)
+                    .expect("prepared identity is indexed");
+                if repeated.iter().any(|next| *next > index) {
+                    // Later copies of this UUID must observe the exact row
+                    // just serialized, including its resolved parent. They
+                    // cannot rely only on the pre-append source snapshot.
+                    let serialized = written
+                        .to_json_string()
+                        .map_err(|error| (index + 1, TranscriptWriterError::from(error)))?;
+                    let actual = Utf16JsonProjection::parse(&serialized)
+                        .map_err(|error| (index + 1, TranscriptWriterError::from(error)))?;
+                    for next in repeated.iter().copied().filter(|next| *next > index) {
+                        let probe = &mut probes[next];
+                        self.inspect_projection(
+                            &actual,
+                            &probe.delivery_id,
+                            &probe.message_uuid,
+                            &probe.expected,
+                            probe.comparison_policy,
+                            &mut probe.matching,
+                        )
+                        .map_err(|error| (index + 1, error))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn append_scanned_json_once(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+        mut payload: Utf16JsonProjection,
+        existing_match: Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
+        identity_registration: Option<(&IdentityLogStore, &Path)>,
+        admitted: &mut AdmittedTranscript,
+    ) -> Result<(TranscriptAppendOutcome, Utf16JsonProjection), TranscriptWriterError> {
         #[cfg(test)]
         Self::wait_authority_test_gate(&self.authority_after_scan);
         if let Some(outcome) = existing_match {
@@ -968,7 +1127,7 @@ impl DurableTranscriptWriter {
                 // write and fsync. Never promote that observation to a durable
                 // duplicate acknowledgement until both file and directory
                 // have crossed the same persistence boundary as a new append.
-                if let Some(file) = admitted_file.as_mut() {
+                if let Some(file) = admitted.file.as_mut() {
                     file.sync_all()
                         .map_err(|error| FsError::Io(error.to_string()))?;
                     sync_parent_pinned(
@@ -988,7 +1147,7 @@ impl DurableTranscriptWriter {
                     transcript_relative,
                 )?;
             }
-            return outcome.map(|outcome| (outcome, last_uuid));
+            return outcome.map(|outcome| (outcome, payload));
         }
         // Parentage is part of the immutable transcript payload. Resolve it
         // only after the UUID duplicate check, while the same transaction is
@@ -1003,7 +1162,7 @@ impl DurableTranscriptWriter {
                 .at_pointer("/parentUuid")
                 .is_none_or(|parent| parent.is_null());
         if needs_parent {
-            let parent = last_uuid.map_or_else(
+            let parent = admitted.last_uuid.clone().map_or_else(
                 || Utf16JsonProjection::parse("null").expect("null is valid JSON"),
                 Utf16JsonProjection::from,
             );
@@ -1021,7 +1180,7 @@ impl DurableTranscriptWriter {
                 limit: self.max_record_bytes,
             });
         }
-        if missing_final_delimiter {
+        if admitted.missing_final_delimiter {
             line.insert(0, b'\n');
         }
         self.verify_authoritative_target(transcript_root, transcript_relative)?;
@@ -1031,17 +1190,20 @@ impl DurableTranscriptWriter {
                 identity_path,
                 transcript_root,
                 transcript_identity,
-                &message_uuid,
+                message_uuid,
             )?;
         }
-        let mut file = match admitted_file {
-            Some(file) => file,
-            None => open_append_file_pinned(
+        if admitted.file.is_none() {
+            admitted.file = Some(open_append_file_pinned(
                 transcript_root,
                 transcript_relative,
                 Some(transcript_identity),
-            )?,
-        };
+            )?);
+        }
+        let file = admitted
+            .file
+            .as_mut()
+            .expect("append descriptor was admitted");
         let exact_previous_len = if resets_parent_chain {
             Some(
                 file.metadata()
@@ -1051,7 +1213,7 @@ impl DurableTranscriptWriter {
         } else {
             None
         };
-        self.append_complete_line(&mut file, &line)?;
+        self.append_complete_line(file, &line)?;
         #[cfg(test)]
         if self
             .fail_next_append_sync
@@ -1059,7 +1221,7 @@ impl DurableTranscriptWriter {
         {
             if let Some(previous_len) = exact_previous_len {
                 return Err(self.rollback_undurable_append(
-                    &mut file,
+                    file,
                     previous_len,
                     "synthetic written transcript sync failure".into(),
                 ));
@@ -1072,17 +1234,13 @@ impl DurableTranscriptWriter {
         self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Err(error) = file.sync_all() {
             if let Some(previous_len) = exact_previous_len {
-                return Err(self.rollback_undurable_append(
-                    &mut file,
-                    previous_len,
-                    error.to_string(),
-                ));
+                return Err(self.rollback_undurable_append(file, previous_len, error.to_string()));
             }
             return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
                 error.to_string(),
             )));
         }
-        if !file_present {
+        if !admitted.file_present {
             #[cfg(test)]
             self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             sync_parent_pinned(
@@ -1092,7 +1250,7 @@ impl DurableTranscriptWriter {
             )
             .map_err(|error| match exact_previous_len {
                 Some(previous_len) => {
-                    self.rollback_undurable_append(&mut file, previous_len, error.to_string())
+                    self.rollback_undurable_append(file, previous_len, error.to_string())
                 }
                 None => TranscriptWriterError::WrittenButNotDurable(error),
             })?;
@@ -1100,7 +1258,10 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         Self::wait_authority_test_gate(&self.authority_after_write);
         self.confirm_authoritative_target_after_write(transcript_root, transcript_relative)?;
-        Ok((TranscriptAppendOutcome::Appended, Some(message_uuid)))
+        admitted.file_present = true;
+        admitted.missing_final_delimiter = false;
+        admitted.last_uuid = Some(message_uuid.to_string());
+        Ok((TranscriptAppendOutcome::Appended, payload))
     }
 
     fn sync_existing_match(
@@ -1163,19 +1324,48 @@ impl DurableTranscriptWriter {
         ),
         TranscriptWriterError,
     > {
+        let mut probe = TranscriptProbe {
+            delivery_id: delivery_id.to_string(),
+            message_uuid: message_uuid.to_string(),
+            expected: TranscriptExpectation {
+                projection: payload.clone(),
+                delivery_id: payload.string_at("/deliveryId").map(str::to_owned),
+            },
+            comparison_policy,
+            matching: None,
+        };
+        let (missing_delimiter, last_uuid) =
+            self.scan_existing_probes(file, std::slice::from_mut(&mut probe))?;
+        Ok((missing_delimiter, probe.matching, last_uuid))
+    }
+
+    /// Read each physical record once, looking up only the pending identities
+    /// named by that record. Oversized history still uses the bounded streaming
+    /// identity decoder rather than allocating its message body.
+    fn scan_existing_probes(
+        &self,
+        file: std::fs::File,
+        probes: &mut [TranscriptProbe],
+    ) -> Result<(bool, Option<String>), TranscriptWriterError> {
         #[cfg(test)]
         self.duplicate_scans
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let expected = payload.clone();
-        let expected_delivery_id = expected.string_at("/deliveryId").map(str::to_owned);
-        let expected = TranscriptExpectation {
-            projection: expected,
-            delivery_id: expected_delivery_id,
-        };
+        let mut identities: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, probe) in probes.iter().enumerate() {
+            identities
+                .entry(probe.message_uuid.clone())
+                .or_default()
+                .push(index);
+            if probe.delivery_id != probe.message_uuid {
+                identities
+                    .entry(probe.delivery_id.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
         let mut reader = BufReader::with_capacity(16 * 1024, file);
         let mut line = Vec::new();
         let mut line_offset = 0_u64;
-        let mut matching = None;
         let mut content_bytes = 0_u64;
         let mut last_uuid = None;
 
@@ -1207,26 +1397,14 @@ impl DurableTranscriptWriter {
                         .ok_or(TranscriptWriterError::ScanTooLarge {
                             limit: self.max_record_bytes,
                         })?;
-                let uuid = if physical_len > self.max_record_bytes as u64 {
-                    self.inspect_large_line(
-                        &mut reader,
-                        line_offset,
-                        physical_len,
-                        delivery_id,
-                        message_uuid,
-                        &mut matching,
-                    )?
-                } else {
-                    self.inspect_line(
-                        &line,
-                        line_offset,
-                        delivery_id,
-                        message_uuid,
-                        &expected,
-                        comparison_policy,
-                        &mut matching,
-                    )?
-                };
+                let uuid = self.inspect_probe_line(
+                    &line,
+                    &mut reader,
+                    line_offset,
+                    physical_len,
+                    probes,
+                    &identities,
+                )?;
                 if uuid.is_some() {
                     last_uuid = uuid;
                 }
@@ -1242,50 +1420,91 @@ impl DurableTranscriptWriter {
 
         let missing_final_delimiter = content_bytes != 0;
         if missing_final_delimiter {
-            let uuid = if content_bytes > self.max_record_bytes as u64 {
-                self.inspect_large_line(
-                    &mut reader,
-                    line_offset,
-                    content_bytes,
-                    delivery_id,
-                    message_uuid,
-                    &mut matching,
-                )?
-            } else {
-                self.inspect_line(
-                    &line,
-                    line_offset,
-                    delivery_id,
-                    message_uuid,
-                    &expected,
-                    comparison_policy,
-                    &mut matching,
-                )?
-            };
+            let uuid = self.inspect_probe_line(
+                &line,
+                &mut reader,
+                line_offset,
+                content_bytes,
+                probes,
+                &identities,
+            )?;
             if uuid.is_some() {
                 last_uuid = uuid;
             }
         }
-        Ok((missing_final_delimiter, matching, last_uuid))
+        Ok((missing_final_delimiter, last_uuid))
     }
 
-    fn inspect_line(
+    fn inspect_probe_line(
         &self,
         line: &[u8],
+        reader: &mut BufReader<std::fs::File>,
         offset: u64,
+        physical_len: u64,
+        probes: &mut [TranscriptProbe],
+        identities: &HashMap<String, Vec<usize>>,
+    ) -> Result<Option<String>, TranscriptWriterError> {
+        let oversized = physical_len > self.max_record_bytes as u64;
+        let actual = if oversized {
+            None
+        } else {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            Some(
+                std::str::from_utf8(line)
+                    .ok()
+                    .and_then(|line| Utf16JsonProjection::parse(line).ok())
+                    .ok_or(TranscriptWriterError::CorruptLine { offset })?,
+            )
+        };
+        let identity = match &actual {
+            Some(actual) => TranscriptIdentity {
+                uuid: actual.string_at("/uuid").map(str::to_owned),
+                delivery: actual.string_at("/deliveryId").map(str::to_owned),
+            },
+            None => self.inspect_large_line(reader, offset, physical_len)?,
+        };
+        let mut candidates = identity
+            .uuid
+            .iter()
+            .chain(identity.delivery.iter())
+            .filter_map(|id| identities.get(id))
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        for index in candidates {
+            let probe = &mut probes[index];
+            if let Some(actual) = &actual {
+                self.inspect_projection(
+                    actual,
+                    &probe.delivery_id,
+                    &probe.message_uuid,
+                    &probe.expected,
+                    probe.comparison_policy,
+                    &mut probe.matching,
+                )?;
+            } else {
+                // No bounded pending row can equal an oversized source row.
+                probe.matching = Some(Err(TranscriptWriterError::DeliveryConflict {
+                    delivery_id: probe.delivery_id.clone(),
+                }));
+            }
+        }
+        Ok(identity.uuid.filter(|uuid| !uuid.is_empty()))
+    }
+
+    fn inspect_projection(
+        &self,
+        actual: &Utf16JsonProjection,
         delivery_id: &str,
         message_uuid: &str,
         expected: &TranscriptExpectation,
         comparison_policy: DuplicatePayloadPolicy,
         matching: &mut Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
     ) -> Result<Option<String>, TranscriptWriterError> {
-        if line.is_empty() {
-            return Ok(None);
-        }
-        let actual = std::str::from_utf8(line)
-            .ok()
-            .and_then(|line| Utf16JsonProjection::parse(line).ok())
-            .ok_or(TranscriptWriterError::CorruptLine { offset })?;
         let stored_uuid = actual.string_at("/uuid");
         let last_uuid = stored_uuid
             .filter(|uuid| !uuid.is_empty())
@@ -1299,7 +1518,7 @@ impl DurableTranscriptWriter {
                 None => actual.at_pointer("/deliveryId").is_none(),
             };
         if matches_uuid || matches_delivery {
-            let mut comparable_actual = payload_without_delivery_id(actual)?;
+            let mut comparable_actual = payload_without_delivery_id(actual.clone())?;
             let mut comparable_expected = payload_without_delivery_id(expected.projection.clone())?;
             // A caller may use null as the parent placeholder for a new
             // Fusion delivery. Existing duplicate rows carry their resolved
@@ -1362,10 +1581,7 @@ impl DurableTranscriptWriter {
         reader: &mut BufReader<std::fs::File>,
         offset: u64,
         length: u64,
-        delivery_id: &str,
-        message_uuid: &str,
-        matching: &mut Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
-    ) -> Result<Option<String>, TranscriptWriterError> {
+    ) -> Result<TranscriptIdentity, TranscriptWriterError> {
         reader
             .seek(SeekFrom::Start(offset))
             .map_err(|error| FsError::Io(error.to_string()))?;
@@ -1387,17 +1603,7 @@ impl DurableTranscriptWriter {
         deserializer
             .end()
             .map_err(|_| TranscriptWriterError::CorruptLine { offset })?;
-        if identity.uuid.as_deref() == Some(message_uuid)
-            || identity.delivery.as_deref() == Some(delivery_id)
-        {
-            // A bounded new Fusion record cannot equal an oversized ordinary
-            // record. Never skip a colliding identity just because its body is
-            // large; failing closed preserves effectively-once publication.
-            *matching = Some(Err(TranscriptWriterError::DeliveryConflict {
-                delivery_id: delivery_id.into(),
-            }));
-        }
-        Ok(identity.uuid.filter(|uuid| !uuid.is_empty()))
+        Ok(identity)
     }
 }
 
@@ -2053,6 +2259,33 @@ impl DurableTranscriptTransaction<'_> {
             payload,
             false,
             Some((identity_store, transcript_path)),
+        )
+    }
+
+    /// Replay one native batch against a single admitted source and duplicate
+    /// scan. Each acknowledged prefix row still crosses its own durability
+    /// boundary, so a partial failure can safely retry the remaining suffix.
+    pub(crate) fn append_native_json_batch_once_at_identity(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        payloads: Vec<Utf16JsonProjection>,
+        admitted: Option<std::fs::File>,
+        identity_store: &IdentityLogStore,
+        transcript_path: &Path,
+    ) -> Result<(), (usize, TranscriptWriterError)> {
+        self.writer
+            .ensure_rewrite_is_resolved()
+            .map_err(|error| (0, error))?;
+        self.writer.append_native_json_batch_once_at_locked(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            payloads,
+            admitted,
+            identity_store,
+            transcript_path,
         )
     }
 

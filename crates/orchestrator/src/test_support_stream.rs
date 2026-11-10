@@ -8,10 +8,9 @@
 //! - [`MockToolDispatchClock`] — records the wall-clock instant each
 //!   tool dispatch begins, for the mid-stream dispatch test.
 //!
-//! Mirroring `test_support`, this module is compiled unconditionally
-//! (not feature-gated) so integration tests can use the fixtures
-//! without needing `--features test-support`. Production builds drop
-//! the unused symbols at link-time.
+//! Unit tests include this module automatically. Integration-test consumers
+//! enable `test-support` through a dev-dependency so production builds do not
+//! compile these scripted clients and event helpers.
 #![forbid(unsafe_code)]
 
 use crate::conversation::StreamingApiClient;

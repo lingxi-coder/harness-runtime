@@ -253,10 +253,28 @@ fn collect_utf16_overrides(projection: &Utf16JsonProjection) -> (Utf16Overrides,
     let private_key = PRIVATE_UTF16_KEY.encode_utf16().collect::<Vec<_>>();
     let mut overrides = Utf16Overrides::new();
     let mut has_non_scalar_key = false;
-    let mut pending = vec![(root, String::new())];
-    while let Some((value, pointer)) = pending.pop() {
+    // Keep one segment per visited edge. Copying the complete pointer into
+    // every pending child makes a narrow, deeply nested row quadratic even
+    // when it contains no strings that need the legacy override index.
+    let mut paths: Vec<(Option<usize>, String)> = Vec::new();
+    let mut pending = vec![(root, None::<usize>)];
+    while let Some((value, path)) = pending.pop() {
         if let Some(units) = value.code_units() {
             if String::from_utf16(units).is_err() {
+                let mut segments = Vec::new();
+                let mut cursor = path;
+                let mut length = 0;
+                while let Some(index) = cursor {
+                    let (parent, segment) = &paths[index];
+                    length += 1 + segment.len();
+                    segments.push(segment.as_str());
+                    cursor = *parent;
+                }
+                let mut pointer = String::with_capacity(length);
+                for segment in segments.into_iter().rev() {
+                    pointer.push('/');
+                    pointer.push_str(segment);
+                }
                 overrides.insert(pointer, units.to_vec());
             }
             continue;
@@ -264,14 +282,16 @@ fn collect_utf16_overrides(projection: &Utf16JsonProjection) -> (Utf16Overrides,
         if let Some(length) = value.array_len() {
             for index in (0..length).rev() {
                 if let Some(child) = value.get_index(index) {
-                    pending.push((child, format!("{pointer}/{index}")));
+                    let child_path = paths.len();
+                    paths.push((path, index.to_string()));
+                    pending.push((child, Some(child_path)));
                 }
             }
             continue;
         }
         if let Some(entries) = value.object_entries() {
             for entry in entries.into_iter().rev() {
-                if pointer.is_empty() && entry.code_units == private_key {
+                if path.is_none() && entry.code_units == private_key {
                     continue;
                 }
                 let Ok(key) = String::from_utf16(entry.code_units) else {
@@ -282,7 +302,9 @@ fn collect_utf16_overrides(projection: &Utf16JsonProjection) -> (Utf16Overrides,
                     continue;
                 };
                 let escaped = key.replace('~', "~0").replace('/', "~1");
-                pending.push((entry.value, format!("{pointer}/{escaped}")));
+                let child_path = paths.len();
+                paths.push((path, escaped));
+                pending.push((entry.value, Some(child_path)));
             }
         }
     }
@@ -1135,6 +1157,38 @@ mod tests {
         assert_eq!(loaded.malformed_line_count, 1);
         assert_eq!(loaded.messages_in_order[0].uuid.as_str(), "u-attachment");
         assert_eq!(loaded.messages_in_order[1].uuid.as_str(), "u-inner-bom");
+    }
+
+    #[test]
+    fn utf16_override_paths_handle_deep_arrays_escaped_and_non_scalar_keys() {
+        let depth = 16_384;
+        let deep = format!("{}\"\\ud800\"{}", "[".repeat(depth), "]".repeat(depth));
+        let source = format!(
+            r#"{{"deep":{deep},"a/b~":["\udfff","\ud83e\uddea"],"\udfff":{{"nested":"\ud800"}}}}"#
+        );
+        let projection = Utf16JsonProjection::parse(&source).unwrap();
+        let original = projection.to_json_string().unwrap();
+        let (overrides, non_scalar_key) = collect_utf16_overrides(&projection);
+        assert!(non_scalar_key);
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(
+            overrides.get(&format!("/deep{}", "/0".repeat(depth))),
+            Some(&vec![0xd800])
+        );
+        assert_eq!(overrides.get("/a~1b~0/0"), Some(&vec![0xdfff]));
+        assert_eq!(projection.to_json_string().unwrap(), original);
+        assert_eq!(
+            projection.string_units("/a~1b~0/1"),
+            Some(vec![0xd83e, 0xddea])
+        );
+
+        let private = serde_json::to_string(PRIVATE_UTF16_KEY).unwrap();
+        let source = format!(r#"{{{private}:"\ud800","kept":"\udfff"}}"#);
+        let projection = Utf16JsonProjection::parse(&source).unwrap();
+        let (overrides, non_scalar_key) = collect_utf16_overrides(&projection);
+        assert!(!non_scalar_key);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides.get("/kept"), Some(&vec![0xdfff]));
     }
 
     #[test]

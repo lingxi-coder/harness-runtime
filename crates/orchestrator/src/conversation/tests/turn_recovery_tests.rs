@@ -796,6 +796,113 @@ async fn pre_compact_success_stdout_becomes_summary_instructions() {
     );
 }
 
+struct PendingPreCompactHandler {
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl BuiltinHookHandler for PendingPreCompactHandler {
+    fn id(&self) -> &str {
+        "pending-precompact"
+    }
+
+    async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult {
+        struct MarkDropped(Arc<AtomicBool>);
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        assert!(matches!(event, HookEvent::PreCompact { reason, .. } if reason == "manual"));
+        assert!(ctx.idle_compaction_cancellation.is_some());
+        assert!(ctx
+            .idle_compaction_process_owner
+            .as_deref()
+            .is_some_and(|owner| owner.starts_with("manual-compact:")));
+        let _drop_guard = MarkDropped(self.dropped.clone());
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn manual_compaction_cancels_pending_pre_compact_before_summary_or_history_swap() {
+    for selected_range in [false, true] {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.register(builtin_hook(
+            "pending-precompact",
+            HookEventType::PreCompact,
+        ));
+        let mut hooks =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        hooks.register_builtin(Arc::new(PendingPreCompactHandler {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        }));
+        let orch = compact_orch(Arc::new(hooks))
+            .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(1_000)));
+        let history = vec![
+            ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "preserve this user history".into(),
+            ),
+            ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "preserve this assistant history".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+                per_turn_effort: None,
+            },
+        ];
+        let selected_id = history[0].id().to_string();
+        orch.session.lock().await.history = history.clone();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let work = async {
+            if selected_range {
+                orch.summarize_at(
+                    &selected_id,
+                    None,
+                    compaction::prompt::SummarizeDirection::From,
+                    cancellation.clone(),
+                )
+                .await
+            } else {
+                orch.force_compact_with_instructions_and_cancel(None, cancellation.clone())
+                    .await
+            }
+        };
+        tokio::pin!(work);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = started.notified() => {}
+                result = &mut work => panic!("compaction settled before the pending hook: {result:?}"),
+            }
+        }).await.expect("manual PreCompact starts");
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut work)
+            .await
+            .expect("hook cancellation settles without waiting for hook timeout");
+        assert!(
+            matches!(result, Err(lingxi_core::host::HandleError::ActionFailed(ref message)) if message == "Compaction canceled.")
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "hook dispatch must be drained before compaction settles"
+        );
+        assert_eq!(orch.session.lock().await.history, history);
+        assert!(
+            orch.turn_gate.try_lock().is_ok(),
+            "cancelled compaction releases turn ownership"
+        );
+    }
+}
+
 /// A Stop hook that blocks EXACTLY ONCE, then passes. Used by tests that need
 /// precisely one stop-hook continuation, isolated from the consecutive-block
 /// CAP (`LINGXI_STOP_HOOK_BLOCK_CAP`, default 8): a block-every-time hook

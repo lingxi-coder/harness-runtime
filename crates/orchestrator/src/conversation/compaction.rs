@@ -575,8 +575,9 @@ pub(crate) struct SessionCompactEventResult {
 pub(crate) struct SessionCompactCoreOutput {
     pub(crate) result: compaction::IterationCompactionResult,
     pub(crate) source_messages: Vec<ConversationMessage>,
-    pub(crate) event_result: SessionCompactEventResult,
     pub(crate) api_duration: std::time::Duration,
+    event_result: std::sync::OnceLock<SessionCompactEventResult>,
+    context_tokens_before: Option<u64>,
 }
 
 struct ExactCompactPreparedState {
@@ -740,7 +741,10 @@ fn compaction_block_text_units(block: &lingxi_core::types::ContentBlock) -> Vec<
 
 impl SessionCompactCoreOutput {
     pub(crate) fn with_context_tokens(mut self, tokens_before: u64) -> Self {
-        self.event_result.tokens_before = Some(tokens_before as f64);
+        self.context_tokens_before = Some(tokens_before);
+        if let Some(event_result) = self.event_result.get_mut() {
+            event_result.tokens_before = Some(tokens_before as f64);
+        }
         self
     }
 
@@ -749,66 +753,75 @@ impl SessionCompactCoreOutput {
         source_messages: Vec<ConversationMessage>,
         api_duration: std::time::Duration,
     ) -> Self {
-        let mut messages = result.messages.clone();
-        messages.extend(result.messages_to_preserve.iter().cloned());
-        let tokens_before =
-            Some(compaction::grouping::estimate_tokens_for_range(&source_messages) as f64);
-        let tokens_after = Some(compaction::grouping::estimate_tokens_for_range(&messages) as f64);
-        let usage = result.compaction_usage.map(|usage| {
-            compact_source_object(vec![
-                (
-                    "input_tokens".to_string(),
-                    compact_source_integer(usage.tokens.input),
-                ),
-                (
-                    "output_tokens".to_string(),
-                    compact_source_integer(usage.tokens.output),
-                ),
-                (
-                    "cache_read_input_tokens".to_string(),
-                    compact_source_integer(usage.tokens.cache_read),
-                ),
-                (
-                    "cache_creation_input_tokens".to_string(),
-                    compact_source_integer(
-                        usage
-                            .tokens
-                            .cache_write
-                            .saturating_add(usage.tokens.cache_write_1h),
-                    ),
-                ),
-            ])
-        });
         Self {
             result,
             source_messages,
-            event_result: SessionCompactEventResult {
+            api_duration,
+            event_result: std::sync::OnceLock::new(),
+            context_tokens_before: None,
+        }
+    }
+
+    fn event_result(&self) -> &SessionCompactEventResult {
+        self.event_result.get_or_init(|| {
+            let mut messages = self.result.messages.clone();
+            messages.extend(self.result.messages_to_preserve.iter().cloned());
+            let tokens_before = Some(self.context_tokens_before.unwrap_or_else(|| {
+                compaction::grouping::estimate_tokens_for_range(&self.source_messages)
+            }) as f64);
+            let tokens_after =
+                Some(compaction::grouping::estimate_tokens_for_range(&messages) as f64);
+            let usage = self.result.compaction_usage.map(|usage| {
+                compact_source_object(vec![
+                    (
+                        "input_tokens".to_string(),
+                        compact_source_integer(usage.tokens.input),
+                    ),
+                    (
+                        "output_tokens".to_string(),
+                        compact_source_integer(usage.tokens.output),
+                    ),
+                    (
+                        "cache_read_input_tokens".to_string(),
+                        compact_source_integer(usage.tokens.cache_read),
+                    ),
+                    (
+                        "cache_creation_input_tokens".to_string(),
+                        compact_source_integer(
+                            usage
+                                .tokens
+                                .cache_write
+                                .saturating_add(usage.tokens.cache_write_1h),
+                        ),
+                    ),
+                ])
+            });
+            SessionCompactEventResult {
                 messages,
                 tokens_before,
                 tokens_after,
                 usage,
-            },
-            api_duration,
-        }
+            }
+        })
     }
 
     fn event_value(&self) -> Result<CompactSource, hooks::mods::ModError> {
-        let messages =
-            SessionCompactRowCodec::default().rows_for_messages(&self.event_result.messages);
+        let event_result = self.event_result();
+        let messages = SessionCompactRowCodec::default().rows_for_messages(&event_result.messages);
         let mut fields = vec![("messages".to_string(), compact_source_array(messages))];
-        if let Some(tokens_before) = self.event_result.tokens_before {
+        if let Some(tokens_before) = event_result.tokens_before {
             fields.push((
                 "tokensBefore".to_string(),
                 compact_source_number(tokens_before),
             ));
         }
-        if let Some(tokens_after) = self.event_result.tokens_after {
+        if let Some(tokens_after) = event_result.tokens_after {
             fields.push((
                 "tokensAfter".to_string(),
                 compact_source_number(tokens_after),
             ));
         }
-        if let Some(usage) = &self.event_result.usage {
+        if let Some(usage) = &event_result.usage {
             fields.push(("usage".to_string(), usage.clone()));
         }
         Ok(compact_source_object(fields))
@@ -1400,7 +1413,7 @@ impl ConversationOrchestrator {
                         row_codec
                             .lock()
                             .unwrap()
-                            .rows_for_messages(&output.event_result.messages);
+                            .rows_for_messages(&output.event_result().messages);
                         *core_result.lock().await = Some((output, event_result.clone()));
                         Ok(Some(event_result))
                     }
@@ -4197,11 +4210,6 @@ impl ConversationOrchestrator {
             };
             let prompt_in_compaction_input = pending_ingress_prompt_id
                 .filter(|prompt_id| snapshot.iter().any(|message| message.id() == *prompt_id));
-            let estimate = context_usage::context_tokens_for_compaction(&snapshot, &usage_metadata);
-            let live_context_tokens =
-                context_usage::live_context_tokens(&snapshot, &usage_metadata);
-            let message_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
-
             // The gate's ceiling belongs to the model, not to the engine:
             // claude-code resolves `getAutoCompactThreshold(model)`
             // (`autoCompact.ts:72-91`) at its `autoCompactIfNeeded` call site, so a
@@ -4234,6 +4242,8 @@ impl ConversationOrchestrator {
 
             // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
             // because we have done no snip work yet at the call site.
+            let (live_context_tokens, estimate) =
+                context_usage::context_token_counts_for_compaction(&snapshot, &usage_metadata);
             if !force_idle && !compaction::should_auto_compact(estimate, 0, threshold) {
                 return AutomaticCompactOutcome::NotNeeded;
             }
@@ -4341,6 +4351,7 @@ impl ConversationOrchestrator {
                 .compaction_runtime
                 .last_response_input_tokens
                 .load(std::sync::atomic::Ordering::Relaxed);
+            let message_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
             let (doc_blocks, img_blocks) = count_document_and_image_blocks(&snapshot);
             if let Some(overflow) = compaction::compaction_prefix_overflow(
                 total_input,
@@ -4489,12 +4500,11 @@ impl ConversationOrchestrator {
                     });
                     let token_budget = token_budget.clone();
                     let queued_human_commands = queued_human_commands.clone();
-                    let tokens_before =
-                        context_usage::live_context_tokens(&source_messages, &usage_metadata);
-                    let context_tokens = context_usage::context_tokens_for_compaction(
-                        &source_messages,
-                        &usage_metadata,
-                    );
+                    let (tokens_before, context_tokens) =
+                        context_usage::context_token_counts_for_compaction(
+                            &source_messages,
+                            &usage_metadata,
+                        );
                     Box::pin(async move {
                         phase_output.emit_compaction_phase("summarizing").await;
                         let api_started = std::time::Instant::now();
@@ -5005,6 +5015,9 @@ impl ConversationOrchestrator {
             });
         }
         let mut ctx = self.lifecycle_hook_ctx(false).await;
+        // The hook dispatcher cancels transports and kills/drains only this
+        // operation's command children before returning. Await that cleanup
+        // instead of dropping the hook future in an outer select.
         ctx.idle_compaction_cancellation = Some(cancellation.clone());
         ctx.idle_compaction_process_owner = Some(process_owner);
         let agg = self
@@ -5725,6 +5738,80 @@ mod session_compact_mod_tests {
             compaction_model: None,
             compaction_profile: None,
         }
+    }
+
+    #[test]
+    fn compact_core_output_defers_hook_projection_and_preserves_token_override() {
+        let summary =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "summary 😀".into());
+        let tail = ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "preserved tail".into(),
+        );
+        let expected_messages = vec![summary.clone(), tail.clone()];
+        let expected_after =
+            compaction::grouping::estimate_tokens_for_range(&expected_messages) as f64;
+        let mut result = empty_compaction_result();
+        result.messages = vec![summary];
+        result.messages_to_preserve = vec![tail];
+        result.compaction_usage = Some(cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 13,
+                output: 5,
+                cache_read: 2,
+                cache_write: 3,
+                cache_write_1h: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let output = SessionCompactCoreOutput::new(
+            result,
+            vec![ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "original history ".repeat(4096),
+            )],
+            std::time::Duration::from_millis(20),
+        );
+        assert!(
+            output.event_result.get().is_none(),
+            "ordinary compaction must not build the hook payload"
+        );
+        let output = output.with_context_tokens(123_456);
+        assert!(
+            output.event_result.get().is_none(),
+            "a usage override must remain lazy too"
+        );
+
+        let event = output.event_value().unwrap();
+        assert_eq!(output.event_result().messages, expected_messages);
+        assert_eq!(
+            parse_native_session_compact_number(&event, "tokensBefore").unwrap(),
+            Some(123_456.0)
+        );
+        assert_eq!(
+            parse_native_session_compact_number(&event, "tokensAfter").unwrap(),
+            Some(expected_after)
+        );
+        assert_eq!(
+            event
+                .subprojection("/usage")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"input_tokens":13,"output_tokens":5,"cache_read_input_tokens":2,"cache_creation_input_tokens":10}"#,
+        );
+        assert_eq!(
+            output.event_value().unwrap(),
+            event,
+            "a repeated hook read preserves event bytes and row identities"
+        );
+        let output = output.with_context_tokens(999);
+        assert_eq!(
+            parse_native_session_compact_number(&output.event_value().unwrap(), "tokensBefore")
+                .unwrap(),
+            Some(999.0)
+        );
     }
 
     #[test]

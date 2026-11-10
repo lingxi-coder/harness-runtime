@@ -445,21 +445,23 @@ impl ConversationOrchestrator {
             let writer = self.transcript.jsonl_writer.as_ref().ok_or_else(|| {
                 OrchestratorError::Internal("storage recovery has no transcript writer".into())
             })?;
-            while let Some(row) = pause.rows.front() {
-                writer
-                    .append_native_message_once(row)
-                    .await
-                    .map_err(|error| {
-                        OrchestratorError::Internal(format!(
-                            "{DISK_FULL_PAUSE} History could not be saved: {error}"
-                        ))
-                    })?;
-                // Retention already advanced the accepted logical cursor.
-                // Compaction can then relink it to a kept suffix, whose last
-                // row precedes the summary physically. Flushing must preserve
-                // that cursor, including when a later retry append fails.
-                pause.rows.pop_front();
-            }
+            let count = pause.rows.len();
+            let result = {
+                let rows = pause.rows.iter().collect::<Vec<_>>();
+                writer.append_native_messages_once(&rows).await
+            };
+            let prefix = result
+                .as_ref()
+                .map_or_else(|(prefix, _)| *prefix, |()| count);
+            // Retention already advanced the accepted logical cursor.
+            // Compaction may relink it to a physically earlier kept suffix.
+            // Remove only acknowledged rows and leave that logical tip alone.
+            pause.rows.drain(..prefix);
+            result.map_err(|(_, error)| {
+                OrchestratorError::Internal(format!(
+                    "{DISK_FULL_PAUSE} History could not be saved: {error}"
+                ))
+            })?;
         }
         pauses.remove(&session);
         drop(pauses);
@@ -631,14 +633,24 @@ mod tests {
                 let loaded =
                     session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
                 assert_eq!(
-                    loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+                    loaded
+                        .by_uuid
+                        .get(&third.uuid)
+                        .unwrap()
+                        .parent_uuid
+                        .as_ref(),
                     Some(&second.uuid)
                 );
             } else {
                 assert!(outcomes[2].is_ok());
                 assert_eq!(loaded.by_uuid.len(), 2);
                 assert_eq!(
-                    loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+                    loaded
+                        .by_uuid
+                        .get(&third.uuid)
+                        .unwrap()
+                        .parent_uuid
+                        .as_ref(),
                     Some(&first.uuid)
                 );
                 let snapshot = writer
@@ -720,7 +732,12 @@ mod tests {
         let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
         assert_eq!(loaded.by_uuid.len(), 3);
         assert_eq!(
-            loaded.by_uuid[&third.uuid].parent_uuid.as_ref(),
+            loaded
+                .by_uuid
+                .get(&third.uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
             Some(&second.uuid)
         );
     }
@@ -855,6 +872,68 @@ mod tests {
         orch.recover_session_storage().await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), persisted);
         assert!(writer.durable_transcript_enabled());
+    }
+
+    #[tokio::test]
+    async fn recovery_batch_removes_only_durable_prefix_and_keeps_logical_tip() {
+        let (_dir, orch, writer, path) = fixture();
+        let existing = row(&orch, "original immutable row").await;
+        writer.append(&existing).await.unwrap();
+        let original = std::fs::read(&path).unwrap();
+        *orch.transcript.last_jsonl_uuid.lock().await = Some(existing.uuid.clone());
+        let first = row(&orch, "durable recovered prefix").await;
+        orch.retain_storage_row(&first).await;
+        let mut conflict = row(&orch, "conflicting interpretation").await;
+        conflict.uuid = existing.uuid.clone();
+        conflict.parent_uuid = existing.parent_uuid.clone();
+        orch.retain_storage_row(&conflict).await;
+        let last = row(&orch, "retained suffix").await;
+        orch.retain_storage_row(&last).await;
+        let sid = orch.session.lock().await.session_id.as_uuid().to_string();
+
+        assert!(orch.recover_session_storage().await.is_err());
+        let pauses = orch.transcript.storage_pauses.lock().await;
+        assert_eq!(pauses[&sid].rows.len(), 2);
+        assert_eq!(pauses[&sid].rows[0].uuid, conflict.uuid);
+        assert_eq!(pauses[&sid].rows[1].uuid, last.uuid);
+        drop(pauses);
+        assert_eq!(
+            *orch.transcript.last_jsonl_uuid.lock().await,
+            Some(last.uuid.clone())
+        );
+        let partial = std::fs::read(&path).unwrap();
+        assert!(partial.starts_with(&original));
+        let loaded = session::jsonl::reader::route_lines(std::str::from_utf8(&partial).unwrap());
+        assert_eq!(loaded.by_uuid.len(), 2);
+        assert!(loaded.by_uuid.contains_key(&first.uuid));
+        assert!(!loaded.by_uuid.contains_key(&last.uuid));
+
+        // Restore the original immutable payload, then acknowledge its UUID
+        // from the shared scan and append only the still-unsaved suffix.
+        *orch
+            .transcript
+            .storage_pauses
+            .lock()
+            .await
+            .get_mut(&sid)
+            .unwrap()
+            .rows
+            .front_mut()
+            .unwrap() = existing;
+        orch.recover_session_storage().await.unwrap();
+        assert!(orch.check_storage_pause().await.is_ok());
+        let complete = std::fs::read(&path).unwrap();
+        assert!(complete.starts_with(&partial));
+        let loaded = session::jsonl::reader::route_lines(std::str::from_utf8(&complete).unwrap());
+        assert_eq!(loaded.messages_in_order.len(), 3);
+        assert_eq!(
+            *orch.transcript.last_jsonl_uuid.lock().await,
+            Some(last.uuid.clone())
+        );
+        assert_eq!(
+            loaded.by_uuid.get(&last.uuid).unwrap().parent_uuid,
+            last.parent_uuid
+        );
     }
 
     #[tokio::test]
