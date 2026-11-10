@@ -34,7 +34,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hooks::events::HookEvent;
-use hooks::registry::HookContext;
 use hooks::task_completed_firer::{TaskCompletedFire, TaskCompletedFirer};
 use hooks::HookExecutorImpl;
 
@@ -43,17 +42,17 @@ use hooks::HookExecutorImpl;
 pub struct OrchestratorTaskCompletedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `TaskCompleted` hook payload (`cwd`) and
-    /// the per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `TaskCompleted` hook
-    /// payload's `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorTaskCompletedFirer {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a firer over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `TaskCompleted` hook rides the identical registry /
@@ -62,8 +61,7 @@ impl OrchestratorTaskCompletedFirer {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 }
@@ -71,6 +69,9 @@ impl OrchestratorTaskCompletedFirer {
 #[async_trait]
 impl TaskCompletedFirer for OrchestratorTaskCompletedFirer {
     async fn fire(&self, fire: TaskCompletedFire) {
+        let Some(ctx) = self.context_source.task_completed(&fire.task_id).await else {
+            return;
+        };
         let event = HookEvent::TaskCompleted {
             task_id: fire.task_id,
             status: fire.status,
@@ -79,15 +80,8 @@ impl TaskCompletedFirer for OrchestratorTaskCompletedFirer {
             teammate_name: fire.teammate_name,
             team_name: fire.team_name,
         };
-        // Context-light: a terminal task transition has no live per-turn session
-        // here, so we thread the engine cwd (also the LINGXI_PROJECT_DIR fallback)
-        // and the main session's `transcript_path` (FIX B). Everything else
-        // defaults — matching the orchestrator's other "context-light" hook fires.
-        let ctx = HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
-        };
+        // The registry captures this task's originating owner before any
+        // detached lifecycle job can cross a foreground session transition.
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the
         // caller's status transition. The aggregate result is intentionally

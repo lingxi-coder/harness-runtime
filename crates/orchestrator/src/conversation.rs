@@ -866,6 +866,23 @@ pub enum ConversationOutcome {
 /// Mirrors the three-way branch in TS `query.ts:1267-1306`: a Stop hook can
 /// force termination (`preventContinuation`), ask the agent to keep working
 /// (a bare `Block` / exit-2), or pass (no Stop hook, or it allowed the stop).
+struct GoalHookContinuation {
+    evaluated: bool,
+    ordinary_fallback: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    reason: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    session_id: SessionId,
+    goal: lingxi_core::session::ActiveGoalState,
+}
+
+impl GoalHookContinuation {
+    fn owns(&self, session: &SessionState) -> bool {
+        session.session_id == self.session_id
+            && session.active_goal.as_ref().is_some_and(|goal| {
+                goal.set_at == self.goal.set_at && goal.condition == self.goal.condition
+            })
+    }
+}
+
 enum StopHookDisposition {
     /// No Stop hook fired, or it allowed the stop — proceed to the normal
     /// end-of-turn (token-budget check then `emit_end_turn`).
@@ -882,7 +899,7 @@ enum StopHookDisposition {
     /// A session-scoped `/goal` Stop Prompt hook blocked natural completion.
     /// Shares the Stop-hook block cap; the distinct variant lets a capped
     /// goal announce why it paused without clearing the condition.
-    GoalContinue(lingxi_core::types::utf16_json::Utf16JsonProjection),
+    GoalContinue(GoalHookContinuation),
     /// A Stop hook requested `continue: false` — terminate the agent loop
     /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`. The carried
     /// `String` is the hook's `stopReason` (defaulted to
@@ -1793,6 +1810,10 @@ pub(crate) struct ModSessionEventContext {
     pub(crate) host: Arc<hooks::mods::ModHost>,
     pub(crate) session: Arc<dyn hooks::mods::ModSessionContext>,
     pub(crate) output: Arc<dyn OutputStream>,
+    pub(crate) session_id: String,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) publication_fence:
+        Option<crate::autonomous_tool_scheduler::ToolDispatchPublicationFence>,
 }
 
 /// Jobs owned by the main-loop Mod session-event FIFO.

@@ -926,6 +926,11 @@ pub struct ResumeRuntimeSnapshot {
     pub compact_summary_message_ids: Vec<crate::types::MessageId>,
     /// User rows with the independent JSONL `isVirtual` flag.
     pub virtual_user_message_ids: Vec<crate::types::MessageId>,
+    /// Whether this session has observed provider rejection of a thinking signature.
+    pub thinking_signature_stripped: bool,
+    /// Rejected assistant reasoning ranges, keyed by their original message identity.
+    /// Each value preserves the count of reasoning blocks before the stripped suffix.
+    pub thinking_stripped_messages: std::collections::HashMap<crate::types::MessageId, usize>,
     /// Real user turns removed from a compacted in-memory history. A resume
     /// reconstructed from full JSONL history leaves this at zero.
     pub compacted_user_turns: u64,

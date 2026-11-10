@@ -32,10 +32,12 @@ const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool us
 const MCP_INTERRUPTED_MESSAGE: &str = "The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed.";
 
 /// Result of one `dispatch_tool_uses_tracked` call routed through the executor:
-/// the single result block + the tool's injected messages + context modifiers.
+/// the optional result block + the tool's injected messages + context modifiers.
+/// A headless PreToolUse deferral stops continuation without a result block.
 type DispatchOutcome = Result<
     (
-        ContentBlock,
+        Option<ContentBlock>,
+        Vec<(usize, ContentBlock)>,
         bool,
         Vec<(ConversationMessage, ToolUseId)>,
         Vec<ContextModifier>,
@@ -155,6 +157,8 @@ pub(crate) struct TrackedTool {
     /// The result block once `Completed` (the unknown-tool case fills it
     /// synchronously at `add_tool` time).
     pub(crate) result: Option<ContentBlock>,
+    /// Non-result blocks in the same user row, retaining their source positions.
+    pub(crate) result_siblings: Vec<(usize, ContentBlock)>,
     /// A per-tool Pre/PostToolUse hook requested that the loop stop.
     pub(crate) prevent_continuation: bool,
     /// Tool-injected follow-up messages (SKILLEXEC.3) + context modifiers,
@@ -366,7 +370,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     model_provider.as_deref(),
                 )
             });
-        let scheduler = ToolScheduler::spawn(
+        let scheduler = ToolScheduler::spawn_with_transient_publications(
             dispatch,
             max_tool_use_concurrency(),
             user_cancel.clone(),
@@ -378,6 +382,7 @@ impl<'a> StreamingToolExecutor<'a> {
             session_root,
             publication_commit_lock,
             Some(model_context_resolver),
+            Some(orch.lifecycle_runtime.session_tool_hook_generation.transient_publications()),
         );
         let publication_fence = scheduler.current_publication_fence();
         Ok(Self {
@@ -450,6 +455,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     status: ToolStatus::Completed,
                     is_concurrency_safe: true,
                     result: Some(block.clone()),
+                    result_siblings: Vec::new(),
                     prevent_continuation: false,
                     injected: Vec::new(),
                     modifiers: Vec::new(),
@@ -494,6 +500,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     status: ToolStatus::Queued,
                     is_concurrency_safe: safe,
                     result: None,
+                    result_siblings: Vec::new(),
                     prevent_continuation: false,
                     injected: Vec::new(),
                     modifiers: Vec::new(),
@@ -860,7 +867,8 @@ impl<'a> StreamingToolExecutor<'a> {
                 assistant_id,
                 publication_guard: Some(Arc::clone(&publication_guard)),
                 tool: name,
-                block,
+                block: Some(block),
+                result_siblings: Vec::new(),
                 prevent_continuation: false,
                 injected: Vec::new(),
                 modifiers: Vec::new(),
@@ -905,19 +913,37 @@ impl<'a> StreamingToolExecutor<'a> {
             let outcome = match completed.outcome {
                 Ok(payload) => {
                     let dispatch = payload.dispatch;
-                    let mut results = dispatch.results.into_iter();
-                    match (results.next(), results.next()) {
-                        (Some(block), None) => Ok((
-                            block,
+                    let mut result = None;
+                    let mut siblings = Vec::new();
+                    let mut invalid_result = false;
+                    for (position, block) in dispatch.results.into_iter().enumerate() {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = &block {
+                            if result.is_some() || tool_use_id != &self.tools[index].id {
+                                invalid_result = true;
+                                break;
+                            }
+                            result = Some(block);
+                        } else {
+                            siblings.push((position, block));
+                        }
+                    }
+                    if !invalid_result
+                        && (result.is_some()
+                            || (dispatch.prevent_continuation && siblings.is_empty()))
+                    {
+                        Ok((
+                            result,
+                            siblings,
                             dispatch.prevent_continuation,
                             dispatch.injected_messages,
                             dispatch.context_modifiers,
                             dispatch.post_tool_batch_calls,
                             dispatch.publications,
-                        )),
-                        _ => Err(crate::error::OrchestratorError::StreamingProtocol(
+                        ))
+                    } else {
+                        Err(crate::error::OrchestratorError::StreamingProtocol(
                             "autonomous scheduler dispatch returned an invalid result count".into(),
-                        )),
+                        ))
                     }
                 }
                 Err(error) => Err(error),
@@ -1001,16 +1027,28 @@ impl<'a> StreamingToolExecutor<'a> {
             );
             self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
             self.tools[i].result = Some(block);
+            self.tools[i].result_siblings.clear();
             // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
             self.tools[i].status = ToolStatus::Completed;
             return;
         }
         // Otherwise record the real outcome (existing handling).
         match outcome {
-            Ok((mut block, prevent, injected, modifiers, post_tool_batch_calls, publications)) => {
+            Ok((
+                mut block,
+                siblings,
+                prevent,
+                injected,
+                modifiers,
+                post_tool_batch_calls,
+                publications,
+            )) => {
                 // Copy the provider id onto the result for egress replay.
-                set_provider_id(&mut block, self.tools[i].provider_id.clone());
-                self.tools[i].result = Some(block);
+                if let Some(block) = &mut block {
+                    set_provider_id(block, self.tools[i].provider_id.clone());
+                }
+                self.tools[i].result = block;
+                self.tools[i].result_siblings = siblings;
                 self.tools[i].prevent_continuation = prevent;
                 self.tools[i].injected = injected;
                 self.tools[i].modifiers = modifiers;
@@ -1041,6 +1079,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 );
                 self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
                 self.tools[i].result = Some(block);
+                self.tools[i].result_siblings.clear();
                 self.tools[i].status = ToolStatus::Completed;
             }
         }
@@ -1119,7 +1158,8 @@ impl<'a> StreamingToolExecutor<'a> {
                 assistant_id,
                 publication_guard: Some(Arc::new(self.publication_fence.clone())),
                 tool: name,
-                block,
+                block: Some(block),
+                result_siblings: Vec::new(),
                 prevent_continuation: false,
                 injected: Vec::new(),
                 modifiers: Vec::new(),
@@ -1357,7 +1397,10 @@ pub(crate) struct DrainedResult {
     /// event or serialized transcript row.
     pub(crate) publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
     pub(crate) tool: String,
-    pub(crate) block: ContentBlock,
+    /// A deferred tool intentionally yields only control/publication effects.
+    pub(crate) block: Option<ContentBlock>,
+    /// Original positions of non-result blocks accompanying the single result.
+    pub(crate) result_siblings: Vec<(usize, ContentBlock)>,
     pub(crate) prevent_continuation: bool,
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
@@ -1397,12 +1440,15 @@ impl<'a> StreamingToolExecutor<'a> {
             return None;
         }
         tool.status = ToolStatus::Yielded;
-        self.tool_use_lifecycle.observe_tool_result(&tool.id);
+        if tool.result.is_some() {
+            self.tool_use_lifecycle.observe_tool_result(&tool.id);
+        }
         Some(DrainedResult {
             assistant_id: tool.assistant_id,
             publication_guard: Some(publication_guard),
             tool: tool.name.clone(),
-            block: tool.result.clone().expect("completed tool has result"),
+            block: tool.result.clone(),
+            result_siblings: std::mem::take(&mut tool.result_siblings),
             prevent_continuation: tool.prevent_continuation,
             injected: std::mem::take(&mut tool.injected),
             modifiers: std::mem::take(&mut tool.modifiers),
@@ -1644,6 +1690,10 @@ fn mcp_server_from_tool_name(name: &str) -> Option<&str> {
 #[cfg(test)]
 #[path = "streaming_executor_test.rs"]
 mod streaming_executor_test;
+
+#[cfg(test)]
+#[path = "streaming_executor_defer_tests.rs"]
+mod streaming_executor_defer_tests;
 
 /// O4-A step 3: denial-kind housekeeping across the executor's synthetic
 /// substitution.

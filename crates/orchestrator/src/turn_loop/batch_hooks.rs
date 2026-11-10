@@ -75,8 +75,14 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
             .lifecycle_runtime
             .session_tool_hook_generation
             .current();
-        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(root, lock))
-            as Arc<dyn HookPublicationGuard>
+        Arc::new(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(root, lock)
+                .with_transient_publications(
+                    orch.lifecycle_runtime
+                        .session_tool_hook_generation
+                        .transient_publications(),
+                ),
+        ) as Arc<dyn HookPublicationGuard>
     });
     if !publication_guard.is_current() {
         return PostToolBatchOutcome {

@@ -166,6 +166,7 @@ tokio::task_local! {
 #[derive(Default)]
 pub(crate) struct ModResultStage {
     tool_use_id: String,
+    persistence_run_id: Option<uuid::Uuid>,
     /// `$.tool.call()` consumes its executor frames locally. It still uses the
     /// permissioned dispatcher, but must not publish the virtual tool row or
     /// persist frame-only side channels into the outer conversation.
@@ -176,9 +177,54 @@ pub(crate) struct ModResultStage {
     turn_end: Option<tool_api::tool_trait::ToolResultTurnEnd>,
     denial_kind: Option<String>,
     permission_denial: Option<(String, Source)>,
+    end_conversation_request: Option<crate::end_conversation_tool::EndConversationRequest>,
+    hook_attachments: Vec<(Source, Option<Arc<dyn HookPublicationGuard>>)>,
+    persisted_hook_attachments: Vec<(Option<lingxi_core::types::MessageId>, Source)>,
+    attachment_registrations: Vec<(ConversationMessage, String, serde_json::Value)>,
 }
 
 impl ModResultStage {
+    pub(crate) async fn persistence_run_id(
+        tool_use_id: &lingxi_core::types::ToolUseId,
+    ) -> Option<uuid::Uuid> {
+        let stage = active_mod_result_stage()?;
+        let stage = stage.lock().await;
+        (stage.tool_use_id == tool_use_id.as_str())
+            .then_some(stage.persistence_run_id)
+            .flatten()
+    }
+
+    async fn stage_persisted_hook_attachment(
+        id: Option<lingxi_core::types::MessageId>,
+        payload: &Source,
+    ) -> bool {
+        let Some(stage) = active_mod_result_stage() else {
+            return false;
+        };
+        let mut stage = stage.lock().await;
+        if !stage.virtual_tool_call {
+            stage.persisted_hook_attachments.push((id, payload.clone()));
+        }
+        true
+    }
+
+    pub(crate) async fn stage_attachment_registration(
+        message: &ConversationMessage,
+        kind: &str,
+        origin: &serde_json::Value,
+    ) -> bool {
+        let Some(stage) = active_mod_result_stage() else {
+            return false;
+        };
+        let mut stage = stage.lock().await;
+        if !stage.virtual_tool_call {
+            stage
+                .attachment_registrations
+                .push((message.clone(), kind.to_owned(), origin.clone()));
+        }
+        true
+    }
+
     pub(crate) fn denial_kind(&self) -> Option<&str> {
         self.denial_kind.as_deref()
     }
@@ -197,6 +243,10 @@ impl ModResultStage {
                 turn_end: self.turn_end,
                 denial_kind: self.denial_kind,
                 permission_denial: self.permission_denial,
+                end_conversation_request: self.end_conversation_request,
+                hook_attachments: self.hook_attachments,
+                persisted_hook_attachments: self.persisted_hook_attachments,
+                attachment_registrations: self.attachment_registrations,
                 frame: Some(crate::turn_loop::ToolResultFramePublication {
                     tool: tool.to_owned(),
                     model_text,
@@ -212,6 +262,10 @@ impl ModResultStage {
             turn_end: self.turn_end,
             denial_kind: self.denial_kind,
             permission_denial: self.permission_denial,
+            end_conversation_request: self.end_conversation_request,
+            hook_attachments: self.hook_attachments,
+            persisted_hook_attachments: self.persisted_hook_attachments,
+            attachment_registrations: self.attachment_registrations,
             frame: self
                 .frame
                 .map(|frame| crate::turn_loop::ToolResultFramePublication {
@@ -245,6 +299,7 @@ async fn with_mod_result_stage_kind<F: std::future::Future>(
 ) -> (F::Output, ModResultStage) {
     let stage = Arc::new(Mutex::new(ModResultStage {
         tool_use_id: tool_use_id.to_string(),
+        persistence_run_id: Some(uuid::Uuid::new_v4()),
         virtual_tool_call,
         ..Default::default()
     }));
@@ -1515,6 +1570,24 @@ impl ConversationOrchestrator {
         stage: ModResultStage,
         replacement: Option<(Source, Source)>,
     ) {
+        for (attachment_id, attachment) in stage.persisted_hook_attachments {
+            if let Some(attachment_id) = attachment_id {
+                self.persist_hook_attachment_to_jsonl_with_id(attachment_id, attachment)
+                    .await;
+            } else {
+                self.persist_hook_attachment_to_jsonl(attachment).await;
+            }
+        }
+        for (attachment, guard) in stage.hook_attachments {
+            self.queue_hook_attachment(id, attachment, guard).await;
+        }
+        for (message, kind, origin) in stage.attachment_registrations {
+            self.register_mod_persisted_attachment(&message, &kind, origin)
+                .await;
+        }
+        if let Some(request) = stage.end_conversation_request {
+            self.record_end_conversation_request(id, request).await;
+        }
         if let Some((raw, text)) = replacement {
             // Native's ref-backed result rewrite reconstructs the selected
             // result row while retaining the selected run's MCP metadata and
@@ -2177,6 +2250,33 @@ impl ConversationOrchestrator {
             .insert(id.to_string(), turn_end);
     }
 
+    pub(crate) async fn record_end_conversation_request(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        request: crate::end_conversation_tool::EndConversationRequest,
+    ) {
+        if let Some(stage) = active_mod_result_stage() {
+            let mut stage = stage.lock().await;
+            if stage.tool_use_id == id.as_str() {
+                if !stage.virtual_tool_call {
+                    stage.end_conversation_request = Some(request);
+                }
+                return;
+            }
+        }
+        if request.publication_guard.is_none() {
+            request
+                .slot
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.transcript
+                .pending_end_conversation_requests
+                .lock()
+                .await
+                .insert(id.to_string(), request);
+        }
+    }
+
     /// Drop result metadata whose real tool outcome was replaced by a
     /// streaming synthetic. The synthetic is an error result and therefore
     /// carries neither the real MCP metadata nor its turn-end request.
@@ -2197,6 +2297,11 @@ impl ConversationOrchestrator {
         self.transcript.tool_use_mcp_meta.lock().await.remove(&key);
         self.transcript
             .pending_tool_result_turn_end
+            .lock()
+            .await
+            .remove(&key);
+        self.transcript
+            .pending_end_conversation_requests
             .lock()
             .await
             .remove(&key);
@@ -2228,12 +2333,19 @@ impl ConversationOrchestrator {
         projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
         publication_fence: Option<Arc<dyn HookPublicationGuard>>,
     ) {
-        if active_mod_result_stage_is_virtual().await {
-            return;
-        }
         if projection.validate().is_err() {
             tracing::warn!(tool_use_id = %id, "discarding invalid exact hook attachment projection");
             return;
+        }
+        if let Some(stage) = active_mod_result_stage() {
+            let mut stage = stage.lock().await;
+            if stage.virtual_tool_call {
+                return;
+            }
+            if stage.tool_use_id == id.as_str() {
+                stage.hook_attachments.push((projection, publication_fence));
+                return;
+            }
         }
         self.transcript
             .pending_hook_attachments
@@ -2244,8 +2356,44 @@ impl ConversationOrchestrator {
             .push((projection, publication_fence));
     }
 
+    /// Drain only this physical dispatch's queued attachments when a no-result
+    /// completion must carry its explicit flush to the streaming journal.
+    pub(crate) async fn take_dispatch_hook_attachments(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+    ) -> Vec<(Source, Option<Arc<dyn HookPublicationGuard>>)> {
+        if let Some(stage) = active_mod_result_stage() {
+            let mut stage = stage.lock().await;
+            if stage.virtual_tool_call {
+                return Vec::new();
+            }
+            if stage.tool_use_id == id.as_str() {
+                return std::mem::take(&mut stage.hook_attachments);
+            }
+        }
+        self.take_queued_hook_attachments(id).await
+    }
+
     /// Persist (and drain) every attachment queued for `id`.
     pub(crate) async fn flush_hook_attachments(&self, id: &lingxi_core::types::ToolUseId) {
+        if let Some(stage) = active_mod_result_stage() {
+            let mut stage = stage.lock().await;
+            if stage.virtual_tool_call {
+                return;
+            }
+            if stage.tool_use_id == id.as_str() {
+                // Defer has no result row to trigger a later queue flush. Keep
+                // its explicit eager flush ordered after the deferred marker,
+                // but publish neither until the Mod selects this physical run.
+                let queued = std::mem::take(&mut stage.hook_attachments);
+                stage.persisted_hook_attachments.extend(
+                    queued
+                        .into_iter()
+                        .map(|(attachment, _guard)| (None, attachment)),
+                );
+                return;
+            }
+        }
         for (projection, publication_fence) in self.take_queued_hook_attachments(id).await {
             let persist = self.persist_hook_attachment_to_jsonl(projection);
             if let Some(fence) = publication_fence {
@@ -3865,6 +4013,9 @@ impl ConversationOrchestrator {
     /// other JSONL append; advances `last_jsonl_uuid` on success so the next
     /// line chains off it.
     pub async fn persist_hook_attachment_to_jsonl(&self, payload: Source) {
+        if ModResultStage::stage_persisted_hook_attachment(None, &payload).await {
+            return;
+        }
         self.persist_attachment_to_jsonl(payload, source_object([]), "hook_attachment")
             .await;
     }
@@ -3877,6 +4028,9 @@ impl ConversationOrchestrator {
         id: lingxi_core::types::MessageId,
         payload: Source,
     ) {
+        if ModResultStage::stage_persisted_hook_attachment(Some(id), &payload).await {
+            return;
+        }
         self.persist_attachment_to_jsonl_with_id(
             id.as_uuid(),
             payload,
@@ -4450,10 +4604,31 @@ impl ConversationOrchestrator {
         status: lingxi_core::host::GoalStatusKind,
         active_goal: Option<&lingxi_core::session::ActiveGoalState>,
     ) {
+        if active_goal.is_none() {
+            return;
+        }
+        let total_tokens = if matches!(
+            status,
+            lingxi_core::host::GoalStatusKind::Achieved | lingxi_core::host::GoalStatusKind::Failed
+        ) {
+            self.snapshot_cost_real().await.total_tokens
+        } else {
+            0
+        };
+        self.persist_goal_status_attachment_with_total_tokens(status, active_goal, total_tokens)
+            .await;
+    }
+
+    /// Persist a goal transition using cost captured before its transition lock.
+    pub(super) async fn persist_goal_status_attachment_with_total_tokens(
+        &self,
+        status: lingxi_core::host::GoalStatusKind,
+        active_goal: Option<&lingxi_core::session::ActiveGoalState>,
+        total_tokens: u64,
+    ) {
         let Some(goal) = active_goal else {
             return;
         };
-        let total_tokens = self.snapshot_cost_real().await.total_tokens;
         let duration_ms = std::time::SystemTime::now()
             .duration_since(goal.set_at)
             .unwrap_or_default()
@@ -6654,6 +6829,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
     .with_config_home(root.path().to_path_buf());
 
     let prompt = ConversationMessage::user(MessageId::new(), "start presence replay".into());
+    orchestrator.initialize_conversation_mode().await.unwrap();
     orchestrator.persist_message_to_jsonl(&prompt).await;
 
     let tool_use_id = source_content
@@ -6988,6 +7164,7 @@ export function register(on) {
 
     let prompt =
         ConversationMessage::user(MessageId::new(), "live UTF-16 session projection".into());
+    orchestrator.initialize_conversation_mode().await.unwrap();
     orchestrator
         .session
         .lock()

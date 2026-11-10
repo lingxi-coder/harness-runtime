@@ -603,6 +603,8 @@ impl ReplayedSession {
                 .copied()
                 .collect(),
             virtual_user_message_ids: self.state.virtual_user_messages.iter().copied().collect(),
+            thinking_signature_stripped: self.state.thinking_signature_stripped,
+            thinking_stripped_messages: self.state.thinking_stripped_messages.clone(),
             compacted_user_turns: self.state.compacted_user_turns,
             model_context_excluded_message_ids: self
                 .state
@@ -3535,6 +3537,11 @@ impl ConversationOrchestrator {
             state.transcript_only_messages = replayed.transcript_only_messages;
             state.compact_summary_messages = replayed.compact_summary_messages;
             state.model_context_excluded_messages = replayed.model_context_excluded_messages;
+            // The retained signed history and its durable recovery ranges
+            // belong to the same mounted session. Restore both before the API
+            // clients receive the rejected-thinking projection below.
+            state.thinking_signature_stripped = replayed.thinking_signature_stripped;
+            state.thinking_stripped_messages = replayed.thinking_stripped_messages;
             state.active_goal = replayed.active_goal;
             if !preserve_boot_model && model_recovered {
                 state.model = replayed.model;
@@ -4574,6 +4581,7 @@ mod exact_history_string_tests {
 
             let first =
                 native_settings_test_orchestrator(config.clone(), session_id, &cwd, writer.clone());
+            first.initialize_conversation_mode().await.unwrap();
             let user_prompt = ConversationMessage::user(MessageId::new(), "start".into());
             first.session.lock().await.history.push(user_prompt.clone());
             first.persist_message_to_jsonl(&user_prompt).await;
@@ -5126,3 +5134,7 @@ mod assistant_resumable_source_tests {
 #[cfg(test)]
 #[path = "nested_memory_resume_287_tests.rs"]
 mod nested_memory_resume_287_tests;
+
+#[cfg(test)]
+#[path = "resume/captured_thinking_recovery_tests.rs"]
+mod captured_thinking_recovery_tests;

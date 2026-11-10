@@ -520,6 +520,12 @@ pub(super) async fn build_mobile_inner_with_ask(
             })?;
     let transcript_path =
         planned_mobile_transcript_path(&cfg, initial_session.as_ref(), main_session_id);
+    let hook_context_source = Arc::new(orchestrator::HookContextSource::new(hooks::HookContext {
+        session_id: main_session_id,
+        cwd: cwd.clone(),
+        transcript_path: transcript_path.clone(),
+        ..hooks::HookContext::default()
+    }));
     if let Some(initial) = &initial_session {
         // The preflight cannot claim a writer before rejecting a mode mismatch.
         // Recheck the same bytes under the authority before mounting the owner.
@@ -1339,7 +1345,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = if cfg.cwd.starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
+    let permission_cwd = if cfg
+        .cwd
+        .starts_with(branding::workspace_home(&cfg.lingxi_home).join("cron"))
         || is_bound_mode_default_cwd(&cfg, &cwd)
     {
         cwd.clone()
@@ -2004,16 +2012,22 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Same blocking TaskCreated/TaskCompleted hook contract as desktop; the
     // transcript path is unavailable before the session mounts (matches the
     // `task_lifecycle_hooks` wiring below).
-    .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        std::path::PathBuf::new(),
-    )))
-    .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        std::path::PathBuf::new(),
-    )));
+    .with_task_completed_firer(Arc::new(
+        orchestrator::OrchestratorTaskCompletedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            std::path::PathBuf::new(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ))
+    .with_task_created_firer(Arc::new(
+        orchestrator::OrchestratorTaskCreatedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            std::path::PathBuf::new(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ));
     task_registry_inner.set_workflow_session_filter(Some(main_session_uuid.clone()));
     let lsp_diagnostics = lsp::LspDiagnosticRegistry::new();
     let typescript_lsp_mode =
@@ -2457,7 +2471,8 @@ pub(super) async fn build_mobile_inner_with_ask(
                 hooks.clone(),
                 cwd.clone(),
                 std::path::PathBuf::new(),
-            ),
+            )
+            .with_context_source(hook_context_source.clone()),
         )),
     };
     // #5 invariant: mobile has no live sandbox runtime, so sandboxing must stay
@@ -3198,6 +3213,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
     // orchestrator↔hook-executor reference cycle.
+    hook_context_source.attach(&orch);
     hook_attachment_sink.attach(&orch);
     hook_prompt_runner.attach(&orch);
 

@@ -2991,7 +2991,8 @@ message with multiple tool uses so they run concurrently."
                     let text = content
                         .iter()
                         .filter_map(|block| match block {
-                            lingxi_core::types::ContentBlock::Text { text, .. } => {
+                            lingxi_core::types::ContentBlock::Text { text, .. }
+                            | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
                                 Some(text.as_str())
                             }
                             _ => None,
@@ -3460,7 +3461,9 @@ message with multiple tool uses so they run concurrently."
                 }
             }
         }
-        let current_tool_name_set = current_tool_names.iter().collect::<std::collections::HashSet<_>>();
+        let current_tool_name_set = current_tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
         let revoked = prior_declared
             .as_deref()
             .unwrap_or_default()

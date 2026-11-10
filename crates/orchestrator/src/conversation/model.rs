@@ -2592,9 +2592,10 @@ impl ConversationOrchestrator {
                     cache_read_input_tokens: row.cache_read_input_tokens,
                     cache_creation_input_tokens: row.cache_creation_input_tokens,
                     reasoning_tokens: row.usage.tokens.reasoning_output,
-                    web_search_requests: row.usage.server_tool_use.map_or(0, |tools| {
-                        u64::from(tools.web_search_requests)
-                    }),
+                    web_search_requests: row
+                        .usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
                     request_count: row.request_count,
                 })
                 .collect(),
@@ -2840,10 +2841,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             return (snap.probe.clone(), snap.block.clone());
         }
         let cwd = cwd.to_owned();
-        let (probe, block) = tokio::task::spawn_blocking(move || {
-            crate::prompt::git_status::snapshot(&cwd)
-        }).await.unwrap_or_default();
-        *cache = Some(GitStatusSnapshot { probe: probe.clone(), block: block.clone() });
+        let (probe, block) =
+            tokio::task::spawn_blocking(move || crate::prompt::git_status::snapshot(&cwd))
+                .await
+                .unwrap_or_default();
+        *cache = Some(GitStatusSnapshot {
+            probe: probe.clone(),
+            block: block.clone(),
+        });
         (probe, block)
     }
 
@@ -3245,9 +3250,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     pub(super) async fn sync_goal_checkin_idle_task(&self) {
+        // Publish the timer under the same owner lock used by replacement and
+        // clear, so a retired goal cannot install a timer after its reset.
+        let session = self.session.lock().await;
         let should_run = self.lifecycle_runtime.stop_hook_snapshot.is_some()
             && crate::prompt::goal_checkin::checkin_interval_ms() > 0
-            && self.session.lock().await.active_goal.is_some()
+            && session.active_goal.is_some()
             && self
                 .lifecycle_runtime
                 .goal_checkin
@@ -4293,6 +4301,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         before_start.await?;
+        let prior_assistants: std::collections::HashSet<_> = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::Assistant { .. }
+                )
+            })
+            .map(lingxi_core::types::ConversationMessage::id)
+            .collect();
         let outcome = self
             .run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await?;
@@ -4305,7 +4327,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 matches!(
                     message,
                     lingxi_core::types::ConversationMessage::Assistant { .. }
-                )
+                ) && !prior_assistants.contains(&message.id())
             })
             .map(lingxi_core::types::ConversationMessage::text_content)
             .unwrap_or_default();
@@ -4350,11 +4372,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         settings: crate::scheduled_turn::ScheduledSettings,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
-        // A scheduled run drives the LIVE session's output stream, so the client
-        // has to learn a turn started — otherwise the composer stays unlocked,
-        // no Stop button appears, and any permission prompt this turn raises
-        // belongs to a turn the client was never told about.
-        self.output.emit_turn_started().await;
+        // The shared admission boundary announces the live scheduled turn only
+        // after its storage/profile checks and cancellation checks succeed.
         crate::scheduled_turn::SETTINGS
             .scope(
                 settings,

@@ -354,6 +354,7 @@ fn mod_turn_step_stream(
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
     >,
     snapshot: Vec<ConversationMessage>,
+    user_cancel: Option<CancellationToken>,
     chat_dispatch_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     guarded_async_hook_reminders: Vec<(
         MessageId,
@@ -394,7 +395,8 @@ fn mod_turn_step_stream(
     let worker_decoder = decoder.clone();
     let worker_model = effective_model.clone();
     let worker_error = physical_error.clone();
-    tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+    let worker_cancel = user_cancel.clone().unwrap_or_default();
+    let dispatch = lingxi_core::host::model_safety::bind_current_model_safety(
         telemetry::otel::bind_current_trace_context(async move {
             let finish_wire = worker_wire.clone();
             let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -843,15 +845,42 @@ fn mod_turn_step_stream(
                 }
             }
         }),
-    ));
+    );
+    let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            () = worker_cancel.cancelled() => {}
+            () = dispatch => {}
+        }
+    }));
     let stream = futures::stream::unfold(
-        (receiver, None::<tokio::sync::oneshot::Sender<()>>),
-        |(mut receiver, previous_ack)| async move {
+        (
+            receiver,
+            None::<tokio::sync::oneshot::Sender<()>>,
+            worker,
+            user_cancel,
+        ),
+        |(mut receiver, previous_ack, mut worker, cancel)| async move {
             if let Some(ack) = previous_ack {
                 let _ = ack.send(());
             }
-            let (item, ack) = receiver.recv().await?;
-            Some((item, (receiver, Some(ack))))
+            let frame = if let Some(cancel) = cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    frame = receiver.recv() => frame,
+                }
+            } else {
+                receiver.recv().await
+            };
+            let Some((item, ack)) = frame else {
+                // Join cancellation before the turn's accounting/terminal
+                // epilogue. Consumer drop also aborts this owned worker.
+                worker.abort();
+                let _ = (&mut worker).await;
+                return None;
+            };
+            Some((item, (receiver, Some(ack), worker, cancel)))
         },
     )
     .fuse()
@@ -1333,6 +1362,7 @@ impl StreamingTurnDriver<'_> {
                     .await,
                 system_prompt.clone(),
                 snapshot,
+                user_cancel.clone(),
                 orch.chat_dispatch_check(user_cancel.as_ref()),
                 guarded_async_hook_reminders.clone(),
                 tool_declarations.clone(),
@@ -4205,6 +4235,9 @@ impl StreamingTurnDriver<'_> {
                     let mut admitted = Vec::with_capacity(inputs.len());
                     let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
                     for (index, mut input) in inputs.into_iter().enumerate() {
+                        if index == image_owner {
+                            input.images.extend(std::mem::take(&mut images));
+                        }
                         if let Some(kind) =
                             input.mod_origin.as_ref().and_then(external_receive_kind)
                         {
@@ -4222,7 +4255,7 @@ impl StreamingTurnDriver<'_> {
                         match orch
                             .screen_mod_prompt_submit(
                                 &input.text,
-                                if index == image_owner { &images } else { &[] },
+                                &input.images,
                                 input.mod_origin.clone(),
                             )
                             .await
@@ -4837,6 +4870,10 @@ impl StreamingTurnDriver<'_> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "mod_stream_cancellation_tests.rs"]
+mod cancellation_regression_tests;
 
 #[cfg(test)]
 mod mod_response_accumulator_tests {

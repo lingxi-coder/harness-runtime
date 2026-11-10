@@ -26,29 +26,29 @@ use std::path::{Path, PathBuf};
 /// Derive the directory a conditional rule's globs are resolved against, 1:1
 /// with claudemd.ts:1376-1380.
 ///
-/// - **Project** tier: globs are relative to the directory CONTAINING `.claude`.
-///   A project rule lives at `<base>/.lingxi/rules/x.md`, so the base is the
-///   rule file's grandparent's parent — `dirname(dirname(dirname(path)))` (TS
-///   `dirname(dirname(rulesDir))`, where `rulesDir = <base>/.lingxi/rules`).
+/// - **Project** tier: globs are relative to the directory containing `.lingxi`.
+///   Rules may be nested anywhere below `<base>/.lingxi/rules`, so find that
+///   rules root rather than assuming the file is its immediate child.
 /// - **Managed / User / Local** tiers: globs are relative to the original cwd
 ///   (`getOriginalCwd()`), passed in as `cwd`.
 ///
-/// Returns `None` for a Project rule whose path has fewer than three ancestors
-/// (a malformed/non-`.lingxi/rules/` location) — such a rule can match nothing.
+/// Returns `None` for a Project rule outside a `.lingxi/rules/` directory.
 #[must_use]
 pub fn base_dir(rule_path: &Path, tier: LingxiMdTier, cwd: &Path) -> Option<PathBuf> {
     match tier {
-        LingxiMdTier::Project => {
-            // path = <base>/.lingxi/rules/x.md
-            //   parent()        -> <base>/.lingxi/rules
-            //   .parent()       -> <base>/.claude
-            //   .parent()       -> <base>
-            rule_path
-                .parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-        }
+        LingxiMdTier::Project => rule_path
+            .parent()?
+            .ancestors()
+            .find(|ancestor| {
+                ancestor.file_name().is_some_and(|name| name == "rules")
+                    && ancestor
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == branding::DOT_DIR)
+            })
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
         LingxiMdTier::Managed | LingxiMdTier::User | LingxiMdTier::Local => Some(cwd.to_path_buf()),
     }
 }
@@ -218,6 +218,51 @@ mod tests {
             Path::new("/some/cwd"),
         );
         assert_eq!(b, Some(PathBuf::from("/proj")));
+    }
+
+    #[test]
+    fn nested_project_rules_match_from_the_rules_root() {
+        let cwd = Path::new("/unrelated/cwd");
+        for path in [
+            "/proj/.lingxi/rules/security/typescript.md",
+            "/proj/.lingxi/rules/security/deep/typescript.md",
+        ] {
+            let rule = rule(path, LingxiMdTier::Project, Some(vec!["src/**/*.ts"]));
+            assert_eq!(
+                base_dir(&rule.path, rule.tier, cwd),
+                Some(PathBuf::from("/proj"))
+            );
+            assert!(rule_matches_touched_file(
+                &rule,
+                Path::new("/proj/src/a.ts"),
+                cwd
+            ));
+            assert!(rule_matches_touched_file(
+                &rule,
+                Path::new("src/deep/a.ts"),
+                cwd
+            ));
+            assert!(!rule_matches_touched_file(
+                &rule,
+                Path::new("/other/src/a.ts"),
+                cwd
+            ));
+            assert!(!rule_matches_touched_file(
+                &rule,
+                Path::new("/proj/docs/a.ts"),
+                cwd
+            ));
+        }
+    }
+
+    #[test]
+    fn project_rules_outside_the_config_rules_root_have_no_base() {
+        for path in ["/proj/rules/x.md", "/proj/.lingxi/other/x.md", "x.md"] {
+            assert_eq!(
+                base_dir(Path::new(path), LingxiMdTier::Project, Path::new("/proj")),
+                None
+            );
+        }
     }
 
     #[test]

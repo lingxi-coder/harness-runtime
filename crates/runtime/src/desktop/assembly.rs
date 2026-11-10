@@ -1368,6 +1368,12 @@ pub async fn build_with_credential_stack(
             &main_session_uuid,
         )
     });
+    let hook_context_source = Arc::new(orchestrator::HookContextSource::new(hooks::HookContext {
+        session_id: main_session_id,
+        cwd: cwd.clone(),
+        transcript_path: main_transcript_path.clone(),
+        ..hooks::HookContext::default()
+    }));
     let captured_target_content = cfg.session_resume_snapshot.as_ref().and_then(|snapshot| {
         if snapshot.source_session_id == main_session_uuid {
             Some(snapshot.content.clone())
@@ -3578,12 +3584,14 @@ pub async fn build_with_credential_stack(
     //         or DENY it; with no hook it falls through to `{"action":"cancel"}`.
     //         `with_hook_dispatcher(Some(..))` is the only behavioral delta from
     //         the previous `with_raw_conn` wiring.
-    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> =
-        Arc::new(orchestrator::OrchestratorHookDispatcher::new(
+    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> = Arc::new(
+        orchestrator::OrchestratorHookDispatcher::new(
             hooks.clone(),
             cwd.clone(),
             main_transcript_path.clone(),
-        ));
+        )
+        .with_context_source(hook_context_source.clone()),
+    );
     // OAuth 2.1 + PKCE seam for OAuth-configured remote (SSE/HTTP) MCP servers.
     // Reuses the platform `http` / `clock` / `storage` already built in step (1);
     // `on_authorization_url` surfaces the consent URL to the user (logs it
@@ -3867,20 +3875,26 @@ pub async fn build_with_credential_stack(
     // when a task reaches a terminal status. The firer wraps the SAME
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
     // the `tasks` leaf reaches `orch.hooks` without a dependency cycle.
-    .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        main_transcript_path.clone(),
-    )))
+    .with_task_completed_firer(Arc::new(
+        orchestrator::OrchestratorTaskCompletedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ))
     // Fire the `TaskCreated` hook (claude-code `executeTaskCreatedHooks`) when a
     // task is created. Counterpart to the `TaskCompleted` firer above — wraps
     // the SAME `Arc<HookExecutorImpl>` so the `tasks` leaf reaches `orch.hooks`
     // without a dependency cycle.
-    .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        main_transcript_path.clone(),
-    )));
+    .with_task_created_firer(Arc::new(
+        orchestrator::OrchestratorTaskCreatedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ));
     // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
     // before the registry is shared. Both depend only on platform traits we
     // already build here; agent/teammate/workflow/remote/dream handlers register
@@ -4076,11 +4090,14 @@ pub async fn build_with_credential_stack(
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
     // the `tasks` leaf reaches `orch.hooks` without a dependency cycle —
     // mirroring the `TaskCompleted` / `TaskCreated` firers above.
-    .with_teammate_idle_firer(Arc::new(orchestrator::OrchestratorTeammateIdleFirer::new(
-        hooks.clone(),
-        cwd.clone(),
-        main_transcript_path.clone(),
-    )))
+    .with_teammate_idle_firer(Arc::new(
+        orchestrator::OrchestratorTeammateIdleFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+        )
+        .with_context_source(hook_context_source.clone()),
+    ))
     // Full teammate parity (P1): inherit the shared budget enforcer + fire
     // SubagentStart via the same `HookExecutorImpl` the orchestrator uses, and
     // stamp the SubagentStart `HookContext` (owning session id + cwd). `hooks` /
@@ -4102,7 +4119,24 @@ pub async fn build_with_credential_stack(
     .with_transcript(
         Arc::new(DesktopFileSystem::new(cwd.clone())),
         main_subagents_dir.clone(),
-    );
+    )
+    .with_subagents_dir_for_session_provider(Arc::new({
+        let lingxi_home = cfg.lingxi_home.clone();
+        move |session_id: lingxi_core::types::SessionId, owner_cwd: &std::path::Path| {
+            let dir = orchestrator::transcript_paths::subagents_dir(
+                &lingxi_home,
+                &owner_cwd.to_string_lossy(),
+                &session_id.as_uuid().to_string(),
+            );
+            std::fs::create_dir_all(&dir).map_err(|error| {
+                tasks::TaskError::Io(format!(
+                    "cannot create teammate transcript directory {}: {error}",
+                    dir.display(),
+                ))
+            })?;
+            Ok(dir)
+        }
+    }));
     // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
     // tool registry / skill loader exist (same deferred-fill the spawner uses).
     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
@@ -5083,7 +5117,8 @@ pub async fn build_with_credential_stack(
                 hooks.clone(),
                 cwd.clone(),
                 main_transcript_path.clone(),
-            ),
+            )
+            .with_context_source(hook_context_source.clone()),
         )),
     };
     let side_chat_tool_context = tool_ctx.clone();
@@ -5281,6 +5316,7 @@ pub async fn build_with_credential_stack(
             main_transcript_path.clone(),
             current_cwd_cell.clone(),
         )
+        .with_context_source(hook_context_source.clone())
         .with_watcher_rebinder(Arc::new(file_changed_watcher_rebinder.clone())),
     ));
     // (parity 2.1.212) The worktree-state persister: a JSONL writer at the SAME
@@ -5625,7 +5661,11 @@ pub async fn build_with_credential_stack(
         }
         tools_inner.register_builtin(workflow_tool.clone());
     }
-    if let Some(read_tools) = cfg.team_invocation.as_ref().and_then(|p| p.read_tools.as_ref()) {
+    if let Some(read_tools) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|p| p.read_tools.as_ref())
+    {
         super::team_process::read_tools::register(&mut tools_inner, read_tools.clone());
     }
     let registered_mcp_tools =
@@ -6091,12 +6131,14 @@ pub async fn build_with_credential_stack(
     // `hooks` is moved) reaches `orch.hooks` without a getter. Keep this firer
     // even for an initially empty matcher set so Desktop can install the first
     // FileChanged hook without restarting the process.
-    let file_changed_firer: Arc<dyn hooks::FileChangedFirer> =
-        Arc::new(orchestrator::OrchestratorFileChangedFirer::new(
+    let file_changed_firer: Arc<dyn hooks::FileChangedFirer> = Arc::new(
+        orchestrator::OrchestratorFileChangedFirer::new(
             hooks.clone(),
             watch_cwd.clone(),
             main_transcript_path.clone(),
-        ));
+        )
+        .with_context_source(hook_context_source.clone()),
+    );
     // (6.5-pre) Clone the registry Arcs the plugin bootstrap (below, after the
     //           command registry is filled at (6)) writes through, BEFORE they
     //           are moved into the orchestrator constructor. `Arc<RwLock<…>>`
@@ -6451,20 +6493,27 @@ pub async fn build_with_credential_stack(
     //
     // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
-        (false, false)
-    } else {
-        resolve_memory_feature_gates(
-            memory::auto_memory_enabled(
-                &memory::AutoMemoryEnv::from_process_env(),
-                effective_settings.settings.auto_memory_enabled,
-            ),
-            is_env_truthy("LINGXI_SESSION_MEMORY"),
-        )
-    };
+    let (memory_prefetch_on, session_memory_on) =
+        if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
+            (false, false)
+        } else {
+            resolve_memory_feature_gates(
+                memory::auto_memory_enabled(
+                    &memory::AutoMemoryEnv::from_process_env(),
+                    effective_settings.settings.auto_memory_enabled,
+                ),
+                is_env_truthy("LINGXI_SESSION_MEMORY"),
+            )
+        };
     let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
-            side_query_client.clone(), Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>, &home, &cfg.cwd)),
+        (true, Some(home)) => {
+            orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
+                side_query_client.clone(),
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+                &home,
+                &cfg.cwd,
+            ))
+        }
         _ => orch_builder,
     };
 
@@ -6540,9 +6589,18 @@ pub async fn build_with_credential_stack(
     // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
     let orch_builder = match (session_memory_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
-            side_query_client.clone(), default_model_id.clone(), memory::session_memory::SessionMemoryConfig {enabled:true,..Default::default()},
-            &home, Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>)),
+        (true, Some(home)) => {
+            orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
+                side_query_client.clone(),
+                default_model_id.clone(),
+                memory::session_memory::SessionMemoryConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                &home,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+            ))
+        }
         _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
@@ -6658,6 +6716,7 @@ pub async fn build_with_credential_stack(
     // JSONL writer) exists, so every hook run from here on persists its one
     // transcript `attachment` line. The sink holds a `Weak`, so this does not
     // create an orchestrator↔hook-executor reference cycle.
+    hook_context_source.attach(&orch);
     hook_attachment_sink.attach(&orch);
     hook_prompt_runner.attach(&orch);
 

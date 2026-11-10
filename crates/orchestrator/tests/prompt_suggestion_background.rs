@@ -427,6 +427,10 @@ async fn background_pipeline() {
         classifiers: Mutex<Vec<sidequery::SideQueryRequest>>,
         classifier_response: Mutex<Utf16JsonProjection>,
         classifier_entered: Notify,
+        hold_classifier: std::sync::atomic::AtomicBool,
+        active_classifiers: std::sync::atomic::AtomicUsize,
+        classifiers_idle: Notify,
+        classifier_release: Semaphore,
         entered: Notify,
         suggestion_query_count: std::sync::atomic::AtomicUsize,
         active_suggestion_queries: std::sync::atomic::AtomicUsize,
@@ -531,8 +535,20 @@ async fn background_pipeline() {
                         3072
                     })
                 );
+                self.active_classifiers
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _active = ActiveSuggestionQuery {
+                    active: &self.active_classifiers,
+                    idle: &self.classifiers_idle,
+                };
                 self.classifiers.lock().unwrap().push(request);
                 self.classifier_entered.notify_waiters();
+                if self
+                    .hold_classifier
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.classifier_release.acquire().await.unwrap().forget();
+                }
                 sidequery::SideQueryResponse {
                     text: Some(self.classifier_response.lock().unwrap().clone()),
                     structured: None,
@@ -594,6 +610,10 @@ async fn background_pipeline() {
             r#"{"state":"blocked","tempo":"blocked","needs":"Choose one option"}"#,
         )),
         classifier_entered: Notify::new(),
+        hold_classifier: std::sync::atomic::AtomicBool::new(false),
+        active_classifiers: std::sync::atomic::AtomicUsize::new(0),
+        classifiers_idle: Notify::new(),
+        classifier_release: Semaphore::new(0),
         entered: Notify::new(),
         suggestion_query_count: std::sync::atomic::AtomicUsize::new(0),
         active_suggestion_queries: std::sync::atomic::AtomicUsize::new(0),
@@ -604,7 +624,7 @@ async fn background_pipeline() {
     // The initial assistant turn warms the conversation gate. Three heuristic
     // turns, two model-route checks, and two UTF-16 needs cases then each need
     // their own scripted response.
-    let turns = (0..8)
+    let turns = (0..10)
         .map(|i| {
             vec![
                 message_start(&format!("reply-{i}"), "claude-sonnet-4-6"),
@@ -670,6 +690,12 @@ async fn background_pipeline() {
     orch.run_turn_streaming("Warm up suggestion history")
         .await
         .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.wait_for_classifier_count(1),
+    )
+    .await
+    .unwrap();
     let classifiers_before_question = client.classifier_count();
     assert_eq!(
         classifiers_before_question, 1,
@@ -930,6 +956,64 @@ async fn background_pipeline() {
             "each model-route and UTF-16 case must classify its actual user ask"
         );
     }
+    drop(classifier_requests);
+    // The classifier belongs to background work, even while its provider is
+    // pending. The completed turn must release foreground admission first.
+    client
+        .hold_classifier
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let target = client.classifier_count() + 1;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        orch.run_turn_streaming_with_cancel(
+            "Compare the implementation components again",
+            cancel.clone(),
+        ),
+    )
+    .await
+    .expect("foreground return cannot wait for classifier provider I/O")
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.wait_for_classifier_count(target),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client
+            .active_classifiers
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let queries = client.suggestion_query_count();
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notified = client.classifiers_idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if client
+                .active_classifiers
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("original turn cancellation must drop the held classifier");
+    assert_eq!(client.suggestion_query_count(), queries);
+    // Another turn is admitted while its new classifier is still held, too.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        orch.run_turn_streaming("Compare the implementation components after cancellation"),
+    )
+    .await
+    .expect("background classification cannot retain the foreground gate")
+    .unwrap();
 }
 
 #[test]

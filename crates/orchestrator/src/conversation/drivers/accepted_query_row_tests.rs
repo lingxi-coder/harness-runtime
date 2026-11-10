@@ -580,6 +580,39 @@ async fn pre_admission_service_shutdown_uses_fresh_query_metrics_and_dedupes_mar
 
 struct EmptyTaskRegistry;
 
+#[tokio::test]
+async fn cancelled_task_notification_admission_preserves_running_owner() {
+    let (orch, output, _root) = completed_multirow_query().await;
+    let _owner = orch.turn_gate.lock().await;
+    let previous_query = orch.completed_query_user_events();
+    let previous_events = output.snapshot().await.len();
+    for precancelled in [false, true] {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if precancelled {
+            cancel.cancel();
+        }
+        let wake = orch.run_task_notification_rewake(&EmptyTaskRegistry, cancel.clone());
+        tokio::pin!(wake);
+        if !precancelled {
+            tokio::select! {
+                biased;
+                result = &mut wake => panic!("wake bypassed the running owner: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            cancel.cancel();
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), wake)
+                .await
+                .expect("cancel must not wait for the running owner")
+                .unwrap(),
+            crate::conversation::TurnOutcome::Cancelled,
+        );
+        assert_eq!(orch.completed_query_user_events(), previous_query);
+        assert_eq!(output.snapshot().await.len(), previous_events);
+    }
+}
+
 #[async_trait]
 impl lingxi_core::host::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
     async fn create(

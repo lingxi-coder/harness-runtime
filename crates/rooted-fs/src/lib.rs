@@ -3960,7 +3960,10 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            // A regular leaf can be swapped for a FIFO after the pre-open
+            // check. Nonblocking open lets the descriptor check reject it
+            // without waiting for a FIFO writer; regular files are unchanged.
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| RootedFsError::Fs(map_unix_io(relative, error)))?;

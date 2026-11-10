@@ -160,10 +160,10 @@ fn text_speaks(text: &str) -> bool {
 
 /// The `o=!0` predicate inside `Ezm`.
 fn assistant_spoke(content: &[ContentBlock]) -> bool {
-    content.iter().any(|b| match b {
-        ContentBlock::Text { text, .. } => text_speaks(text),
-        ContentBlock::ToolUse { name, .. } => SPEAKING_TOOL_NAMES.contains(&name.as_str()),
-        _ => false,
+    content.iter().any(|block| {
+        block.visible_text().is_some_and(text_speaks)
+            || matches!(block, ContentBlock::ToolUse { name, .. }
+                if SPEAKING_TOOL_NAMES.contains(&name.as_str()))
     })
 }
 
@@ -398,6 +398,57 @@ mod tests {
             scan_silent_stretch(&history, &[]).turns_since_last_reminder,
             1
         );
+    }
+
+    #[test]
+    fn source_backed_visible_commentary_ends_the_silent_stretch() {
+        let units = vec![u16::from(b'F'), 0xd800, u16::from(b'!')];
+        let source_text = ContentBlock::TextJsUtf16 {
+            text: String::from_utf16_lossy(&units),
+            utf16_code_units: units,
+            citations: None,
+        };
+        let opaque_text = ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"type":"text","text":"A finding","native_field":true}"#,
+            )
+            .unwrap(),
+        };
+        for block in [source_text, opaque_text] {
+            let spoken = ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![block.clone()],
+                stop_reason: None,
+                resumable: None,
+            };
+            let history = vec![
+                real_user(),
+                silent_assistant(),
+                tool_result_user(),
+                spoken,
+                silent_assistant(),
+                tool_result_user(),
+            ];
+            let original = history.clone();
+            let stretch = scan_silent_stretch(&history, &[]);
+            assert_eq!(stretch.turns_since_last_reminder, 1, "{block:?}");
+            assert!(!should_emit(stretch, 2));
+            assert_eq!(history, original, "scanning must preserve source text");
+        }
+    }
+
+    #[test]
+    fn source_backed_sentinels_and_whitespace_remain_silent() {
+        for text in [NO_CONTENT_SENTINEL, NO_RESPONSE_REQUESTED_SENTINEL, "  "] {
+            let block = ContentBlock::TextJsUtf16 {
+                text: text.into(),
+                utf16_code_units: text.encode_utf16().collect(),
+                citations: None,
+            };
+            assert!(!assistant_spoke(&[block]), "{text:?}");
+        }
     }
 
     #[test]

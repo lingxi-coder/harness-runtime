@@ -999,3 +999,122 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
         "the resumed snapshot description must reach the next typed SDK request exactly"
     );
 }
+
+#[tokio::test]
+async fn app_agent_profile_updates_and_clear_preserve_the_frozen_request_base() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    struct RestoreSnapshotChoice(Option<bool>);
+    impl Drop for RestoreSnapshotChoice {
+        fn drop(&mut self) {
+            lingxi_core::host::session_flags::set_system_prompt_snapshot(self.0);
+        }
+    }
+    let _restore =
+        RestoreSnapshotChoice(lingxi_core::host::session_flags::system_prompt_snapshot());
+    lingxi_core::host::session_flags::set_system_prompt_snapshot(Some(true));
+
+    for attach_before_first_request in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let append = Source::parse(r#""APPEND_AFTER_PROFILE\ud800""#).unwrap();
+        let append_units = append.string_units("").unwrap();
+        let response = || {
+            crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::Text {
+                    text: "answer".into(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                Some("end_turn"),
+            )
+        };
+        let api = Arc::new(MockApiClient::new((0..4).map(|_| response()).collect()));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                append_system_prompt: Some(append),
+                ..OrchestratorConfig::default()
+            },
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        );
+        if attach_before_first_request {
+            orch.set_app_agent_prompt_profile(1, "APP_REVISION_ONE".into())
+                .unwrap();
+        }
+        orch.run_turn("first request").await.unwrap();
+        let frozen_base = orch
+            .prompt_runtime
+            .prompt_snapshot
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert!(!frozen_base
+            .system_prompt
+            .iter()
+            .any(|text| text.contains("App Agent Profile")));
+        assert_eq!(
+            frozen_base.system_prompt_utf16.last(),
+            Some(&Some(append_units.clone()))
+        );
+
+        if !attach_before_first_request {
+            orch.set_app_agent_prompt_profile(1, "APP_REVISION_ONE".into())
+                .unwrap();
+            orch.run_turn("attach after the first successful request")
+                .await
+                .unwrap();
+        }
+        let owned_prompt = orch.provider_system_prompt().await.unwrap();
+        let owned_source = ConversationOrchestrator::system_prompt_source_text(&owned_prompt);
+        assert!(owned_prompt.display_text().contains("APP_REVISION_ONE"));
+
+        orch.set_app_agent_prompt_profile(2, "APP_REVISION_TWO".into())
+            .unwrap();
+        orch.run_turn("updated revision").await.unwrap();
+        assert_eq!(
+            ConversationOrchestrator::system_prompt_source_text(&owned_prompt),
+            owned_source,
+            "an already-built request owns its original profile revision"
+        );
+        assert!(owned_prompt.display_text().contains("APP_REVISION_ONE"));
+        assert!(!owned_prompt.display_text().contains("APP_REVISION_TWO"));
+        orch.clear_app_agent_prompt_profile().unwrap();
+        orch.run_turn("ordinary conversation again").await.unwrap();
+
+        let sent = api.captured_systems().await;
+        let profile_one_index = usize::from(!attach_before_first_request);
+        assert!(sent[profile_one_index]
+            .as_deref()
+            .unwrap()
+            .contains("APP_REVISION_ONE"));
+        let updated = sent[sent.len() - 2].as_deref().unwrap();
+        assert!(updated.contains("Revision: 2\nAPP_REVISION_TWO"));
+        assert!(!updated.contains("APP_REVISION_ONE"));
+        assert!(
+            updated.find("APP_REVISION_TWO").unwrap()
+                < updated.find("APPEND_AFTER_PROFILE").unwrap()
+        );
+        assert!(!sent
+            .last()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("App Agent Profile"));
+        if !attach_before_first_request {
+            assert!(!sent[0].as_deref().unwrap().contains("App Agent Profile"));
+        }
+        for request in api.captured_requests().await {
+            assert_appended_source_occurs_once(&request, &append_units);
+        }
+        assert_eq!(
+            *orch.prompt_runtime.prompt_snapshot.lock().await,
+            Some(frozen_base),
+            "profile changes must not rebuild or mutate unrelated frozen base members"
+        );
+    }
+}

@@ -2980,6 +2980,108 @@ async fn prompt_compose_api_returns_detached_hooked_sections() {
 }
 
 #[tokio::test]
+async fn chat_prompt_compose_next_preserves_mode_and_instruction_epoch() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("chat-compose-next.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('prompt.compose', async ($, e, next) => {
+            const answer = await next({ ...e, traits: [...e.traits, 'sdk-preset'] });
+            return { sections: [...answer.sections,
+              { id: 'chat-recompose-marker', text: 'CHAT RECOMPOSED', scope: 'session' }] };
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "chat-compose-next",
+        dir.path(),
+        &module,
+        empty_mod_options(),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
+        .with_conversation_mode(ConversationMode::Chat)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    orch.restore_captured_conversation_profile(ConversationMode::Chat, 7)
+        .await
+        .unwrap();
+
+    let prompt = orch.build_system_prompt().await.unwrap();
+    assert!(prompt.starts_with(crate::prompt::profile_header(ConversationMode::Chat)));
+    assert!(prompt.contains("Discuss and explain when asked to discuss"));
+    assert!(prompt.contains("Current conversation profile: chat (context epoch 7)"));
+    assert!(prompt.ends_with("CHAT RECOMPOSED"));
+    assert!(!prompt.contains(crate::prompt::profile_header(ConversationMode::Code)));
+    assert!(!prompt.contains("Primary working directory:"));
+}
+
+#[tokio::test]
+async fn chat_detached_prompt_compose_preserves_mode_and_instruction_epoch() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("chat-compose-api.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('prompt.context', async ($, e, next) => {
+            const answer = await $.prompt.compose({ traits: ['sdk-preset'] });
+            return next({ ...e, blocks: [...e.blocks, {
+              name: 'chatDetachedCompose',
+              text: answer.sections.map(section => section.text).join('\n\n')
+            }] });
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("chat-compose-api", dir.path(), &module, empty_mod_options())
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
+        .with_conversation_mode(ConversationMode::Chat)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    orch.restore_captured_conversation_profile(ConversationMode::Chat, 9)
+        .await
+        .unwrap();
+
+    let context = text(
+        &orch
+            .additional_context_message()
+            .await
+            .unwrap()
+            .expect("Mod context"),
+    );
+    assert!(context.contains("# chatDetachedCompose\n"));
+    assert!(context.contains(crate::prompt::profile_header(ConversationMode::Chat)));
+    assert!(context.contains("Discuss and explain when asked to discuss"));
+    assert!(context.contains("Current conversation profile: chat (context epoch 9)"));
+    assert!(!context.contains(crate::prompt::profile_header(ConversationMode::Code)));
+    assert!(!context.contains("Primary working directory:"));
+    assert!(orch
+        .prompt_runtime
+        .mod_prompt_sections
+        .lock()
+        .await
+        .answers
+        .is_empty());
+}
+
+#[tokio::test]
 async fn prompt_compose_facts_use_mobile_surface_for_mobile_sessions() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_mobile_runtime_environment(mobile_environment("/workspace/mobile"));

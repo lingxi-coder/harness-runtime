@@ -716,10 +716,13 @@ mod tests {
     }
 
     #[test]
-    fn if_removed_agent_alias_does_not_match() {
+    fn if_permission_rule_alias_matches_the_canonical_agent_event() {
+        // Native 2.1.318 permission-rule parsing maps stored Task rules to
+        // Agent, including a tool-wide (*). Event tool identities remain
+        // canonical; AgentTool does not expose Task as a runtime alias.
         let input = json!({ "description": "x" });
-        assert!(!matches_if_condition("Task", "Agent", &input));
-        assert!(!matches_if_condition("Task(*)", "Agent", &input));
+        assert!(matches_if_condition("Task", "Agent", &input));
+        assert!(matches_if_condition("Task(*)", "Agent", &input));
         assert!(!matches_if_condition("Agent", "Task", &input));
         assert!(matches_if_condition("Agent(*)", "Agent", &input));
     }

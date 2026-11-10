@@ -180,6 +180,25 @@ impl BlockAccumulator {
         Ok(())
     }
 
+    /// Replace an unfinished block with the authoritative terminal snapshot.
+    /// It still passes through the ordinary stop/admission path exactly once.
+    pub(crate) fn replace_completed_block(
+        &mut self,
+        index: u32,
+        block: ContentBlock,
+    ) -> Result<(), StreamingError> {
+        self.start_block(index, BlockKind::Preserved(block))
+    }
+
+    pub(crate) fn open_indices(&self) -> impl Iterator<Item = u32> + '_ {
+        self.blocks.keys().copied()
+    }
+
+    pub(crate) fn thinking_text(&self, index: u32) -> Option<&str> {
+        let state = self.blocks.get(&index)?;
+        matches!(state.kind, BlockKind::Thinking).then_some(state.text_buf.as_str())
+    }
+
     /// Append `text` to the `Text` or `Thinking` buffer of the block at
     /// `index`. Errors if no such block, or if the block is not
     /// text-shaped.
@@ -253,11 +272,7 @@ impl BlockAccumulator {
                 ..
             } => {
                 let units = units.get_or_insert_with(|| state.text_buf.encode_utf16().collect());
-                sync_initial_display(
-                    &mut state.text_buf,
-                    units,
-                    &mut state.text_display_synced,
-                );
+                sync_initial_display(&mut state.text_buf, units, &mut state.text_display_synced);
                 append_exact_text(&mut state.text_buf, units, utf16_code_units);
                 Ok(())
             }
@@ -265,11 +280,7 @@ impl BlockAccumulator {
                 let units = state
                     .text_utf16_code_units
                     .get_or_insert_with(|| state.text_buf.encode_utf16().collect());
-                sync_initial_display(
-                    &mut state.text_buf,
-                    units,
-                    &mut state.text_display_synced,
-                );
+                sync_initial_display(&mut state.text_buf, units, &mut state.text_display_synced);
                 append_exact_text(&mut state.text_buf, units, utf16_code_units);
                 state.preserved_text_dirty = true;
                 Ok(())
@@ -401,7 +412,7 @@ impl BlockAccumulator {
         }
     }
 
-    /// Set the signature on a `Thinking` block (from a `signature_delta`).
+    /// Append a signature fragment on a `Thinking` block (`signature_delta`).
     ///
     /// # Errors
     /// `BlockNotFound` if `index` was never started; `TypeMismatch` if
@@ -413,7 +424,10 @@ impl BlockAccumulator {
             .ok_or(StreamingError::BlockNotFound { index })?;
         match &state.kind {
             BlockKind::Thinking => {
-                state.signature = Some(sig.to_string());
+                state
+                    .signature
+                    .get_or_insert_with(String::new)
+                    .push_str(sig);
                 Ok(())
             }
             other => Err(StreamingError::TypeMismatch {
@@ -523,11 +537,18 @@ impl BlockAccumulator {
     /// excluded as well because they are not user-visible answer content.
     #[must_use]
     pub(crate) fn incomplete_text_blocks(&self) -> Vec<ContentBlock> {
+        self.incomplete_text_blocks_with_indices()
+            .into_iter()
+            .map(|(_, block)| block)
+            .collect()
+    }
+
+    pub(crate) fn incomplete_text_blocks_with_indices(&self) -> Vec<(u32, ContentBlock)> {
         let mut blocks: Vec<_> = self.blocks.iter().collect();
-        blocks.sort_unstable_by_key(|(index, _)| **index);
+        blocks.sort_unstable_by_key(|(index, _)| llm_runtime::stream_content_order(**index));
         blocks
             .into_iter()
-            .filter_map(|(_, state)| match &state.kind {
+            .filter_map(|(index, state)| match &state.kind {
                 BlockKind::PreservedText(block) if !state.text_buf.is_empty() => {
                     let mut block = block.clone();
                     if state.preserved_text_dirty {
@@ -540,23 +561,26 @@ impl BlockAccumulator {
                                 .expect("provider text member exists on preserved text block");
                         }
                     }
-                    Some(block)
+                    Some((*index, block))
                 }
                 BlockKind::Text {
                     citations,
                     utf16_code_units,
                     ..
-                } if !state.text_buf.is_empty() => Some(match utf16_code_units {
-                    Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
-                        text: state.text_buf.clone(),
-                        utf16_code_units: utf16_code_units.clone(),
-                        citations: citations_to_core(citations.clone()),
+                } if !state.text_buf.is_empty() => Some((
+                    *index,
+                    match utf16_code_units {
+                        Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
+                            text: state.text_buf.clone(),
+                            utf16_code_units: utf16_code_units.clone(),
+                            citations: citations_to_core(citations.clone()),
+                        },
+                        None => ContentBlock::Text {
+                            text: state.text_buf.clone(),
+                            citations: citations_to_core(citations.clone()),
+                        },
                     },
-                    None => ContentBlock::Text {
-                        text: state.text_buf.clone(),
-                        citations: citations_to_core(citations.clone()),
-                    },
-                }),
+                )),
                 _ => None,
             })
             .collect()

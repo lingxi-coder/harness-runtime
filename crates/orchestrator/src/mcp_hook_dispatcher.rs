@@ -34,7 +34,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hooks::events::{ElicitationMode, HookEvent};
-use hooks::registry::HookContext;
 use hooks::response::HookDecision;
 use hooks::HookExecutorImpl;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -44,17 +43,17 @@ use mcp::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
 pub struct OrchestratorHookDispatcher {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
-    /// Engine cwd, threaded into the `Elicitation` hook payload (`cwd`) and the
-    /// per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
-    cwd: PathBuf,
-    /// The MAIN orchestrator session's transcript path
-    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    /// `getTranscriptPathForSession`), stamped on the `Elicitation` hook payload's
-    /// `transcript_path` (FIX B). Empty for builds wiring neither.
-    transcript_path: PathBuf,
+    context_source: Arc<crate::HookContextSource>,
 }
 
 impl OrchestratorHookDispatcher {
+    /// Share the composition root's actual session owner, including transitions.
+    #[must_use]
+    pub fn with_context_source(mut self, source: Arc<crate::HookContextSource>) -> Self {
+        self.context_source = source;
+        self
+    }
+
     /// Build a dispatcher over the shared hook executor, engine cwd, and the main
     /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
     /// the orchestrator so the `Elicitation` hook rides the identical registry /
@@ -63,8 +62,7 @@ impl OrchestratorHookDispatcher {
     pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
         Self {
             hooks,
-            cwd,
-            transcript_path,
+            context_source: Arc::new(crate::HookContextSource::from_paths(cwd, transcript_path)),
         }
     }
 
@@ -105,14 +103,8 @@ impl HookDispatcher for OrchestratorHookDispatcher {
             elicitation_id,
             requested_schema,
         };
-        // Minimal context: the inbound elicitation path has no live per-turn
-        // session, so we thread the engine cwd (also used as the LINGXI_PROJECT_DIR
-        // fallback) and the main session's `transcript_path` (FIX B). Everything
-        // else defaults — matching the orchestrator's other "context-light" fires.
-        let ctx = HookContext {
-            cwd: self.cwd.clone(),
-            transcript_path: self.transcript_path.clone(),
-            ..Default::default()
+        let Some(ctx) = self.context_source.current().await else {
+            return ElicitationHookOutcome::Pass;
         };
 
         let agg = self.hooks.execute(event, ctx).await;

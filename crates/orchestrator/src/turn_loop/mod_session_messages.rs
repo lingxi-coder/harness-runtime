@@ -49,21 +49,7 @@ fn projection_to_value(projection: &Utf16JsonProjection) -> Value {
 }
 
 fn exact_text_projection(blocks: &[ContentBlock]) -> Utf16JsonProjection {
-    let mut code_units = Vec::new();
-    for block in blocks {
-        match block {
-            ContentBlock::Text { text, .. } => code_units.extend(text.encode_utf16()),
-            ContentBlock::TextJsUtf16 {
-                utf16_code_units, ..
-            } => {
-                code_units.extend(utf16_code_units);
-            }
-            _ => {}
-        }
-    }
-    let display = String::from_utf16_lossy(&code_units);
-    Utf16JsonProjection::root_string(display, code_units)
-        .expect("message text display matches exact UTF-16 units")
+    crate::streaming_loop::joined_visible_text_projection(blocks)
 }
 
 pub(super) fn summarize_projection(history: &[ConversationMessage]) -> Utf16JsonProjection {
@@ -649,6 +635,84 @@ mod tests {
             interrupted_by_shutdown: None,
             refused_message_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn default_mod_summary_keeps_opaque_visible_text_and_exact_utf16() {
+        use crate::conversation::ConversationOrchestrator;
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use crate::OrchestratorConfig;
+        use std::sync::Arc;
+        use tool_api::registry::ToolRegistry;
+
+        let cwd = tempfile::tempdir().unwrap();
+        let orchestrator = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd.path().to_path_buf(),
+        );
+        let opaque = ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: Utf16JsonProjection::parse(
+                r#"{"type":"text","text":"opaque\ud800","native_field":true}"#,
+            )
+            .unwrap(),
+        };
+        let source_units = vec![u16::from(b'!'), 0xdc00];
+        let content = vec![
+            ContentBlock::Text {
+                text: "before".into(),
+                citations: None,
+            },
+            opaque.clone(),
+            ContentBlock::Thinking {
+                thinking: "private reasoning".into(),
+                signature: None,
+            },
+            ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&source_units),
+                utf16_code_units: source_units.clone(),
+                citations: None,
+            },
+        ];
+        let history = vec![
+            user(vec![opaque], false),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content,
+                stop_reason: None,
+                resumable: None,
+                per_turn_effort: None,
+            },
+        ];
+        orchestrator.session.lock().await.history = history.clone();
+        let summary = hooks::mods::ModSessionContext::messages(&orchestrator, None)
+            .await
+            .unwrap();
+        summary.validate().unwrap();
+        assert_eq!(summary.array_len(""), Some(2));
+        let mut opaque_units = "opaque".encode_utf16().collect::<Vec<_>>();
+        opaque_units.push(0xd800);
+        assert_eq!(summary.string_at("/0/role"), Some("user"));
+        assert_eq!(summary.string_units("/0/text"), Some(opaque_units.clone()));
+        let mut expected = "before".encode_utf16().collect::<Vec<_>>();
+        expected.extend(opaque_units);
+        expected.extend(source_units);
+        assert_eq!(summary.string_at("/1/role"), Some("assistant"));
+        assert_eq!(summary.string_units("/1/text"), Some(expected));
+        assert_eq!(
+            orchestrator.session.lock().await.history,
+            history,
+            "the default summary must preserve original provider payloads and source units"
+        );
     }
 
     #[test]

@@ -1858,6 +1858,27 @@ impl Tool for FileReadTool {
         TOOL_NAME
     }
 
+    async fn open_file_for_compaction(
+        &self,
+        requested: &Path,
+    ) -> Result<Option<std::fs::File>, ToolError> {
+        let requested =
+            crate::normalize_model_file_path(&requested.to_string_lossy(), &self.ctx.cwd());
+        if is_device_file(&requested.to_string_lossy()) {
+            return Err(ToolError::PathBlocked { path: requested });
+        }
+        let path = translate_model_path(&self.ctx.fs, requested, false)
+            .map_err(|message| ToolError::InvalidInput(message.into()))?;
+        let trusted_dirs = self.ctx.read_roots().await;
+        let approved = canonicalize_and_validate(&path, &trusted_dirs)
+            .map_err(|_| ToolError::PathBlocked { path: path.clone() })?;
+        tokio::task::spawn_blocking(move || open_rooted_file(&path, &approved, &trusted_dirs))
+            .await
+            .map_err(|error| ToolError::Io(error.to_string().into()))?
+            .map(Some)
+            .map_err(|error| ToolError::Io(error.to_string().into()))
+    }
+
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
     fn search_hint(&self) -> Option<Utf16JsonProjection> {

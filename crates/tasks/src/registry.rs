@@ -371,6 +371,7 @@ struct SpawnPublicationGuard {
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
     cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
     aliases: Arc<RwLock<HashMap<String, String>>>,
+    hook_origin_firer: hooks::OptionalTaskCreatedFirer,
     cleanup: Option<TaskCleanup>,
     armed: bool,
 }
@@ -383,6 +384,11 @@ impl SpawnPublicationGuard {
             spawned: registry.spawned.clone(),
             cleanups: registry.cleanups.clone(),
             aliases: registry.aliases.clone(),
+            hook_origin_firer: registry
+                .task_created_firer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             cleanup,
             armed: true,
         }
@@ -411,6 +417,7 @@ impl Drop for SpawnPublicationGuard {
         let spawned = self.spawned.clone();
         let cleanups = self.cleanups.clone();
         let aliases = self.aliases.clone();
+        let hook_origin_firer = self.hook_origin_firer.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
                 task_id,
@@ -419,6 +426,9 @@ impl Drop for SpawnPublicationGuard {
             return;
         };
         drop(runtime.spawn(async move {
+            if let Some(firer) = hook_origin_firer {
+                firer.discard_origin(&task_id).await;
+            }
             // Match publication lock order. Holding the task write lock while
             // removing secondary indexes prevents readers from observing a row
             // whose route/cleanup is only partially rolled back.
@@ -1165,6 +1175,28 @@ impl TaskRegistry {
         Ok(id)
     }
 
+    async fn capture_task_hook_origin(&self, task_id: &str) {
+        let firer = self
+            .task_created_firer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(firer) = firer {
+            firer.capture_origin(task_id).await;
+        }
+    }
+
+    async fn discard_task_hook_origin(&self, task_id: &str) {
+        let firer = self
+            .task_created_firer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(firer) = firer {
+            firer.discard_origin(task_id).await;
+        }
+    }
+
     /// Best-effort `TaskCreated` hook fire for a newly-created task. Runs
     /// WITHOUT holding the registry lock (callers drop their write guard before
     /// invoking) so a slow/blocking hook never stalls other task operations.
@@ -1187,6 +1219,7 @@ impl TaskRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         if let Some(firer) = firer {
+            firer.capture_origin(task_id).await;
             let (teammate_name, team_name) = self
                 .get(task_id)
                 .await
@@ -1377,6 +1410,7 @@ impl TaskRegistry {
             .allocate(&id)
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
+        self.capture_task_hook_origin(&id).await;
         self.pending_bash_registration
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1395,6 +1429,14 @@ impl TaskRegistry {
             // A record was registered against this identity after all; its file
             // is live output, not a redundant allocation.
             return;
+        }
+        let firer = self
+            .task_created_firer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(firer) = firer {
+            firer.discard_origin(task_id).await;
         }
         self.pending_bash_registration
             .lock()
@@ -1444,6 +1486,7 @@ impl TaskRegistry {
         creator_agent_id: Option<lingxi_core::types::AgentId>,
         backgrounded: bool,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
+        self.capture_task_hook_origin(&id).await;
         let path = self
             .output_manager
             .path_for(&id)
@@ -1577,6 +1620,15 @@ impl TaskRegistry {
                         .clone()
                 })
                 .flatten();
+            let origin_firer = created_firer.clone().or_else(|| {
+                self.task_created_firer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            });
+            if let Some(firer) = &created_firer {
+                firer.capture_origin(&id).await;
+            }
             let completed_firer = self
                 .task_completed_firer
                 .lock()
@@ -1626,7 +1678,7 @@ impl TaskRegistry {
                     if let Some(status) = status {
                         firer
                             .fire(hooks::TaskCompletedFire {
-                                task_id,
+                                task_id: task_id.clone(),
                                 status: status.into(),
                                 task_subject: base.description.clone(),
                                 task_description: Some(description_for_hook.clone()),
@@ -1635,6 +1687,9 @@ impl TaskRegistry {
                             })
                             .await;
                     }
+                }
+                if let Some(firer) = origin_firer {
+                    firer.discard_origin(&task_id).await;
                 }
             });
             job.await.map_err(|error| {
@@ -1892,6 +1947,7 @@ impl TaskRegistry {
             .remove(&id)
             .map(|state| state.base().output_file.clone());
         drop(map);
+        self.discard_task_hook_origin(&id).await;
         if let Some(output) = output {
             if let Some(handler) = self.handler_for(TaskType::LocalAgent).await {
                 handler.forget_resume_recipe(&id);
@@ -1929,6 +1985,7 @@ impl TaskRegistry {
             .remove(&task_id)
             .map(|state| state.base().output_file.clone());
         drop(map);
+        self.discard_task_hook_origin(&task_id).await;
         if let Some(output) = output {
             self.output_manager.release_output_state(&output).await;
         }
@@ -2707,6 +2764,7 @@ impl TaskRegistry {
         let id = handle.task_id.clone();
         let cleanup = handle.cleanup.clone();
         let mut publication_guard = SpawnPublicationGuard::new(self, id.clone(), cleanup.clone());
+        self.capture_task_hook_origin(&id).await;
 
         // 3. Recover the spool path the handler ALREADY allocated (the path is a
         //    deterministic function of the id) and insert the typed state built
@@ -3100,15 +3158,23 @@ impl TaskRegistry {
     /// Remove the paused predecessor after an explicit resume has successfully
     /// spawned a replacement task for the same workflow run in the same session.
     pub async fn remove_paused_workflow_by_run_id(&self, session_uuid: &str, run_id: &str) {
-        self.tasks.write().await.retain(|_, state| {
-            !matches!(
+        let mut removed = Vec::new();
+        self.tasks.write().await.retain(|task_id, state| {
+            let remove = matches!(
                 state,
                 TaskState::LocalWorkflow(workflow)
                     if workflow.base.status == TaskStatus::Paused
                         && workflow.session_uuid.as_deref() == Some(session_uuid)
                         && workflow.run_id.as_deref() == Some(run_id)
-            )
+            );
+            if remove {
+                removed.push(task_id.clone());
+            }
+            !remove
         });
+        for task_id in removed {
+            self.discard_task_hook_origin(&task_id).await;
+        }
     }
 
     /// Record a shell-backed task's child exit code (M8 cc2.1.198 "Task
@@ -3275,6 +3341,12 @@ impl TaskRegistry {
                     })
                     .await;
             }
+        }
+        if matches!(
+            status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+        ) {
+            self.discard_task_hook_origin(task_id).await;
         }
     }
 
@@ -5528,6 +5600,7 @@ impl TaskRegistry {
                     .push_back(note);
             }
             drop(map);
+            self.discard_task_hook_origin(task_id).await;
             self.append_killed_trailer(output.clone()).await;
             if let Some(output) = output {
                 self.output_manager.evict_writer(&output).await;
@@ -5566,6 +5639,7 @@ impl TaskRegistry {
                 .push_back(note);
         }
         drop(map);
+        self.discard_task_hook_origin(task_id).await;
         self.append_killed_trailer(killed_bash_output.clone()).await;
         if let Some(output) = killed_bash_output {
             self.output_manager.evict_writer(&output).await;
@@ -7339,6 +7413,107 @@ mod registry_api_test {
                 .len(),
             1
         );
+    }
+
+    #[derive(Default)]
+    struct OriginRecordingFirer {
+        origins: std::sync::Mutex<HashSet<String>>,
+        created: std::sync::Mutex<Vec<String>>,
+        completed: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl hooks::TaskCreatedFirer for OriginRecordingFirer {
+        async fn capture_origin(&self, task_id: &str) {
+            self.origins.lock().unwrap().insert(task_id.to_string());
+        }
+        async fn discard_origin(&self, task_id: &str) {
+            self.origins.lock().unwrap().remove(task_id);
+        }
+        async fn fire(&self, fire: hooks::TaskCreatedFire) {
+            assert!(self.origins.lock().unwrap().contains(&fire.task_id));
+            self.created.lock().unwrap().push(fire.task_id);
+        }
+    }
+
+    #[async_trait]
+    impl hooks::TaskCompletedFirer for OriginRecordingFirer {
+        async fn fire(&self, fire: hooks::TaskCompletedFire) {
+            assert!(
+                self.origins.lock().unwrap().contains(&fire.task_id),
+                "origin survives through completion delivery"
+            );
+            self.completed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn early_terminal_shell_releases_origin_with_only_a_created_firer() {
+        for (code, killed) in [(Some(0), false), (Some(1), false), (None, true)] {
+            let (_dir, _fs, registry) = make_registry();
+            let firer = Arc::new(OriginRecordingFirer::default());
+            let registry = registry.with_task_created_firer(firer.clone());
+            let (id, _) = registry.allocate_bash_output().await.unwrap();
+            registry
+                .settle_background_bash(&id, code, killed)
+                .await
+                .unwrap();
+            registry
+                .register_background_bash(id.clone(), "job".into(), "job".into(), None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(*firer.created.lock().unwrap(), vec![id]);
+            assert!(firer.origins.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_delivery_keeps_origin_until_completion_then_releases_it() {
+        let (_dir, _fs, registry) = make_registry();
+        let firer = Arc::new(OriginRecordingFirer::default());
+        let registry = registry
+            .with_task_created_firer(firer.clone())
+            .with_task_completed_firer(firer.clone());
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        registry
+            .register_background_bash(id.clone(), "job".into(), "job".into(), None, None, None)
+            .await
+            .unwrap();
+        assert!(firer.origins.lock().unwrap().contains(&id));
+        registry
+            .settle_background_bash(&id, Some(0), false)
+            .await
+            .unwrap();
+        assert_eq!(firer.completed.load(Ordering::SeqCst), 1);
+        assert!(firer.origins.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_paused_workflow_releases_its_captured_origin() {
+        let (_dir, _fs, registry) = make_registry();
+        let firer = Arc::new(OriginRecordingFirer::default());
+        let registry = registry.with_task_created_firer(firer.clone());
+        let id = format!("{}origin01", TaskType::LocalWorkflow.id_prefix());
+        registry
+            .register_adopted_workflow(AdoptedWorkflow {
+                task_id: id.clone(),
+                session_uuid: Some("owner".into()),
+                workflow_id: "flow".into(),
+                run_id: "wf_origin".into(),
+                script_path: "flow.js".into(),
+                args: None,
+                transcript_dir: "journal".into(),
+                description: "paused work".into(),
+                start_time: SystemTime::now(),
+            })
+            .await
+            .unwrap();
+        registry.capture_task_hook_origin(&id).await;
+        registry
+            .remove_paused_workflow_by_run_id("owner", "wf_origin")
+            .await;
+        assert!(registry.get(&id).await.is_none());
+        assert!(firer.origins.lock().unwrap().is_empty());
     }
 }
 

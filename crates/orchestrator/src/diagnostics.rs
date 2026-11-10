@@ -50,9 +50,7 @@ async fn check_config_dir(p: &Path) -> DoctorCheck {
             };
         }
     }
-    let probe = p.join(".lingxi_writable_probe");
-    let writable = tokio::fs::write(&probe, b"").await.is_ok();
-    let _ = tokio::fs::remove_file(&probe).await;
+    let writable = write_owned_probe(p, b"").await;
     DoctorCheck {
         name: "config-dir".to_string(),
         status: if writable {
@@ -66,6 +64,26 @@ async fn check_config_dir(p: &Path) -> DoctorCheck {
             Some(format!("{} is not writable", p.display()))
         },
     }
+}
+
+/// Probe only an exclusively created scratch file. Its owner removes it on
+/// success, failure, or cancellation without touching a pre-existing path.
+async fn write_owned_probe(directory: &Path, contents: &[u8]) -> bool {
+    let directory = directory.to_path_buf();
+    let contents = contents.to_vec();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+
+        let Ok(mut probe) = tempfile::Builder::new()
+            .prefix(".lingxi_doctor_probe_")
+            .tempfile_in(directory)
+        else {
+            return false;
+        };
+        probe.write_all(&contents).is_ok()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Probe the global config file `~/.lingxi.json` — claude-code's doctor names
@@ -193,10 +211,8 @@ async fn check_disk_space(p: &Path) -> DoctorCheck {
     // Simple probe: try to write a 1-byte test file. If that succeeds we
     // can't *measure* free space without an extra crate, so we report Pass
     // as a coarse Boolean. M5-14 may add a `fs2`-based size check.
-    let probe = p.join(".lingxi_disk_probe");
     let _ = tokio::fs::create_dir_all(p).await;
-    let writable = tokio::fs::write(&probe, b"\0").await.is_ok();
-    let _ = tokio::fs::remove_file(&probe).await;
+    let writable = write_owned_probe(p, b"\0").await;
     DoctorCheck {
         name: "disk-space".to_string(),
         status: if writable {
@@ -307,6 +323,58 @@ fn check_telemetry_schema() -> DoctorCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn doctor_probes_preserve_existing_probe_files_and_remove_only_owned_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [".lingxi_writable_probe", ".lingxi_disk_probe"] {
+            std::fs::write(root.path().join(name), b"existing settings").unwrap();
+        }
+        assert!(matches!(
+            check_config_dir(root.path()).await.status,
+            CheckStatus::Pass
+        ));
+        assert!(matches!(
+            check_disk_space(root.path()).await.status,
+            CheckStatus::Pass
+        ));
+        for name in [".lingxi_writable_probe", ".lingxi_disk_probe"] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).unwrap(),
+                b"existing settings"
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_probes_do_not_follow_existing_probe_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        let target = root.path().join("settings.json");
+        std::fs::write(&target, b"existing settings").unwrap();
+        for name in [".lingxi_writable_probe", ".lingxi_disk_probe"] {
+            std::os::unix::fs::symlink(&target, config.join(name)).unwrap();
+        }
+        assert!(matches!(
+            check_config_dir(&config).await.status,
+            CheckStatus::Pass
+        ));
+        assert!(matches!(
+            check_disk_space(&config).await.status,
+            CheckStatus::Pass
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing settings");
+        for name in [".lingxi_writable_probe", ".lingxi_disk_probe"] {
+            assert!(std::fs::symlink_metadata(config.join(name))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        assert_eq!(std::fs::read_dir(config).unwrap().count(), 2);
+    }
 
     #[test]
     fn check_telemetry_schema_passes_at_expected_count() {

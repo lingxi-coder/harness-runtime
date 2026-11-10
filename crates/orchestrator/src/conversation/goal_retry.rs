@@ -72,18 +72,61 @@ impl ConversationOrchestrator {
     }
 
     pub(crate) async fn handle_goal_interruption(&self, interruption: GoalInterruption) {
-        if !self.prompt_is_interactive()
-            || !telemetry::flag_bool("tengu_pewter_avocet", true)
-            || crate::prompt::goal_checkin::checkin_interval_ms() == 0
-        {
-            self.reset_goal_interruption();
-            return;
-        }
-        let Some(goal) = self.session.lock().await.active_goal.clone() else {
-            self.reset_goal_interruption();
-            return;
-        };
+        self.handle_goal_interruption_for_owner(interruption, None)
+            .await;
+    }
+
+    pub(super) async fn handle_goal_hook_interruption(
+        &self,
+        interruption: GoalInterruption,
+        session_id: lingxi_core::types::SessionId,
+        hook_id: lingxi_core::types::HookId,
+        goal: &lingxi_core::session::ActiveGoalState,
+    ) -> bool {
+        self.handle_goal_interruption_for_owner(interruption, Some((session_id, hook_id, goal)))
+            .await
+    }
+
+    async fn handle_goal_interruption_for_owner(
+        &self,
+        interruption: GoalInterruption,
+        expected: Option<(
+            lingxi_core::types::SessionId,
+            lingxi_core::types::HookId,
+            &lingxi_core::session::ActiveGoalState,
+        )>,
+    ) -> bool {
         let notice = {
+            // Set/Clear publish state, metadata and the runtime hook role in
+            // this order under one transition owner. An old evaluator cannot
+            // act on the intermediate replacement state.
+            let _transition = self.lifecycle_runtime.goal_transition.lock().await;
+            let session = self.session.lock().await;
+            if let Some((session_id, hook_id, goal)) = expected {
+                if session.session_id != session_id
+                    || !session.active_goal.as_ref().is_some_and(|current| {
+                        current.set_at == goal.set_at && current.condition == goal.condition
+                    })
+                    || self
+                        .hooks
+                        .get_session_named_hook(session_id, super::GOAL_STOP_HOOK_NAME)
+                        .await
+                        .is_none_or(|hook| hook.id != hook_id)
+                {
+                    return false;
+                }
+            }
+            if !self.prompt_is_interactive()
+                || !telemetry::flag_bool("tengu_pewter_avocet", true)
+                || crate::prompt::goal_checkin::checkin_interval_ms() == 0
+            {
+                self.reset_goal_interruption();
+                return true;
+            }
+            let Some(goal) = session.active_goal.clone() else {
+                self.reset_goal_interruption();
+                return true;
+            };
             let mut state = self
                 .lifecycle_runtime
                 .goal_retry
@@ -98,18 +141,18 @@ impl ConversationOrchestrator {
                 GoalInterruption::Pause(cause) => {
                     state.cancel_pending();
                     if state.announced == Some(cause.key()) {
-                        return;
+                        return true;
                     }
                     state.announced = Some(cause.key());
                     (cause.text().into(), false)
                 }
                 GoalInterruption::Retry(cause) => {
                     if state.pending.is_some() {
-                        return;
+                        return true;
                     }
                     if state.retries >= goal_interruption::MAX_RETRIES {
                         if state.announced == Some("gave_up") {
-                            return;
+                            return true;
                         }
                         state.announced = Some("gave_up");
                         (goal_interruption::gave_up_announcement(cause).into(), true)
@@ -119,11 +162,11 @@ impl ConversationOrchestrator {
                             .get()
                             .is_none_or(|source| !source.supports_goal_retries())
                         {
-                            return;
+                            return true;
                         }
                         let Some(owner) = self.lifecycle_runtime.goal_retry_owner.get().cloned()
                         else {
-                            return;
+                            return true;
                         };
                         let attempt = state.retries;
                         // UUID entropy avoids introducing a new random-number dependency.
@@ -160,6 +203,7 @@ impl ConversationOrchestrator {
             }
         };
         self.output.emit_system_notice(&notice.0, notice.1).await;
+        true
     }
 
     /// Queue an idle deferral check-in without consuming the interruption retry budget.
@@ -777,6 +821,7 @@ mod tests {
         );
         let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs));
         let (orch, api, queue) = fixture_config(true, true, Some((id, writer)));
+        orch.initialize_conversation_mode().await.unwrap();
         orch.set_active_goal(&source_text("finish")).await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(orch.queue_goal_checkin("continue".into(), &goal).await);

@@ -29,6 +29,47 @@ mod synthetic_api_error_identity_tests {
 
 use super::*;
 
+/// Admission lease for queued lifecycle jobs. A transition closes admission
+/// until its new session starts; retained jobs keep their retired token.
+pub(crate) struct ModSessionJobLifetime {
+    state: std::sync::Mutex<(CancellationToken, bool)>,
+}
+
+impl ModSessionJobLifetime {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new((CancellationToken::new(), true)),
+        }
+    }
+
+    pub(crate) fn capture(&self) -> Option<CancellationToken> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.1.then(|| state.0.clone())
+    }
+
+    pub(crate) fn retire(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.0.cancel();
+        state.1 = false;
+    }
+
+    pub(crate) fn activate(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.1 {
+            *state = (CancellationToken::new(), true);
+        }
+    }
+}
+
 /// Session owner for tool-hook publication generations. A normal per-turn
 /// executor may finish while an admitted async hook is still running, so its
 /// generation must remain current until the session changes. Session switches
@@ -41,6 +82,7 @@ pub(crate) struct SessionToolHookGeneration {
 struct SessionToolHookGenerationState {
     root: lingxi_core::host::CancellationToken,
     publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_publications: Arc<crate::autonomous_tool_scheduler::TransientPublicationGate>,
 }
 
 impl SessionToolHookGeneration {
@@ -49,6 +91,7 @@ impl SessionToolHookGeneration {
             state: std::sync::Mutex::new(SessionToolHookGenerationState {
                 root: lingxi_core::host::CancellationToken::new(),
                 publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+                transient_publications: Arc::default(),
             }),
         }
     }
@@ -71,6 +114,18 @@ impl SessionToolHookGeneration {
         )
     }
 
+    pub(crate) fn transient_publications(
+        &self,
+    ) -> Arc<crate::autonomous_tool_scheduler::TransientPublicationGate> {
+        Arc::clone(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .transient_publications,
+        )
+    }
+
     /// Invalidate every retired executor generation first, then wait for any
     /// durable mutation already admitted under the old session's lease. New
     /// sessions receive a distinct token and commit lock.
@@ -83,6 +138,7 @@ impl SessionToolHookGeneration {
             let replacement = SessionToolHookGenerationState {
                 root: lingxi_core::host::CancellationToken::new(),
                 publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+                transient_publications: Arc::default(),
             };
             let old = std::mem::replace(&mut *state, replacement);
             old.root.cancel();
@@ -194,6 +250,11 @@ pub(crate) struct TranscriptStore {
     /// persisted and its post-result hooks/attachments have run.
     pub(crate) pending_tool_result_turn_end:
         Mutex<std::collections::HashMap<String, tool_api::tool_trait::ToolResultTurnEnd>>,
+    /// Accepted EndConversation results retain their generation authority until
+    /// the driver consumes them; a reset after metadata commit revokes them.
+    pub(crate) pending_end_conversation_requests: Mutex<
+        std::collections::HashMap<String, crate::end_conversation_tool::EndConversationRequest>,
+    >,
     /// `tool_use_id` → claude's `sourceToolAssistantUUID`: the uuid of the
     /// ASSISTANT transcript line that carried this `tool_use` block
     /// (`sourceToolAssistantUUID: i.uuid` at every producer site). claude's
@@ -286,6 +347,7 @@ impl TranscriptStore {
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
             pending_tool_result_turn_end: Mutex::new(std::collections::HashMap::new()),
+            pending_end_conversation_requests: Mutex::new(std::collections::HashMap::new()),
             tool_source_assistant_uuids: Arc::new(Mutex::new(std::collections::HashMap::new())),
             tool_persisted_origins: Arc::new(Mutex::new(std::collections::HashMap::new())),
             tool_source_assistant_notify: Arc::new(tokio::sync::Notify::new()),
@@ -328,6 +390,7 @@ impl TranscriptStore {
         self.tool_use_results.lock().await.clear();
         self.tool_use_mcp_meta.lock().await.clear();
         self.pending_tool_result_turn_end.lock().await.clear();
+        self.pending_end_conversation_requests.lock().await.clear();
         self.tool_source_assistant_uuids.lock().await.clear();
         self.tool_persisted_origins.lock().await.clear();
         self.pending_hook_attachments.lock().await.clear();
@@ -939,8 +1002,7 @@ pub(crate) struct PromptRuntime {
     /// Exact deferred-schema token counts, memoized by the same stable schema
     /// key as `wire_tool_schema_cache`. `None` is cached too: unsupported
     /// providers must not retry a doomed count endpoint every turn.
-    pub(super) deferred_tool_token_cache:
-        Mutex<std::collections::HashMap<u64, Option<u64>>>,
+    pub(super) deferred_tool_token_cache: Mutex<std::collections::HashMap<u64, Option<u64>>>,
     /// `history.len()` captured at each `silent_turn_reminder` emission.
     ///
     /// The oracle keeps its emitted attachments IN the message list, so `Ezm`
@@ -1710,6 +1772,10 @@ mod total_tokens_lifecycle_tests;
 
 /// State owned by lifecycle hooks, goal checks, and main-thread agents.
 pub(crate) struct LifecycleRuntime {
+    /// Serializes goal state and its ordered metadata publication. External
+    /// evaluators, usage providers and analytics run outside this guard.
+    pub(crate) goal_transition: tokio::sync::Mutex<()>,
+    pub(crate) mod_session_jobs: ModSessionJobLifetime,
     pub(crate) goal_retry: std::sync::Mutex<super::goal_retry_impl::GoalRetryState>,
     pub(crate) goal_retry_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
     /// Parent cancellation/commit scope shared by every streaming executor in
@@ -1789,6 +1855,8 @@ pub(crate) struct LifecycleRuntime {
 impl LifecycleRuntime {
     pub(crate) fn new() -> Self {
         Self {
+            goal_transition: tokio::sync::Mutex::new(()),
+            mod_session_jobs: ModSessionJobLifetime::new(),
             hook_registry: None,
             agent_catalog: None,
             main_thread_agent: tokio::sync::RwLock::new(None),
