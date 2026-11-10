@@ -77,6 +77,7 @@ struct ReentrantStorageOutput {
     owner: std::sync::Mutex<Option<std::sync::Weak<ConversationOrchestrator>>>,
     paused: AtomicUsize,
     recovered: AtomicUsize,
+    reenter_recovered: AtomicBool,
     notices: AtomicUsize,
 }
 
@@ -127,9 +128,12 @@ impl OutputStream for ReentrantStorageOutput {
     async fn emit_session_storage_state(&self, paused: bool) {
         if !paused {
             self.recovered.fetch_add(1, Ordering::SeqCst);
-            return;
+            if !self.reenter_recovered.load(Ordering::Acquire) {
+                return;
+            }
+        } else {
+            self.paused.fetch_add(1, Ordering::SeqCst);
         }
-        self.paused.fetch_add(1, Ordering::SeqCst);
         let owner = self
             .owner
             .lock()
@@ -140,7 +144,11 @@ impl OutputStream for ReentrantStorageOutput {
         // This must acquire both goal_transition and storage_append_lock again.
         // It also appends another retained goal row while storage remains full.
         owner
-            .set_active_goal_last_reason(Some("storage callback reentered".into()))
+            .set_active_goal_last_reason(Some(if paused {
+                "storage callback reentered".into()
+            } else {
+                "recovery callback reentered".into()
+            }))
             .await;
     }
     async fn emit_system_notice(&self, text: &Utf16JsonProjection, error: bool) {
@@ -473,4 +481,120 @@ async fn goal_set_retries_cost_capture_after_usage_provider_switches_session() {
         2,
         "the retired session's cost capture is discarded"
     );
+}
+
+#[tokio::test]
+async fn ordinary_and_hook_appends_release_storage_locks_before_reentrant_pause_and_recovery() {
+    for hook_attachment in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+        let fs = Arc::new(AppendFailureFs {
+            inner: platform_posix::fs::PosixFileSystem::new(root.path().to_path_buf()),
+            fail: AtomicBool::new(false),
+        });
+        let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs.clone()));
+        let output = Arc::new(ReentrantStorageOutput::default());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_session_id(id)
+            .with_jsonl_writer(writer),
+        );
+        *output.owner.lock().unwrap() = Some(Arc::downgrade(&orch));
+        orch.initialize_conversation_mode().await.unwrap();
+        orch.set_active_goal(&"finish work".into()).await;
+        fs.fail.store(true, Ordering::Release);
+        let row_id = MessageId::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            if hook_attachment {
+                orch.persist_hook_attachment_to_jsonl_with_id(
+                    row_id,
+                    Utf16JsonProjection::parse(
+                        r#"{"type":"hook_additional_context","content":"retained hook"}"#,
+                    )
+                    .unwrap(),
+                )
+                .await;
+            } else {
+                orch.persist_message_to_jsonl(&ConversationMessage::user(
+                    row_id,
+                    "retained ordinary user".into(),
+                ))
+                .await;
+            }
+        })
+        .await
+        .expect("ordinary ENOSPC callback reenters the append path after all append locks drop");
+        let pending = orch.transcript.storage_pauses.lock().await[&id.as_uuid().to_string()]
+            .rows
+            .clone();
+        assert_eq!(
+            pending.len(),
+            2,
+            "original append and reentrant goal snapshot are retained"
+        );
+        assert_eq!(pending[0].uuid, row_id.as_uuid().to_string());
+        assert_eq!(pending[1].parent_uuid.as_ref(), Some(&pending[0].uuid));
+        assert_eq!(output.paused.load(Ordering::SeqCst), 1);
+        fs.fail.store(false, Ordering::Release);
+        bind_recovery_transcript(&orch, root.path(), id);
+        output.reenter_recovered.store(true, Ordering::Release);
+        let (recovery, notices) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            orch.with_deferred_storage_notifications(async {
+                let _goal = orch.lifecycle_runtime.goal_transition.lock().await;
+                let result = orch.recover_session_storage().await;
+                assert_eq!(
+                    output.recovered.load(Ordering::SeqCst),
+                    0,
+                    "recovery reuses the outer state transaction's collector"
+                );
+                result
+            }),
+        )
+        .await
+        .expect("recovery releases all append locks before callbacks");
+        recovery.unwrap();
+        orch.emit_deferred_storage_notifications(notices).await;
+        assert_eq!(output.recovered.load(Ordering::SeqCst), 1);
+        assert!(orch.check_storage_pause().await.is_ok());
+        assert_eq!(
+            orch.session
+                .lock()
+                .await
+                .active_goal
+                .as_ref()
+                .unwrap()
+                .last_reason
+                .as_ref()
+                .unwrap()
+                .string_at(""),
+            Some("recovery callback reentered")
+        );
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        for row in &pending {
+            assert!(loaded.by_uuid.contains_key(&row.uuid));
+        }
+        let tip = orch
+            .transcript
+            .last_jsonl_uuid
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_ne!(tip, pending[1].uuid);
+        assert_eq!(
+            loaded.by_uuid[&tip].parent_uuid.as_ref(),
+            Some(&pending[1].uuid)
+        );
+    }
 }

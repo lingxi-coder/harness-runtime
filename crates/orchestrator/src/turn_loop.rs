@@ -96,7 +96,7 @@ pub(crate) use error_reporting::GoalClearReason;
 #[cfg(test)]
 pub(crate) use error_reporting::{GoalClearBucket, GOAL_CLEAR_CONDITION_WIDTH};
 pub(crate) use refusal_retry::{
-    inject_native_refusal_safety_retry, native_refusal_retry_enabled, native_refusal_retry_route,
+    inject_native_refusal_safety_retry, native_refusal_retry_enabled,
     native_refusal_retry_route_for_request,
 };
 use response::handle_malformed_tool_use;
@@ -799,6 +799,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         &context_announcements,
                         cost_scope.as_ref(),
                         native_anthropic_request_context.clone(),
+                        None,
                         None,
                     ),
                 )

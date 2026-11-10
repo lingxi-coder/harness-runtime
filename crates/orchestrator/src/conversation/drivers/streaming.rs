@@ -299,6 +299,14 @@ enum StreamErrorFallback<'a> {
     Cancelled,
 }
 
+enum RecoveredResponseAdmission {
+    Accepted {
+        pumped: crate::streaming_loop::PumpedTurn,
+        cost_receipt: Option<cost::CostResponseReceipt>,
+    },
+    Declined(MessageId),
+}
+
 type ModStepFrame = (
     Result<HistoryEvent, LlmError>,
     tokio::sync::oneshot::Sender<()>,
@@ -1044,7 +1052,7 @@ impl StreamingTurnDriver<'_> {
             };
             crate::cost_wiring::model_ref_from_string(billing_model, model_profile)
         });
-        Some(scope.submit_model_response_with_pricing(
+        let receipt = scope.submit_model_response_with_pricing(
             cost::CostModelResponse {
                 model_ref,
                 usage: cost_usage,
@@ -1063,7 +1071,139 @@ impl StreamingTurnDriver<'_> {
             } else {
                 cost::CostResponseMeasurement::Missing
             },
-        ))
+        );
+        // Submission transfers this physical response to its independent
+        // settlement owner. Count it before close, persistence, or cancellation
+        // can suspend/drop the caller; receipt settlement must not count again.
+        orch.model_runtime
+            .api_calls_recorded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(receipt)
+    }
+
+    async fn settle_stream_cost_response(
+        orch: &ConversationOrchestrator,
+        receipt: Option<cost::CostResponseReceipt>,
+    ) {
+        if let Some(receipt) = receipt {
+            let settlement = receipt.settle().await;
+            if let Err(error) = settlement.persistence_result() {
+                orch.note_cost_settlement_failure(error).await;
+            }
+        }
+    }
+
+    // Complete PTL and non-streaming fallback responses have the same host
+    // admission boundary. Observe paid usage before awaiting admission, but
+    // publish no assistant content or tools from a declined model.
+    async fn admit_recovered_response(
+        orch: &ConversationOrchestrator,
+        response: &llm_runtime::HistoryResponse,
+        model: &str,
+        profile: Option<&str>,
+        cost_scope: Option<&cost::CostSessionScope>,
+        duration: std::time::Duration,
+    ) -> Result<RecoveredResponseAdmission, OrchestratorError> {
+        let mut pumped = llm_response_to_pumped_turn(response);
+        let cost_receipt =
+            Self::begin_stream_cost_response(orch, cost_scope, model, profile, &pumped, duration);
+        for info in &pumped.server_fallback_events {
+            if !matches!(info.event.reason.as_str(), "refusal" | "sticky") {
+                continue;
+            }
+            match crate::server_fallback::handle(orch, info, false).await {
+                Ok(crate::server_fallback::ServerFallbackAdmission::Applied) => {
+                    pumped.handled_server_fallback_events += 1;
+                }
+                Ok(crate::server_fallback::ServerFallbackAdmission::Declined) => {
+                    Self::settle_stream_cost_response(orch, cost_receipt).await;
+                    orch.record_prompt_cache_usage(&response.usage).await;
+                    crate::server_fallback::flush_pending_notice(orch).await;
+                    let (message_id, _) =
+                        crate::server_fallback::surface_declined(orch, info, Some(&response.id))
+                            .await;
+                    return Ok(RecoveredResponseAdmission::Declined(message_id));
+                }
+                Err(error) => {
+                    Self::settle_stream_cost_response(orch, cost_receipt).await;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(RecoveredResponseAdmission::Accepted {
+            pumped,
+            cost_receipt,
+        })
+    }
+
+    async fn recovered_response_refuses_tools(
+        orch: &ConversationOrchestrator,
+        pumped: &crate::streaming_loop::PumpedTurn,
+        model: &str,
+        profile: Option<&str>,
+        refusal_retry_spent: bool,
+        user_cancel: &Option<CancellationToken>,
+    ) -> bool {
+        pumped.stop_reason.as_deref() == Some("refusal")
+            && pumped.server_fallback_events.is_empty()
+            && !token_aborted(user_cancel)
+            && crate::turn_loop::native_refusal_retry_enabled(
+                &orch.config.query_source,
+                refusal_retry_spent,
+            )
+            && crate::turn_loop::native_refusal_retry_route_for_request(orch, model, profile).await
+    }
+
+    async fn register_recovered_tools(
+        exec: &mut crate::streaming_executor::StreamingToolExecutor<'_>,
+        pumped: &crate::streaming_loop::PumpedTurn,
+        assistant_id: MessageId,
+        request_history: Vec<ConversationMessage>,
+        refuse_tools: bool,
+    ) -> Result<(), OrchestratorError> {
+        let assistant_message = pumped_assistant_message(pumped, assistant_id);
+        let dispatch_query_history: Arc<[ConversationMessage]> = request_history.into();
+        let mut prior_tool_uses = Vec::new();
+        for tu in &pumped.tool_uses {
+            let facts = crate::turn_loop::ToolUseDispatchFacts {
+                native_query_depth: exec.native_query_depth(),
+                query_history: Arc::clone(&dispatch_query_history),
+                assistant_message: assistant_message.clone(),
+                same_turn_tool_uses: prior_tool_uses.clone(),
+                refusal_call_boundary: None,
+            };
+            if refuse_tools {
+                // A complete refusal is already known before admission. Keep
+                // its exact tool identity for Native not-run settlement without
+                // sending eager scheduler Add, hooks, permissions, or calls.
+                exec.add_refused_tool_with_context_owned(
+                    tu.id.clone(),
+                    tu.name.clone(),
+                    tu.input.clone(),
+                    tu.provider_id.clone(),
+                    assistant_id,
+                    facts,
+                )
+                .await?;
+            } else {
+                exec.add_tool_with_context_owned(
+                    tu.id.clone(),
+                    tu.name.clone(),
+                    tu.input.clone(),
+                    tu.provider_id.clone(),
+                    assistant_id,
+                    facts,
+                )
+                .await?;
+            }
+            prior_tool_uses.push(ContentBlock::ToolUse {
+                id: tu.id.clone(),
+                name: tu.name.clone(),
+                input: tu.input.clone(),
+                provider_id: tu.provider_id.clone(),
+            });
+        }
+        Ok(())
     }
 
     async fn prepare_iteration(
@@ -1686,6 +1826,7 @@ impl StreamingTurnDriver<'_> {
                     api_call_started,
                     retry_scope,
                     false,
+                    loop_state.recovery.refusal_retry_spent,
                 )
                 .await;
                 orch.record_native_afk_beta_rejection_if_any();
@@ -1769,14 +1910,12 @@ impl StreamingTurnDriver<'_> {
                 // Re-snapshot history — the per-turn `snapshot` was MOVED into
                 // the failed `stream()` call. Prepend the additional-context
                 // meta message, like every `callModel` (claude-code `A6n`).
-                let (recov_snapshot_raw, recov_model, recov_profile) = {
-                    let s = orch.session.lock().await;
-                    (
-                        s.model_context_history(),
-                        s.model.clone(),
-                        s.model_profile.clone(),
-                    )
-                };
+                let recov_snapshot_raw = orch.session.lock().await.model_context_history();
+                // The prepared model/profile selected the failed physical
+                // request. A query-local fallback need not change the session's
+                // default route, so recovery must retain this captured pair.
+                let recov_model = &model;
+                let recov_profile = model_profile.as_deref();
                 let mut recov_snapshot = orch
                     .rewrite_outgoing_history(
                         recov_snapshot_raw,
@@ -1797,15 +1936,15 @@ impl StreamingTurnDriver<'_> {
                     orch,
                     crate::query_model::ModelRoute {
                         model: recov_model.clone(),
-                        profile: recov_profile.clone(),
+                        profile: model_profile.clone(),
                     },
                 );
                 let recovered_result = call_api_with_ptl_recovery(
                     orch,
                     system_prompt.as_ref(),
                     skip_global_cache_for_system_prompt,
-                    &recov_model,
-                    recov_profile.as_deref(),
+                    recov_model,
+                    recov_profile,
                     recov_snapshot,
                     outgoing_history_rewriter.clone(),
                     wire_tools.clone(),
@@ -1819,6 +1958,7 @@ impl StreamingTurnDriver<'_> {
                     cost_scope.as_ref(),
                     native_anthropic_request_context.clone(),
                     user_cancel.as_ref(),
+                    native_model_source.for_route(orch, recov_model, recov_profile),
                 )
                 .await;
                 orch.record_native_afk_beta_rejection_if_any();
@@ -1835,23 +1975,43 @@ impl StreamingTurnDriver<'_> {
                         request_history,
                     } => {
                         query_history = request_history.clone();
+                        let (mut pumped_from_recovery, recovery_cost_receipt) =
+                            match Self::admit_recovered_response(
+                                orch,
+                                &resp,
+                                recov_model,
+                                recov_profile,
+                                cost_scope.as_ref(),
+                                api_call_started.elapsed(),
+                            )
+                            .await?
+                            {
+                                RecoveredResponseAdmission::Accepted {
+                                    pumped,
+                                    cost_receipt,
+                                } => (pumped, cost_receipt),
+                                RecoveredResponseAdmission::Declined(message_id) => {
+                                    return Ok(OpenStreamingOutcome::Complete(message_id));
+                                }
+                            };
                         // Replay the recovered non-streaming response exactly
                         // like the 529 fallback below: emit text live, rebuild
                         // a fresh executor, register its tool_uses, and flow on
                         // as the turn's `pumped` result.
-                        let mut pumped_from_recovery = llm_response_to_pumped_turn(&resp);
                         if let Some(timing_capture) = orch.active_turn_timing_capture() {
                             timing_capture.discard_unobserved_request_dispatch();
                             pumped_from_recovery.timing_capture = Some(timing_capture);
                         }
-                        cost_receipt = Self::begin_stream_cost_response(
+                        let refuse_tools = Self::recovered_response_refuses_tools(
                             orch,
-                            cost_scope.as_ref(),
-                            &model,
-                            model_profile.as_deref(),
                             &pumped_from_recovery,
-                            api_call_started.elapsed(),
-                        );
+                            recov_model,
+                            recov_profile,
+                            loop_state.recovery.refusal_retry_spent,
+                            user_cancel,
+                        )
+                        .await;
+                        cost_receipt = recovery_cost_receipt;
                         orch.check_output_accounting()?;
                         append_recovered_assistant_row(
                             orch,
@@ -1879,34 +2039,14 @@ impl StreamingTurnDriver<'_> {
                             available_tool_names.clone(),
                         )
                         .await?;
-                        let assistant_message =
-                            pumped_assistant_message(&pumped_from_recovery, assistant_id);
-                        let dispatch_query_history: Arc<[ConversationMessage]> =
-                            request_history.clone().into();
-                        let mut prior_tool_uses = Vec::new();
-                        for tu in &pumped_from_recovery.tool_uses {
-                            exec.add_tool_with_context_owned(
-                                tu.id.clone(),
-                                tu.name.clone(),
-                                tu.input.clone(),
-                                tu.provider_id.clone(),
-                                assistant_id,
-                                crate::turn_loop::ToolUseDispatchFacts {
-                                    native_query_depth: loop_state.native_query_depth,
-                                    query_history: Arc::clone(&dispatch_query_history),
-                                    assistant_message: assistant_message.clone(),
-                                    same_turn_tool_uses: prior_tool_uses.clone(),
-                                    refusal_call_boundary: None,
-                                },
-                            )
-                            .await?;
-                            prior_tool_uses.push(ContentBlock::ToolUse {
-                                id: tu.id.clone(),
-                                name: tu.name.clone(),
-                                input: tu.input.clone(),
-                                provider_id: tu.provider_id.clone(),
-                            });
-                        }
+                        Self::register_recovered_tools(
+                            &mut exec,
+                            &pumped_from_recovery,
+                            assistant_id,
+                            request_history,
+                            refuse_tools,
+                        )
+                        .await?;
                         OpenedModelStream::Recovered(pumped_from_recovery)
                     }
                     PtlCallOutcome::Cancelled => {
@@ -2080,6 +2220,7 @@ impl StreamingTurnDriver<'_> {
         api_call_started: std::time::Instant,
         retry_scope: &ModelCallRetryScope,
         failed_stream_outlasted_timeout: bool,
+        refusal_retry_spent: bool,
     ) -> Result<StreamErrorFallback<'a>, OrchestratorError> {
         // Seed: a streaming overload counts as 1 toward the consecutive
         // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
@@ -2208,73 +2349,44 @@ impl StreamingTurnDriver<'_> {
         let Some(resp_result) = resp else {
             return Ok(StreamErrorFallback::Cancelled);
         };
-        let mut resp = resp_result.map_err(OrchestratorError::ApiCall)?;
+        let resp = resp_result.map_err(OrchestratorError::ApiCall)?;
 
         if let Some(observation) = &mut output_observation {
             observation.observe(&resp.usage);
             let _ = observation.finish();
         }
 
-        let server_fallback_events = resp.server_fallback_events();
-        let mut handled_server_fallback_events = 0;
-        for info in &server_fallback_events {
-            if !matches!(info.event.reason.as_str(), "refusal" | "sticky") {
-                continue;
+        let (mut pumped_from_fallback, cost_receipt) = match Self::admit_recovered_response(
+            orch,
+            &resp,
+            &non_stream_model,
+            non_stream_profile.as_deref(),
+            cost_scope,
+            api_call_started.elapsed(),
+        )
+        .await?
+        {
+            RecoveredResponseAdmission::Accepted {
+                pumped,
+                cost_receipt,
+            } => (pumped, cost_receipt),
+            RecoveredResponseAdmission::Declined(message_id) => {
+                return Ok(StreamErrorFallback::Declined(message_id));
             }
-            match crate::server_fallback::handle(orch, info, false).await? {
-                crate::server_fallback::ServerFallbackAdmission::Applied => {
-                    handled_server_fallback_events += 1;
-                    if matches!(info.event.reason.as_str(), "refusal" | "sticky") {
-                        resp.model =
-                            lingxi_core::host::refusal_server_control::resolve_received_model(
-                                Some(&info.lane.model),
-                                &info.event.to_model,
-                            );
-                    }
-                }
-                crate::server_fallback::ServerFallbackAdmission::Declined => {
-                    let rejected = llm_response_to_pumped_turn(&resp);
-                    if let Some(receipt) = Self::begin_stream_cost_response(
-                        orch,
-                        cost_scope,
-                        &resp.model,
-                        non_stream_profile.as_deref(),
-                        &rejected,
-                        api_call_started.elapsed(),
-                    ) {
-                        let settlement = receipt.settle().await;
-                        orch.model_runtime
-                            .api_calls_recorded
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if let Err(error) = settlement.persistence_result() {
-                            orch.note_cost_settlement_failure(error).await;
-                        }
-                    }
-                    orch.record_prompt_cache_usage(&resp.usage).await;
-                    crate::server_fallback::flush_pending_notice(orch).await;
-                    let (message_id, _) =
-                        crate::server_fallback::surface_declined(orch, info, Some(&resp.id)).await;
-                    return Ok(StreamErrorFallback::Declined(message_id));
-                }
-            }
-        }
-
-        // Convert HistoryResponse → PumpedTurn so the rest of the streaming
-        // turn loop can proceed identically.
-        let mut pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+        };
         if let Some(timing_capture) = orch.active_turn_timing_capture() {
             timing_capture.discard_unobserved_request_dispatch();
             pumped_from_fallback.timing_capture = Some(timing_capture);
         }
-        pumped_from_fallback.handled_server_fallback_events = handled_server_fallback_events;
-        let cost_receipt = Self::begin_stream_cost_response(
+        let refuse_tools = Self::recovered_response_refuses_tools(
             orch,
-            cost_scope,
+            &pumped_from_fallback,
             &non_stream_model,
             non_stream_profile.as_deref(),
-            &pumped_from_fallback,
-            api_call_started.elapsed(),
-        );
+            refusal_retry_spent,
+            user_cancel,
+        )
+        .await;
 
         orch.check_output_accounting()?;
         append_recovered_assistant_row(orch, &mut pumped_from_fallback, assistant_id).await;
@@ -2328,32 +2440,14 @@ impl StreamingTurnDriver<'_> {
             available_tool_names.clone(),
         )
         .await?;
-        let assistant_message = pumped_assistant_message(&pumped_from_fallback, assistant_id);
-        let dispatch_query_history: Arc<[ConversationMessage]> = request_history.clone().into();
-        let mut prior_tool_uses = Vec::new();
-        for tu in &pumped_from_fallback.tool_uses {
-            exec.add_tool_with_context_owned(
-                tu.id.clone(),
-                tu.name.clone(),
-                tu.input.clone(),
-                tu.provider_id.clone(),
-                assistant_id,
-                crate::turn_loop::ToolUseDispatchFacts {
-                    native_query_depth: exec.native_query_depth(),
-                    query_history: Arc::clone(&dispatch_query_history),
-                    assistant_message: assistant_message.clone(),
-                    same_turn_tool_uses: prior_tool_uses.clone(),
-                    refusal_call_boundary: None,
-                },
-            )
-            .await?;
-            prior_tool_uses.push(ContentBlock::ToolUse {
-                id: tu.id.clone(),
-                name: tu.name.clone(),
-                input: tu.input.clone(),
-                provider_id: tu.provider_id.clone(),
-            });
-        }
+        Self::register_recovered_tools(
+            &mut exec,
+            &pumped_from_fallback,
+            assistant_id,
+            request_history.clone(),
+            refuse_tools,
+        )
+        .await?;
 
         Ok(StreamErrorFallback::Recovered {
             pumped: pumped_from_fallback,
@@ -2731,7 +2825,16 @@ impl StreamingTurnDriver<'_> {
                                         < crate::streaming_loop::WEBSOCKET_STREAM_MAX_RETRIES
                                     && retry_scope.take_stream_retry()) =>
                         {
+                            let failed_cost_receipt = Self::begin_stream_cost_response(
+                                orch,
+                                cost_scope.as_ref(),
+                                &model,
+                                model_profile.as_deref(),
+                                &f.partial,
+                                api_call_started.elapsed(),
+                            );
                             f.partial_close.close(orch.output.as_ref()).await;
+                            Self::settle_stream_cost_response(orch, failed_cost_receipt).await;
                             if let Some(usage) = f.partial.usage.as_ref() {
                                 orch.record_prompt_cache_usage(usage).await;
                             }
@@ -2955,9 +3058,6 @@ impl StreamingTurnDriver<'_> {
                             api_call_started.elapsed(),
                         ) {
                             let settlement = receipt.settle().await;
-                            orch.model_runtime
-                                .api_calls_recorded
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             if let Err(error) = settlement.persistence_result() {
                                 orch.note_cost_settlement_failure(error).await;
                             }
@@ -2986,7 +3086,6 @@ impl StreamingTurnDriver<'_> {
                             &failure.partial, api_call_started.elapsed(),
                         ) {
                             let settlement = receipt.settle().await;
-                            orch.model_runtime.api_calls_recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             if let Err(error) = settlement.persistence_result() {
                                 orch.note_cost_settlement_failure(error).await;
                             }
@@ -3156,7 +3255,16 @@ impl StreamingTurnDriver<'_> {
                                 )
                                 && retry_scope.take_non_streaming_fallback())) =>
                     {
+                        let failed_cost_receipt = Self::begin_stream_cost_response(
+                            orch,
+                            cost_scope.as_ref(),
+                            &model,
+                            model_profile.as_deref(),
+                            &f.partial,
+                            api_call_started.elapsed(),
+                        );
                         f.partial_close.close(orch.output.as_ref()).await;
+                        Self::settle_stream_cost_response(orch, failed_cost_receipt).await;
                         // The opened stream may already have written cache
                         // tokens at message_start. Record it before the
                         // replacement request overwrites its captured prefix.
@@ -3198,6 +3306,7 @@ impl StreamingTurnDriver<'_> {
                                 api_call_started,
                                 &retry_scope,
                                 failed_stream_outlasted_timeout,
+                                loop_state.recovery.refusal_retry_spent,
                             )
                             .await;
                         orch.record_native_afk_beta_rejection_if_any();
@@ -3500,9 +3609,6 @@ impl StreamingTurnDriver<'_> {
             let retries = orch.streaming_api.last_retry_count();
             let settlement = cost_receipt.settle().await;
             let cost_for_this_call = settlement.observed_nano_usd();
-            orch.model_runtime
-                .api_calls_recorded
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Err(error) = settlement.persistence_result() {
                 orch.note_cost_settlement_failure(error).await;
             }
@@ -3803,7 +3909,12 @@ impl StreamingTurnDriver<'_> {
         let native_catalog_refusal = pumped.stop_reason.as_deref() == Some("refusal")
             && pumped.server_fallback_events.is_empty()
             && !aborted_during_stream
-            && crate::turn_loop::native_refusal_retry_route(orch, &request_model).await;
+            && crate::turn_loop::native_refusal_retry_route_for_request(
+                orch,
+                &request_model,
+                model_profile.as_deref(),
+            )
+            .await;
         let refusal_retry_enabled = crate::turn_loop::native_refusal_retry_enabled(
             &orch.config.query_source,
             loop_state.recovery.refusal_retry_spent,
@@ -5185,6 +5296,10 @@ impl StreamingTurnDriver<'_> {
 #[cfg(test)]
 #[path = "mod_stream_cancellation_tests.rs"]
 mod cancellation_regression_tests;
+
+#[cfg(test)]
+#[path = "streaming_recovery_admission_tests.rs"]
+mod recovery_admission_regression_tests;
 
 #[cfg(test)]
 mod mod_response_accumulator_tests {

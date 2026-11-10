@@ -41,7 +41,77 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::attachment::HookPublicationGuard;
+use crate::HookContext;
 use async_trait::async_trait;
+use std::future::Future;
+
+tokio::task_local! {
+    static CWD_CHANGE_AUTHORITY: Option<Arc<dyn HookPublicationGuard>>;
+}
+
+/// Carry the physical tool call's original generation into leaf shell code.
+pub async fn scope_cwd_change_authority<F: Future>(
+    guard: Option<Arc<dyn HookPublicationGuard>>,
+    future: F,
+) -> F::Output {
+    CWD_CHANGE_AUTHORITY.scope(guard, future).await
+}
+
+/// Captured before a command starts. Completion must never resolve a new
+/// session owner after the command has already finished.
+#[derive(Clone, Default)]
+pub struct CwdChangedOrigin {
+    pub context: Option<HookContext>,
+    pub publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+}
+
+impl CwdChangedOrigin {
+    pub fn from_context(context: HookContext) -> Self {
+        Self {
+            publication_guard: context.publication_guard.clone(),
+            context: Some(context),
+        }
+    }
+
+    pub fn with_call_authority(mut self) -> Self {
+        if let Some(guard) = CWD_CHANGE_AUTHORITY.try_with(Clone::clone).ok().flatten() {
+            self.publication_guard = Some(guard.clone());
+            if let Some(context) = &mut self.context {
+                context.publication_guard = Some(guard);
+            }
+        }
+        self
+    }
+
+    pub async fn commit_if_current(&self, mutation: impl Future<Output = ()> + Send) -> bool {
+        match self.publication_guard.as_ref() {
+            Some(guard) => guard.commit_if_current(Box::pin(mutation)).await,
+            None => {
+                mutation.await;
+                true
+            }
+        }
+    }
+
+    /// Hooks keep their captured context, admit their first poll under the
+    /// original lease, and stop polling as soon as that owner is retired.
+    pub async fn run_if_current(&self, operation: impl Future<Output = ()> + Send) -> bool {
+        let Some(guard) = self.publication_guard.as_ref() else {
+            operation.await;
+            return true;
+        };
+        let admitted = crate::attachment::run_with_first_poll_admission(guard.as_ref(), operation);
+        match guard.generation_cancellation_token() {
+            Some(cancellation) => tokio::select! {
+                biased;
+                () = cancellation.cancelled() => false,
+                output = admitted => output.is_some(),
+            },
+            None => admitted.await.is_some(),
+        }
+    }
+}
 
 /// The byte-faithful wire payload for a `CwdChanged` fire, sourced from the
 /// `BashTool` cwd readback. Field set mirrors `CwdChangedHookInput`
@@ -59,6 +129,17 @@ pub struct CwdChangedFire {
 /// performs a strict no-op; the orchestrator provides the real impl.
 #[async_trait]
 pub trait CwdChangedFirer: Send + Sync {
+    /// Capture immutable owner facts before executing the shell command.
+    async fn capture_origin(&self) -> Option<CwdChangedOrigin> {
+        Some(CwdChangedOrigin::default())
+    }
+
+    /// Complete against the captured owner, retaining the legacy observer seam
+    /// for hosts without session ownership.
+    async fn fire_from_origin(&self, fire: CwdChangedFire, origin: &CwdChangedOrigin) {
+        origin.run_if_current(self.fire(fire)).await;
+    }
+
     /// Fire the `CwdChanged` hook for a working-directory change.
     ///
     /// Best-effort: implementations MUST NOT propagate hook failures — a

@@ -1052,6 +1052,8 @@ impl FallbackPolicy {
 pub struct MessagesCreateOptions {
     /// Output ceiling, applied before model-aware reasoning and context bounds.
     pub max_output_tokens: Option<u32>,
+    /// Explicit request effort, overriding the session's current selection.
+    pub effort: Option<serde_json::Value>,
     /// Anthropic context-hint offer; the codec and beta policy consume it.
     pub context_hint: Option<serde_json::Value>,
     /// Activate the hint beta independently of whether an offer meets its floor.
@@ -2940,6 +2942,36 @@ impl ApiService {
         profile: Option<&str>,
     ) -> Result<crate::ProtocolFamily, LlmError> {
         self.client().protocol_for_model(model, profile)
+    }
+
+    /// Reasoning controls follow the selected route's canonical provider and
+    /// wire protocol, independently of its user-defined connection label.
+    pub fn reasoning_provider_for_model(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<String> {
+        let client = self.client();
+        let target = client
+            .prompt_target(
+                model,
+                profile,
+                lingxi_core::host::session_context::ConversationMode::Code,
+            )
+            .ok()?;
+        let protocol = client.protocol_for_model(model, profile).ok()?;
+        use crate::ProtocolFamily;
+        Some(match protocol {
+            ProtocolFamily::AnthropicMessages
+            | ProtocolFamily::BedrockClaude
+            | ProtocolFamily::VertexClaude
+            | ProtocolFamily::FoundryClaude => "anthropic".to_owned(),
+            ProtocolFamily::OpenAiResponses | ProtocolFamily::AzureOpenAi => "openai".to_owned(),
+            ProtocolFamily::GeminiGenerateContent
+            | ProtocolFamily::GeminiInteractions
+            | ProtocolFamily::VertexGemini => "gemini".to_owned(),
+            ProtocolFamily::OpenAiChat => target.provider_id,
+        })
     }
 
     /// Account epoch used to fence model-validation probes. This is the
@@ -13078,6 +13110,16 @@ impl ApiService {
                     req.input.max_tokens
                 },
             ));
+            if matches!(thinking, crate::model::thinking::ThinkingConfig::Disabled)
+                && !self.native_api_system_route(model, profile)
+            {
+                // Non-native codecs distinguish explicit Off from an omitted
+                // mode, which means the provider's default reasoning policy.
+                req.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                    mode: Some(lingxi_llm_client::protocol::ThinkingMode::Disabled),
+                    ..Default::default()
+                });
+            }
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
             // `rhn` temperature-gate set (binary @205866168:
@@ -13179,6 +13221,7 @@ impl ApiService {
             })
             .transpose()?;
         req.execution.context_hint_beta = opts.context_hint_beta;
+        req.set_effort(opts.effort)?;
         req.execution.model_attempt = opts.model_attempt;
         req.execution
             .set_request_dispatch_admission(opts.request_dispatch_admission);

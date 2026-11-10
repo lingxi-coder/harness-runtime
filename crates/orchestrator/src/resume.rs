@@ -48,11 +48,15 @@ use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
 
 #[cfg(test)]
+mod compaction_iteration_tests;
+#[cfg(test)]
 mod deferred_authority_tests;
+mod deferred_checkpoint;
 mod file_state;
 #[cfg(test)]
 mod file_state_tests;
 mod plan_files;
+pub(crate) mod todo_state;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
 #[derive(Debug, thiserror::Error)]
@@ -1238,10 +1242,7 @@ fn build_state_from_jsonl_with_text_projection(
             }
             "system" if m.extra.string_at("/subtype") == Some("api_system") => {
                 flush_pending_assistant(&mut state, pending_assistant.take());
-                let mut content = extract_content_blocks(&m.message, true, false);
-                if restore_exact_history_strings(m, &mut content, false).is_err() {
-                    continue;
-                }
+                let content = extract_api_system_content_blocks(&m.message);
                 let output_config = m
                     .extra
                     .subprojection("/outputConfig")
@@ -1503,6 +1504,7 @@ fn build_state_from_jsonl_with_text_projection(
         }
     }
     flush_pending_assistant(&mut state, pending_assistant.take());
+    todo_state::restore(&mut state);
     restore_thinking_stripped_ranges(&mut state, messages);
     let runtime_metadata = resume_runtime_metadata(messages);
     if transcript_has_open_plan_segment(messages) {
@@ -2390,10 +2392,13 @@ pub fn deferred_tool_replays_from_messages(
 }
 
 /// What one replayed tool contributes to the single batched result message.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeferredReplayOutcome {
     tool_use_id: ToolUseId,
     tool_results: Vec<ContentBlock>,
     injected_messages: Vec<(ConversationMessage, ToolUseId)>,
+    had_context_modifiers: bool,
 }
 
 async fn replay_deferred_tool_after_resume(
@@ -2475,6 +2480,7 @@ async fn replay_deferred_tool_after_resume(
     // Applied per tool, before the next one is dispatched: a context modifier
     // is about the model's context, not about message shape, and the following
     // replay has to see it.
+    let had_context_modifiers = !context_modifiers.is_empty();
     crate::turn_loop::boxed_turn_future(|| {
         crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers)
     })
@@ -2483,6 +2489,7 @@ async fn replay_deferred_tool_after_resume(
         tool_use_id,
         tool_results,
         injected_messages,
+        had_context_modifiers,
     })
 }
 
@@ -2491,7 +2498,11 @@ pub async fn replay_deferred_tools_after_resume(
     orch: &ConversationOrchestrator,
     deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
 ) -> Result<(), crate::OrchestratorError> {
+    if deferred_tools.is_empty() {
+        return Ok(());
+    }
     let session_id = orch.session.lock().await.session_id;
+    let checkpoints = deferred_checkpoint::ReplayCheckpoints::open(orch, session_id).await?;
     // ONE user message carrying EVERY replayed result, exactly as the normal
     // dispatch path batches a turn's results. Emitting one message per tool
     // would be a wire-shape bug, not a cosmetic one: `ensure_tool_result_pairing`
@@ -2514,10 +2525,33 @@ pub async fn replay_deferred_tools_after_resume(
                     ))
                 })?;
         }
-        let outcome = crate::turn_loop::boxed_turn_future(|| {
-            replay_deferred_tool_after_resume(orch, deferred)
-        })
-        .await?;
+        let descriptor = deferred_checkpoint::ReplayDescriptor::new(session_id, &deferred)?;
+        let outcome = if let Some(completed) = checkpoints.completed(&descriptor).await? {
+            completed.restore(orch).await?
+        } else {
+            // Only a new durable Started ACK authorizes permission/dispatch.
+            // A dropped or uncertain attempt remains a blocker on every retry.
+            checkpoints.start(&descriptor).await?;
+            if let Some(writer) = &orch.transcript.jsonl_writer {
+                writer
+                    .verify_active_replay_source(session_id)
+                    .await
+                    .map_err(|error| {
+                        crate::OrchestratorError::Internal(format!(
+                            "deferred replay transcript authority: {error}"
+                        ))
+                    })?;
+            }
+            orch.check_storage_pause().await?;
+            let before = deferred_checkpoint::ReplayContext::capture(orch).await?;
+            let outcome = crate::turn_loop::boxed_turn_future(|| {
+                replay_deferred_tool_after_resume(orch, deferred)
+            })
+            .await?;
+            let context = before.finish(orch, outcome.had_context_modifiers).await?;
+            checkpoints.complete(&descriptor, &outcome, context).await?;
+            outcome
+        };
         if outcome.tool_results.is_empty() {
             continue;
         }
@@ -2909,10 +2943,61 @@ fn finite_native_token_sum(input: f64, cache_creation: f64, cache_read: f64, out
     }
 }
 
+/// Count logical model iterations rather than their per-block JSONL envelopes.
+fn assistant_iteration_count(messages: &[JsonlMessage]) -> usize {
+    let logical_by_response = messages
+        .iter()
+        .filter_map(|message| {
+            let logical = message
+                .extra
+                .string_at("/logicalMessageId")
+                .filter(|id| !id.is_empty())?;
+            let response = message
+                .message
+                .string_at("/id")
+                .filter(|id| !id.is_empty())?;
+            (message.message_type == "assistant").then_some((response, logical))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut iterations = HashSet::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.message_type != "assistant" {
+            continue;
+        }
+        let identity = message
+            .extra
+            .string_at("/logicalMessageId")
+            .filter(|id| !id.is_empty())
+            .map(|id| ("logical", id.to_owned()))
+            .or_else(|| {
+                message
+                    .message
+                    .string_at("/id")
+                    .filter(|id| !id.is_empty())
+                    .map(|id| match logical_by_response.get(id) {
+                        Some(logical) => ("logical", (*logical).to_owned()),
+                        None => ("response", id.to_owned()),
+                    })
+            })
+            // Older transcripts did not persist a shared response identity.
+            // Their outer row UUID remains one iteration; do not merge rows
+            // by model, timestamp, adjacency, or content.
+            .unwrap_or_else(|| {
+                let id = if message.uuid.is_empty() {
+                    format!("missing-row-{index}")
+                } else {
+                    message.uuid.clone()
+                };
+                ("row", id)
+            });
+        iterations.insert(identity);
+    }
+    iterations.len()
+}
+
 /// Reconstruct state Claude keeps adjacent to the message array. Boundaries
 /// persist the cumulative counter directly; the rapid-refill window is derived
-/// from the number of completed assistant iterations between adjacent
-/// boundaries and after the latest boundary.
+/// from completed assistant iterations between and after compact boundaries.
 fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     let reasoning_selection = messages.iter().rev().find_map(|m| {
         (carries_human_turn_settings(m)
@@ -2959,13 +3044,9 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
                 .unwrap_or(0);
 
         tracking.compacted = true;
-        tracking.turn_counter = u32::try_from(
-            messages[last_boundary + 1..]
-                .iter()
-                .filter(|message| message.message_type == "assistant")
-                .count(),
-        )
-        .unwrap_or(u32::MAX);
+        tracking.turn_counter =
+            u32::try_from(assistant_iteration_count(&messages[last_boundary + 1..]))
+                .unwrap_or(u32::MAX);
         tracking.turn_id = messages[last_boundary + 1..]
             .iter()
             .rev()
@@ -2980,10 +3061,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         // the consecutive count; a wider interval resets it.
         let mut consecutive = 0_u32;
         for pair in boundary_indices.windows(2) {
-            let turns = messages[pair[0] + 1..pair[1]]
-                .iter()
-                .filter(|message| message.message_type == "assistant")
-                .count();
+            let turns = assistant_iteration_count(&messages[pair[0] + 1..pair[1]]);
             if turns < compaction::RAPID_REFILL_TURN_WINDOW as usize {
                 consecutive = consecutive.saturating_add(1);
             } else {
@@ -3328,51 +3406,97 @@ fn extract_content_blocks(
                 continue;
             }
             let pointer = format!("/content/{index}");
-            let Ok(mut block) = message.subprojection(&pointer) else {
+            let Ok(block) = message.subprojection(&pointer) else {
                 continue;
             };
-            if normalize_tool_results && block_type == Some("tool_result") {
-                if let Ok(result_content) = block.subprojection("/content") {
-                    let content_view = result_content.at_pointer("").expect("root view");
-                    if content_view.array_len().is_some() {
-                        let encoded = result_content
-                            .to_json_string()
-                            .expect("tool-result content array is valid JSON");
-                        block
-                            .set_field(
-                                "content",
-                                Utf16JsonProjection::root_string(
-                                    encoded.clone(),
-                                    encoded.encode_utf16().collect(),
-                                )
-                                .expect("serialized tool-result content is valid text"),
-                            )
-                            .expect("tool result is an object");
-                        block
-                            .set_field("content_blocks", result_content)
-                            .expect("tool result is an object");
-                    } else if !content_view.is_null() && content_view.as_str().is_none() {
-                        block
-                            .set_field(
-                                "content",
-                                crate::tool_result_text::normalized_tool_result_projection(
-                                    &result_content,
-                                ),
-                            )
-                            .expect("tool result is an object");
-                    }
-                }
-            }
-            let Ok(source) = block.to_json_string() else {
-                continue;
-            };
-            if let Ok(block) = serde_json::from_str::<ContentBlock>(&source) {
+            if let Some(block) = decode_content_block(block, normalize_tool_results) {
                 blocks.push(block);
             }
         }
         return blocks;
     }
     Vec::new()
+}
+
+fn decode_content_block(
+    mut block: Utf16JsonProjection,
+    normalize_tool_results: bool,
+) -> Option<ContentBlock> {
+    if normalize_tool_results && block.string_at("/type") == Some("tool_result") {
+        if let Ok(result_content) = block.subprojection("/content") {
+            let content_view = result_content.at_pointer("").expect("root view");
+            if content_view.array_len().is_some() {
+                let encoded = result_content
+                    .to_json_string()
+                    .expect("tool-result content array is valid JSON");
+                block
+                    .set_field(
+                        "content",
+                        Utf16JsonProjection::root_string(
+                            encoded.clone(),
+                            encoded.encode_utf16().collect(),
+                        )
+                        .expect("serialized tool-result content is valid text"),
+                    )
+                    .expect("tool result is an object");
+                block
+                    .set_field("content_blocks", result_content)
+                    .expect("tool result is an object");
+            } else if !content_view.is_null() && content_view.as_str().is_none() {
+                block
+                    .set_field(
+                        "content",
+                        crate::tool_result_text::normalized_tool_result_projection(&result_content),
+                    )
+                    .expect("tool result is an object");
+            }
+        }
+    }
+    serde_json::from_str(&block.to_json_string().ok()?).ok()
+}
+
+/// API-system rows can carry native controls, such as tool additions, which
+/// have no application ContentBlock variant. Retain only those unknown tags as
+/// opaque provider data; malformed recognized blocks keep the normal filter.
+fn extract_api_system_content_blocks(message: &Utf16JsonProjection) -> Vec<ContentBlock> {
+    let Some(length) = message.array_len("/content") else {
+        return extract_content_blocks(message, true, false);
+    };
+    let mut blocks = Vec::with_capacity(length);
+    for index in 0..length {
+        let Ok(source) = message.subprojection(&format!("/content/{index}")) else {
+            continue;
+        };
+        let Some(tag) = source.string_at("/type") else {
+            continue;
+        };
+        if matches!(
+            tag,
+            "provider_content"
+                | "text"
+                | "text_js_utf16"
+                | "tool_use"
+                | "tool_result"
+                | "thinking"
+                | "image"
+                | "document"
+                | "redacted_thinking"
+                | "server_tool_use"
+                | "connector_text"
+                | "advisor_tool_result"
+                | "media_analysis"
+        ) {
+            if let Some(block) = decode_content_block(source, true) {
+                blocks.push(block);
+            }
+        } else {
+            blocks.push(ContentBlock::ProviderContent {
+                protocol: "anthropic_messages".into(),
+                value: source,
+            });
+        }
+    }
+    blocks
 }
 
 /// Reapply exact JSONL text for cold-resumed user content, while projecting
@@ -3539,6 +3663,9 @@ impl ConversationOrchestrator {
             let mut state = self.session.lock().await;
             state.session_id = replayed.session_id;
             state.history = replayed.history;
+            state.todos = replayed.todos;
+            state.turns_since_last_todo_write = replayed.turns_since_last_todo_write;
+            state.turns_since_last_reminder = replayed.turns_since_last_reminder;
             state.compacted_user_turns = replayed.compacted_user_turns;
             state.virtual_user_messages = replayed.virtual_user_messages;
             state.transcript_only_messages = replayed.transcript_only_messages;
@@ -4942,6 +5069,56 @@ mod exact_history_string_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn api_system_resume_keeps_unknown_native_blocks_and_exact_utf16() {
+        let native = r#"{"type":"tool_addition","tools":[{"name":"late","description":"\udfff","input_schema":{"type":"object"}}]}"#;
+        let control = row_with_extra(
+            "system",
+            &format!(
+                r#"[{{"type":"text","text":"x\ud800y"}},{{"type":"text","text":false}},{native},{{"type":"tool_use","id":"malformed","name":"Read"}},{{"type":"text","text":"tail\ud801"}}]"#
+            ),
+            r#""subtype":"api_system","outputConfig":{"effort":"high\ud800"}"#,
+        );
+        let expected = ConversationMessage::api_system(
+            MessageId::from_uuid(Uuid::parse_str(&control.uuid).unwrap()),
+            lingxi_core::types::ApiSystemMessage {
+                content: vec![
+                    ContentBlock::TextJsUtf16 {
+                        text: String::from_utf16_lossy(&[b'x' as u16, 0xD800, b'y' as u16]),
+                        utf16_code_units: vec![b'x' as u16, 0xD800, b'y' as u16],
+                        citations: None,
+                    },
+                    ContentBlock::ProviderContent {
+                        protocol: "anthropic_messages".into(),
+                        value: Utf16JsonProjection::parse(native).unwrap(),
+                    },
+                    ContentBlock::TextJsUtf16 {
+                        text: String::from_utf16_lossy(&[
+                            b't' as u16,
+                            b'a' as u16,
+                            b'i' as u16,
+                            b'l' as u16,
+                            0xD801,
+                        ]),
+                        utf16_code_units: vec![
+                            b't' as u16,
+                            b'a' as u16,
+                            b'i' as u16,
+                            b'l' as u16,
+                            0xD801,
+                        ],
+                        citations: None,
+                    },
+                ],
+                output_config: Some(lingxi_core::types::ApiSystemOutputConfig {
+                    effort: Some(Utf16JsonProjection::parse(r#""high\ud800""#).unwrap()),
+                }),
+            },
+        );
+        let state = state_from_messages(Uuid::new_v4(), &[control]);
+        assert_eq!(state.history, vec![expected]);
     }
 
     #[test]

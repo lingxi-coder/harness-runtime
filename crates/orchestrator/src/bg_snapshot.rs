@@ -47,35 +47,49 @@ fn source<T: serde::Serialize + ?Sized>(value: &T) -> Source {
         .expect("valid transcript source")
 }
 
-fn source_content_blocks(content: &[ContentBlock]) -> Source {
-    let blocks = content
-        .iter()
-        .map(|block| match block {
-            ContentBlock::TextJsUtf16 {
-                text,
-                utf16_code_units,
-                citations,
-            } => {
-                // JSONL stores the native text block and carries exact UTF-16
-                // units in the row's private override map; do not persist the
-                // in-memory `text_js_utf16` carrier as a different wire block.
-                let text = Source::root_string(text.clone(), utf16_code_units.clone())
-                    .expect("text block has a valid UTF-16 display projection");
-                let mut projection = object(vec![("type", "text".into()), ("text", text)]);
-                if let Some(citations) = citations {
-                    let citations = citations
-                        .clone()
-                        .unwrap_or_else(|| Source::parse("null").expect("JSON null"));
-                    projection
-                        .set_field("citations", citations)
-                        .expect("text block object");
-                }
+fn source_content_block(block: &ContentBlock) -> Source {
+    match block {
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations,
+        } => {
+            // JSONL stores the native text block and carries exact UTF-16
+            // units in the row's private override map; do not persist the
+            // in-memory `text_js_utf16` carrier as a different wire block.
+            let text = Source::root_string(text.clone(), utf16_code_units.clone())
+                .expect("text block has a valid UTF-16 display projection");
+            let mut projection = object(vec![("type", "text".into()), ("text", text)]);
+            if let Some(citations) = citations {
+                let citations = citations
+                    .clone()
+                    .unwrap_or_else(|| Source::parse("null").expect("JSON null"));
                 projection
+                    .set_field("citations", citations)
+                    .expect("text block object");
             }
-            _ => source(block),
-        })
-        .collect();
-    Source::array(blocks).expect("content blocks form a JSON array")
+            projection
+        }
+        _ => source(block),
+    }
+}
+
+fn source_content_blocks(content: &[ContentBlock]) -> Source {
+    Source::array(content.iter().map(source_content_block).collect())
+        .expect("content blocks form a JSON array")
+}
+
+fn source_api_system_content(content: &[ContentBlock]) -> Source {
+    Source::array(
+        content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ProviderContent { value, .. } => value.clone(),
+                _ => source_content_block(block),
+            })
+            .collect(),
+    )
+    .expect("API system content blocks form a JSON array")
 }
 
 fn object(fields: Vec<(&str, Source)>) -> Source {
@@ -273,6 +287,26 @@ pub fn history_to_jsonl_lines(
                     ("isMeta", source(&false)),
                 ]);
                 ("system", source(&()))
+            }
+            ConversationMessage::System {
+                api_system: Some(message),
+                ..
+            } => {
+                extra
+                    .set_field("subtype", "api_system".into())
+                    .expect("API system metadata");
+                if let Some(config) = &message.output_config {
+                    extra
+                        .set_field("outputConfig", source(config))
+                        .expect("API system metadata");
+                }
+                (
+                    "system",
+                    object(vec![
+                        ("role", "system".into()),
+                        ("content", source_api_system_content(&message.content)),
+                    ]),
+                )
             }
             ConversationMessage::System { content, .. } => (
                 "system",
@@ -474,6 +508,59 @@ mod tests {
 
             resumable: None,
         }
+    }
+
+    #[test]
+    fn api_system_snapshot_roundtrip_keeps_native_content_and_output_config() {
+        use lingxi_core::types::{ApiSystemMessage, ApiSystemOutputConfig, MessageId};
+        let units = vec![b'x' as u16, 0xd800, b'y' as u16];
+        let control = ConversationMessage::api_system(
+            MessageId::new(),
+            ApiSystemMessage {
+                content: vec![
+                    ContentBlock::TextJsUtf16 {
+                        text: String::from_utf16_lossy(&units),
+                        utf16_code_units: units.clone(),
+                        citations: None,
+                    },
+                    ContentBlock::ProviderContent {
+                        protocol: "anthropic_messages".into(),
+                        value: Source::parse(
+                            r#"{"type":"tool_addition","tools":[{"name":"late","description":"\udfff","input_schema":{"type":"object"}}]}"#,
+                        )
+                        .unwrap(),
+                    },
+                ],
+                output_config: Some(ApiSystemOutputConfig {
+                    effort: Some(Source::parse(r#""high\ud800""#).unwrap()),
+                }),
+            },
+        );
+        let lines = history_to_jsonl_lines(
+            &snapshot(&[user("request"), control.clone()]),
+            &uuid::Uuid::nil().to_string(),
+            "/tmp",
+            "test",
+            "claude-sonnet-4-20250514",
+        );
+        let row = source(&lines[1]);
+        assert_eq!(row.string_at("/subtype"), Some("api_system"));
+        assert_eq!(row.string_units("/message/content/0/text"), Some(units));
+        assert_eq!(
+            row.string_units("/message/content/1/tools/0/description"),
+            Some(vec![0xdfff])
+        );
+        assert_eq!(
+            row.string_at("/message/content/1/type"),
+            Some("tool_addition")
+        );
+        assert!(row.at_pointer("/message/content/1/value").is_none());
+        assert_eq!(
+            row.string_units("/outputConfig/effort"),
+            Some("high".encode_utf16().chain([0xd800]).collect())
+        );
+        let restored = crate::resume::state_from_messages(uuid::Uuid::nil(), &lines);
+        assert_eq!(restored.history[1], control);
     }
 
     #[test]

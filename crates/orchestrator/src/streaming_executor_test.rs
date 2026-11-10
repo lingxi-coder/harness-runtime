@@ -2588,6 +2588,7 @@ mod tests {
         first_permission_finished: Arc<Notify>,
         first_saw_cancellation: Arc<std::sync::atomic::AtomicBool>,
         second_call_started: Arc<Notify>,
+        first_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait]
@@ -2655,11 +2656,12 @@ mod tests {
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 self.first_permission_finished.notify_one();
-                return permission::PermissionResult::Deny {
+                return permission::PermissionResult::Allow {
                     reason: permission::PermissionDecisionReason::Other {
                         reason: "scheduler reset".into(),
                     },
-                    explanation: None,
+                    updated_input: None,
+                    update_destination: None,
                     metadata: permission::result::PermissionMetadata::default(),
                 };
             }
@@ -2693,6 +2695,10 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
+            if input.string_at("/step") == Some("first") {
+                self.first_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             if input.string_at("/step") == Some("second") {
                 self.second_call_started.notify_one();
             }
@@ -8557,6 +8563,7 @@ mod tests {
         let release_first_permission = Arc::new(Notify::new());
         let first_permission_finished = Arc::new(Notify::new());
         let first_saw_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let second_call_started = Arc::new(Notify::new());
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(ParkedPermissionTool {
@@ -8565,6 +8572,7 @@ mod tests {
             first_permission_finished: first_permission_finished.clone(),
             first_saw_cancellation: first_saw_cancellation.clone(),
             second_call_started: second_call_started.clone(),
+            first_calls: first_calls.clone(),
         }));
         let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -8583,8 +8591,8 @@ mod tests {
             .await
             .unwrap();
         let initial_model = orch.session.lock().await.model.clone();
-        executor
-            .add_tool(
+        let first_dispatch_finished = executor
+            .add_tool_observed_dispatch(
                 first_id.clone(),
                 "ParkedPermission".into(),
                 project_test_tool_input(json!({ "step": "first" })),
@@ -8634,6 +8642,15 @@ mod tests {
         .await
         .expect("released permission call completes after reset");
         assert!(first_saw_cancellation.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::timeout(std::time::Duration::from_secs(5), first_dispatch_finished)
+            .await
+            .expect("retired delayed-Allow dispatch settles")
+            .expect("dispatch completion barrier is retained");
+        assert_eq!(
+            first_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a retired generation cannot first enter a Block tool after permission returns Allow"
+        );
         assert!(executor.tools.is_empty(), "late old rows remain tombstoned");
         assert!(executor.take_newly_completed().is_empty());
         assert!(executor.is_current_generation_idle().await);

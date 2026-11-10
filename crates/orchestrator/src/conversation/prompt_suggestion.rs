@@ -399,7 +399,7 @@ impl ConversationOrchestrator {
     }
 
     fn suggestion_background_mode() -> bool {
-        std::env::var("CLAUDE_CODE_SESSION_KIND").ok().as_deref() == Some("bg")
+        lingxi_core::host::env::is_bg_session()
     }
 
     async fn reset_suggestion_backoff(

@@ -150,6 +150,31 @@ struct SuggestionClient {
     entered: Notify,
     release: Semaphore,
 }
+
+#[derive(Default)]
+struct UnusedSuggestionSuppression {
+    settled: Notify,
+}
+
+#[async_trait]
+impl telemetry::AnalyticsSink for UnusedSuggestionSuppression {
+    async fn log_event(&self, name: &str, metadata: telemetry::LogEventMetadata) {
+        if name == "tengu_prompt_suggestion"
+            && matches!(metadata.get("reason"), Some(telemetry::AnalyticsValue::String(reason)) if reason == "unused_streak")
+        {
+            self.settled.notify_one();
+        }
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: telemetry::LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "unused-suggestion-suppression"
+    }
+}
+
 #[async_trait]
 impl SideQueryClient for SuggestionClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
@@ -183,7 +208,7 @@ fn setup_with_suggestion(
     Arc<SuggestionOutput>,
     Arc<sidequery::CacheSafeParamsSlot>,
 ) {
-    setup_with_config(suggestion, true, "repl_main_thread", None)
+    setup_with_config(suggestion, true, "repl_main_thread", None, None)
 }
 
 struct SuggestionSettings(bool);
@@ -206,6 +231,7 @@ fn setup_with_config(
     interactive: bool,
     query_source: &str,
     setting: Option<bool>,
+    analytics: Option<Arc<telemetry::AnalyticsBus>>,
 ) -> (
     Arc<ConversationOrchestrator>,
     Arc<SuggestionClient>,
@@ -255,6 +281,9 @@ fn setup_with_config(
     ));
     if let Some(enabled) = setting {
         orch = orch.with_mod_settings_reader(Arc::new(SuggestionSettings(enabled)));
+    }
+    if let Some(analytics) = analytics {
+        orch = orch.with_analytics_bus(analytics);
     }
     (
         ConversationOrchestrator::into_shared(orch),
@@ -433,6 +462,7 @@ async fn sdk_composer_attaching_after_the_first_turn_enables_default_generation(
         false,
         "sdk",
         None,
+        None,
     );
     orch.run_turn_streaming("first turn before context arrives")
         .await
@@ -458,6 +488,7 @@ async fn unattached_mobile_sdk_does_not_automatically_generate_suggestions() {
         Utf16JsonProjection::from("Run the focused tests"),
         true,
         "sdk",
+        None,
         None,
     );
     orch.run_turn_streaming("first scheduled turn")
@@ -491,6 +522,7 @@ async fn persisted_user_disable_still_blocks_attached_sdk_suggestions() {
         false,
         "sdk",
         Some(false),
+        None,
     );
     context(&orch, "focused", true, false).await;
     orch.run_turn_streaming("first turn").await.unwrap();
@@ -627,7 +659,16 @@ async fn generated_previews_that_never_reach_the_composer_do_not_back_off() {
 
 #[tokio::test]
 async fn only_shown_unused_suggestions_back_off_and_reenable_resets_frequency() {
-    let (orch, client, output, _) = setup();
+    let suppression = Arc::new(UnusedSuggestionSuppression::default());
+    let analytics = Arc::new(telemetry::AnalyticsBus::new());
+    analytics.attach_sink(suppression.clone()).await;
+    let (orch, client, output, _) = setup_with_config(
+        Utf16JsonProjection::from("建议：运行测试"),
+        true,
+        "repl_main_thread",
+        None,
+        Some(analytics),
+    );
     client.release.add_permits(100);
     orch.run_turn_streaming("first").await.unwrap();
     orch.run_turn_streaming("second").await.unwrap();
@@ -665,6 +706,9 @@ async fn only_shown_unused_suggestions_back_off_and_reenable_resets_frequency() 
         orch.run_turn_streaming(&format!("backed off {n}"))
             .await
             .unwrap();
+        // Generation runs after the foreground turn. Let its eligibility
+        // check settle before the next turn cancels the prior pipeline.
+        wait(&suppression.settled).await;
     }
     assert_eq!(client.requests.lock().unwrap().len(), at_threshold);
     orch.run_turn_streaming("tenth eligible turn")

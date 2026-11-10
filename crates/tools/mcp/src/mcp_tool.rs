@@ -1285,6 +1285,28 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonP
         }))
     });
 
+/// Capture the invocation's admitted route before its MCP call can detach.
+/// A boot model or an unscoped registry lookup cannot establish which account
+/// is allowed to receive the returned tool data.
+#[derive(Clone)]
+struct McpCountRoute {
+    model: String,
+    profile: String,
+}
+
+impl McpCountRoute {
+    fn from_options(options: &tool_api::context::ToolUseOptions) -> Option<Self> {
+        let profile = options.model_profile.as_ref()?;
+        if options.main_loop_model.trim().is_empty() || profile.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            model: options.main_loop_model.clone(),
+            profile: profile.clone(),
+        })
+    }
+}
+
 /// Transform a settled `tools/call` result into the model-facing
 /// [`ToolCallResult`] (or [`ToolError`]).
 ///
@@ -1300,7 +1322,7 @@ async fn process_mcp_call_result(
     bus: Arc<AnalyticsBus>,
     output_dir: std::path::PathBuf,
     token_counter: Option<Arc<dyn tool_api::McpTokenCounter>>,
-    default_model: String,
+    count_route: Option<McpCountRoute>,
     inline_chat: bool,
     server: String,
     tool: String,
@@ -1538,13 +1560,17 @@ async fn process_mcp_call_result(
             // handler applies (see `ExactCountOutcome`).
             let exact_token_count =
                 if crate::large_output::mcp_content_needs_exact_count_source(&model_content) {
-                    match match token_counter.as_ref() {
-                        Some(counter) => {
+                    match match (token_counter.as_ref(), count_route.as_ref()) {
+                        (Some(counter), Some(route)) => {
                             counter
-                                .count_mcp_content_tokens(&default_model, &model_content)
+                                .count_mcp_content_tokens(
+                                    &route.model,
+                                    &route.profile,
+                                    &model_content,
+                                )
                                 .await
                         }
-                        None => Ok(None),
+                        _ => Ok(None),
                     } {
                         // The active route returned an exact count.
                         Ok(Some(count)) => crate::large_output::ExactCountOutcome::Counted(count),
@@ -2165,7 +2191,7 @@ impl Tool for MCPTool {
         let bus = self.ctx.bus.clone();
         let output_dir = self.ctx.tool_results_dir();
         let token_counter = self.ctx.mcp_token_counter.clone();
-        let default_model = self.ctx.default_model.clone();
+        let count_route = McpCountRoute::from_options(&ctx.options);
 
         // Direct-await path: auto-background disabled (`auto_bg_ms == 0`) OR no
         // task registry wired (nothing to detach into). This is the pre-G08
@@ -2190,7 +2216,7 @@ impl Tool for MCPTool {
                 bus,
                 output_dir,
                 token_counter,
-                default_model,
+                count_route,
                 inline_chat,
                 server,
                 tool,
@@ -2229,7 +2255,7 @@ impl Tool for MCPTool {
             let bus = bus.clone();
             let output_dir = output_dir.clone();
             let token_counter = token_counter.clone();
-            let default_model = default_model.clone();
+            let count_route = count_route.clone();
             let server = server.clone();
             let call_server = dispatch_key.clone();
             let tool = tool.clone();
@@ -2279,7 +2305,7 @@ impl Tool for MCPTool {
                             bus,
                             output_dir,
                             token_counter,
-                            default_model,
+                            count_route,
                             false,
                             server,
                             tool,
@@ -5831,6 +5857,93 @@ mod auto_background_race_tests {
             bytes.push(b'\n');
             let _ = peer_tx.send(Bytes::from(bytes)).await;
         });
+    }
+
+    #[derive(Default)]
+    struct RouteCounter {
+        seen: StdMutex<Vec<(String, String)>>,
+        counted: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl tool_api::McpTokenCounter for RouteCounter {
+        async fn count_mcp_content_tokens(
+            &self,
+            model: &str,
+            profile: &str,
+            _: &UJP,
+        ) -> Result<Option<u64>, String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((model.into(), profile.into()));
+            self.counted.notify_one();
+            Ok(Some(1))
+        }
+    }
+
+    async fn reply_with_large_result(
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        peer_tx: mpsc::Sender<Bytes>,
+    ) {
+        let request: Value = serde_json::from_slice(&peer_rx.recv().await.unwrap()).unwrap();
+        let response = json!({
+            "jsonrpc":"2.0", "id":request["id"],
+            "result":{"content":[{"type":"text","text":"x".repeat(50_004)}],"isError":false}
+        });
+        let mut bytes = serde_json::to_vec(&response).unwrap();
+        bytes.push(b'\n');
+        peer_tx.send(Bytes::from(bytes)).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exact_count_uses_invoking_route_inline_and_after_backgrounding() {
+        for (background, profile) in [
+            (false, Some("selected-b")),
+            (true, Some("selected-b")),
+            (false, None),
+        ] {
+            let (connection, peer_tx, peer_rx) =
+                paired_with_timeout(std::time::Duration::from_secs(600));
+            let client = Arc::new(
+                mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), connection).await,
+            );
+            let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+            registry.register_client("slow", client).await;
+            let counter = Arc::new(RouteCounter::default());
+            let tasks = background
+                .then(|| Arc::new(RecordingRegistry::default()) as Arc<dyn TaskRegistryHandle>);
+            let mut context = ctx_with(registry, tasks);
+            context.default_model = "unrelated-boot-model".into();
+            context.mcp_token_counter = Some(counter.clone());
+            let tool = MCPTool::new(context);
+            let mut invocation = tool_api::test_support::fresh_ctx();
+            invocation.options.main_loop_model = "selected-live-model".into();
+            invocation.options.model_profile = profile.map(str::to_owned);
+            if background {
+                let result = tool
+                    .call(call_input(), invocation, tool_api::test_support::fresh_tx())
+                    .await
+                    .unwrap();
+                assert!(result
+                    .model_content
+                    .unwrap()
+                    .string_at("")
+                    .unwrap()
+                    .contains("moved to the background"));
+                reply_with_large_result(peer_rx, peer_tx).await;
+                counter.counted.notified().await;
+            } else {
+                tokio::spawn(reply_with_large_result(peer_rx, peer_tx));
+                tool.call(call_input(), invocation, tool_api::test_support::fresh_tx())
+                    .await
+                    .unwrap();
+            }
+            let expected = profile
+                .map(|profile| vec![("selected-live-model".into(), profile.into())])
+                .unwrap_or_default();
+            assert_eq!(*counter.seen.lock().unwrap(), expected);
+        }
     }
 
     // A slow call (peer never responds) auto-backgrounds after the threshold:

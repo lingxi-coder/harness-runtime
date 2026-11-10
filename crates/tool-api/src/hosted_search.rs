@@ -5,11 +5,12 @@ pub use lingxi_llm_client::protocol::JsonPayload;
 /// Exact MCP token counting supplied by the active provider route.
 #[async_trait::async_trait]
 pub trait McpTokenCounter: Send + Sync {
-    /// Count model-facing MCP content exactly when the active route supports
-    /// it. `Ok(None)` means the route has no exact token-count endpoint.
+    /// Count model-facing MCP content on the invocation's pinned model and
+    /// provider profile. `Ok(None)` means this route has no exact counter.
     async fn count_mcp_content_tokens(
         &self,
         model: &str,
+        profile: &str,
         content: &Utf16JsonProjection,
     ) -> Result<Option<u64>, String>;
 }

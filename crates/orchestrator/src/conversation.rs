@@ -104,6 +104,12 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Canonical reasoning behavior for the resolved route, independently of
+    /// its user-defined profile name. Unknown metadata admits no override.
+    fn reasoning_provider_for_model(&self, _model: &str, _profile: Option<&str>) -> Option<String> {
+        None
+    }
+
     /// Native QTe model-option observation for the selected request route.
     /// `None` means no local override was observed; callers then apply the
     /// route's baked Native default.

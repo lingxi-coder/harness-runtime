@@ -53,6 +53,9 @@ impl PermissionGate for CountingGate {
 struct CountingTool {
     calls: Arc<AtomicUsize>,
     replace_after_first: Option<PathBuf>,
+    modifier_failure: bool,
+    read_state: Option<tool_api::read_file_state::ReadFileStateMap>,
+    read_path: Option<PathBuf>,
 }
 
 #[async_trait::async_trait]
@@ -115,7 +118,7 @@ impl Tool for CountingTool {
 
     async fn call(
         &self,
-        _: Utf16JsonProjection,
+        input: Utf16JsonProjection,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -125,7 +128,39 @@ impl Tool for CountingTool {
                 replace_leaf(path);
             }
         }
-        Ok(tool_api::ToolCallResult::from_data("called".into()))
+        if let (Some(map), Some(path)) = (&self.read_state, &self.read_path) {
+            if input.at_pointer("/read").and_then(JsonValueView::as_bool) == Some(true) {
+                tool_api::read_file_state::set(
+                    map,
+                    path.clone(),
+                    tool_api::read_file_state::ReadFileEntry {
+                        content: "known read bytes".into(),
+                        mtime_ms: 17,
+                        offset: None,
+                        limit: None,
+                        from_read: true,
+                        seeded_from_context: false,
+                        is_partial_view: false,
+                    },
+                );
+            }
+            if input
+                .at_pointer("/check_cached_read")
+                .and_then(JsonValueView::as_bool)
+                == Some(true)
+            {
+                tool_file::check_read_before_write(map, path, 17, "known read bytes", false)
+                    .map_err(|error| tool_api::ToolError::Internal(error.to_string()))?;
+            }
+        }
+        let mut result = tool_api::ToolCallResult::from_data("called".into());
+        if self.modifier_failure {
+            result.context_modifier = Some(Box::new(|mut context| {
+                context.options.main_loop_model = "unresolvable-modifier-model".into();
+                context
+            }));
+        }
+        Ok(result)
     }
 }
 
@@ -154,12 +189,27 @@ fn orchestrator(
     writer: Option<Arc<JsonlWriter>>,
     replace_after_first: Option<PathBuf>,
 ) -> (ConversationOrchestrator, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    orchestrator_options(id, cwd, writer, replace_after_first, false, None)
+}
+
+fn orchestrator_options(
+    id: SessionId,
+    cwd: &Path,
+    writer: Option<Arc<JsonlWriter>>,
+    replace_after_first: Option<PathBuf>,
+    modifier_failure: bool,
+    read_path: Option<PathBuf>,
+) -> (ConversationOrchestrator, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let permissions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
+    let read_state = tool_api::read_file_state::new_read_file_state_map();
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(CountingTool {
         calls: calls.clone(),
         replace_after_first,
+        modifier_failure,
+        read_state: read_path.as_ref().map(|_| read_state.clone()),
+        read_path,
     }));
     let mut orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -171,7 +221,8 @@ fn orchestrator(
         Arc::new(StaticMemoryProvider::empty()),
         cwd.to_owned(),
     )
-    .with_session_id(id);
+    .with_session_id(id)
+    .with_read_state_map(read_state);
     if let Some(writer) = writer {
         orch = orch.with_jsonl_writer(writer);
     }
@@ -244,6 +295,47 @@ impl Fixture {
             Some(self.writer.clone()),
             replace_after_first,
         )
+    }
+
+    fn recaptured_writer(&self) -> Arc<JsonlWriter> {
+        let authority = session::jsonl::writer::TranscriptFileAuthority::capture(
+            self.source_root.clone(),
+            self.path.file_name().unwrap().into(),
+        )
+        .unwrap()
+        .0;
+        let state = self
+            ._root
+            .path()
+            .join(format!("cold-state-{}", Uuid::new_v4()));
+        std::fs::create_dir(&state).unwrap();
+        let writer = Arc::new(
+            JsonlWriter::new(
+                self.path.clone(),
+                Arc::new(platform_posix::fs::PosixFileSystem::new(
+                    self._root.path().to_owned(),
+                )),
+            )
+            .with_durable_lock(Arc::new(
+                session::jsonl::DurableTranscriptWriter::open(state).unwrap(),
+            )),
+        );
+        writer
+            .activate_session_target_with_authority(
+                self.id,
+                self.path.clone(),
+                self.source_root.clone(),
+                Some(authority),
+            )
+            .unwrap();
+        writer
+    }
+
+    fn checkpoint_path(&self) -> PathBuf {
+        self.source_root
+            .join("deferred-tool-replay")
+            .join(self.id.as_uuid().to_string())
+            .join(session::jsonl::JOURNAL_FILE_NAME)
     }
 }
 
@@ -339,12 +431,169 @@ async fn replay_rejects_missing_durable_authority() {
 }
 
 #[tokio::test]
-async fn replay_without_durable_writer_retains_in_memory_behavior() {
+async fn replay_without_durable_authority_fails_before_permission_or_effect() {
     let root = tempfile::tempdir().unwrap();
     let (orch, permissions, calls) = orchestrator(SessionId::new(), root.path(), None, None);
-    replay_deferred_tools_after_resume(&orch, deferred(1))
+    for _ in 0..2 {
+        assert!(replay_deferred_tools_after_resume(&orch, deferred(1))
+            .await
+            .is_err());
+    }
+    assert_eq!(permissions.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn successful_a_survives_b_authority_failure_and_identical_inode_replacement() {
+    let fixture = Fixture::new(true);
+    let (first, _, first_calls) = fixture.orchestrator(Some(fixture.path.clone()));
+    assert!(replay_deferred_tools_after_resume(&first, deferred(2))
+        .await
+        .is_err());
+    assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        first.session.lock().await.history.is_empty(),
+        "model-visible rows stay batched"
+    );
+    let (cold, permissions, calls) = orchestrator(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.recaptured_writer()),
+        None,
+    );
+    replay_deferred_tools_after_resume(&cold, deferred(2))
         .await
         .unwrap();
-    assert_eq!(permissions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "only B executes in the cold owner"
+    );
+    assert_eq!(
+        permissions.load(Ordering::SeqCst),
+        1,
+        "A does not reenter permission/dispatch"
+    );
+    let history = cold.session.lock().await.history.clone();
+    assert_eq!(history.len(), 1);
+    assert!(matches!(&history[0], ConversationMessage::User { content, .. } if content.len() == 2));
+}
+
+#[tokio::test]
+async fn started_unknown_replay_never_authorizes_a_second_effect() {
+    let fixture = Fixture::new(true);
+    let (orch, permissions, calls) = fixture.orchestrator(None);
+    let checkpoints = deferred_checkpoint::ReplayCheckpoints::open(&orch, fixture.id)
+        .await
+        .unwrap();
+    let descriptor =
+        deferred_checkpoint::ReplayDescriptor::new(fixture.id, &deferred(1).remove(0)).unwrap();
+    checkpoints.start(&descriptor).await.unwrap();
+    let error = replay_deferred_tools_after_resume(&orch, deferred(1))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown outcome"), "{error}");
+    assert_eq!(permissions.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn malformed_or_mismatched_completion_is_rejected_before_dispatch() {
+    for malformed in [false, true] {
+        let fixture = Fixture::new(true);
+        let (orch, permissions, calls) = fixture.orchestrator(None);
+        replay_deferred_tools_after_resume(&orch, deferred(1))
+            .await
+            .unwrap();
+        let mut retry = deferred(1);
+        if malformed {
+            use std::io::Write as _;
+            let mut wal = std::fs::OpenOptions::new()
+                .append(true)
+                .open(fixture.checkpoint_path())
+                .unwrap();
+            wal.write_all(b"{").unwrap();
+            wal.sync_all().unwrap();
+        } else {
+            retry[0].tool_input = Utf16JsonProjection::parse(r#"{"changed":true}"#).unwrap();
+        }
+        assert!(replay_deferred_tools_after_resume(&orch, retry)
+            .await
+            .is_err());
+        assert_eq!(permissions.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if malformed {
+            assert!(
+                std::fs::read(fixture.checkpoint_path())
+                    .unwrap()
+                    .ends_with(b"{"),
+                "a torn checkpoint must not be repaired"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn modifier_failure_leaves_unknown_attempt_instead_of_repeating_side_effect() {
+    let fixture = Fixture::new(true);
+    let (orch, _, calls) = orchestrator_options(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.writer.clone()),
+        None,
+        true,
+        None,
+    );
+    let first = replay_deferred_tools_after_resume(&orch, deferred(1))
+        .await
+        .unwrap_err();
+    assert!(first.to_string().contains("model preference"), "{first}");
+    let second = replay_deferred_tools_after_resume(&orch, deferred(1))
+        .await
+        .unwrap_err();
+    assert!(second.to_string().contains("unknown outcome"), "{second}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn recovered_read_completion_restores_cache_before_later_write_guard() {
+    let fixture = Fixture::new(true);
+    let path = fixture.source_root.join("read.txt");
+    let mut work = deferred(2);
+    work[0].tool_input = Utf16JsonProjection::parse(r#"{"read":true}"#).unwrap();
+    work[1].tool_input = Utf16JsonProjection::parse(r#"{"check_cached_read":true}"#).unwrap();
+    let (first, _, calls) = orchestrator_options(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.writer.clone()),
+        Some(fixture.path.clone()),
+        false,
+        Some(path.clone()),
+    );
+    assert!(replay_deferred_tools_after_resume(&first, work.clone())
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let (cold, _, cold_calls) = orchestrator_options(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.recaptured_writer()),
+        None,
+        false,
+        Some(path.clone()),
+    );
+    replay_deferred_tools_after_resume(&cold, work)
+        .await
+        .unwrap();
+    assert_eq!(cold_calls.load(Ordering::SeqCst), 1);
+    let entry = tool_api::read_file_state::get(&cold.prompt_runtime.read_state_map, &path).unwrap();
+    assert_eq!(
+        entry.mtime_ms,
+        i64::MIN,
+        "recovered snapshots must recheck present disk bytes"
+    );
+    let history = cold.session.lock().await.history.clone();
+    assert!(
+        matches!(&history[0], ConversationMessage::User { content, .. } if content.iter().all(|block| matches!(block, ContentBlock::ToolResult { is_error, .. } if *is_error != Some(true))))
+    );
 }

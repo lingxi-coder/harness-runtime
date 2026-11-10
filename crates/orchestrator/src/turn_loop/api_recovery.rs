@@ -129,6 +129,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // producers during recovery.
     native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     side_cancel: Option<&tokio_util::sync::CancellationToken>,
+    // The exact source captured by the physical request's owner. Recovery
+    // retains it without reconstructing a Native selection from a model name.
+    model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     let request_dispatch_observer = orch.turn_request_dispatch_observer();
     macro_rules! side_request {
@@ -318,6 +321,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         tools.clone(),
     );
     request.opts.native_anthropic_request_context = native_anthropic_request_context.clone();
+    request.opts.model_source = model_source.clone();
     request.opts.request_dispatch_observer = request_dispatch_observer.clone();
     request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
     request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
@@ -452,6 +456,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     );
                     request.opts.native_anthropic_request_context =
                         native_anthropic_request_context.clone();
+                    request.opts.model_source = model_source.clone();
                     request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                     request.opts.skip_global_cache_for_system_prompt =
                         skip_global_cache_for_system_prompt;
@@ -557,6 +562,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 );
                 request.opts.native_anthropic_request_context =
                     native_anthropic_request_context.clone();
+                request.opts.model_source = model_source.clone();
                 request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
@@ -650,7 +656,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         }
         // Cost preflight precedes any core call. The Mod may skip without
         // calling next(e); only the callback below starts the summarizer.
-        let reactive_cost_scope = orch.compaction_cost_scope().await.map_err(|error| {
+        let _reactive_cost_scope = orch.compaction_cost_scope().await.map_err(|error| {
             OrchestratorError::Internal(format!(
                 "reactive compaction cost preflight failed: {error}"
             ))
@@ -730,7 +736,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             return Ok(PtlCallOutcome::Cancelled);
         }
         *orch.compaction_runtime.compaction_tracking.lock().await = tracking.lock().await.clone();
-        let (compact_result, compact_duration, source_messages) = match compacted {
+        let (compact_result, _compact_duration, source_messages) = match compacted {
             Ok(SessionCompactDecision::Continue {
                 result,
                 source_messages,
@@ -758,11 +764,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
             .map(lingxi_core::types::text_byte_size)
             .sum();
         let pre_tokens_estimate = orch.current_live_context_usage_for(&source_messages).await;
-        // A successful summarizer response is owned before the failure-detail,
-        // telemetry, or output awaits below.
-        let compact_cost_receipt = compact_result.as_ref().ok().and_then(|result| {
-            orch.begin_compaction_usage(reactive_cost_scope.as_ref(), result, compact_duration)
-        });
+        // dispatch_session_compact_mods transferred each completed core
+        // response before returning to the outer middleware.
         // SC-04 (oracle `Fol`, cc-238.js @228433532): a FAILED rescue compact is
         // what upgrades the bare `Prompt is too long` into
         // `Prompt is too long · automatic compaction failed: <detail>`. Stash the
@@ -781,13 +784,6 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
         }
         if let Ok(result) = compact_result {
-            orch.settle_compaction_usage(compact_cost_receipt)
-                .await
-                .map_err(|error| {
-                    OrchestratorError::Internal(format!(
-                        "reactive compaction cost settlement failed: {error}"
-                    ))
-                })?;
             // #54 reactive rapid-refill (thrashing) breaker: if the reactive
             // compact tripped the breaker, re-compacting cannot help (a single
             // file/tool output is too large). Emit telemetry + surface the
@@ -869,6 +865,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 );
                 request.opts.native_anthropic_request_context =
                     native_anthropic_request_context.clone();
+                request.opts.model_source = model_source.clone();
                 request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),

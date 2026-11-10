@@ -5,12 +5,15 @@ use std::future::Future;
 #[derive(Clone)]
 pub(crate) struct DeferredStorageNotification {
     session: String,
+    paused: bool,
 }
 
 tokio::task_local! {
     static DEFERRED_STORAGE_NOTIFICATIONS:
         Arc<std::sync::Mutex<Vec<DeferredStorageNotification>>>;
 }
+
+const STORAGE_RECOVERED: &str = "Disk space is available again. Pending records were saved; continuing this session with its existing history.";
 
 const DISK_FULL_PAUSE: &str = "Session paused because disk space is insufficient (ENOSPC). Free disk space, then retry in this same session. Existing history is retained; pending records will be saved before continuing.";
 
@@ -55,8 +58,8 @@ impl ConversationOrchestrator {
                 .lock()
                 .await
                 .contains_key(&notice.session);
-            if active && paused {
-                self.output.emit_session_storage_state(true).await;
+            if active && paused == notice.paused {
+                self.output.emit_session_storage_state(notice.paused).await;
                 // The first callback may itself switch/recover the session.
                 let active =
                     self.session.lock().await.session_id.as_uuid().to_string() == notice.session;
@@ -66,9 +69,14 @@ impl ConversationOrchestrator {
                     .lock()
                     .await
                     .contains_key(&notice.session);
-                if active && paused {
+                if active && paused == notice.paused {
+                    let message = if notice.paused {
+                        DISK_FULL_PAUSE
+                    } else {
+                        STORAGE_RECOVERED
+                    };
                     self.output
-                        .emit_system_notice(&DISK_FULL_PAUSE.into(), true)
+                        .emit_system_notice(&message.into(), notice.paused)
                         .await;
                 }
             }
@@ -93,40 +101,86 @@ impl ConversationOrchestrator {
             }
         };
         if newly_paused && active {
-            let notice = DeferredStorageNotification { session };
-            if DEFERRED_STORAGE_NOTIFICATIONS
-                .try_with(|notices| {
-                    notices
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(notice.clone());
-                })
-                .is_err()
-            {
-                self.emit_deferred_storage_notifications(vec![notice]).await;
-            }
+            self.defer_storage_notification(DeferredStorageNotification {
+                session,
+                paused: true,
+            })
+            .await;
         }
     }
 
-    /// Keep the exact native row, including its UUID and provider metadata.
-    /// Advancing the logical tip lets later retained rows preserve their chain;
-    /// callers still receive the write error and never claim a durable append.
+    async fn defer_storage_notification(&self, notice: DeferredStorageNotification) {
+        if DEFERRED_STORAGE_NOTIFICATIONS
+            .try_with(|notices| {
+                notices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(notice.clone());
+            })
+            .is_err()
+        {
+            self.emit_deferred_storage_notifications(vec![notice]).await;
+        }
+    }
+
+    /// Retained rows and the logical cursor become visible together. Any
+    /// storage callback belongs to the outer transaction's notification scope.
     async fn retain_storage_row(&self, row: &JsonlMessage) {
-        self.mark_storage_paused(row.session_id.clone()).await;
-        let mut pauses = self.transcript.storage_pauses.lock().await;
-        let pause = pauses.entry(row.session_id.clone()).or_default();
-        if !pause.rows.iter().any(|pending| pending.uuid == row.uuid) {
-            pause.rows.push_back(row.clone());
-        }
-        *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+        let ((), notices) = self
+            .with_deferred_storage_notifications(async {
+                self.mark_storage_paused(row.session_id.clone()).await;
+                let mut pauses = self.transcript.storage_pauses.lock().await;
+                let pause = pauses.entry(row.session_id.clone()).or_default();
+                if !pause.rows.iter().any(|pending| pending.uuid == row.uuid) {
+                    pause.rows.push_back(row.clone());
+                    *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                }
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
     }
 
+    /// Append a linear row against the cursor selected by this transaction,
+    /// never against a cursor sampled before an external callback or await.
     pub(crate) async fn append_transcript_row(
         &self,
         writer: &session::jsonl::JsonlWriter,
         row: &JsonlMessage,
     ) -> Result<(), session::jsonl::writer::WriterError> {
-        let _append = self.transcript.storage_append_lock.lock().await;
+        self.append_transcript_row_with_parent(writer, row, false)
+            .await
+            .map(|_| ())
+    }
+
+    /// Return the actual parent for streaming tombstones. Explicit tool-result
+    /// parents and compact roots keep their supplied parent (including None).
+    pub(crate) async fn append_transcript_row_with_parent(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        row: &JsonlMessage,
+        explicit_parent: bool,
+    ) -> Result<Option<String>, session::jsonl::writer::WriterError> {
+        let (result, notices) = self
+            .with_deferred_storage_notifications(async {
+                let _append = self.transcript.storage_append_lock.lock().await;
+                let mut row = row.clone();
+                if !explicit_parent {
+                    row.parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
+                }
+                let parent = row.parent_uuid.clone();
+                self.append_transcript_row_locked(writer, &row).await?;
+                Ok(parent)
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
+        result
+    }
+
+    async fn append_transcript_row_locked(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        row: &JsonlMessage,
+    ) -> Result<(), session::jsonl::writer::WriterError> {
         let pending = self
             .transcript
             .storage_pauses
@@ -139,7 +193,9 @@ impl ConversationOrchestrator {
             return Err(lingxi_core::host::FsError::Io(DISK_FULL_PAUSE.into()).into());
         }
         let result = writer.append(row).await;
-        if result
+        if result.is_ok() {
+            *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+        } else if result
             .as_ref()
             .is_err_and(|error| cost::persistence::is_disk_full(&error.to_string()))
         {
@@ -148,9 +204,7 @@ impl ConversationOrchestrator {
         result
     }
 
-    /// Preserve the same ENOSPC queue boundary as individual appends while
-    /// allowing already-accepted rows to share their durable transaction.
-    pub(crate) async fn append_transcript_batch(
+    async fn append_transcript_batch_locked(
         &self,
         writer: &session::jsonl::JsonlWriter,
         rows: &[JsonlMessage],
@@ -158,7 +212,6 @@ impl ConversationOrchestrator {
         if rows.is_empty() {
             return Ok(());
         }
-        let _append = self.transcript.storage_append_lock.lock().await;
         let pending = self
             .transcript
             .storage_pauses
@@ -186,20 +239,49 @@ impl ConversationOrchestrator {
         result
     }
 
-    /// Settle a linear, already-prepared chain. On a non-ENOSPC failure,
-    /// subsequent rows chain from the last acknowledged row as they do in the
-    /// single-row path; ENOSPC retains the original suffix and logical tip.
+    /// Parent selection, acknowledged-prefix settlement, ENOSPC retention and
+    /// fallback reparents all share the ordinary single-row append transaction.
     pub(crate) async fn append_prepared_transcript_rows(
         &self,
         writer: &session::jsonl::JsonlWriter,
         rows: &mut [JsonlMessage],
     ) -> Vec<Result<(), session::jsonl::writer::WriterError>> {
-        let result = self.append_transcript_batch(writer, rows).await;
-        self.settle_prepared_transcript_rows(writer, rows, result)
-            .await
+        let (outcomes, notices) = self
+            .with_deferred_storage_notifications(async {
+                let _append = self.transcript.storage_append_lock.lock().await;
+                let mut parent = self.transcript.last_jsonl_uuid.lock().await.clone();
+                for row in rows.iter_mut() {
+                    row.parent_uuid = parent;
+                    parent = Some(row.uuid.clone());
+                }
+                let result = self.append_transcript_batch_locked(writer, rows).await;
+                self.settle_prepared_transcript_rows_locked(writer, rows, result)
+                    .await
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
+        outcomes
     }
 
+    #[cfg(test)]
     async fn settle_prepared_transcript_rows(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        rows: &mut [JsonlMessage],
+        result: Result<(), (usize, session::jsonl::writer::WriterError)>,
+    ) -> Vec<Result<(), session::jsonl::writer::WriterError>> {
+        let (outcomes, notices) = self
+            .with_deferred_storage_notifications(async {
+                let _append = self.transcript.storage_append_lock.lock().await;
+                self.settle_prepared_transcript_rows_locked(writer, rows, result)
+                    .await
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
+        outcomes
+    }
+
+    async fn settle_prepared_transcript_rows_locked(
         &self,
         writer: &session::jsonl::JsonlWriter,
         rows: &mut [JsonlMessage],
@@ -226,16 +308,9 @@ impl ConversationOrchestrator {
                         continue;
                     }
                     row.parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
-                    let result = self.append_transcript_row(writer, row).await;
-                    if result.is_ok() {
-                        *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
-                    }
-                    outcomes.push(result);
+                    outcomes.push(self.append_transcript_row_locked(writer, row).await);
                 }
             } else if let Some(row) = rows.last() {
-                // The rows were acknowledged before a maintenance rewrite
-                // failed. Keep their durable tip and report the uncertainty
-                // independently; replaying them would duplicate the batch.
                 self.record_transcript_append_failure(&row.session_id, "batch_maintenance", &error)
                     .await;
             }
@@ -251,15 +326,86 @@ impl ConversationOrchestrator {
         (session::jsonl::TranscriptAppendOutcome, Option<String>),
         session::jsonl::TranscriptWriterError,
     > {
-        let _append = self.transcript.storage_append_lock.lock().await;
-        let result = writer.append_pending_prompt_message_once(row).await;
-        if result
-            .as_ref()
-            .is_err_and(|error| cost::persistence::is_disk_full(&error.to_string()))
-        {
-            self.retain_storage_row(row).await;
-        }
+        let (result, notices) = self
+            .with_deferred_storage_notifications(async {
+                let _append = self.transcript.storage_append_lock.lock().await;
+                let mut retained = row.clone();
+                retained.parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
+                let pending = self
+                    .transcript
+                    .storage_pauses
+                    .lock()
+                    .await
+                    .get(&row.session_id)
+                    .is_some_and(|pause| !pause.rows.is_empty());
+                if pending {
+                    self.retain_storage_row(&retained).await;
+                    return Err(lingxi_core::host::FsError::Io(DISK_FULL_PAUSE.into()).into());
+                }
+                // A pending retry derives its parent under the durable writer's
+                // identity transaction and returns that transaction's actual tip.
+                let result = writer.append_pending_prompt_message_once(row).await;
+                if let Ok((_, tip)) = &result {
+                    *self.transcript.last_jsonl_uuid.lock().await = tip.clone();
+                } else if result
+                    .as_ref()
+                    .is_err_and(|error| cost::persistence::is_disk_full(&error.to_string()))
+                {
+                    self.retain_storage_row(&retained).await;
+                }
+                result
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
         result
+    }
+
+    /// Compact markers deliberately start a new physical chain. Their
+    /// logical-parent fallback and resulting cursor still share the append
+    /// transaction with ordinary rows and retained ENOSPC records.
+    pub(crate) async fn append_compact_boundary_row(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        row: &JsonlMessage,
+        exact_native: bool,
+    ) -> Result<(), String> {
+        let (result, notices) = self
+            .with_deferred_storage_notifications(async {
+                let _append = self.transcript.storage_append_lock.lock().await;
+                let mut row = row.clone();
+                if row.logical_parent_uuid.is_none() {
+                    row.logical_parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
+                }
+                if exact_native {
+                    match writer.append_native_message_once(&row).await {
+                        Ok((_, true)) => {
+                            *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                            Ok(())
+                        }
+                        Ok((_, false)) => {
+                            Err("native compact boundary is not the transcript tip".to_string())
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    self.append_transcript_row_locked(writer, &row)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .await;
+        self.emit_deferred_storage_notifications(notices).await;
+        result
+    }
+
+    /// A compact suffix can intentionally resume an older kept tail. Do not
+    /// rewind past a newer lifecycle attachment that committed in the meantime.
+    pub(crate) async fn relink_transcript_tip(&self, expected: &str, next: String) {
+        let _append = self.transcript.storage_append_lock.lock().await;
+        let mut tip = self.transcript.last_jsonl_uuid.lock().await;
+        if tip.as_deref() == Some(expected) {
+            *tip = Some(next);
+        }
     }
 
     pub(crate) async fn check_storage_pause(&self) -> Result<(), OrchestratorError> {
@@ -317,8 +463,12 @@ impl ConversationOrchestrator {
         }
         pauses.remove(&session);
         drop(pauses);
-        self.output.emit_session_storage_state(false).await;
-        self.output.emit_system_notice(&"Disk space is available again. Pending records were saved; continuing this session with its existing history.".into(), false).await;
+        drop(_append);
+        self.defer_storage_notification(DeferredStorageNotification {
+            session,
+            paused: false,
+        })
+        .await;
         Ok(())
     }
 }
@@ -722,5 +872,108 @@ mod tests {
         assert!(std::fs::read_to_string(path)
             .unwrap()
             .contains("original session only"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_ordinary_and_lifecycle_appends_choose_parent_inside_one_transaction() {
+        let (_dir, orch, _writer, path) = fixture();
+        let ordinary = ConversationMessage::user(MessageId::new(), "accepted ordinary row".into());
+        let hook_id = MessageId::new();
+        let payload = Utf16JsonProjection::parse(
+            r#"{"type":"hook_additional_context","content":"hook context"}"#,
+        )
+        .unwrap();
+        // Both writers reach the shared append boundary before either can
+        // append. A parent sampled outside that boundary is stale for writer 2.
+        let append = orch.transcript.storage_append_lock.lock().await;
+        let ordinary_write = orch.persist_message_to_jsonl(&ordinary);
+        let hook_write = orch.persist_hook_attachment_to_jsonl_with_id(hook_id, payload);
+        tokio::pin!(ordinary_write, hook_write);
+        assert!(futures::poll!(ordinary_write.as_mut()).is_pending());
+        assert!(futures::poll!(hook_write.as_mut()).is_pending());
+        drop(append);
+        ordinary_write.await;
+        hook_write.await;
+        let following =
+            ConversationMessage::user(MessageId::new(), "following accepted row".into());
+        orch.persist_message_to_jsonl(&following).await;
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        let ordinary_uuid = ordinary.id().as_uuid().to_string();
+        let hook_uuid = hook_id.as_uuid().to_string();
+        let following_uuid = following.id().as_uuid().to_string();
+        assert_eq!(
+            loaded.by_uuid[&hook_uuid].parent_uuid.as_ref(),
+            Some(&ordinary_uuid)
+        );
+        assert_eq!(
+            loaded.by_uuid[&following_uuid].parent_uuid.as_ref(),
+            Some(&hook_uuid)
+        );
+        assert_eq!(
+            orch.transcript.last_jsonl_uuid.lock().await.as_ref(),
+            Some(&following_uuid)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_tool_parent_and_compact_root_survive_linear_append_transactions() {
+        let (_dir, orch, writer, path) = fixture();
+        let first = row(&orch, "first").await;
+        orch.append_transcript_row(&writer, &first).await.unwrap();
+        let assistant_parent = "explicit-tool-assistant".to_string();
+        let mut tool_result = row(&orch, "tool result").await;
+        tool_result.parent_uuid = Some(assistant_parent.clone());
+        orch.append_transcript_row_with_parent(&writer, &tool_result, true)
+            .await
+            .unwrap();
+        let mut boundary = row(&orch, "boundary").await;
+        boundary.parent_uuid = None;
+        boundary.logical_parent_uuid = Some(tool_result.uuid.clone());
+        orch.append_compact_boundary_row(&writer, &boundary, false)
+            .await
+            .unwrap();
+        let following = row(&orch, "after boundary").await;
+        orch.append_transcript_row(&writer, &following)
+            .await
+            .unwrap();
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        assert_eq!(
+            loaded.by_uuid[&tool_result.uuid].parent_uuid.as_ref(),
+            Some(&assistant_parent)
+        );
+        assert_eq!(loaded.by_uuid[&boundary.uuid].parent_uuid, None);
+        assert_eq!(
+            loaded.by_uuid[&following.uuid].parent_uuid.as_ref(),
+            Some(&boundary.uuid)
+        );
+    }
+
+    #[tokio::test]
+    async fn retrying_a_retained_row_does_not_reparent_it_or_rewind_the_logical_tip() {
+        let (_dir, orch, writer, path) = fixture();
+        let first = row(&orch, "first retained row").await;
+        orch.retain_storage_row(&first).await;
+        let second = row(&orch, "second retained row").await;
+        orch.append_transcript_row(&writer, &second)
+            .await
+            .unwrap_err();
+        orch.append_transcript_row(&writer, &first)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            orch.transcript.last_jsonl_uuid.lock().await.as_ref(),
+            Some(&second.uuid)
+        );
+        let session = orch.session.lock().await.session_id.as_uuid().to_string();
+        let pending = orch.transcript.storage_pauses.lock().await[&session]
+            .rows
+            .clone();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].parent_uuid, first.parent_uuid);
+        assert_eq!(pending[1].parent_uuid.as_ref(), Some(&first.uuid));
+        orch.recover_session_storage().await.unwrap();
+        orch.recover_session_storage().await.unwrap();
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        assert_eq!(loaded.by_uuid.len(), 2);
     }
 }

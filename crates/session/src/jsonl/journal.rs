@@ -580,7 +580,7 @@ impl DurableJournal {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut scan = self.scan_file_locked(file, 0, 0, None, collect_entries, visitor)?;
+        let mut scan = self.scan_file_locked(file, 0, 0, None, collect_entries, visitor, true)?;
         scan.fingerprint = self.current_fingerprint_locked()?;
         Ok(scan)
     }
@@ -610,6 +610,7 @@ impl DurableJournal {
             Some(prior_locations),
             false,
             None,
+            true,
         )?;
         scan.fingerprint = self.current_fingerprint_locked()?;
         Ok(scan)
@@ -623,6 +624,7 @@ impl DurableJournal {
         prior_locations: Option<&std::collections::HashMap<String, JournalRecordLocation>>,
         collect_entries: bool,
         mut visitor: Option<&mut dyn FnMut(JournalEntry)>,
+        repair_final_tail: bool,
     ) -> Result<JournalScan, JournalError> {
         let relative = Path::new(JOURNAL_FILE_NAME);
         let mut reader = BufReader::with_capacity(16 * 1024, file);
@@ -701,6 +703,11 @@ impl DurableJournal {
         }
 
         if !line.is_empty() {
+            if !repair_final_tail {
+                return Err(JournalError::MalformedFinalTail {
+                    offset: line_offset,
+                });
+            }
             self.note_scanned_record();
             match serde_json::from_slice::<JournalEnvelope<Value>>(&line) {
                 Ok(envelope) => {
@@ -1075,6 +1082,67 @@ impl DurableJournal {
             scan.validated_len,
             synced,
         )?;
+        self.replace_index_from_scan(&mut scan);
+        Ok(scan.replay)
+    }
+
+    /// Durably validate a complete WAL without repairing an uncertain tail.
+    /// The scanned descriptor must still name the same leaf and byte prefix
+    /// when it is synced. As with other visitors, callers must buffer events
+    /// until this method succeeds before using them as durable authority.
+    pub fn replay_strict_durable_with<F>(
+        &self,
+        mut visitor: F,
+    ) -> Result<JournalReplay, JournalError>
+    where
+        F: FnMut(JournalEntry),
+    {
+        let _lock = self.lock()?;
+        let file = match open_read_file_pinned(
+            &self.root,
+            Path::new(JOURNAL_FILE_NAME),
+            Some(&self.identity),
+        ) {
+            Ok(file) => file,
+            Err(FsError::NotFound(_)) => {
+                if self.current_fingerprint_locked()?.is_some() {
+                    return Err(JournalError::Corrupted {
+                        offset: 0,
+                        reason: "missing journal appeared during strict replay".into(),
+                    });
+                }
+                return Ok(JournalReplay {
+                    entries: Vec::new(),
+                    last_revision: 0,
+                    repaired_final_tail: false,
+                    journal_present: false,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let before = JournalFileFingerprint::from_file(&file)?;
+        let scan_file = file
+            .try_clone()
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        self.note_scan(JournalScanKind::Full);
+        let mut scan =
+            self.scan_file_locked(scan_file, 0, 0, None, false, Some(&mut visitor), false)?;
+        let scanned = JournalFileFingerprint::from_file(&file)?;
+        if scanned != before || scan.validated_len != before.len {
+            return Err(JournalError::Corrupted {
+                offset: scan.validated_len,
+                reason: "journal changed while strict replay scanned its descriptor".into(),
+            });
+        }
+        let synced = self.sync_durable_prefix_locked(true)?;
+        scan.fingerprint =
+            self.validate_synced_fingerprint(Some(&before), true, scan.validated_len, synced)?;
+        if self.current_fingerprint_locked()? != scan.fingerprint {
+            return Err(JournalError::Corrupted {
+                offset: scan.validated_len,
+                reason: "journal changed after strict replay durability sync".into(),
+            });
+        }
         self.replace_index_from_scan(&mut scan);
         Ok(scan.replay)
     }
@@ -1903,5 +1971,56 @@ mod tests {
             assert_eq!(std::fs::read(&wal).unwrap(), incomplete);
             assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
         }
+    }
+
+    #[test]
+    fn strict_durable_replay_syncs_complete_records_and_rejects_every_torn_tail() {
+        let (dir, journal) = journal();
+        journal
+            .append_once("started", &json!({"stage":"started"}))
+            .unwrap();
+        let wal = dir.path().join(JOURNAL_FILE_NAME);
+        let complete = std::fs::read(&wal).unwrap();
+        let mut events = Vec::new();
+        let replay = journal
+            .replay_strict_durable_with(|entry| events.push(entry))
+            .unwrap();
+        assert_eq!(replay.last_revision, 1);
+        assert!(!replay.repaired_final_tail);
+        assert_eq!(events.len(), 1);
+        assert_eq!(std::fs::read(&wal).unwrap(), complete);
+        let valid_tail = serde_json::to_vec(&JournalEnvelope {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            journal_revision: 2,
+            event_id: "completed".to_owned(),
+            event: json!({"stage":"completed"}),
+        })
+        .unwrap();
+        for tail in [b"{bad".as_slice(), valid_tail.as_slice()] {
+            let mut torn = complete.clone();
+            torn.extend_from_slice(tail);
+            std::fs::write(&wal, &torn).unwrap();
+            assert!(matches!(
+                journal.replay_strict_durable_with(|_| {}),
+                Err(JournalError::MalformedFinalTail { .. })
+            ));
+            assert_eq!(std::fs::read(&wal).unwrap(), torn);
+        }
+    }
+
+    #[test]
+    fn strict_durable_replay_rejects_same_bytes_in_a_replaced_descriptor() {
+        let (dir, journal) = journal();
+        journal
+            .append_once("started", &json!({"stage":"started"}))
+            .unwrap();
+        let wal = dir.path().join(JOURNAL_FILE_NAME);
+        let bytes = std::fs::read(&wal).unwrap();
+        let result = journal.replay_strict_durable_with(|_| {
+            std::fs::rename(&wal, dir.path().join("old-ledger")).unwrap();
+            std::fs::write(&wal, &bytes).unwrap();
+        });
+        assert!(matches!(result, Err(JournalError::Corrupted { .. })));
+        assert_eq!(std::fs::read(&wal).unwrap(), bytes);
     }
 }

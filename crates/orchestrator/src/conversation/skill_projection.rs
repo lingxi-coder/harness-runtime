@@ -319,7 +319,6 @@ impl ConversationOrchestrator {
                     "conversation changed during skill projection persistence".into(),
                 ));
             }
-            *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid);
         }
         let mut session = self.session.lock().await;
         if session.session_id != target_session {

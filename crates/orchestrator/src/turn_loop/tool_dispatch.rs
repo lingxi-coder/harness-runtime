@@ -7181,25 +7181,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             match execution_record {
                 Err(error) => (None, Err(error), None),
                 Ok(record) => {
-                    if tool_dispatch_facts
-                        .as_ref()
-                        .and_then(|facts| facts.refusal_call_boundary.as_ref())
-                        .is_some_and(|boundary| !boundary.mark_started())
-                    {
-                        // Native's refusal boundary won before the physical
-                        // call. Close any native execution record, stop local
-                        // event producers, and return no synthetic tool or
-                        // post-tool hook work for a call that never ran.
-                        let aborted = Err(tool_api::ToolError::Aborted);
-                        Box::pin(crate::native_computer::after_execution(
-                            orch, record, &aborted,
-                        ))
-                        .await
-                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                        event_tasks_done.cancel();
-                        while event_tasks.join_next().await.is_some() {}
-                        return Ok(DeferredToolDispatch::default());
-                    }
+                    let refusal_suppressed = std::sync::atomic::AtomicBool::new(false);
                     // Keep the call future in this inner scope. When cancellation wins,
                     // leaving the scope drops the non-cooperative future (and its
                     // progress sender) before we await the progress consumer below.
@@ -7217,12 +7199,36 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         trace_context.as_ref(),
                         async {
                             // Recheck live authority after approvals and input hooks.
-                            let tool_call = async {
+                            let physical_call = async {
                                 orch.tools.check_session_tool_access(tool_handle.as_ref())?;
+                                if tool_dispatch_facts
+                                    .as_ref()
+                                    .and_then(|facts| facts.refusal_call_boundary.as_ref())
+                                    .is_some_and(|boundary| !boundary.mark_started())
+                                {
+                                    refusal_suppressed.store(true, Ordering::Release);
+                                    return Err(tool_api::ToolError::Aborted);
+                                }
                                 tool_handle
                                     .call(effective_input.clone(), ctx, progress_tx)
                                     .await
                             };
+                            let tool_call = hooks::cwd_changed_firer::scope_cwd_change_authority(
+                                publication_fence.clone(),
+                                async {
+                                    match publication_fence.as_ref() {
+                                        Some(guard) => {
+                                            hooks::attachment::run_with_first_poll_admission(
+                                                guard.as_ref(),
+                                                physical_call,
+                                            )
+                                            .await
+                                            .unwrap_or(Err(tool_api::ToolError::Aborted))
+                                        }
+                                        None => physical_call.await,
+                                    }
+                                },
+                            );
                             tokio::pin!(tool_call);
                             match (interrupt_behavior, dispatch_cancel) {
                                 (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {
@@ -7247,6 +7253,19 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         Ok(result) if !result.is_error => "success",
                         _ => "error",
                     });
+                    if refusal_suppressed.load(Ordering::Acquire) {
+                        // Refusal won inside the admitted first poll. Close the
+                        // native record and event producers without inventing
+                        // tool results or post-tool hooks for a call never run.
+                        Box::pin(crate::native_computer::after_execution(
+                            orch, record, &outcome,
+                        ))
+                        .await
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                        event_tasks_done.cancel();
+                        while event_tasks.join_next().await.is_some() {}
+                        return Ok(DeferredToolDispatch::default());
+                    }
                     (record, outcome, end_request)
                 }
             }

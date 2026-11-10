@@ -454,6 +454,7 @@ pub(super) async fn dispatch(
                         params.cost_scope.as_ref(),
                         params.native_anthropic_request_context.clone(),
                         None,
+                        None,
                     ),
                 ),
             )
@@ -604,6 +605,7 @@ pub(super) async fn dispatch(
                     &params.context_announcements,
                     params.cost_scope.as_ref(),
                     params.native_anthropic_request_context.clone(),
+                    None,
                     None,
                 ),
             )

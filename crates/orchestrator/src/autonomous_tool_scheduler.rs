@@ -174,6 +174,64 @@ mod transient_publication_tests {
     }
 
     #[tokio::test]
+    async fn retired_generation_never_first_polls_a_call_waiting_for_admission() {
+        let authority = CancellationToken::new();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let fence = ToolDispatchPublicationFence::new(authority.clone(), lock.clone());
+        let lease = lock.lock().await;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let call = hooks::attachment::run_with_first_poll_admission(&fence, async {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        tokio::pin!(call);
+        assert!(matches!(
+            futures::poll!(call.as_mut()),
+            std::task::Poll::Pending
+        ));
+        authority.cancel();
+        assert!(tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .is_none());
+        drop(lease);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_entered_call_keeps_running_after_its_short_admission_lease() {
+        let authority = CancellationToken::new();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let fence = ToolDispatchPublicationFence::new(authority.clone(), lock.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = entered.clone();
+        let released = release.clone();
+        let call = tokio::spawn(async move {
+            hooks::attachment::run_with_first_poll_admission(&fence, async move {
+                started.notify_one();
+                released.notified().await;
+                23
+            })
+            .await
+        });
+        entered.notified().await;
+        authority.cancel();
+        let drained = tokio::time::timeout(Duration::from_secs(2), lock.lock())
+            .await
+            .expect("retirement does not wait for the entered long call");
+        drop(drained);
+        assert!(!call.is_finished());
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(23)
+        );
+    }
+
+    #[tokio::test]
     async fn suspension_does_not_cancel_an_admitted_durable_mutation() {
         let authority = CancellationToken::new();
         let gate = Arc::new(TransientPublicationGate::default());

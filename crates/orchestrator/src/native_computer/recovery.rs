@@ -185,6 +185,7 @@ pub(super) async fn preserve_pending_compaction_tail(
         {
             // Recovery can derive notices only in memory. A preserved tail's
             // UUIDs must all exist on disk before the compact boundary names it.
+            let _append = orch.transcript.storage_append_lock.lock().await;
             let row = prepare_stored_row(orch, message).await?;
             let delivery = format!("native-compact-tail:{session_id}:{}", message.id());
             if exact_members {
@@ -200,7 +201,7 @@ pub(super) async fn preserve_pending_compaction_tail(
                     .await
                     .map_err(internal)?;
             } else {
-                persist_stored_row(orch, &row, &delivery).await?;
+                persist_stored_row_locked(orch, &row, &delivery).await?;
             }
         }
     }
@@ -947,6 +948,12 @@ pub(super) async fn refresh_pending(
         .iter()
         .flat_map(|record| record.execution_ids.iter().cloned())
         .collect();
+    let completed: HashSet<_> = recovered
+        .receipts
+        .iter()
+        .filter(|record| record.stage == NativeReceiptStage::ResponseReceived)
+        .flat_map(|record| record.execution_ids.iter().cloned())
+        .collect();
     restrict_completed_recovery(&mut recovered, &history, true)?;
     let records: HashMap<_, _> = recovered
         .executions
@@ -958,6 +965,7 @@ pub(super) async fn refresh_pending(
         .find_registered("computer")
         .filter(|tool| !tool.is_mcp() && tool.native_computer_capabilities().is_some());
     let mut work = orch.computer_runtime.work.lock().await.clone();
+    work.retain(|_, member| !completed.contains(&member.identity.execution_id()));
     if let Some(tool) = &tool {
         restore_execution_bindings(&records, tool, &mut work).await?;
     }
@@ -1075,25 +1083,33 @@ pub(super) async fn refresh_pending(
         abandon_calls(orch, session_id, provider, abandoned.clone(),
             "Recovered computer execution was not durably started, has no final model-visible output, or has an unknown input outcome. Do not repeat the inputs; obtain a fresh observation through the same provider's computer function.").await?;
     }
-    let mut ready = Vec::new();
+    // Index eligible work once per provider call. Historical acknowledged work
+    // is already pruned, and pending receipts need no member scan at all.
+    let mut calls = HashMap::new();
     for (id, member) in &work {
-        let members = work
-            .values()
-            .filter(|candidate| {
-                candidate.identity.provider_response_id == member.identity.provider_response_id
-                    && candidate.call.context.call_id == member.call.context.call_id
-            })
-            .collect::<Vec<_>>();
-        if !receipted.contains(&member.identity.execution_id())
-            && !abandoned.contains(&member.identity.call_identity())
-            && members.len() == member.call.operations.len()
-            && members.iter().all(|candidate| {
+        if receipted.contains(&member.identity.execution_id())
+            || abandoned.contains(&member.identity.call_identity())
+        {
+            continue;
+        }
+        calls
+            .entry((
+                &member.identity.provider_response_id,
+                &member.call.context.call_id,
+            ))
+            .or_insert_with(Vec::new)
+            .push((id, member));
+    }
+    let mut ready = Vec::new();
+    for members in calls.values() {
+        if members.len() == members[0].1.call.operations.len()
+            && members.iter().all(|(_, candidate)| {
                 records
                     .get(&candidate.identity.execution_id())
                     .is_some_and(|record| !needs_fresh_observation(record))
             })
         {
-            ready.push(id.clone());
+            ready.extend(members.iter().map(|(id, _)| (*id).clone()));
         }
     }
     ready.sort_by_key(ToString::to_string);
@@ -1144,6 +1160,12 @@ pub(super) async fn rehydrate(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let completed: HashSet<_> = recovered
+        .receipts
+        .iter()
+        .filter(|record| record.stage == NativeReceiptStage::ResponseReceived)
+        .flat_map(|record| record.execution_ids.iter().cloned())
+        .collect();
     restrict_completed_recovery(&mut recovered, &history, false)?;
     let records: HashMap<_, _> = recovered
         .executions
@@ -1247,6 +1269,9 @@ pub(super) async fn rehydrate(
             ));
         }
     }
+    // Reject inconsistent received boundaries before making this cold owner
+    // appear live to a subsequent recovery attempt.
+    validate_received_boundaries(&history, &receipt_artifacts)?;
     let mut state = RoundState {
         session_id: Some(session_id),
         continuation,
@@ -1265,12 +1290,6 @@ pub(super) async fn rehydrate(
     *orch.computer_runtime.work.lock().await = restored.clone();
     *orch.computer_runtime.state.lock().await = state;
 
-    let completed: HashSet<_> = recovered
-        .receipts
-        .iter()
-        .filter(|record| record.stage == NativeReceiptStage::ResponseReceived)
-        .flat_map(|record| record.execution_ids.iter().cloned())
-        .collect();
     for record in records.values() {
         if completed.contains(&record.execution_id()) {
             continue;
@@ -1314,7 +1333,6 @@ pub(super) async fn rehydrate(
         restore_message(orch, stored.message).await;
     }
 
-    validate_received_boundaries(&history, &receipt_artifacts)?;
     let mut acknowledged = BTreeSet::new();
     for (record, stored) in receipt_artifacts {
         match record.stage {
@@ -1335,6 +1353,11 @@ pub(super) async fn rehydrate(
             _ => {}
         }
     }
+    // Completed bindings were needed to validate the saved successor boundary.
+    // They are no longer runnable work and must not accumulate after a cold
+    // restore (including completed rows intentionally removed by compaction).
+    restored.retain(|_, member| !completed.contains(&member.identity.execution_id()));
+    *orch.computer_runtime.work.lock().await = restored.clone();
     if let Some(blocker) = recovered.receipts.iter().find(|record| {
         matches!(
             record.stage,

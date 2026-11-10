@@ -1580,6 +1580,16 @@ async fn persist_stored_row(
     row: &session::jsonl::JsonlMessage,
     delivery: &str,
 ) -> Result<(), OrchestratorError> {
+    let _append = orch.transcript.storage_append_lock.lock().await;
+    persist_stored_row_locked(orch, row, delivery).await
+}
+
+/// Caller holds the append lock, including while choosing a fresh row's parent.
+async fn persist_stored_row_locked(
+    orch: &ConversationOrchestrator,
+    row: &session::jsonl::JsonlMessage,
+    delivery: &str,
+) -> Result<(), OrchestratorError> {
     let writer = orch
         .transcript
         .jsonl_writer
@@ -1728,68 +1738,69 @@ pub(crate) async fn persist_native_assistant(
         .jsonl_writer
         .as_ref()
         .ok_or_else(|| internal("native transcript unavailable"))?;
-    let session_id = orch.session.lock().await.session_id;
-    let usage = crate::conversation::assistant_usage_value(&response.usage);
-    let mut row = orch.to_jsonl_message_with_inner_id(
-        &accepted,
-        &session_id.as_uuid().to_string(),
-        orch.transcript.last_jsonl_uuid.lock().await.clone(),
-        None,
-        None,
-        None,
-        Some(&response.id),
-        Some(&response.model),
-        Some(&usage),
-        request_id,
-        None,
-    );
-    row.extra
-        .set_field(
-            "modelProfile",
-            source_payload(&json!(orch.session.lock().await.model_profile))?,
-        )
-        .map_err(internal)?;
-    let uuid = row.uuid.clone();
-    let saved_response = if expected_ack.is_empty() {
-        None
-    } else {
-        Some(
-            store_payload(
-                orch,
-                &format!("native-response:{}", response.id),
-                &StoredOutput::new(accepted.clone(), row.clone()),
-            )
-            .await?,
-        )
-    };
-    let payload = transcript_row_source(&row)?;
     let mut persisted = None;
     let success = fence
         .commit_if_current(Box::pin(async {
-            // Recovery can finish this exact successor if publication is interrupted.
-            if let Some(saved) = saved_response {
-                if let Err(error) = prepare_response_receipts(orch, &response.id, saved).await {
-                    persisted = Some(Err(error));
-                    return;
-                }
-            }
             persisted = Some(
-                writer
-                    .append_native_json_once_durable_for_session_with_tip(
-                        session_id,
-                        &format!("native-response:{}", response.id),
-                        payload,
-                    )
-                    .await
-                    .map_err(internal),
+                async {
+                    // Acquire the publication lease before the append lock. Parent
+                    // selection, durable acceptance and tip publication are one
+                    // transaction, with no host callbacks under the append lock.
+                    let _append = orch.transcript.storage_append_lock.lock().await;
+                    let session_id = orch.session.lock().await.session_id;
+                    let usage = crate::conversation::assistant_usage_value(&response.usage);
+                    let mut row = orch.to_jsonl_message_with_inner_id(
+                        &accepted,
+                        &session_id.as_uuid().to_string(),
+                        orch.transcript.last_jsonl_uuid.lock().await.clone(),
+                        None,
+                        None,
+                        None,
+                        Some(&response.id),
+                        Some(&response.model),
+                        Some(&usage),
+                        request_id,
+                        None,
+                    );
+                    row.extra
+                        .set_field(
+                            "modelProfile",
+                            source_payload(&json!(orch.session.lock().await.model_profile))?,
+                        )
+                        .map_err(internal)?;
+                    let uuid = row.uuid.clone();
+                    if !expected_ack.is_empty() {
+                        let saved = store_payload(
+                            orch,
+                            &format!("native-response:{}", response.id),
+                            &StoredOutput::new(accepted.clone(), row.clone()),
+                        )
+                        .await?;
+                        // Recovery can finish this exact successor if publication
+                        // is interrupted after the durable receipt transition.
+                        prepare_response_receipts(orch, &response.id, saved).await?;
+                    }
+                    let (_, is_tip) = writer
+                        .append_native_json_once_durable_for_session_with_tip(
+                            session_id,
+                            &format!("native-response:{}", response.id),
+                            transcript_row_source(&row)?,
+                        )
+                        .await
+                        .map_err(internal)?;
+                    if is_tip && orch.session.lock().await.session_id == session_id {
+                        *orch.transcript.last_jsonl_uuid.lock().await = Some(uuid.clone());
+                    }
+                    Ok::<_, OrchestratorError>(uuid)
+                }
+                .await,
             );
         }))
         .await;
     if !success {
         return Err(internal("native response durable publication revoked"));
     }
-    persisted.ok_or_else(|| internal("native response persistence did not run"))??;
-    *orch.transcript.last_jsonl_uuid.lock().await = Some(uuid.clone());
+    let uuid = persisted.ok_or_else(|| internal("native response persistence did not run"))??;
     for block in content {
         if let ContentBlock::ToolUse { id, .. } = block {
             orch.record_source_tool_assistant_uuid(id, uuid.clone())
@@ -1841,6 +1852,7 @@ pub(crate) async fn publish_native_result(
         record.outcome = Some(ToolExecutionOutcome::Unknown);
     }
     if record.stage != ToolExecutionStage::OutputPublished {
+        let _append = orch.transcript.storage_append_lock.lock().await;
         if record.output.is_none() {
             record.output = Some(
                 store_payload(
@@ -1863,7 +1875,7 @@ pub(crate) async fn publish_native_result(
                 .ok_or_else(|| internal("missing saved output"))?,
         )
         .await?;
-        persist_stored_row(
+        persist_stored_row_locked(
             orch,
             &stored.row,
             &format!("{}:output", record.execution_id()),
@@ -2072,6 +2084,7 @@ pub(crate) async fn prepare_receipts(
             origin: None,
             turn_origin: None,
         };
+        let append = orch.transcript.storage_append_lock.lock().await;
         let row = prepare_stored_row(orch, &message).await?;
         let stored = StoredReceipt {
             block,
@@ -2101,7 +2114,8 @@ pub(crate) async fn prepare_receipts(
         if ack.duplicate {
             return Err(internal("native receipt preparation conflicted"));
         }
-        persist_stored_row(orch, &stored.row, &format!("{receipt_id}:history")).await?;
+        persist_stored_row_locked(orch, &stored.row, &format!("{receipt_id}:history")).await?;
+        drop(append);
         orch.session.lock().await.history.push(message);
         orch.computer_runtime
             .state

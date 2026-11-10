@@ -84,6 +84,9 @@ struct SessionCompactRowRecord {
 #[derive(Default)]
 struct SessionCompactRowCodec {
     records: std::collections::HashMap<String, SessionCompactRowRecord>,
+    // There is no public row handle for a history made entirely of hidden
+    // model context. Retain that exact empty projection for a no-op next(e).
+    unrepresented_messages: Option<Vec<ConversationMessage>>,
 }
 
 impl SessionCompactRowCodec {
@@ -135,13 +138,36 @@ impl SessionCompactRowCodec {
             );
             rows.push(row);
         }
+        if let Some(handle) = rows.last().and_then(|row| row.string_at("/handle")) {
+            // Hidden context after the final visible row belongs to that same
+            // preserved boundary, just as hidden context before a row does.
+            self.records
+                .get_mut(handle)
+                .unwrap()
+                .messages
+                .extend(leading_unrepresented);
+        } else if !leading_unrepresented.is_empty() {
+            self.unrepresented_messages = Some(leading_unrepresented);
+        }
         rows
+    }
+
+    fn validate_rows(&self, rows: &[CompactSource]) -> Result<(), hooks::mods::ModError> {
+        if rows.is_empty() && self.unrepresented_messages.is_some() {
+            return Ok(());
+        }
+        validate_session_compact_rows(rows)
     }
 
     fn messages_of_rows(
         &self,
         rows: &[CompactSource],
     ) -> Result<Vec<ConversationMessage>, hooks::mods::ModError> {
+        if rows.is_empty() {
+            if let Some(messages) = &self.unrepresented_messages {
+                return Ok(messages.clone());
+            }
+        }
         let mut messages = Vec::new();
         let mut restored_handles = std::collections::HashSet::new();
         for row in rows {
@@ -165,6 +191,10 @@ impl SessionCompactRowCodec {
 fn recorded_handle_key(handle: &str) -> String {
     handle.to_string()
 }
+
+#[cfg(test)]
+#[path = "tests/compact_middleware_ownership_tests.rs"]
+mod compact_middleware_ownership_tests;
 
 #[cfg(test)]
 #[path = "tests/persistence_boundary_regression_tests.rs"]
@@ -315,7 +345,7 @@ fn parse_session_compact_event_result(
             "session.compact result must contain messages or skip".to_string(),
         )
     })?;
-    validate_session_compact_rows(&rows)?;
+    codec.validate_rows(&rows)?;
     Ok(SessionCompactEventResult {
         messages: codec.messages_of_rows(&rows)?,
         tokens_before: parse_native_session_compact_number(result, "tokensBefore")?,
@@ -1157,6 +1187,109 @@ impl ConversationOrchestrator {
         instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         compact: SessionCompactCore,
     ) -> Result<SessionCompactDecision, hooks::mods::ModError> {
+        let scope = self.compaction_cost_scope().await.map_err(|error| {
+            hooks::mods::ModError::Native(format!("Compaction cost preflight failed: {error}"))
+        })?;
+        let receipts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let receipts_for_core = receipts.clone();
+        let bus = self.model_runtime.analytics_bus.clone();
+        let calls = self.model_runtime.api_calls_recorded.clone();
+        let accounted_core: SessionCompactCore = Arc::new(move |messages, instructions| {
+            let core = compact.clone();
+            let scope = scope.clone();
+            let receipts = receipts_for_core.clone();
+            let bus = bus.clone();
+            let calls = calls.clone();
+            Box::pin(async move {
+                let physical_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let observed_for_attempt = physical_observed.clone();
+                let attempt_scope = scope.clone();
+                let attempt_receipts = receipts.clone();
+                let attempt_bus = bus.clone();
+                let attempt_calls = calls.clone();
+                let observer: compaction::autocompact::SummaryAttemptObserver =
+                    Arc::new(move |attempt| {
+                        observed_for_attempt.store(true, std::sync::atomic::Ordering::Release);
+                        let Some(scope) = attempt_scope.as_ref() else {
+                            return;
+                        };
+                        // Every physical request transfers before its validation or
+                        // reask. The scope was captured before any Mod awaited next.
+                        let receipt = scope.submit_model_response(cost::CostModelResponse {
+                            model_ref: crate::cost_wiring::model_ref_from_string(
+                                &attempt.model,
+                                attempt.profile.as_deref(),
+                            ),
+                            usage: attempt.usage,
+                            duration: attempt.duration,
+                            retries: 0,
+                            cache_read_input_tokens: attempt.usage.tokens.cache_read,
+                            cache_creation_input_tokens: attempt.usage.tokens.cache_write,
+                            is_batch_request: false,
+                            account: None,
+                            bus: attempt_bus.clone(),
+                        });
+                        attempt_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        attempt_receipts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(receipt);
+                    });
+                let output = if scope.is_some() {
+                    compaction::autocompact::with_summary_attempt_observer(
+                        observer,
+                        core(messages, instructions),
+                    )
+                    .await?
+                } else {
+                    core(messages, instructions).await?
+                };
+                // Legacy/scripted compactors may expose only a final response.
+                // Real forks have already transferred every completed/partial
+                // attempt above; their aggregate final usage must not be billed again.
+                if !physical_observed.load(std::sync::atomic::Ordering::Acquire) {
+                    if let Some(receipt) = Self::submit_compaction_usage(
+                        scope.as_ref(),
+                        &output.result,
+                        output.api_duration,
+                        bus,
+                    ) {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        receipts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(receipt);
+                    }
+                }
+                Ok(output)
+            })
+        });
+        let decision = self
+            .dispatch_session_compact_mods_inner(trigger, messages, instructions, accounted_core)
+            .await;
+        let completed = std::mem::take(
+            &mut *receipts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        // On cancellation this future may be dropped here or inside the Mod.
+        // Dropping a receipt detaches its already-owned finalizer, never usage.
+        for receipt in completed {
+            let settlement = receipt.settle().await;
+            settlement.persistence_result().clone().map_err(|error| {
+                hooks::mods::ModError::Native(format!("Compaction cost settlement failed: {error}"))
+            })?;
+        }
+        decision
+    }
+
+    async fn dispatch_session_compact_mods_inner(
+        &self,
+        trigger: &str,
+        messages: Vec<ConversationMessage>,
+        instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        compact: SessionCompactCore,
+    ) -> Result<SessionCompactDecision, hooks::mods::ModError> {
         let original_instructions = instructions.cloned();
         let Some(registry) = self.lifecycle_runtime.hook_registry.as_ref() else {
             let output = compact(messages, original_instructions).await?;
@@ -1190,7 +1323,7 @@ impl ConversationOrchestrator {
         let row_codec =
             std::sync::Arc::new(std::sync::Mutex::new(SessionCompactRowCodec::default()));
         let messages_rows = row_codec.lock().unwrap().rows_for_messages(&messages);
-        validate_session_compact_rows(&messages_rows)?;
+        row_codec.lock().unwrap().validate_rows(&messages_rows)?;
         let mut input_fields = vec![
             ("trigger".to_string(), CompactSource::from(trigger)),
             ("messages".to_string(), compact_source_array(messages_rows)),
@@ -1257,8 +1390,11 @@ impl ConversationOrchestrator {
                                     "session.compact messages must be a native row list".into(),
                                 )
                             })?;
-                        validate_session_compact_rows(&messages)?;
-                        let messages = row_codec.lock().unwrap().messages_of_rows(&messages)?;
+                        let messages = {
+                            let codec = row_codec.lock().unwrap();
+                            codec.validate_rows(&messages)?;
+                            codec.messages_of_rows(&messages)?
+                        };
                         let output = compact(messages, instructions).await?;
                         let event_result = output.event_value()?;
                         row_codec
@@ -1756,7 +1892,17 @@ impl ConversationOrchestrator {
         self.output.emit_compaction_started().await;
 
         let outcome = async {
-            let pre_compact = self.fire_pre_compact("manual", user_context).await;
+            let pre_compact = self
+                .fire_pre_compact_for_idle(
+                    "manual",
+                    user_context,
+                    &cancel,
+                    format!("manual-compact:{}", uuid::Uuid::new_v4()),
+                )
+                .await
+                .ok_or_else(|| {
+                    lingxi_core::host::HandleError::ActionFailed("Compaction canceled.".into())
+                })?;
             if let Some(detail) = pre_compact.blocked_by {
                 let detail = detail.string_at("").unwrap_or_default().to_owned();
                 let msg = if detail.is_empty() {
@@ -1865,7 +2011,7 @@ impl ConversationOrchestrator {
                     lingxi_core::host::HandleError::ActionFailed(error.to_string())
                 })?,
             };
-            let (result, history_before, compact_duration) = match compacted {
+            let (result, history_before, _compact_duration) = match compacted {
                 SessionCompactDecision::Continue {
                     result,
                     source_messages,
@@ -1892,20 +2038,11 @@ impl ConversationOrchestrator {
             let pre_tokens_estimate =
                 compaction::grouping::estimate_tokens_for_range(&split.to_summarize);
             let messages_summarized = u32::try_from(split.to_summarize.len()).unwrap_or(u32::MAX);
-            let cost_receipt =
-                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
             if cancel.is_cancelled() {
                 return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
-            self.settle_compaction_usage(cost_receipt)
-                .await
-                .map_err(|error| {
-                    lingxi_core::host::HandleError::ActionFailed(format!(
-                        "Compaction cost settlement failed: {error}"
-                    ))
-                })?;
 
             // The kept half rides through `apply_post_compact`'s preserved-tail
             // slot; `placement` decides which side of the summary it lands on.
@@ -2057,7 +2194,17 @@ impl ConversationOrchestrator {
             // blocking PreCompact hook ABORTS the compaction, throwing
             // `"Compaction blocked by PreCompact hook: <blockedBy>"`. We surface the
             // same message as the `/compact` failure result.
-            let pre_compact = self.fire_pre_compact("manual", custom_instructions).await;
+            let pre_compact = self
+                .fire_pre_compact_for_idle(
+                    "manual",
+                    custom_instructions,
+                    &cancel,
+                    format!("manual-compact:{}", uuid::Uuid::new_v4()),
+                )
+                .await
+                .ok_or_else(|| {
+                    lingxi_core::host::HandleError::ActionFailed("Compaction canceled.".into())
+                })?;
             if let Some(detail) = pre_compact.blocked_by {
                 let detail = detail.string_at("").unwrap_or_default().to_owned();
                 let msg = if detail.is_empty() {
@@ -2157,7 +2304,7 @@ impl ConversationOrchestrator {
                     lingxi_core::host::HandleError::ActionFailed(error.to_string())
                 })?,
             };
-            let (result, history_before, compact_duration) = match compacted {
+            let (result, history_before, _compact_duration) = match compacted {
                 SessionCompactDecision::Continue {
                     result,
                     source_messages,
@@ -2174,8 +2321,6 @@ impl ConversationOrchestrator {
                 .map(lingxi_core::types::text_byte_size)
                 .sum();
             let pre_tokens_estimate = self.current_live_context_usage_for(&history_before).await;
-            let cost_receipt =
-                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
             // CC re-checks `signal.aborted` between compaction phases: an Esc that
             // lands while the summarizer response was already resolving must still
             // abort BEFORE the post-compact transition (file re-reads, SessionStart
@@ -2190,13 +2335,6 @@ impl ConversationOrchestrator {
             // (above, pre-hooks) feeds the boundary's user-visible durationMs;
             // feeding it here would fold PreCompact hook wall-time into
             // /cost's total_api_duration_ms.
-            self.settle_compaction_usage(cost_receipt)
-                .await
-                .map_err(|error| {
-                    lingxi_core::host::HandleError::ActionFailed(format!(
-                        "Compaction cost settlement failed: {error}"
-                    ))
-                })?;
 
             // Apply the post-compact transition (boundary marker + history swap +
             // CompactionCompleted emit) via the shared helper reused by the
@@ -3418,7 +3556,8 @@ impl ConversationOrchestrator {
                 return None;
             }
             if let Some(tail_last) = native_exact_tail.as_ref() {
-                *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last.clone());
+                self.relink_transcript_tip(&marker.id().as_uuid().to_string(), tail_last.clone())
+                    .await;
             }
             if let Some(prepared) = &exact_prepared {
                 prepared.commit(self);
@@ -3496,7 +3635,11 @@ impl ConversationOrchestrator {
             && matches!(placement, SummaryPlacement::BeforeKept)
         {
             if let Some(tail_last) = pre_boundary_last_uuid {
-                *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last);
+                let expected = result.messages.last().map_or_else(
+                    || marker.id().as_uuid().to_string(),
+                    |message| message.id().as_uuid().to_string(),
+                );
+                self.relink_transcript_tip(&expected, tail_last).await;
             }
         }
         // These are new rows after the preserved tail; never include the
@@ -3656,12 +3799,12 @@ impl ConversationOrchestrator {
         Ok(scope)
     }
 
-    /// Transfer a known compaction response before any post-response await.
-    pub(crate) fn begin_compaction_usage(
-        &self,
+    /// Transfer a known physical compaction response before any post-response await.
+    fn submit_compaction_usage(
         scope: Option<&cost::CostSessionScope>,
         result: &compaction::IterationCompactionResult,
         duration: std::time::Duration,
+        bus: Option<Arc<telemetry::AnalyticsBus>>,
     ) -> Option<cost::CostResponseReceipt> {
         let (Some(scope), Some(usage), Some(model)) = (
             scope,
@@ -3681,22 +3824,8 @@ impl ConversationOrchestrator {
             cache_creation_input_tokens: usage.tokens.cache_write,
             is_batch_request: false,
             account: None,
-            bus: self.model_runtime.analytics_bus.clone(),
+            bus,
         }))
-    }
-
-    pub(crate) async fn settle_compaction_usage(
-        &self,
-        receipt: Option<cost::CostResponseReceipt>,
-    ) -> Result<(), cost::CostPersistError> {
-        let Some(receipt) = receipt else {
-            return Ok(());
-        };
-        let settlement = receipt.settle().await;
-        self.model_runtime
-            .api_calls_recorded
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        settlement.persistence_result().clone().map(|_| ())
     }
 
     /// The shared output-token pool backing a launched workflow's
@@ -4273,7 +4402,7 @@ impl ConversationOrchestrator {
                 return AutomaticCompactOutcome::HookBlocked;
             }
 
-            let cost_scope = match self.compaction_cost_scope().await {
+            let _cost_scope = match self.compaction_cost_scope().await {
                 Ok(scope) => scope,
                 Err(error) => {
                     tracing::error!(%error, "proactive compaction cost preflight failed");
@@ -4352,7 +4481,12 @@ impl ConversationOrchestrator {
                     let phase_output = phase_output.clone();
                     let last_assistant_at = last_assistant_at_for_core;
                     let force_idle = force_idle;
-                    let model_override = model_override_for_core.clone();
+                    let model_override = model_override_for_core.as_ref().map(|model| {
+                        compaction::autocompact::CompactModelOverride::new(
+                            model.model.clone(),
+                            model.profile.clone(),
+                        )
+                    });
                     let token_budget = token_budget.clone();
                     let queued_human_commands = queued_human_commands.clone();
                     let tokens_before =
@@ -4444,15 +4578,16 @@ impl ConversationOrchestrator {
                             }
                         };
                         let result = if let Some(cancel) = cancel {
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),
-                        result = request => result,
-                    }
-                } else {
-                    request.await
-                }
-                .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
+                            tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => return Err(hooks::mods::ModError::Native("compaction cancelled".into())),
+                                result = request => result,
+                            }
+                        } else {
+                            request.await
+                        };
+                        let result = result
+                            .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
                         Ok(SessionCompactCoreOutput::new(
                             result,
                             source_messages,
@@ -4493,30 +4628,6 @@ impl ConversationOrchestrator {
                     .await,
                 )
             };
-            if let Some(override_model) = model_override.as_ref() {
-                if let Some(usage) = override_model.observed_usage() {
-                    let receipt = cost_scope.as_ref().map(|scope| {
-                        scope.submit_model_response(cost::CostModelResponse {
-                            model_ref: crate::cost_wiring::model_ref_from_string(
-                                &override_model.model,
-                                override_model.profile.as_deref(),
-                            ),
-                            usage,
-                            duration: compact_started.elapsed(),
-                            retries: 0,
-                            cache_read_input_tokens: usage.tokens.cache_read,
-                            cache_creation_input_tokens: usage.tokens.cache_write,
-                            is_batch_request: false,
-                            account: None,
-                            bus: self.model_runtime.analytics_bus.clone(),
-                        })
-                    });
-                    if let Err(error) = self.settle_compaction_usage(receipt).await {
-                        tracing::error!(%error, "candidate compaction cost settlement failed");
-                        return AutomaticCompactOutcome::Failed;
-                    }
-                }
-            }
             let Some(compacted) = compacted else {
                 self.output
                     .emit_compaction_finished(Some("Compaction canceled."))
@@ -4535,7 +4646,7 @@ impl ConversationOrchestrator {
             let tracking_after_core = tracking_state.lock().await.clone();
             let turns_since = i64::from(tracking_after_core.turn_counter);
             *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
-            let (result, snapshot, compact_duration, core_ran) = match compacted {
+            let (result, snapshot, _compact_duration, core_ran) = match compacted {
                 Ok(SessionCompactDecision::Continue {
                     result,
                     source_messages,
@@ -4571,22 +4682,8 @@ impl ConversationOrchestrator {
                 .iter()
                 .map(lingxi_core::types::text_byte_size)
                 .sum();
-            // The response facts become session-owned before any telemetry,
-            // output, or cancellation-sensitive await below.
-            let cost_receipt = if model_override.is_none() {
-                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration)
-            } else {
-                None
-            };
-            if let Err(error) = self.settle_compaction_usage(cost_receipt).await {
-                tracing::error!(%error, "proactive compaction cost settlement failed");
-                self.output
-                    .emit_compaction_finished(Some(&format!(
-                        "Compaction cost settlement failed: {error}"
-                    )))
-                    .await;
-                return AutomaticCompactOutcome::Failed;
-            }
+            // Physical response cost was transferred by each core callback,
+            // before any outer session.compact middleware continuation.
 
             // #54 rapid-refill (thrashing) breaker (proactive trip): when the
             // breaker tripped, the orchestrator SKIPPED the summarizer (history
@@ -4813,23 +4910,11 @@ impl ConversationOrchestrator {
         let uuid_for_chain = jmsg.uuid.clone();
         let (persisted, notices) = self
             .with_deferred_storage_notifications(async {
-                let append = if exact_native {
-                    match writer.append_native_message_once(&jmsg).await {
-                        Ok((_, true)) => Ok(()),
-                        Ok((_, false)) => {
-                            Err("native compact boundary is not the transcript tip".to_string())
-                        }
-                        Err(error) => Err(error.to_string()),
-                    }
-                } else {
-                    self.append_transcript_row(writer, &jmsg)
-                        .await
-                        .map_err(|error| error.to_string())
-                };
+                let append = self
+                    .append_compact_boundary_row(writer, &jmsg, exact_native)
+                    .await;
                 match append {
                     Ok(()) => {
-                        *self.transcript.last_jsonl_uuid.lock().await =
-                            Some(uuid_for_chain.clone());
                         telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
                         true
                     }
@@ -4906,6 +4991,19 @@ impl ConversationOrchestrator {
         cancellation: &CancellationToken,
         process_owner: String,
     ) -> Option<PreCompactHookOutcome> {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        if self
+            .compaction_runtime
+            .external_input_protected
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Some(PreCompactHookOutcome {
+                blocked_by: Some("Current external input must remain complete".into()),
+                additional_instructions: None,
+            });
+        }
         let mut ctx = self.lifecycle_hook_ctx(false).await;
         ctx.idle_compaction_cancellation = Some(cancellation.clone());
         ctx.idle_compaction_process_owner = Some(process_owner);

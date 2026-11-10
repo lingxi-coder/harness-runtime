@@ -14,6 +14,16 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+fn fixed_code_transcript(session_id: Uuid, body: &str) -> String {
+    let header = json!({
+        "type": "fixed-session-mode",
+        "sessionId": session_id.to_string(),
+        "sessionMode": "code",
+        "instructionEpoch": 0,
+    });
+    format!("{header}\n{body}")
+}
+
 async fn setup_two_turn_jsonl() -> (
     TempDir,
     std::path::PathBuf,
@@ -62,9 +72,12 @@ async fn setup_two_turn_jsonl() -> (
         }))
         .unwrap(),
     );
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_code_transcript(sid, &body),
+    )
+    .await
+    .unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
     (temp, lingxi_home, cwd, sid, m2, fs)
 }
@@ -1039,9 +1052,12 @@ async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
         }))
         .unwrap(),
     );
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_code_transcript(sid, &body),
+    )
+    .await
+    .unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
     let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
         .await
@@ -1101,9 +1117,12 @@ async fn resume_skips_synthetic_model_marker() {
             "invalid request: ..."
         ),
     );
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_code_transcript(sid, &body),
+    )
+    .await
+    .unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
     let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
         .await
@@ -1184,7 +1203,7 @@ async fn resume_marks_pre_compact_discovered_tools_loaded() {
     .unwrap();
     tokio::fs::write(
         subdir.join(format!("{sid}.jsonl")),
-        format!("{boundary}\n{summary}\n{assistant}\n"),
+        fixed_code_transcript(sid, &format!("{boundary}\n{summary}\n{assistant}\n")),
     )
     .await
     .unwrap();
@@ -1613,7 +1632,9 @@ mod deferred_tool_resume_tests {
             .unwrap(),
         );
         let transcript_path = subdir.join(format!("{sid}.jsonl"));
-        tokio::fs::write(&transcript_path, body).await.unwrap();
+        tokio::fs::write(&transcript_path, fixed_code_transcript(sid, &body))
+            .await
+            .unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(root.path().to_path_buf()));
         // This fixture imports a Native transcript before the resumed host mutates it.
         session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
@@ -1641,7 +1662,27 @@ mod deferred_tool_resume_tests {
         let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let (lingxi_home, cwd, sid, fs) = write_deferred_transcript(&temp, traceparent).await;
         let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
-        let writer = Arc::new(JsonlWriter::new(transcript_path.clone(), fs.clone()));
+        let authority = session::jsonl::writer::TranscriptFileAuthority::capture(
+            transcript_path.parent().unwrap().to_owned(),
+            transcript_path.file_name().unwrap().into(),
+        )
+        .unwrap()
+        .0;
+        let checkpoint_root = temp.path().join("durable-deferred-writer");
+        std::fs::create_dir(&checkpoint_root).unwrap();
+        let writer = Arc::new(
+            JsonlWriter::new(transcript_path.clone(), fs.clone()).with_durable_lock(Arc::new(
+                session::jsonl::DurableTranscriptWriter::open(checkpoint_root).unwrap(),
+            )),
+        );
+        writer
+            .activate_session_target_with_authority(
+                lingxi_core::types::SessionId::from_uuid(sid),
+                transcript_path.clone(),
+                PathBuf::from(&cwd),
+                Some(authority),
+            )
+            .unwrap();
 
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1761,9 +1802,12 @@ async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
                 parent = Some(id);
             }
         }
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), rows.join("\n"))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            subdir.join(format!("{sid}.jsonl")),
+            fixed_code_transcript(sid, &rows.join("\n")),
+        )
+        .await
+        .unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
         let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
         let snapshot = replayed.handle_runtime_snapshot();
@@ -1982,8 +2026,12 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    rows[1]["message"]["model"] = json!("claude-sonnet-4-5");
-    rows[1]["message"]["usage"] = json!({"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500});
+    let assistant = rows
+        .iter_mut()
+        .find(|row| row["type"].as_str() == Some("assistant"))
+        .expect("fixture has an assistant row");
+    assistant["message"]["model"] = json!("claude-sonnet-4-5");
+    assistant["message"]["usage"] = json!({"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500});
     std::fs::write(
         &path,
         rows.iter()

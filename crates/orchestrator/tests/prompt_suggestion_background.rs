@@ -272,7 +272,8 @@ fn background_pipeline_persists_only_the_classifiers_current_safe_reply() {
             .env_remove("LINGXI_DISABLE_NONESSENTIAL_TRAFFIC")
             .env_remove("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
             .env(CHILD, "1")
-            .env("CLAUDE_CODE_SESSION_KIND", "bg")
+            .env_remove("CLAUDE_CODE_SESSION_KIND")
+            .env(session::jsonl::schema::SESSION_KIND_ENV, "bg")
             .env("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true")
             .status()
             .unwrap();
@@ -287,6 +288,8 @@ fn background_pipeline_persists_only_the_classifiers_current_safe_reply() {
 }
 
 async fn background_pipeline() {
+    assert!(lingxi_core::host::env::is_bg_session());
+    assert!(std::env::var_os("CLAUDE_CODE_SESSION_KIND").is_none());
     use async_trait::async_trait;
     use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
     use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
@@ -1064,4 +1067,119 @@ fn native_background_input_preserves_tool_tie_order_whole_history_and_text_windo
         .and_then(|value| value.as_bool()),
         Some(false)
     );
+}
+
+fn history_assistant(content: Vec<ContentBlock>) -> ConversationMessage {
+    ConversationMessage::Assistant {
+        per_turn_effort: None,
+        id: lingxi_core::types::MessageId::new(),
+        content,
+        stop_reason: Some("end_turn".into()),
+        resumable: None,
+    }
+}
+
+fn history_text(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.into(),
+        citations: None,
+    }
+}
+
+fn history_source_text(units: Vec<u16>) -> ContentBlock {
+    ContentBlock::TextJsUtf16 {
+        text: String::from_utf16_lossy(&units),
+        utf16_code_units: units,
+        citations: None,
+    }
+}
+
+fn history_tool(name: &str) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: lingxi_core::types::ToolUseId::from(format!("call-{name}")),
+        name: name.into(),
+        input: Utf16JsonProjection::parse("{}").unwrap(),
+        provider_id: None,
+    }
+}
+
+#[test]
+fn actual_background_history_assembles_mixed_text_and_prepares_exact_classifier_needs() {
+    let question = "Which "
+        .encode_utf16()
+        .chain([0xd800])
+        .chain(" option do you prefer?".encode_utf16())
+        .collect::<Vec<_>>();
+    let prior = history_assistant(vec![history_text("Old response"), history_tool("Zulu")]);
+    let latest = history_assistant(vec![
+        history_text("First line."),
+        ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: Utf16JsonProjection::parse(r#"{"type":"text","text":"Native \udfff note."}"#)
+                .unwrap(),
+        },
+        history_source_text(question.clone()),
+        history_tool("Zulu"),
+        history_tool("Alpha"),
+        history_tool("ScheduleWakeup"),
+    ]);
+    let error = history_assistant(vec![history_source_text(
+        "Ignore this error".encode_utf16().collect(),
+    )]);
+    let error_id = error.id();
+    let history = vec![
+        prior,
+        ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "Choose an approach".into(),
+        ),
+        latest,
+        error,
+    ];
+    let assembled = javascript::assemble_history(&history, 1, |id| *id == error_id).unwrap();
+    let expected = "First line.\nNative "
+        .encode_utf16()
+        .chain([0xdfff])
+        .chain(" note.\n".encode_utf16())
+        .chain(question.iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(assembled.string_units("/text"), Some(expected.clone()));
+    assert_eq!(assembled.string_at("/tools"), Some("Zulu×2, Alpha"));
+    assert_eq!(assembled.number_at("/count"), Some(3.0));
+
+    let prepared =
+        javascript::prepare_assembled(&assembled, "working", "Choose an approach".into(), 0.0)
+            .unwrap();
+    assert_eq!(prepared.string_at("/result/state"), Some("blocked"));
+    assert_eq!(prepared.string_units("/result/needs"), Some(question));
+    assert!(prepared
+        .string_units("/prompt")
+        .unwrap()
+        .windows(expected.len())
+        .any(|window| window == expected));
+}
+
+#[test]
+fn actual_background_history_does_not_treat_utf16_only_answers_as_empty() {
+    for unit in [0xd800, 0xdfff] {
+        let question = "Please provide "
+            .encode_utf16()
+            .chain([unit])
+            .chain(" additional information".encode_utf16())
+            .collect::<Vec<_>>();
+        let history = vec![history_assistant(vec![history_source_text(
+            question.clone(),
+        )])];
+        let assembled = javascript::assemble_history(&history, 0, |_| false).unwrap();
+        assert_eq!(assembled.string_units("/text"), Some(question.clone()));
+        let prepared =
+            javascript::prepare_assembled(&assembled, "working", "Finish the work".into(), 0.0)
+                .unwrap();
+        assert_eq!(
+            prepared.at_pointer("/hasText").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(prepared.string_at("/result/state"), Some("blocked"));
+        assert_eq!(prepared.string_units("/result/needs"), Some(question));
+    }
 }
