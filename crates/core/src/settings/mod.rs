@@ -335,6 +335,48 @@ pub struct EffectiveSettings {
 }
 
 impl EffectiveSettings {
+    /// Select Native 2.1.319's `Dh` directory setting before path validation.
+    /// Managed and CLI overrides precede trusted local/project sources, then
+    /// user settings. An invalid high-priority path falls back to the default
+    /// memory directory, not to a lower-priority setting.
+    #[must_use]
+    pub fn auto_memory_directory(&self, workspace_trusted: bool) -> Option<String> {
+        use tracer::Source;
+        if !self.source_layers.is_empty() {
+            for source in [
+                Source::Managed,
+                Source::Cli,
+                Source::Local,
+                Source::Project,
+                Source::User,
+            ] {
+                if !workspace_trusted && matches!(source, Source::Local | Source::Project) {
+                    continue;
+                }
+                if let Some(value) = self
+                    .source_layers
+                    .iter()
+                    .rev()
+                    .filter(|layer| layer.source == source)
+                    .find_map(|layer| layer.projection.string_units("/autoMemoryDirectory"))
+                {
+                    // Node's filesystem path boundary replaces unpaired
+                    // UTF-16 units. They must not make a selected managed
+                    // source disappear in favour of a lower-priority path.
+                    return Some(String::from_utf16_lossy(&value));
+                }
+            }
+            return None;
+        }
+        let source = self
+            .effective_for("autoMemoryDirectory")
+            .and_then(|field| field.contributors.last());
+        if !workspace_trusted && matches!(source, Some(Source::Local | Source::Project)) {
+            return None;
+        }
+        self.settings.auto_memory_directory.clone()
+    }
+
     /// Look up provenance for a top-level settings field.
     ///
     /// Field names are camelCase wire identifiers (e.g. `trustedDirectories`),
@@ -923,6 +965,76 @@ mod load_tests {
     use crate::settings::test_support::HOME_LOCK;
     use std::collections::BTreeMap;
     use std::io::Write;
+
+    #[test]
+    fn memory_directory_source_selection_gates_workspace_layers_and_keeps_native_priority() {
+        use tracer::Source;
+        let env = BTreeMap::new();
+        let mut effective = Settings::load_with_layers(
+            LoadInputs {
+                env: &env,
+                project_dir: std::path::Path::new("/memory-source-test"),
+                defaults: SettingsJson::default(),
+            },
+            FileLayerScope {
+                include_user: false,
+                include_project: false,
+                include_local: false,
+            },
+            SupplementalLayers::default(),
+        )
+        .unwrap();
+        let layer = |source, directory: &str| raw_layer_stack::SettingsRawLayer {
+            source,
+            path: None,
+            projection: crate::types::utf16_json::Utf16JsonProjection::parse(
+                &serde_json::json!({"autoMemoryDirectory": directory}).to_string(),
+            )
+            .unwrap(),
+        };
+        effective.source_layers = vec![
+            layer(Source::User, "/user/memory"),
+            layer(Source::Project, "/project/memory"),
+            layer(Source::Local, "/local/memory"),
+        ];
+        assert_eq!(
+            effective.auto_memory_directory(false).as_deref(),
+            Some("/user/memory")
+        );
+        assert_eq!(
+            effective.auto_memory_directory(true).as_deref(),
+            Some("/local/memory")
+        );
+        effective
+            .source_layers
+            .push(layer(Source::Cli, "/cli/memory"));
+        effective
+            .source_layers
+            .push(layer(Source::Managed, "/managed/memory"));
+        assert_eq!(
+            effective.auto_memory_directory(false).as_deref(),
+            Some("/managed/memory")
+        );
+        // Native chooses the source before validating its path. An empty
+        // managed override therefore selects the default path at the next
+        // boundary rather than reusing a lower-priority directory.
+        effective.source_layers.push(layer(Source::Managed, ""));
+        assert_eq!(effective.auto_memory_directory(true).as_deref(), Some(""));
+        effective
+            .source_layers
+            .push(raw_layer_stack::SettingsRawLayer {
+                source: Source::Managed,
+                path: None,
+                projection: crate::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"autoMemoryDirectory":"/managed/\ud800"}"#,
+                )
+                .unwrap(),
+            });
+        assert_eq!(
+            effective.auto_memory_directory(false).as_deref(),
+            Some("/managed/\u{fffd}")
+        );
+    }
 
     #[test]
     fn env_beats_local_beats_project_beats_user_beats_defaults() {

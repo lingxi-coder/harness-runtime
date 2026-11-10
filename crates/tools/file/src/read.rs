@@ -2001,7 +2001,7 @@ impl Tool for FileReadTool {
         // One snapshot of trusted_dirs for both containment checks below (the
         // primary path and the macOS screenshot alt-path retry), so they
         // can't straddle a swap between the two calls.
-        let mut trusted_dirs = self.ctx.read_roots().await;
+        let mut trusted_dirs = self.ctx.read_roots_for_tool(TOOL_NAME, &input).await;
         if let Some(root) =
             lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {

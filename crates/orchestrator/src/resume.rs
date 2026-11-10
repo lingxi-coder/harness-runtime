@@ -3596,6 +3596,9 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        self.prompt_runtime
+            .memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(0);
         *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
@@ -3634,6 +3637,9 @@ impl ConversationOrchestrator {
             context_rendering_hint_from_messages(messages);
         if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
             *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
+            self.prompt_runtime
+                .memory_resume_prompt_checked
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         *self
             .transcript
@@ -3663,6 +3669,9 @@ impl ConversationOrchestrator {
         let (snapshot, rendering) =
             prompt_state_for_epoch_from_source(source, session_id, active_epoch);
         *self.prompt_runtime.prompt_snapshot.lock().await = snapshot;
+        self.prompt_runtime
+            .memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(active_epoch);
         *self.prompt_runtime.context_rendering_hint.lock().await = rendering;
         self.prompt_runtime

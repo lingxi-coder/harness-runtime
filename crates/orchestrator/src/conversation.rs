@@ -2262,6 +2262,12 @@ mod headless_mcp;
 mod headless_ui;
 #[path = "conversation/idle_compaction.rs"]
 mod idle_compaction_impl;
+#[path = "conversation/auto_memory.rs"]
+mod auto_memory;
+pub use auto_memory::AutoMemoryHandle;
+#[path = "conversation/background_memory.rs"]
+mod background_memory;
+pub use background_memory::{MemoryPreferences, MemoryPreferencesProvider};
 #[path = "conversation/persistent_chat_context.rs"]
 mod persistent_chat_context;
 pub use persistent_chat_context::PersistentChatContextConfig;

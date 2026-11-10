@@ -1,0 +1,789 @@
+{
+  "version": "2.1.319",
+  "native_sha256": "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd",
+  "source_byte_ranges": [
+    {
+      "name": "memory constants",
+      "start": 263563243,
+      "endExclusive": 263563306,
+      "sha256": "8319f7f5f2f5cf9dc9015caafec77ff65703dba445ff567f66bc8544a654c9ae"
+    },
+    {
+      "name": "memory directory instructions",
+      "start": 263563588,
+      "endExclusive": 263563859,
+      "sha256": "63c61b792cfd88591a90c6fc2001180bca23d0fc4c90326ccca45b527337c875"
+    },
+    {
+      "name": "memory tool names",
+      "start": 265393667,
+      "endExclusive": 265393776,
+      "sha256": "ecb2ef89522774e220168063dc2aac10385183d29af1d6732567ed5755a7c54b"
+    },
+    {
+      "name": "forked agent default turn cap",
+      "start": 271708077,
+      "endExclusive": 271708126,
+      "sha256": "7996c79dad06081d8ac018230e827f8e5692a1c975a3d9c2495db82ebd440fb3"
+    },
+    {
+      "name": "availability and setting gates",
+      "start": 278850306,
+      "endExclusive": 278850531,
+      "sha256": "078ce4d1ac3d5c77695a4b7ac93766245008e408fe32a4db064844383becbf15"
+    },
+    {
+      "name": "dream literals and Q renderer",
+      "start": 278850574,
+      "endExclusive": 278855839,
+      "sha256": "49c616c5d471eb1a04343759018ab2bb6a27c8b81e2c5a063410c67644e51523"
+    },
+    {
+      "name": "thresholds and host gates",
+      "start": 278856948,
+      "endExclusive": 278857451,
+      "sha256": "26ba867cc427329e8debb1e2f3fc6287af7d392278b63b06796178eacf3b3e77"
+    }
+  ],
+  "permitted_substitutions": [
+    "CLAUDE.md -> LINGXI.md",
+    "Claude sessions -> LingXi sessions"
+  ],
+  "cases": [
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": false,
+        "mcp_memory": false,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": false,
+        "mcp_memory": false,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": false,
+        "mcp_memory": false,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": false,
+        "mcp_memory": false,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": false,
+        "mcp_memory": true,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": false,
+        "mcp_memory": true,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": false,
+        "mcp_memory": true,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": false,
+        "mcp_memory": true,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": true,
+        "mcp_memory": false,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": true,
+        "mcp_memory": false,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": true,
+        "mcp_memory": false,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": true,
+        "mcp_memory": false,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": true,
+        "mcp_memory": true,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": true,
+        "mcp_memory": true,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "",
+        "team_memory": true,
+        "mcp_memory": true,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so."
+    },
+    {
+      "input": {
+        "memory_directory": "/home/u/.lingxi/projects/-repo/memdir",
+        "transcript_directory": "/home/u/.lingxi/projects/-repo",
+        "additional_context": "Prioritize build feedback.\nPreserve the useful explanation.",
+        "team_memory": true,
+        "mcp_memory": true,
+        "unused_flag": true
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/home/u/.lingxi/projects/-repo/memdir`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/home/u/.lingxi/projects/-repo` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /home/u/.lingxi/projects/-repo/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nPrioritize build feedback.\nPreserve the useful explanation."
+    },
+    {
+      "input": {
+        "memory_directory": "/记忆/🧠/{transcript_directory}",
+        "transcript_directory": "/sessions/{team_memory}/项目",
+        "additional_context": "Line one\r\nLine two {memory_directory}",
+        "team_memory": true,
+        "mcp_memory": true,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/记忆/🧠/{transcript_directory}`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/sessions/{team_memory}/项目` (large JSONL files — grep narrowly, don't read whole files)\n\n## Team memory (`team/` subdirectory)\n\nThe `team/` subdirectory holds memories shared across everyone working in this repo. Other teammates' LingXi sessions write here too — treat it differently from your personal files:\n\n- **Phase 1:** `ls team/` and skim it alongside your personal files. A teammate may have already captured something you'd otherwise duplicate.\n- **Phase 3:** Merge near-duplicates *within* `team/` the same way you would personal memories. If a personal memory restates a team memory, delete the personal one.\n- **Phase 4 — be conservative pruning `team/`:**\n  - DO delete or fix a team memory that is clearly contradicted by the current code, or that a newer team memory marks as superseded.\n  - DO NOT delete a team memory just because you don't recognize it or it isn't relevant to *your* recent sessions — a teammate may rely on it.\n  - When unsure, leave it. A stale team memory costs little; deleting a teammate's load-bearing note costs a lot.\n\nDo not promote personal memories into `team/` during a dream — that's a deliberate choice the user makes via `/remember`, not something to do reflexively.\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /sessions/{team_memory}/项目/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save. The memory_list / memory_read / memory_write tools are unavailable in a dream: consolidate only this memory directory, and leave anything that section marks as shared with the project where it is — never copy it into these files.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\nLine one\r\nLine two {memory_directory}"
+    },
+    {
+      "input": {
+        "memory_directory": "/a path/with `backticks` and $dollars",
+        "transcript_directory": "/a path/with \"quotes\"",
+        "additional_context": " ",
+        "team_memory": false,
+        "mcp_memory": false,
+        "unused_flag": false
+      },
+      "expected": "# Dream: Memory Consolidation\n\nYou are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.\n\nMemory directory: `/a path/with `backticks` and $dollars`\nThis directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nSession transcripts: `/a path/with \"quotes\"` (large JSONL files — grep narrowly, don't read whole files)\n\n---\n\n## Phase 1 — Orient\n\n- `ls` the memory directory to see what already exists\n- Read `MEMORY.md` to understand the current index\n- Skim existing topic files so you improve them rather than creating duplicates\n- If a `sessions/` subdirectory exists, review recent entries there\n\n## Phase 2 — Gather recent signal\n\nLook for new information worth persisting. Sources in rough priority order:\n\n1. **Existing memories that drifted** — facts that contradict something you see in the codebase now\n2. **Transcript search** — if you need specific context (e.g., \"what was the error message from yesterday's build failure?\"), grep the JSONL transcripts for narrow terms:\n   `grep -rn \"<narrow term>\" /a path/with \"quotes\"/ --include=\"*.jsonl\" | tail -50`\n\nDon't exhaustively read transcripts. Look only for things you already suspect matter.\n\n## Phase 3 — Consolidate\n\nFor each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.\n\nFocus on:\n- Merging new signal into existing topic files rather than creating near-duplicates\n- Converting relative dates (\"yesterday\", \"last week\") to absolute dates so they remain interpretable after time passes\n- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source\n\n## Phase 4 — Prune and index\n\nUpdate `MEMORY.md` so it stays under 200 lines AND under ~25KB. It's an **index**, not a dump — each entry should be one line under ~150 characters: `- [Title](file.md) — one-line hook`. Never write memory content directly into it.\n\n- Remove pointers to memories that are now stale, wrong, or superseded\n- Demote verbose entries: if an index line is over ~200 chars, it's carrying content that belongs in the topic file — shorten the line, move the detail\n- Add pointers to newly important memories\n- Resolve contradictions — if two files disagree, fix the wrong one\n\n### Reconcile memories against LINGXI.md\n\nProject LINGXI.md instructions are loaded in your system prompt. For each memory that captures feedback or project conventions (the `feedback`/`project` types, where tagged), check whether it contradicts a LINGXI.md instruction on the same topic:\n\n- **Memory is stale** — LINGXI.md and the memory describe different procedures for the same task: LINGXI.md is the maintained, checked-in source. Delete the memory, or rewrite it to agree if it carries context worth keeping (the *why* is still useful but the *how* is wrong).\n- **LINGXI.md may be stale** — the memory is clearly dated after LINGXI.md and explicitly corrects it: do NOT edit LINGXI.md during a dream. Annotate the memory with \"contradicts LINGXI.md — verify which is current\" and list it in your summary so the user can update LINGXI.md.\n- **Not a conflict** — the memory adds detail LINGXI.md doesn't cover, or narrows a LINGXI.md rule with a stated reason. Leave it.\n\nA `feedback` memory's \"Why: the user corrected me\" framing is not evidence it's newer than LINGXI.md — LINGXI.md may have been updated since.\n\n---\n\nReturn a brief summary of what you consolidated, updated, or pruned. If nothing changed (memories are already tight), say so.\n\n## Additional context\n\n "
+    }
+  ],
+  "scheduler_gates": [
+    {
+      "flag": null,
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": null,
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": null,
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": null,
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": null,
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": null,
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {},
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": true
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": true
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": true
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": true
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": false,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": false,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "available": false,
+        "enabled": false
+      },
+      "setting": true,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": false,
+      "enabled": false,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": null,
+      "host": {
+        "agent": true,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": true,
+        "autoMemory": true,
+        "excluded": false
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    },
+    {
+      "flag": {
+        "enabled": true
+      },
+      "setting": null,
+      "host": {
+        "agent": false,
+        "simple": false,
+        "autoMemory": true,
+        "excluded": true
+      },
+      "available": true,
+      "enabled": true,
+      "can_run": false
+    }
+  ],
+  "scheduler_thresholds": [
+    {
+      "flag": null,
+      "expected": {
+        "minHours": 24,
+        "minSessions": 5
+      }
+    },
+    {
+      "flag": {},
+      "expected": {
+        "minHours": 24,
+        "minSessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 0,
+        "minSessions": -1
+      },
+      "expected": {
+        "minHours": 24,
+        "minSessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 1.5,
+        "minSessions": 2.5
+      },
+      "expected": {
+        "minHours": 1.5,
+        "minSessions": 2.5
+      }
+    },
+    {
+      "flag": {
+        "minHours": "3",
+        "minSessions": "4"
+      },
+      "expected": {
+        "minHours": 24,
+        "minSessions": 5
+      }
+    },
+    {
+      "flag": {
+        "minHours": 48,
+        "minSessions": 10
+      },
+      "expected": {
+        "minHours": 48,
+        "minSessions": 10
+      }
+    }
+  ],
+  "scan_throttle_ms": 600000,
+  "default_max_turns": 50
+}

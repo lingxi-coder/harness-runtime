@@ -122,10 +122,11 @@ pub use conversation::{
     ScheduledLoopFire, ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 pub use conversation::{
-    AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
-    OrchestratorApiClient, OrchestratorApiRequest, PersistentChatContextConfig,
-    QueryUserInterruptionKind, SessionMemoryHandle, SideChatParentSnapshot, StreamingApiClient,
-    TurnExecutionMetrics, TurnOutcome,
+    AppAgentPromptProfile, AutoMemoryHandle, ConversationOrchestrator, ConversationOutcome,
+    HookPromptRequest, MemoryPreferences, MemoryPreferencesProvider, OrchestratorApiClient,
+    OrchestratorApiRequest, PersistentChatContextConfig, QueryUserInterruptionKind,
+    SessionMemoryHandle, SideChatParentSnapshot, StreamingApiClient, TurnExecutionMetrics,
+    TurnOutcome,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;

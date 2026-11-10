@@ -76,6 +76,9 @@ pub struct TaskRegistry {
     )>,
     observer_activity_lock: tokio::sync::Mutex<()>,
     tasks: Arc<crate::lifecycle_store::TaskRows>,
+    /// Automatic Dream completion is consumed by its memory-update owner.
+    /// Keep a terminal row until that owner has read its outcome and paths.
+    memory_completion_holds: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Active direct-Agent wait claims. Generations prevent a dropped older
     /// waiter from resetting a newer waiter's notification claim.
     agent_wait_claims: std::sync::Mutex<HashMap<String, AgentWaitClaimRecord>>,
@@ -368,6 +371,7 @@ type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
 struct SpawnPublicationGuard {
     task_id: String,
     tasks: Arc<crate::lifecycle_store::TaskRows>,
+    memory_completion_holds: Arc<std::sync::Mutex<HashSet<String>>>,
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
     cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
     aliases: Arc<RwLock<HashMap<String, String>>>,
@@ -380,6 +384,7 @@ impl SpawnPublicationGuard {
         Self {
             task_id,
             tasks: registry.tasks.clone(),
+            memory_completion_holds: registry.memory_completion_holds.clone(),
             spawned: registry.spawned.clone(),
             cleanups: registry.cleanups.clone(),
             aliases: registry.aliases.clone(),
@@ -405,6 +410,10 @@ impl Drop for SpawnPublicationGuard {
         if let Some(cleanup) = self.cleanup.take() {
             cleanup();
         }
+        self.memory_completion_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.task_id);
 
         let task_id = self.task_id.clone();
         let tasks = self.tasks.clone();
@@ -560,6 +569,7 @@ impl TaskRegistry {
             observer_activity_lock: tokio::sync::Mutex::new(()),
             pending_bash_registration: std::sync::Mutex::new(HashMap::new()),
             tasks: Arc::new(crate::lifecycle_store::TaskRows::default()),
+            memory_completion_holds: Arc::new(std::sync::Mutex::new(HashSet::new())),
             agent_wait_claims: std::sync::Mutex::new(HashMap::new()),
             next_agent_wait_claim_generation: AtomicU64::new(1),
             shell_session_activity: std::sync::Mutex::new(ShellSessionActivity::default()),
@@ -2825,6 +2835,18 @@ impl TaskRegistry {
                     self.bind_agent_spawn_token(&id, token);
                 }
             }
+            if matches!(
+                &input,
+                TaskSpawnInput::Dream {
+                    writes: Some(_),
+                    ..
+                }
+            ) {
+                self.memory_completion_holds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.clone());
+            }
             tasks.insert(id.clone(), state);
             spawned.insert(id.clone(), task_type);
             if let Some(cleanup) = cleanup {
@@ -2877,6 +2899,14 @@ impl TaskRegistry {
     pub async fn get(&self, task_id: &str) -> Option<TaskState> {
         let task_id = self.canonical_or_raw(task_id).await;
         self.tasks.read().await.get(&task_id).cloned()
+    }
+
+    /// The automatic-memory owner has consumed a Dream's terminal result.
+    pub(crate) fn release_memory_completion(&self, task_id: &str) {
+        self.memory_completion_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(task_id);
     }
 
     /// Return all known tasks.
@@ -5346,6 +5376,18 @@ impl TaskRegistry {
                 token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User);
             }
         }
+        // A terminal Dream may still be firing its completion hook. A
+        // reentrant stop from that hook must not wait on its own worker.
+        if !was_live
+            && self
+                .tasks
+                .read()
+                .await
+                .get(task_id_ref)
+                .is_some_and(|state| matches!(state, TaskState::Dream(_)))
+        {
+            return Ok(());
+        }
         if self
             .external_teammate_tasks
             .read()
@@ -5429,7 +5471,21 @@ impl TaskRegistry {
                 stop_guard = Some(guard);
                 result?;
             } else {
-                handler.kill(task_id_ref, ctx).await?;
+                let mut terminal = self.subscribe_task_notifications();
+                if !handler.request_stop(task_id_ref, ctx).await? {
+                    loop {
+                        if self
+                            .get(task_id_ref)
+                            .await
+                            .is_none_or(|state| state.base().status.is_terminal())
+                        {
+                            return Ok(());
+                        }
+                        if terminal.changed().await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
             }
             // Commit the routing teardown only after the owner confirms the
             // process is stopped. A concurrent terminal transition is harmless:
@@ -5734,6 +5790,11 @@ impl TaskRegistry {
                 let base = state.base();
                 if !base.status.is_terminal()
                     || !base.notified
+                    || self
+                        .memory_completion_holds
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains(&base.id)
                     || self.has_human_messages(&base.id)
                     || self
                         .shell_transfer_fences
@@ -6378,7 +6439,10 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         TaskSpawnInput::AutoModeScan => {
             TaskState::AutoModeScan(crate::state::AutoModeScanTaskState { base })
         }
-        TaskSpawnInput::Dream { max_iterations, .. } => {
+        TaskSpawnInput::Dream { max_iterations, writes, .. } => {
+            // Automatic consolidation delivers a memory_update, not a model
+            // task-notification. Set this before the worker is activated.
+            if writes.is_some() { base.notified = true; }
             TaskState::Dream(crate::state::DreamTaskState {
                 base,
                 iteration_count: 0,

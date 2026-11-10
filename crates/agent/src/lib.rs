@@ -43,6 +43,7 @@ pub mod handle;
 pub mod hooks_trust;
 mod instructions;
 pub mod mcp_servers;
+pub mod memory_fork;
 mod mod_agent_offer;
 mod mod_prompt_attachment;
 mod mod_turn_complete;

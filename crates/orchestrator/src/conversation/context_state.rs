@@ -550,7 +550,21 @@ impl ConversationOrchestrator {
         }
         let snapshot_epoch = *self.prompt_runtime.prompt_snapshot_epoch.lock().await;
         if !preserve_matching_prompt || snapshot_epoch.unwrap_or(0) != epoch {
+            *self
+                .prompt_runtime
+                .pending_memory_prompt_snapshot
+                .lock()
+                .await = None;
+            self.prompt_runtime
+                .memory_prompt_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.prompt_runtime
+                .memory_prompt_dirty
+                .store(true, std::sync::atomic::Ordering::Release);
             *self.prompt_runtime.prompt_snapshot.lock().await = None;
+            self.prompt_runtime
+                .memory_resume_prompt_checked
+                .store(false, std::sync::atomic::Ordering::Release);
             *self.prompt_runtime.context_rendering_hint.lock().await = None;
             *self.prompt_runtime.prompt_snapshot_epoch.lock().await = None;
         }

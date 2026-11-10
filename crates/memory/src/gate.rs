@@ -1,8 +1,9 @@
 //! Product auto-memory gate shared by prompt injection and memory prefetch.
 //!
 //! `LINGXI_DISABLE_AUTO_MEMORY` and `LINGXI_SIMPLE` disable memory when true.
-//! False flags leave the `autoMemoryEnabled` setting in control. With no flag
-//! or setting the feature is enabled.
+//! An explicit false disable flag forces memory on before the simple-mode and
+//! settings checks, matching Claude Code 2.1.319 `Mh`/`Aie`. With no flag or
+//! setting the feature is enabled.
 //!
 //! Environment is captured once at the composition root. The decision remains
 //! a pure function so ordinary tests do not mutate process-global variables.
@@ -12,7 +13,7 @@
 pub struct AutoMemoryEnv {
     /// `LINGXI_DISABLE_AUTO_MEMORY`, as written. `None` = unset.
     /// `1`, `true`, `yes`, or `on` disable memory.
-    /// A false flag leaves the simple-mode and settings gates in control.
+    /// An explicit false flag forces memory on before simple-mode/settings.
     pub disable_auto_memory: Option<String>,
     /// Whether `LINGXI_SIMPLE` is truthy.
     pub simple_mode: bool,
@@ -30,7 +31,7 @@ impl AutoMemoryEnv {
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         Self {
             disable_auto_memory: lookup("LINGXI_DISABLE_AUTO_MEMORY")
-                .filter(|value| !value.trim().is_empty()),
+                .filter(|value| !lingxi_core::host::effort::trim_js_whitespace(value).is_empty()),
             simple_mode: lingxi_core::host::env::is_env_truthy(lookup("LINGXI_SIMPLE").as_deref()),
         }
     }
@@ -42,14 +43,22 @@ impl AutoMemoryEnv {
 ///
 /// Precedence, highest first:
 /// 1. `disable_auto_memory` truthy  → OFF
-/// 2. `simple_mode`                 → OFF
-/// 3. `settings_enabled`            → whatever it says
-/// 4. otherwise                     → **ON**
+/// 2. `disable_auto_memory` explicitly false → ON
+/// 3. `simple_mode`                 → OFF
+/// 4. `settings_enabled`            → whatever it says
+/// 5. otherwise                     → **ON**
 #[must_use]
 pub fn auto_memory_enabled(env: &AutoMemoryEnv, settings_enabled: Option<bool>) -> bool {
     if let Some(raw) = env.disable_auto_memory.as_deref() {
         if lingxi_core::host::env::is_env_truthy(Some(raw)) {
             return false;
+        }
+        let lower = raw.to_lowercase();
+        if matches!(
+            lingxi_core::host::effort::trim_js_whitespace(&lower),
+            "0" | "false" | "no" | "off"
+        ) {
+            return true;
         }
     }
     if env.simple_mode {
@@ -86,10 +95,10 @@ mod tests {
     }
 
     #[test]
-    fn false_disable_flag_leaves_other_gates_in_control() {
+    fn false_disable_flag_forces_on_before_other_gates() {
         for raw in ["0", "false", "OFF"] {
-            assert!(!auto_memory_enabled(&env(Some(raw), false), Some(false)));
-            assert!(!auto_memory_enabled(&env(Some(raw), true), Some(true)));
+            assert!(auto_memory_enabled(&env(Some(raw), false), Some(false)));
+            assert!(auto_memory_enabled(&env(Some(raw), true), Some(true)));
             assert!(auto_memory_enabled(&env(Some(raw), false), None));
         }
     }
@@ -133,8 +142,8 @@ mod tests {
         // observe these environment changes.
         let cases = [
             (None, None, None, true),
-            (Some("false"), None, Some(false), false),
-            (Some("false"), Some("true"), Some(true), false),
+            (Some("false"), None, Some(false), true),
+            (Some("false"), Some("true"), Some(true), true),
             (None, Some("false"), None, true),
             (Some("yes"), Some("false"), Some(true), false),
         ];

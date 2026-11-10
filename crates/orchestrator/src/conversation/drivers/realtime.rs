@@ -1215,7 +1215,7 @@ impl ConversationOrchestrator {
             .iter()
             .filter_map(realtime_manifest_message)
             .collect::<Vec<_>>();
-        let system = self.provider_system_prompt().await?;
+        let system = self.provider_system_prompt_for_main_request().await?;
         let instructions = Self::system_prompt_source_text(&system)
             .string_at("")
             .map(str::to_owned)

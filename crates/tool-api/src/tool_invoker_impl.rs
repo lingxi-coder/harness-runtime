@@ -46,6 +46,7 @@ pub struct SuppliedTool(pub Arc<dyn crate::Tool>);
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
 /// Cheap to construct; clones share the same registry `Arc`.
+#[derive(Clone)]
 pub struct RegistryToolInvoker {
     registry: Arc<ToolRegistry>,
     trusted_session_profile: Option<lingxi_core::host::session_context::SessionModeSnapshot>,
@@ -61,6 +62,8 @@ pub struct RegistryToolInvoker {
     /// [`lingxi_core::host::permission_gate::PermissionCheckContext::background_owned`].
     /// Default `false`; set only via [`Self::with_background_owned`].
     background_owned: bool,
+    read_file_state: Option<crate::read_file_state::ReadFileStateMap>,
+    memory_fork_state: Option<Arc<crate::read_file_state::MemoryForkReadState>>,
 }
 
 impl RegistryToolInvoker {
@@ -75,6 +78,8 @@ impl RegistryToolInvoker {
             durable_tool_origins: None,
             gate: None,
             background_owned: false,
+            read_file_state: None,
+            memory_fork_state: None,
         }
     }
 
@@ -111,6 +116,14 @@ impl RegistryToolInvoker {
         self
     }
 
+    /// Bind the file cache shared by this registry's builtin tools. Memory
+    /// forks clone it without replacing the tools or changing session trust.
+    #[must_use]
+    pub fn with_read_file_state(mut self, state: crate::read_file_state::ReadFileStateMap) -> Self {
+        self.read_file_state = Some(state);
+        self
+    }
+
     /// Borrow the underlying registry `Arc`.
     #[must_use]
     pub fn registry_arc(&self) -> &Arc<ToolRegistry> {
@@ -125,6 +138,16 @@ impl RegistryToolInvoker {
 
 #[async_trait]
 impl ToolInvoker for RegistryToolInvoker {
+    fn fork_for_memory(&self, inherit_reads: bool) -> Option<Arc<dyn ToolInvoker>> {
+        let parent = self.read_file_state.as_ref()?;
+        let mut fork = self.clone();
+        fork.memory_fork_state = Some(Arc::new(match &self.memory_fork_state {
+            Some(seed) => seed.fork(),
+            None => crate::read_file_state::MemoryForkReadState::new(parent.clone(), inherit_reads),
+        }));
+        Some(Arc::new(fork))
+    }
+
     fn durable_origin_state(
         &self,
     ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
@@ -257,8 +280,12 @@ impl ToolInvoker for RegistryToolInvoker {
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.invoke_registered_or_supplied(name, input, ctx, None)
-            .await
+        let call = self.invoke_registered_or_supplied(name, input, ctx, None);
+        if let Some(state) = &self.memory_fork_state {
+            state.scope(call).await
+        } else {
+            call.await
+        }
     }
 
     async fn invoke_supplied_detailed(
@@ -304,6 +331,9 @@ impl RegistryToolInvoker {
         self.registry
             .check_session_tool_access(tool.as_ref())
             .map_err(|error| ToolInvokerError::Internal(error.model_facing_message()))?;
+        let memory_scope_directory =
+            lingxi_core::host::memory_tool_scope::memory_tool_scope_directory(name, &input);
+        let memory_scope_source = memory_scope_directory.as_ref().map(|_| input.clone());
 
         // BASH-18 `coerceInput` (claude-code 2.1.238 BIN off **294282716**): the
         // tool's own pre-validation normalization of the model's raw arguments.
@@ -349,6 +379,20 @@ impl RegistryToolInvoker {
                 None => {}
             }
         }
+        // Schema parsing can rebuild the flat arena and strip inert fields.
+        // Preserve the exact pre-schema authority while requiring that its
+        // path/command identity survives trusted normalization unchanged.
+        if let Some(source) = memory_scope_source.as_ref() {
+            if ["/file_path", "/command"]
+                .into_iter()
+                .any(|field| source.string_units(field) != input.string_units(field))
+            {
+                return Err(ToolInvokerError::InvalidInput(
+                    "The memory tool target changed during input normalization.".into(),
+                ));
+            }
+        }
+        let memory_scope_checked_input = memory_scope_directory.as_ref().map(|_| input.clone());
 
         // Tool-owned checks (MCP clamps and Workflow's nested Read gate) run
         // before either policy outcome can reach the tool body.
@@ -569,11 +613,41 @@ impl RegistryToolInvoker {
                 // Set semantics; a post-base `disallowed_tools` layer would
                 // reverse same-source negation order.
                 frozen_command_denies: ctx.frozen_command_denies.clone(),
-                permission_layers: own_plan_path
-                    .is_some()
-                    .then(|| permission::PermissionLayer::AllowedTools(vec![name.into()]).to_wire())
-                    .into_iter()
-                    .collect(),
+                permission_layers: {
+                    let mut layers = own_plan_path
+                        .is_some()
+                        .then(|| {
+                            permission::PermissionLayer::AllowedTools(vec![name.into()]).to_wire()
+                        })
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    // The memory worker mints this task-local allowance only
+                    // after validating the exact tool/input and memory path.
+                    // Configured deny/ask rules and tool-owned safety checks
+                    // still precede these per-call grants; no prompt is shown.
+                    if let Some(directory) = memory_scope_directory.clone() {
+                        layers.push(
+                            permission::PermissionLayer::WorkingDirectory(directory.clone())
+                                .to_wire(),
+                        );
+                        let file_roots =
+                            lingxi_core::host::memory_tool_scope::memory_tool_scope_file_roots(
+                                name,
+                                memory_scope_source
+                                    .as_ref()
+                                    .expect("memory scope has source input"),
+                            );
+                        for root in file_roots.into_iter().filter(|root| root != &directory) {
+                            layers.push(
+                                permission::PermissionLayer::WorkingDirectory(root).to_wire(),
+                            );
+                        }
+                        layers.push(
+                            permission::PermissionLayer::AllowedTools(vec![name.into()]).to_wire(),
+                        );
+                    }
+                    layers
+                },
                 // Finding 22: carry THIS invoker's background-owned marker
                 // (set only on the dedicated background-task invoker, see
                 // `with_background_owned`) onto every check so a transport
@@ -661,6 +735,21 @@ impl RegistryToolInvoker {
             ));
         }
 
+        if memory_scope_directory.is_some()
+            && (memory_scope_checked_input.as_ref() != Some(&input)
+                || lingxi_core::host::memory_tool_scope::memory_tool_scope_directory(
+                    name,
+                    memory_scope_source
+                        .as_ref()
+                        .expect("a memory scope has source input"),
+                ) != memory_scope_directory)
+        {
+            return Err(ToolInvokerError::InvalidInput(
+                "The memory tool call changed or its worker stopped after permission was checked."
+                    .into(),
+            ));
+        }
+
         // A transport may rewrite input, but the one-file allowance must not
         // follow that rewrite onto another path or a changed filesystem link.
         if let Some(approved_path) = own_plan_path {
@@ -692,13 +781,81 @@ impl RegistryToolInvoker {
         self.registry
             .check_session_tool_access(tool.as_ref())
             .map_err(|error| ToolInvokerError::Internal(error.model_facing_message()))?;
-        let result = tool
-            .call(input, tool_use_ctx, progress_tx)
+        let normalized_input = memory_scope_source.as_ref().map(|_| input.clone());
+        let call = async {
+            // Literal memory pruning is a rooted host operation on every
+            // shell backend. Permission and tool-local checks above still
+            // run; the command string never becomes a second filesystem sink.
+            if let Some(removal) =
+                lingxi_core::host::memory_tool_scope::memory_tool_scope_removals(name, &input)
+                    .map_err(|error| crate::ToolError::InvalidInput(error.to_string().into()))?
+            {
+                let cancellation = tool_use_ctx.cancel.clone();
+                if cancellation
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
+                {
+                    return Err(crate::ToolError::Aborted);
+                }
+                let worker_cancellation = cancellation.clone();
+                lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
+                    removal.remove_files(|| {
+                        worker_cancellation
+                            .as_ref()
+                            .is_some_and(|token| token.is_cancelled())
+                    })
+                })
+                .await
+                .map_err(|error| crate::ToolError::Internal(error.to_string()))?
+                .map_err(|error| {
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(|token| token.is_cancelled())
+                    {
+                        crate::ToolError::Aborted
+                    } else {
+                        crate::ToolError::Io(error.to_string().into())
+                    }
+                })?;
+                let data = if name == "Bash" {
+                    serde_json::json!({
+                        "stdout": "", "stderr": "", "interrupted": false, "isImage": false,
+                        "noOutputExpected": crate::util::shell_classification::silent::is_silent_bash_command(
+                            input.string_at("/command").unwrap_or_default()),
+                    })
+                } else {
+                    serde_json::json!({
+                        "exit_code": 0, "stdout": "", "stderr": "", "is_error": false,
+                        "timed_out": false, "truncated": false,
+                    })
+                };
+                let data = crate::tool_trait::generated_builtin_result(&data);
+                let model_content = tool.map_result_text(&data);
+                let mut result = crate::ToolCallResult::from_data(data);
+                result.model_content = model_content;
+                Ok(result)
+            } else {
+                tool.call(input, tool_use_ctx, progress_tx).await
+            }
+        };
+        let result = if let Some(original) = memory_scope_source.as_ref() {
+            lingxi_core::host::memory_tool_scope::with_normalized_memory_tool_scope(
+                name,
+                original,
+                normalized_input.expect("a memory call has normalized input"),
+                call,
+            )
             .await
-            .map_err(|e| match e {
-                crate::tool_trait::ToolError::InvalidInput(s) => ToolInvokerError::InvalidInput(s),
-                other => ToolInvokerError::Internal(other.model_facing_message()),
-            })?;
+            .ok_or_else(|| {
+                ToolInvokerError::InvalidInput("The memory tool scope is no longer active.".into())
+            })?
+        } else {
+            call.await
+        }
+        .map_err(|e| match e {
+            crate::tool_trait::ToolError::InvalidInput(s) => ToolInvokerError::InvalidInput(s),
+            other => ToolInvokerError::Internal(other.model_facing_message()),
+        })?;
 
         let turn_end = crate::tool_trait::tool_result_turn_end(
             tool.result_ends_turn(&result),
@@ -736,7 +893,7 @@ mod tests {
     use permission::result::PermissionMetadata;
     use permission::{PermissionDecisionReason, PermissionResult};
     use serde_json::Value;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
     fn source_fixture(value: Value) -> Utf16JsonProjection {
@@ -3189,5 +3346,78 @@ mod tests {
             .is_err());
         assert!(!other.exists());
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn memory_allowance_preserves_deny_ask_and_frozen_rules_without_changing_mode() {
+        use lingxi_core::host::memory_tool_scope::with_memory_tool_scope;
+        use permission::PermissionBehavior::{Ask, Deny};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("feedback.md");
+        let input = json!({"file_path":path,"content":"Keep the correction"});
+        for rule in [Some(Deny), Some(Ask), None] {
+            let invoker =
+                RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(rule));
+            let mut ctx = no_ctx();
+            ctx.mode_override = Some("plan".into());
+            ctx.is_non_interactive_session = true;
+            let result = with_memory_tool_scope(
+                "Write".into(),
+                input.clone(),
+                directory.path().to_path_buf(),
+                Arc::new(AtomicBool::new(true)),
+                ToolInvoker::invoke_detailed(&invoker, "Write", input.clone(), ctx),
+            )
+            .await;
+            assert_eq!(result.is_ok(), rule.is_none());
+            if rule.is_some() {
+                assert!(!path.exists());
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        let invoker =
+            RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(None));
+        let mut ctx = no_ctx();
+        ctx.is_non_interactive_session = true;
+        ctx.frozen_command_denies.push("Write".into());
+        let result = with_memory_tool_scope(
+            "Write".into(),
+            input.clone(),
+            directory.path().to_path_buf(),
+            Arc::new(AtomicBool::new(true)),
+            ToolInvoker::invoke_detailed(&invoker, "Write", input, ctx),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn memory_allowance_rejects_permission_rewrites() {
+        use lingxi_core::host::memory_tool_scope::with_memory_tool_scope;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feedback.md");
+        let other = directory.path().join("other.md");
+        let input = json!({"file_path":path,"content":"one fact"});
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                updated_input: Some(json!({"file_path":other,"content":"changed"})),
+                permission_updates: vec![],
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(plan_probe_registry()).with_gate(gate);
+        let result = with_memory_tool_scope(
+            "Write".into(),
+            input.clone(),
+            directory.path().to_path_buf(),
+            Arc::new(AtomicBool::new(true)),
+            ToolInvoker::invoke_detailed(&invoker, "Write", input, no_ctx()),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!path.exists());
+        assert!(!other.exists());
     }
 }

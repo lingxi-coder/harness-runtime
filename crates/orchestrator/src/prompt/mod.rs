@@ -500,9 +500,10 @@ pub(crate) fn named_prompt_sections_for_mode(
         };
         sections.push(PromptSection::new(
             memory_id,
-            memory_section::render_for_profile(
-                &dir.to_string_lossy(),
+            memory_section::render_for_prompt(
+                &memory::memdir::paths::memory_directory_prompt_path(dir),
                 lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model),
+                ctx.exclude_dynamic_sections,
             ),
             PromptSectionScope::Session,
         ));

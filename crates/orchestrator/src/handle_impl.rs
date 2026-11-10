@@ -285,6 +285,7 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        self.reset_background_memory().await;
         self.reset_native_proactivity_session();
         self.reset_prompt_suggestion_session();
         // Retire session-owned async hook completions before clearing or

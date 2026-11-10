@@ -448,6 +448,7 @@ pub mod instruction_memory_sanitize;
 /// Shared main/subagent instruction-loading boundary.
 pub mod instructions;
 pub mod invoked_skills;
+pub mod memory_tool_scope;
 
 pub use tool_execution::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,

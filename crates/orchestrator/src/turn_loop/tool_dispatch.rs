@@ -604,8 +604,7 @@ pub(super) async fn memdir_index_notice_for_tool(
         .prompt_runtime
         .memory_prefetch
         .as_ref()?
-        .user_memdir()?
-        .to_path_buf();
+        .user_memdir()?;
     let target = resolve_tool_file_path(tool_input, &orch.current_cwd())?;
     tokio::task::spawn_blocking(move || {
         let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));

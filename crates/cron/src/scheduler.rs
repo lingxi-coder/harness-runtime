@@ -72,6 +72,10 @@ impl SessionCronDelivery for RegistryTestDelivery {
                     prompt: String::from_utf16_lossy(
                         &fire.prompt.string_units("").unwrap_or_default(),
                     ),
+                    context: None,
+                    fork_request: None,
+                    fork_wire: None,
+                    writes: None,
                     max_iterations: None,
                 },
                 format!("cron: {}", fire.id).into(),

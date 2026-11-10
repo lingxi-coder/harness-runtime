@@ -467,6 +467,11 @@ impl StateMachinePool {
         // not proof the accepted runner was destroyed. Both the local/slot
         // owner and the actual runner must release before capacity returns.
         let runner_capacity = capacity_permit.clone();
+        // A memory worker can be aborted while this separately scheduled
+        // runner is still executing a tool. Its receipt ends at actual runner
+        // destruction, independently of wrapper or slot-table removal.
+        let memory_settlement = crate::memory_fork::current_settlement();
+        let memory_work = memory_settlement.as_ref().map(|owner| owner.enter());
         let restore_startup =
             crate::context::HandbackRestoreStartupGuard(ctx.handback_restore_start.clone());
         let task = self
@@ -474,6 +479,7 @@ impl StateMachinePool {
             .spawn(
                 "subagent-state-machine",
                 Box::pin(async move {
+                    let _memory_work = memory_work;
                     let _restore_startup = restore_startup;
                     let _capacity = runner_capacity;
                     // Keep the ID reserved even when allocation is cancelled
@@ -485,7 +491,11 @@ impl StateMachinePool {
                             return;
                         }
                     }
-                    crate::runner::run_subagent(ctx, event_rx, out_tx).await;
+                    let run = crate::runner::run_subagent(ctx, event_rx, out_tx);
+                    match memory_settlement {
+                        Some(owner) => crate::memory_fork::with_settlement(owner, run).await,
+                        None => run.await,
+                    };
                 }),
             )
             .await?;
@@ -828,6 +838,7 @@ mod tests {
             budget: None,
             hook_executor: None,
             agent_spawn_token: None,
+            memory_fork_wire: None,
             stop_hook_scope: Default::default(),
             subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
@@ -1301,7 +1312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_ack_does_not_release_a_live_runner_capacity() {
+    async fn memory_cancellation_ack_does_not_release_a_live_runner_capacity_or_settlement() {
         type Runner = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
         #[derive(Default)]
         struct CooperativeRuntime {
@@ -1341,10 +1352,15 @@ mod tests {
         let (mut permits, drain) = lease.into_parts();
         let drain = drain.expect("production group carries a producer drain");
         let permit = pool.take_panel_permit(permits.pop().unwrap()).unwrap();
-        let (id, _events) = pool
-            .allocate_admitted_with_receipt(make_ctx(), None, permit, None)
-            .await
-            .unwrap();
+        let memory = Arc::new(crate::memory_fork::MemoryForkSettlement::default());
+        let outer = memory.enter();
+        let (id, _events) = crate::memory_fork::with_settlement(
+            memory.clone(),
+            pool.allocate_admitted_with_receipt(make_ctx(), None, permit, None),
+        )
+        .await
+        .unwrap();
+        drop(outer);
         pool.deallocate(&id).await.unwrap();
         assert_eq!(pool.slot_count().await, 0);
         let available_before_drop = pool.capacity.available_permits();
@@ -1353,6 +1369,11 @@ mod tests {
             futures::poll!(&mut draining).is_pending(),
             "cancel ack cannot complete producer drain"
         );
+        let mut memory_done = Box::pin(memory.wait());
+        assert!(
+            futures::poll!(&mut memory_done).is_pending(),
+            "memory wrapper/slot removal must not settle a retained actual runner"
+        );
         drop(runtime.runner.lock().unwrap().take());
         assert_eq!(
             available_before_drop, 0,
@@ -1360,6 +1381,7 @@ mod tests {
         );
         assert_eq!(pool.capacity.available_permits(), 1);
         draining.await;
+        memory_done.await;
     }
 
     /// `send_event` routes an inbound `lingxi_core::Event` into the slot's runner.

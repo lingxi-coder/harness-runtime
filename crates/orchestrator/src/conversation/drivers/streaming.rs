@@ -4097,7 +4097,7 @@ impl StreamingTurnDriver<'_> {
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(orch.provider_system_prompt().await?);
+        > = Some(orch.provider_system_prompt_for_main_request().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.

@@ -213,3 +213,110 @@ async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
     );
     assert!(!handle.extractor.lock().await.is_initialized());
 }
+
+#[tokio::test]
+async fn hot_memory_disable_fences_legacy_extraction_commit_and_blocks_a_fresh_query() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = Arc::new(BlockingSideQuery {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let handle = Arc::new(SessionMemoryHandle {
+        extractor: tokio::sync::Mutex::new(memory::session_memory::SessionMemoryExtractor::new(
+            memory::session_memory::SessionMemoryConfig {
+                enabled: true,
+                minimum_message_tokens_to_init: 0,
+                minimum_tokens_between_update: 0,
+                tool_calls_between_updates: 0,
+            },
+        )),
+        runner: Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "haiku".into()),
+        ),
+        config_home: dir.path().to_path_buf(),
+        runtime: Arc::new(TokioRuntime),
+        in_flight: std::sync::atomic::AtomicBool::new(false),
+        generation: std::sync::atomic::AtomicU64::new(0),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    slot.save(cache_safe_params()).await;
+    let roots = memory::memdir::paths::memdir_roots_at(dir.path(), dir.path(), false);
+    let memory_directory = roots.user_memdir.clone();
+    let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::new(
+        Arc::new(memory::selector::MemorySelector::new(client.clone())),
+        Arc::new(TokioRuntime),
+        roots,
+    ));
+    let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let settings = enabled.clone();
+    let provider: Arc<crate::MemoryPreferencesProvider> = Arc::new(move |_| {
+        let preferences = crate::MemoryPreferences {
+            directory: memory_directory.clone(),
+            enabled: Some(settings.load(std::sync::atomic::Ordering::Acquire)),
+            auto_dream_enabled: None,
+        };
+        Box::pin(async move { Ok(preferences) })
+    });
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_memory_prefetch(prefetch.clone())
+    .with_memory_preferences_provider(provider)
+    .with_session_memory(handle.clone());
+    orch.refresh_memory_activation().await;
+    let session_id = orch.session.lock().await.session_id;
+    let stale_path =
+        memory::session_memory::session_memory_path(dir.path(), &session_id.to_string());
+    let generation = handle.generation.load(std::sync::atomic::Ordering::Acquire);
+
+    let started = client.started.notified();
+    orch.maybe_extract_session_memory().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), started)
+        .await
+        .expect("legacy background extraction started");
+    enabled.store(false, std::sync::atomic::Ordering::Release);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        orch.refresh_memory_activation(),
+    )
+    .await
+    .expect("hot disable must not wait for the blocked model request");
+    assert!(!prefetch.is_enabled());
+    assert_eq!(orch.session.lock().await.session_id, session_id);
+    assert!(handle.generation.load(std::sync::atomic::Ordering::Acquire) > generation);
+    assert!(handle.in_flight.load(std::sync::atomic::Ordering::Acquire));
+
+    client.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while handle.in_flight.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("invalidated extraction finished");
+    assert!(
+        !stale_path.exists(),
+        "a result predating memory-off must not be committed"
+    );
+    assert!(!handle.extractor.lock().await.is_initialized());
+
+    let fresh_query = client.started.notified();
+    orch.maybe_extract_session_memory().await;
+    assert!(!handle.in_flight.load(std::sync::atomic::Ordering::Acquire));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), fresh_query)
+            .await
+            .is_err(),
+        "disabled memory must not issue another legacy extraction query"
+    );
+    assert!(!stale_path.exists());
+}

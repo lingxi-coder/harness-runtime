@@ -1542,7 +1542,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // feature is unwired" — enumerate every entry point to the behaviour
         // (here, every caller of `observer_agents_enabled`) before concluding
         // anything about reachability.
-        let activity_observer = self.activity_observer(&request, &inherit).await;
+        let internal_memory_fork = matches!(
+            request.query_source_label.as_deref(),
+            Some("extract_memories" | "auto_dream")
+        );
+        let activity_observer = if internal_memory_fork {
+            None
+        } else {
+            self.activity_observer(&request, &inherit).await
+        };
         let request_name = request.name.clone().or_else(|| {
             request
                 .description
@@ -1552,6 +1560,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         let observers: Vec<Arc<dyn SubagentSpawnObserver>> = self
             .spawn_observer
             .iter()
+            .filter(|_| !internal_memory_fork)
             .cloned()
             .chain(observer)
             .chain(activity_observer)

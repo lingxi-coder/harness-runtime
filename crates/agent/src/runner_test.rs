@@ -2377,6 +2377,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         budget: None,
         hook_executor: None,
         agent_spawn_token: None,
+        memory_fork_wire: None,
         stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
         subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
@@ -12111,6 +12112,56 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
 // thread, so a refusing subagent hops to the fallback model and retries. This
 // port's subagent loop is separate and treated `refusal` as an ordinary
 // terminal stop reason, so the run simply ended.
+
+#[tokio::test]
+async fn memory_fork_wire_survives_refusal_fallback_without_overriding_fallback_model() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("memory complete", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".into()];
+    ctx.query_source_label = Some("auto_dream".into());
+    ctx.memory_fork_wire = Some(Arc::new(crate::memory_fork::MemoryForkProjection {
+        tool_invoker: None,
+        system_prompt_input: Some(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("frozen memory prefix"),
+        )),
+        tools: Vec::new(),
+        typed_attachment_ids: Default::default(),
+        task_deliveries: Default::default(),
+        model_source: Some("original-wire-model".into()),
+    }));
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 2);
+    let original = calls[0].request.opts.memory_fork_wire.as_ref().unwrap();
+    let fallback = calls[1].request.opts.memory_fork_wire.as_ref().unwrap();
+    assert_eq!(
+        original.model_source.as_ref().unwrap().string_at(""),
+        Some("original-wire-model")
+    );
+    assert_eq!(calls[1].request.model, "fallback-model");
+    assert!(fallback.model_source.is_none());
+    assert_eq!(fallback.system_prompt_input, original.system_prompt_input);
+    assert_eq!(fallback.typed_attachment_ids, original.typed_attachment_ids);
+    assert_eq!(fallback.task_deliveries, original.task_deliveries);
+    assert_eq!(
+        calls[0].request.opts.query_source_label.as_deref(),
+        Some("auto_dream")
+    );
+    assert_eq!(
+        calls[1].request.opts.query_source_label.as_deref(),
+        Some("auto_dream")
+    );
+}
 
 #[tokio::test]
 async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {

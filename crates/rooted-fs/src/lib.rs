@@ -79,6 +79,49 @@ pub struct RootIdentity {
     file: u64,
 }
 
+/// Leaf identity admitted before permission evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileIdentity {
+    Missing,
+    Existing(RootIdentity),
+}
+
+/// Root and leaf identity for a single pre-admitted mutation.
+#[derive(Debug, Clone, Copy)]
+pub struct FileMutationIdentity {
+    pub root: RootIdentity,
+    pub file: FileIdentity,
+}
+
+fn validate_file_identity(file: &std::fs::File, expected: &FileIdentity) -> Result<(), FsError> {
+    validate_open_file_single_link(file)?;
+    if let FileIdentity::Existing(identity) = expected {
+        if opened_file_identity(file)? == *identity {
+            return Ok(());
+        }
+    }
+    Err(FsError::OutsideWorkspace(
+        "file identity changed after admission".into(),
+    ))
+}
+
+/// Inspect a regular leaf without reading its contents, below a pinned parent.
+pub fn file_identity_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: &RootIdentity,
+) -> Result<FileIdentity, FsError> {
+    #[cfg(any(unix, windows))]
+    {
+        imp::file_identity_pinned(root, relative, expected)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, relative, expected);
+        Err(FsError::Io("file identity unsupported".into()))
+    }
+}
+
 /// Identity of this opened file, without following its current pathname.
 pub fn opened_file_identity(file: &std::fs::File) -> Result<RootIdentity, FsError> {
     #[cfg(unix)]
@@ -711,6 +754,29 @@ mod imp {
         }
         let root_file = open_root(root)?;
         root_identity_from_file(&root_file, root)
+    }
+
+    pub(super) fn file_identity_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<FileIdentity, FsError> {
+        let (parent, leaf) = open_parent_checked(root, relative, false, Some(expected))?;
+        let file = match open_regular(
+            &parent,
+            &leaf,
+            relative,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        ) {
+            Ok(file) => file,
+            Err(FsError::NotFound(_)) => return Ok(FileIdentity::Missing),
+            Err(error) => return Err(error),
+        };
+        validate_open_file_single_link(&file)?;
+        Ok(FileIdentity::Existing(opened_file_identity(&file)?))
     }
 
     pub(super) fn ensure_private_directory(
@@ -1702,6 +1768,7 @@ mod imp {
         relative: &Path,
         requested: &Path,
         approved: &Path,
+        expected: Option<&FileMutationIdentity>,
         after_permission: F,
     ) -> Result<RootedFileSnapshot, RootedFsError>
     where
@@ -1722,7 +1789,9 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
-        let (parent, file_name) = open_parent(root, relative, false).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, expected.map(|value| &value.root))
+                .map_err(RootedFsError::Fs)?;
         let mut file = open_regular(
             &parent,
             &file_name,
@@ -1744,6 +1813,9 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
+        if let Some(expected) = expected {
+            validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+        }
         let metadata = file
             .metadata()
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
@@ -1764,7 +1836,17 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, || {})
+        read_file_after_permission_inner(root, relative, requested, approved, None, || {})
+    }
+
+    pub(super) fn read_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: &FileMutationIdentity,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {})
     }
 
     pub(super) fn open_file_after_permission(
@@ -1812,7 +1894,14 @@ mod imp {
     where
         F: FnOnce(),
     {
-        read_file_after_permission_inner(root, relative, requested, approved, after_permission)
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            after_permission,
+        )
     }
 
     fn write_file_after_permission_inner<F>(
@@ -1821,6 +1910,7 @@ mod imp {
         requested: &Path,
         approved: &Path,
         bytes: &[u8],
+        expected: Option<&FileMutationIdentity>,
         after_permission: F,
     ) -> Result<RootedWriteResult, RootedFsError>
     where
@@ -1837,7 +1927,9 @@ mod imp {
         // Missing parents are materialized by the fixed no-follow directory
         // handle chain. Never create them through the requested pathname:
         // doing so would reopen a retargetable ancestor before rooted I/O.
-        let (parent, file_name) = open_parent(root, relative, true).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) =
+            open_parent_checked(root, relative, true, expected.map(|value| &value.root))
+                .map_err(RootedFsError::Fs)?;
         verify_parent_resolution(requested, approved)?;
         verify_leaf_not_symlink(requested)?;
         let mut file = open_regular(
@@ -1846,7 +1938,11 @@ mod imp {
             relative,
             GENERIC_WRITE | SYNCHRONIZE,
             SHARE_ALL,
-            FILE_OVERWRITE_IF,
+            match expected.map(|value| value.file) {
+                Some(FileIdentity::Missing) => FILE_CREATE,
+                Some(FileIdentity::Existing(_)) => FILE_OPEN,
+                None => FILE_OVERWRITE_IF,
+            },
             FILE_ATTRIBUTE_NORMAL,
         )
         .map_err(|error| {
@@ -1864,6 +1960,14 @@ mod imp {
             verify_resolution(requested, approved)?;
         } else {
             verify_parent_resolution(requested, approved)?;
+        }
+        if let Some(expected) = expected {
+            validate_open_file_single_link(&file).map_err(RootedFsError::Fs)?;
+            if matches!(expected.file, FileIdentity::Existing(_)) {
+                validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+            }
+            file.set_len(0)
+                .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
         }
         file.write_all(bytes)
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
@@ -1892,7 +1996,26 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
     ) -> Result<RootedWriteResult, RootedFsError> {
-        write_file_after_permission_inner(root, relative, requested, approved, bytes, || {})
+        write_file_after_permission_inner(root, relative, requested, approved, bytes, None, || {})
+    }
+
+    pub(super) fn write_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expected: &FileMutationIdentity,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            Some(expected),
+            || {},
+        )
     }
 
     #[cfg(test)]
@@ -1913,6 +2036,7 @@ mod imp {
             requested,
             approved,
             bytes,
+            None,
             after_permission,
         )
     }
@@ -2684,6 +2808,52 @@ pub fn write_file_after_permission(
     imp::write_file_after_permission(root, relative, requested, approved, bytes)
 }
 
+/// Read one single-link regular file under a root admitted before permissions.
+pub fn read_file_after_permission_pinned(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    expected: &FileMutationIdentity,
+) -> Result<RootedFileSnapshot, RootedFsError> {
+    #[cfg(any(unix, windows))]
+    {
+        imp::read_file_after_permission_pinned(root, relative, requested, approved, expected)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, relative, requested, approved, expected);
+        Err(RootedFsError::Fs(FsError::Io(
+            "pinned file I/O unsupported".into(),
+        )))
+    }
+}
+
+/// Direct-write under the originally admitted root. The opened file must be
+/// regular and single-link before any existing contents are truncated.
+pub fn write_file_after_permission_pinned(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    bytes: &[u8],
+    expected: &FileMutationIdentity,
+) -> Result<RootedWriteResult, RootedFsError> {
+    #[cfg(any(unix, windows))]
+    {
+        imp::write_file_after_permission_pinned(
+            root, relative, requested, approved, bytes, expected,
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, relative, requested, approved, bytes, expected);
+        Err(RootedFsError::Fs(FsError::Io(
+            "pinned file I/O unsupported".into(),
+        )))
+    }
+}
+
 /// Atomically write bytes without following any component below `root`.
 pub fn atomic_write(
     root: &Path,
@@ -3019,6 +3189,28 @@ mod imp {
     pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
         let directory = open_root(root)?;
         identity_from_fd(&directory, root)
+    }
+
+    pub(super) fn file_identity_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<FileIdentity, FsError> {
+        let (parent, leaf) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, Some(expected))?;
+        let stat = match fs::statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(FileIdentity::Missing),
+            Err(error) => return Err(map_unix_io(relative, error)),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_nlink != 1 {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        Ok(FileIdentity::Existing(RootIdentity {
+            volume: u64::try_from(stat.st_dev)
+                .map_err(|_| FsError::Io("invalid device id".into()))?,
+            file: u64::try_from(stat.st_ino).map_err(|_| FsError::Io("invalid inode".into()))?,
+        }))
     }
 
     pub(super) fn ensure_private_directory(
@@ -3875,6 +4067,7 @@ mod imp {
         relative: &Path,
         requested: &Path,
         approved: &Path,
+        expected: Option<&FileMutationIdentity>,
         after_permission: F,
     ) -> Result<RootedFileSnapshot, RootedFsError>
     where
@@ -3894,8 +4087,14 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
-        let (parent, file_name) =
-            open_parent(root, relative, false, PRIVATE_DIR_MODE).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            false,
+            PRIVATE_DIR_MODE,
+            expected.map(|value| &value.root),
+        )
+        .map_err(RootedFsError::Fs)?;
         // Stat without following the final component before opening. Besides
         // rejecting non-regular files, this keeps a FIFO from blocking the
         // synchronous `openat(O_RDONLY)` below while waiting for a writer.
@@ -3914,6 +4113,9 @@ mod imp {
             verify_parent_resolution(requested, approved)?;
         }
         let file = std::fs::File::from(fd);
+        if let Some(expected) = expected {
+            validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+        }
         let metadata = file
             .metadata()
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
@@ -3939,7 +4141,17 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, || {})
+        read_file_after_permission_inner(root, relative, requested, approved, None, || {})
+    }
+
+    pub(super) fn read_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: &FileMutationIdentity,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {})
     }
 
     pub(super) fn open_file_after_permission(
@@ -3984,7 +4196,14 @@ mod imp {
     where
         F: FnOnce(),
     {
-        read_file_after_permission_inner(root, relative, requested, approved, after_permission)
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            after_permission,
+        )
     }
 
     fn verify_leaf_at(
@@ -4024,6 +4243,7 @@ mod imp {
         requested: &Path,
         approved: &Path,
         bytes: &[u8],
+        expected: Option<&FileMutationIdentity>,
         after_permission: F,
     ) -> Result<RootedWriteResult, RootedFsError>
     where
@@ -4043,14 +4263,27 @@ mod imp {
         // `create_dir_all` used by FileWriteTool applies the process umask to
         // 0777, so retain that mode while changing only the resolution
         // primitive to rooted mkdirat.
-        let (parent, file_name) =
-            open_parent(root, relative, true, 0o777).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            true,
+            0o777,
+            expected.map(|value| &value.root),
+        )
+        .map_err(RootedFsError::Fs)?;
         verify_parent_resolution(requested, approved)?;
         verify_leaf_at(&parent, &file_name, relative)?;
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::WRONLY
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC
+                | match expected.map(|value| value.file) {
+                    Some(FileIdentity::Missing) => OFlags::CREATE | OFlags::EXCL,
+                    Some(FileIdentity::Existing(_)) => OFlags::empty(),
+                    None => OFlags::CREATE | OFlags::TRUNC,
+                },
             Mode::from_bits_retain(0o666),
         )
         .map_err(|error| {
@@ -4067,6 +4300,14 @@ mod imp {
             verify_parent_resolution(requested, approved)?;
         }
         let mut file = std::fs::File::from(fd);
+        if let Some(expected) = expected {
+            validate_open_file_single_link(&file).map_err(RootedFsError::Fs)?;
+            if matches!(expected.file, FileIdentity::Existing(_)) {
+                validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+            }
+            file.set_len(0)
+                .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        }
         file.write_all(bytes)
             .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
         // A parent swap after the fixed dirfd was opened cannot redirect this
@@ -4097,7 +4338,26 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
     ) -> Result<RootedWriteResult, RootedFsError> {
-        write_file_after_permission_inner(root, relative, requested, approved, bytes, || {})
+        write_file_after_permission_inner(root, relative, requested, approved, bytes, None, || {})
+    }
+
+    pub(super) fn write_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expected: &FileMutationIdentity,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            Some(expected),
+            || {},
+        )
     }
 
     #[cfg(test)]
@@ -4118,6 +4378,7 @@ mod imp {
             requested,
             approved,
             bytes,
+            None,
             after_permission,
         )
     }
@@ -4574,6 +4835,74 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn memory_pinned_file_io_rejects_replaced_roots_and_new_hard_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let root_pin = super::root_identity(&root).unwrap();
+        let pin = super::FileMutationIdentity {
+            root: root_pin,
+            file: super::FileIdentity::Missing,
+        };
+        let relative = std::path::Path::new("topic.md");
+        let target = root.join(relative);
+        let outside = temp.path().join("outside.md");
+        std::fs::write(&outside, "preserve").unwrap();
+        std::fs::hard_link(&outside, &target).unwrap();
+        assert!(
+            super::read_file_after_permission_pinned(&root, relative, &target, &target, &pin)
+                .is_err()
+        );
+        assert!(super::write_file_after_permission_pinned(
+            &root, relative, &target, &target, b"changed", &pin
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "preserve");
+        std::fs::remove_file(&target).unwrap();
+        std::fs::rename(&root, temp.path().join("old-memory")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&target, "replacement").unwrap();
+        assert!(
+            super::read_file_after_permission_pinned(&root, relative, &target, &target, &pin)
+                .is_err()
+        );
+        assert!(super::write_file_after_permission_pinned(
+            &root, relative, &target, &target, b"changed", &pin
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_pinned_file_write_creates_missing_parents_and_keeps_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let root_pin = super::root_identity(&root).unwrap();
+        let pin = super::FileMutationIdentity {
+            root: root_pin,
+            file: super::FileIdentity::Missing,
+        };
+        let relative = std::path::Path::new("nested/topic.md");
+        let target = root.join(relative);
+        let result = super::write_file_after_permission_pinned(
+            &root, relative, &target, &target, b"memory", &pin,
+        )
+        .unwrap();
+        assert!(result.parent.is_some());
+        let pin = super::FileMutationIdentity {
+            root: root_pin,
+            file: super::file_identity_pinned(&root, relative, &root_pin).unwrap(),
+        };
+        let read =
+            super::read_file_after_permission_pinned(&root, relative, &target, &target, &pin)
+                .unwrap();
+        assert_eq!(read.bytes, b"memory");
+    }
+
     #[cfg(unix)]
     #[test]
     fn dropping_lock_releases_it_when_a_duplicate_descriptor_is_open() {

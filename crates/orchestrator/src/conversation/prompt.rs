@@ -751,7 +751,39 @@ impl ConversationOrchestrator {
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
         lingxi_core::settings::SettingsError,
     > {
-        self.provider_system_prompt_inner(true).await
+        self.provider_memory_prompt(false).await
+    }
+
+    /// Only the turn owner records the memory epoch. Preview and prewarm
+    /// callers use provider_system_prompt and cannot release stale forks.
+    pub(crate) async fn provider_system_prompt_for_main_request(
+        &self,
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
+        self.provider_memory_prompt(true).await
+    }
+
+    async fn provider_memory_prompt(
+        &self,
+        main_request: bool,
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
+        self.refresh_memory_activation().await;
+        let _lifecycle = self.prompt_runtime.background_memory_lifecycle.lock().await;
+        let prompt = self.provider_system_prompt_inner(true).await?;
+        if main_request {
+            self.prompt_runtime.main_memory_prompt_generation.store(
+                self.prompt_runtime
+                    .memory_prompt_generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+        Ok(prompt)
     }
 
     /// Build the same profile source for a side query without changing the
@@ -803,10 +835,15 @@ impl ConversationOrchestrator {
         // hit never builds joined static/display strings or decodes UTF-16.
         // The provider's owned API still clones its typed vector on egress.
         if let Some(frozen) = self.frozen_prompt_source_vector().await {
-            let dynamic = self.current_system_context_block().await
-                .map(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string);
+            let dynamic = self.current_system_context_block().await.map(
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string,
+            );
             if record_pending_snapshot {
-                *self.prompt_runtime.pending_prompt_source_vector.lock().await = Some(frozen.elements.clone());
+                *self
+                    .prompt_runtime
+                    .pending_prompt_source_vector
+                    .lock()
+                    .await = Some(frozen.elements.clone());
             }
             return Ok(lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
                 frozen.elements.clone(),
@@ -853,6 +890,9 @@ impl ConversationOrchestrator {
                 crate::prompt::profile_header(self.conversation_profile().await.mode),
             )),
         );
+        if record_pending_snapshot {
+            self.replace_memory_prompt_snapshot(&system_prompt).await;
+        }
         let pending = self
             .prompt_snapshot_eligible()
             .then_some(system_prompt)
@@ -879,9 +919,13 @@ impl ConversationOrchestrator {
     }
 
     async fn frozen_prompt_source_vector(&self) -> Option<Arc<FrozenPromptSourceVector>> {
-        if !self.prompt_snapshot_eligible() { return None; }
+        if !self.prompt_snapshot_eligible() {
+            return None;
+        }
         let snapshot_guard = self.prompt_runtime.prompt_snapshot.lock().await;
-        let snapshot = snapshot_guard.as_ref().filter(|snapshot| valid_prompt_snapshot(snapshot))?;
+        let snapshot = snapshot_guard
+            .as_ref()
+            .filter(|snapshot| valid_prompt_snapshot(snapshot))?;
         let mut cache = self.prompt_runtime.frozen_prompt_source_vector.lock().await;
         if let Some(cached) = cache.as_ref().filter(|cached| {
             cached.source == snapshot.system_prompt && cached.utf16 == snapshot.system_prompt_utf16
@@ -894,9 +938,16 @@ impl ConversationOrchestrator {
                 |units| lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units.clone()),
             )
         }).collect::<Vec<_>>();
-        let static_text = elements.iter().filter(|section| {
-            !section.equals_ascii(lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY)
-        }).map(|section| section.display_text()).collect::<Vec<_>>().join("\n\n");
+        let static_text = elements
+            .iter()
+            .filter(|section| {
+                !section.equals_ascii(
+                    lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY,
+                )
+            })
+            .map(|section| section.display_text())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let frozen = Arc::new(FrozenPromptSourceVector {
             source: snapshot.system_prompt.clone(),
             utf16: snapshot.system_prompt_utf16.clone(),
@@ -933,7 +984,8 @@ impl ConversationOrchestrator {
                 snapshot_system_prompt: Some(frozen.elements.clone()),
                 dynamic_system_context: None,
             };
-            prompt.dynamic_system_context = self.append_dynamic_system_context(&mut prompt.text).await;
+            prompt.dynamic_system_context =
+                self.append_dynamic_system_context(&mut prompt.text).await;
             return Ok(prompt);
         }
         let main_thread_prompt = self
@@ -1070,6 +1122,69 @@ impl ConversationOrchestrator {
         self.prompt_runtime
             .prompt_snapshot_resume
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Retire the old memory protocol under the background-memory lifecycle
+    /// fence, retaining tool descriptions and rendering metadata for its
+    /// replacement. Repeated changes before the next request coalesce.
+    pub(crate) async fn retire_memory_prompt_snapshot(&self) {
+        self.prompt_runtime
+            .memory_prompt_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut pending = self
+            .prompt_runtime
+            .pending_memory_prompt_snapshot
+            .lock()
+            .await;
+        if let Some(snapshot) = self.prompt_runtime.prompt_snapshot.lock().await.take() {
+            if pending.is_none() {
+                *pending = Some(snapshot);
+            }
+        }
+        *self.prompt_runtime.frozen_prompt_source_vector.lock().await = None;
+        self.prompt_runtime
+            .memory_prompt_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        *self
+            .prompt_runtime
+            .pending_prompt_source_vector
+            .lock()
+            .await = None;
+    }
+
+    /// An existing snapshot can be replaced on resume; a missing resumed
+    /// snapshot still stays missing. The next real provider build supplies the
+    /// complete admitted source vector before any background fork can use it.
+    async fn replace_memory_prompt_snapshot(
+        &self,
+        system: &[lingxi_llm_client::providers::anthropic::system_prompt::PromptText],
+    ) {
+        if system.is_empty() {
+            return;
+        }
+        let mut pending = self
+            .prompt_runtime
+            .pending_memory_prompt_snapshot
+            .lock()
+            .await;
+        let Some(mut snapshot) = pending.as_ref().cloned() else {
+            return;
+        };
+        snapshot.system_prompt = system
+            .iter()
+            .map(|text| text.display_text().to_owned())
+            .collect();
+        snapshot.system_prompt_utf16 = system
+            .iter()
+            .map(|text| {
+                let units = text.utf16_code_units().to_vec();
+                String::from_utf16(&units).is_err().then_some(units)
+            })
+            .collect();
+        *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot.clone());
+        *pending = None;
+        drop(pending);
+        self.persist_prompt_snapshot_attachment(&snapshot).await;
     }
 
     /// Persist the first eligible request's static prompt and initial inline
@@ -1725,8 +1840,7 @@ impl ConversationOrchestrator {
                 None => Ok(false),
             }
         };
-        let ((git, _), skills_available) =
-            tokio::join!(self.cached_git_status(&probe_cwd), skills);
+        let ((git, _), skills_available) = tokio::join!(self.cached_git_status(&probe_cwd), skills);
         let skills_available = skills_available?;
 
         // Tool name extraction: ToolRegistry's `all_names()` is the
@@ -1811,8 +1925,7 @@ impl ConversationOrchestrator {
                 .prompt_runtime
                 .memory_prefetch
                 .as_ref()
-                .and_then(|p| p.user_memdir())
-                .map(std::path::Path::to_path_buf),
+                .and_then(|p| p.user_memdir()),
             // `--exclude-dynamic-system-prompt-sections`: when set, `assemble`
             // OMITS the env block from the system prompt (it is re-emitted in the
             // first-user-message context reminder via `env_reminder_section`).
@@ -1905,6 +2018,7 @@ impl ConversationOrchestrator {
     pub(super) async fn build_system_prompt(
         &self,
     ) -> Result<String, lingxi_core::settings::SettingsError> {
+        self.refresh_memory_activation().await;
         Ok(self.build_system_prompt_parts().await?.text)
     }
 
@@ -2567,8 +2681,24 @@ impl ConversationOrchestrator {
             })
             .collect::<Vec<_>>();
         let native_managed = self.memory.native_managed_instruction_files();
-        let instruction_files =
-            projection_array(mod_instruction_files(&memory_files, &native_managed));
+        let mut instruction_files = mod_instruction_files(&memory_files, &native_managed);
+        instruction_files.extend(
+            cached
+                .eager_instructions
+                .iter()
+                .flatten()
+                .filter(|file| {
+                    file.kind == lingxi_core::host::instructions::InstructionFileType::AutoMem
+                })
+                .map(|file| {
+                    projection_object(vec![
+                        ("path".into(), file.path.clone()),
+                        ("kind".into(), "memory".into()),
+                        ("content".into(), file.content.clone()),
+                    ])
+                }),
+        );
+        let instruction_files = projection_array(instruction_files);
         let initial = projection_object(vec![
             ("blocks".into(), projection_array(blocks)),
             ("instructionFiles".into(), instruction_files),
@@ -2737,6 +2867,37 @@ impl ConversationOrchestrator {
                 ]));
             }
         }
+        // Native qwi appends Aji's directory announcement after the frozen
+        // user context. The stable system protocol contains no machine path.
+        let dynamic_memory = if exclude_env {
+            let model = self.session.lock().await.model.clone();
+            (lingxi_core::host::model_capabilities::prompt_profile_for(&model)
+                != lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean)
+                .then(|| {
+                    self.prompt_runtime
+                        .memory_prefetch
+                        .as_ref()
+                        .and_then(|prefetch| prefetch.user_memdir())
+                })
+                .flatten()
+                .map(|directory| {
+                    let rendered = crate::prompt::memory_section::render_auto_directory(
+                        &memory::memdir::paths::memory_directory_prompt_path(&directory),
+                    );
+                    rendered
+                        .strip_prefix("# auto memory\n")
+                        .expect("native directory heading")
+                        .to_owned()
+                })
+        } else {
+            None
+        };
+        if let Some(directory) = &dynamic_memory {
+            blocks.push(projection_object(vec![
+                ("name".into(), "auto memory".into()),
+                ("text".into(), directory.clone().into()),
+            ]));
+        }
         // Forks inherit the exact parent user-context envelope, including its
         // non-instruction keys. omitClaudeMd replaces only claudeMd later.
         let session = self.session.lock().await;
@@ -2765,6 +2926,11 @@ impl ConversationOrchestrator {
                         .set_user_context_value(&name, value)
                         .expect("resolved Mod userContext remains an ordered object");
                 }
+            }
+            if let Some(directory) = dynamic_memory {
+                context
+                    .set_user_context_text("auto memory", directory)
+                    .expect("native memory directory is a userContext string");
             }
             context.eager_instructions = resolved
                 .at_pointer("/instructionFiles")

@@ -390,6 +390,7 @@ impl MobileSessionRetirementState {
             std::time::Duration::from_secs(60),
         )
         .await;
+        orchestrator.shutdown_background_memory().await;
         orchestrator.shutdown_idle_compaction().await;
         // No handler graph is retired while an admitted turn can use it.
         orchestrator.wait_for_turn_idle().await;
@@ -1968,6 +1969,7 @@ impl Drop for MobileEngineHandle {
                 tracing::warn!("mobile turn tasks did not drain within the shutdown budget");
                 turn_tasks.wait().await;
             }
+            producer_orchestrator.shutdown_background_memory().await;
             producer_orchestrator.shutdown_idle_compaction().await;
             let mut side_chat_retry = std::time::Duration::from_secs(1);
             loop {

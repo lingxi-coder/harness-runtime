@@ -634,6 +634,14 @@ pub struct ToolInvocationResult {
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync + Any {
+    /// Snapshot private file-tool state for one host-owned memory fork while
+    /// retaining the same registry and enforcing permission gate. Test or
+    /// stateless invokers may leave this unsupported. Inherited reads are
+    /// admitted only when the host freezes this state with its history.
+    fn fork_for_memory(&self, _inherit_reads: bool) -> Option<Arc<dyn ToolInvoker>> {
+        None
+    }
+
     /// Host-owned durable-origin acknowledgement state for child transcript
     /// writers. This is opaque to core and never comes from tool input.
     fn durable_origin_state(&self) -> Option<ToolInvocationContextState> {

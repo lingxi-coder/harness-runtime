@@ -272,6 +272,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         budget: None,
         hook_executor: None,
         agent_spawn_token: None,
+        memory_fork_wire: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: lingxi_core::types::SessionId::nil(),

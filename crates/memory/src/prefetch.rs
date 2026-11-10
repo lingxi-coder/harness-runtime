@@ -12,10 +12,9 @@
 //! - [`MemoryPrefetch::new`] binds a real [`MemorySelector`] + memdir
 //!   [`MemdirRoots`]: [`MemoryPrefetch::start`] scans the memdir, asks the
 //!   selector (a side query on the live session route) which entries are relevant to the turn
-//!   query, and maps the chosen entries to [`SurfacedMemory`]. This is the path
-//!   the composition root wires once the prefetch is enabled (claude-code
-//!   `tengu_moth_copse`, default off — here the gate is "is a prefetch wired at
-//!   all", `memory_prefetch.is_some()`).
+//!   query, and maps the chosen entries to [`SurfacedMemory`]. The host may
+//!   keep this handle dormant while the live auto-memory gate is off; only an
+//!   enabled prefetch scans files or calls the selector.
 //! - [`MemoryPrefetch::with_fixed_result`] resolves to a PRE-SELECTED set,
 //!   bypassing the selector — the deterministic seam the orchestrator's
 //!   surfacing tests drive, and the injection seam a composition root uses when
@@ -32,12 +31,16 @@ use crate::surfacing::SurfacedMemory;
 use lingxi_core::host::RuntimeSpawner;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
 
 /// Side-channel that fires the memory selector concurrently with the
 /// main turn.
 pub struct MemoryPrefetch {
+    /// Live auto-memory gate. Roots remain configured while dormant so a
+    /// later settings change can activate the same per-project store.
+    enabled: AtomicBool,
     /// Selector that ranks the available memory set via a side query. `Some` on
     /// the real path ([`Self::new`]); `None` for the fixed-result seam.
     selector: Option<Arc<MemorySelector>>,
@@ -45,7 +48,7 @@ pub struct MemoryPrefetch {
     runtime: Arc<dyn RuntimeSpawner>,
     /// memdir roots to scan for candidate memories. `Some` on the real path
     /// (paired with `selector`); `None` for the fixed-result seam.
-    roots: Option<MemdirRoots>,
+    roots: Option<RwLock<MemdirRoots>>,
     /// Pre-resolved surfaced set: when `Some`, [`Self::start`] short-circuits
     /// to this set instead of running the selector. `None` ⇒ the selector path
     /// (or, with no selector/roots, an empty inert result).
@@ -108,9 +111,10 @@ impl MemoryPrefetch {
         roots: MemdirRoots,
     ) -> Self {
         Self {
+            enabled: AtomicBool::new(true),
             selector: Some(selector),
             runtime,
-            roots: Some(roots),
+            roots: Some(RwLock::new(roots)),
             fixed_result: None,
         }
     }
@@ -120,8 +124,48 @@ impl MemoryPrefetch {
     /// construction. Used by the system-prompt builder so the `# Memory` section
     /// points the model at exactly the directory the prefetch reads back.
     #[must_use]
-    pub fn user_memdir(&self) -> Option<&std::path::Path> {
-        self.roots.as_ref().map(|r| r.user_memdir.as_path())
+    pub fn user_memdir(&self) -> Option<PathBuf> {
+        if !self.is_enabled() {
+            return None;
+        }
+        self.configured_user_memdir()
+    }
+
+    /// The configured store, including while auto-memory is disabled. The
+    /// host uses this path to create the directory before activating recall;
+    /// obtaining the path performs no filesystem or provider operations.
+    #[must_use]
+    pub fn configured_user_memdir(&self) -> Option<PathBuf> {
+        self.roots.as_ref().map(|roots| {
+            roots
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .user_memdir
+                .clone()
+        })
+    }
+
+    /// Replace the admitted local store after the host has cancelled writers
+    /// and discarded pending recall from the previous directory. Existing
+    /// directories and their contents are retained.
+    pub fn retarget_user_memdir(&self, directory: PathBuf) {
+        if let Some(roots) = &self.roots {
+            roots
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .user_memdir = directory;
+        }
+    }
+
+    /// Update the live gate after resolving the current admitted settings.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    /// Whether this store currently participates in recall and prompt assembly.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
     }
 
     /// Construct a prefetcher that resolves to a PRE-SELECTED surfaced set,
@@ -135,6 +179,7 @@ impl MemoryPrefetch {
         result: Vec<SurfacedMemory>,
     ) -> Self {
         Self {
+            enabled: AtomicBool::new(true),
             selector: None,
             runtime,
             roots: None,
@@ -152,8 +197,8 @@ impl MemoryPrefetch {
     /// `model` and `profile` are captured from the live route for this turn.
     ///
     /// `_memory_dir` (the orchestrator's cwd) is currently unused: the memdir
-    /// roots are home-based and bound at construction. It is retained for a
-    /// future project-scoped memdir root.
+    /// roots are host-configured. Trusted source changes retarget the store
+    /// through [`Self::retarget_user_memdir`] instead of changing it here.
     pub async fn start(
         &self,
         query: String,
@@ -181,6 +226,13 @@ impl MemoryPrefetch {
     ) -> PendingMemoryPrefetch {
         let (tx, rx) = oneshot::channel();
 
+        if !self.is_enabled() {
+            let _ = tx.send(Vec::new());
+            return PendingMemoryPrefetch {
+                rx: tokio::sync::Mutex::new(Some(rx)),
+            };
+        }
+
         if let Some(fixed) = self.fixed_result.clone() {
             let _ = tx.send(fixed);
             return PendingMemoryPrefetch {
@@ -189,7 +241,13 @@ impl MemoryPrefetch {
         }
 
         // Real path requires BOTH a selector and memdir roots; otherwise inert.
-        let (Some(selector), Some(roots)) = (self.selector.clone(), self.roots.clone()) else {
+        let roots = self.roots.as_ref().map(|roots| {
+            roots
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
+        let (Some(selector), Some(roots)) = (self.selector.clone(), roots) else {
             let _ = self
                 .runtime
                 .spawn(
@@ -209,15 +267,22 @@ impl MemoryPrefetch {
             .spawn(
                 "memory-prefetch",
                 Box::pin(async move {
-                    let surfaced = select_surfaced(
+                    let mut tx = tx;
+                    let selection = select_surfaced(
                         &selector,
                         &roots,
                         &query,
                         &model,
                         profile.as_deref(),
                         current_session_id.as_deref(),
-                    )
-                    .await;
+                    );
+                    // Disabling or retargeting drops the owning pending
+                    // receiver. Stop its old selection, including model work.
+                    let surfaced = tokio::select! {
+                        biased;
+                        _ = tx.closed() => return,
+                        surfaced = selection => surfaced,
+                    };
                     let _ = tx.send(surfaced);
                 }),
             )
@@ -255,6 +320,8 @@ const SURFACED_MEMORY_MAX_BYTES: usize = 4096;
 ///   and fires when `total_lines > xHo || truncated_by_bytes` (binary `i`), with
 ///   the `truncated_by_bytes`-conditional wording.
 fn truncate_surfaced_content(content: &str, path: &Path) -> String {
+    // Native tLe/Uys removes an initial BOM before counting selected lines.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let lines: Vec<&str> = content.split('\n').collect();
     let total_lines = lines.len();
     let mut kept: Vec<&str> = Vec::new();
@@ -271,20 +338,48 @@ fn truncate_surfaced_content(content: &str, path: &Path) -> String {
         running_bytes = next;
         kept.push(line);
     }
-    let body = kept.join("\n");
+    // Bzr sanitizes only after the read's byte/line splice, so removed control
+    // characters do not make additional bytes eligible for recall.
+    let body =
+        lingxi_core::host::instruction_memory_sanitize::sanitize_memory_body(&kept.join("\n"));
     if total_lines > SURFACED_MEMORY_MAX_LINES || truncated_by_bytes {
         let reason = if truncated_by_bytes {
             format!("{SURFACED_MEMORY_MAX_BYTES} byte limit")
         } else {
             format!("first {SURFACED_MEMORY_MAX_LINES} lines")
         };
+        let path = path.to_string_lossy();
+        let path = path.replace(['\t', '\n', '\r', '\u{2028}', '\u{2029}'], "");
+        let path = lingxi_core::host::instruction_memory_sanitize::sanitize_memory_body(&path);
         format!(
-            "{body}\n> This memory file was truncated ({reason}). Use the Read tool to view the complete file at: {}",
-            path.display()
+            "{body}\n\n> This memory file was truncated ({reason}). Use the Read tool to view the complete file at: {path}"
         )
     } else {
         body
     }
+}
+
+/// Native .319 AutoMem file-read pipeline: strip frontmatter and block HTML
+/// comments, splice the original index using xvr, then apply Rfe sanitation.
+/// Sanitation must follow the splice: hidden/control bytes count toward its
+/// original limits and a high surrogate produced by the slice is then removed.
+#[must_use]
+pub fn load_memory_index(content: &str) -> crate::MemoryIndexView {
+    let without_frontmatter = crate::lingxi_md::loader::strip_frontmatter(content);
+    let body = crate::lingxi_md::loader::strip_html_comments(without_frontmatter);
+    let mut view = crate::truncate_memory_index(&body);
+    let units = lingxi_core::host::instruction_memory_sanitize::sanitize_memory_body_utf16(
+        &view
+            .content
+            .string_units("")
+            .expect("memory index is a string"),
+    );
+    view.content = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("sanitized memory index preserves its source units");
+    view
 }
 
 /// Scan the memdir, ask the selector which entries are relevant to `query`, and
@@ -305,6 +400,18 @@ async fn select_surfaced(
     let Some(mut snapshot) = scan_snapshot(roots.clone()).await else {
         return Vec::new();
     };
+    // The native recall inventory excludes the eager index and only lists
+    // Markdown memory files; the general four-tier scanner has other callers.
+    snapshot.entries.retain(|entry| {
+        entry
+            .path
+            .extension()
+            .is_some_and(|extension| extension == "md")
+            && entry
+                .path
+                .file_name()
+                .is_some_and(|name| name != "MEMORY.md")
+    });
     if let Some(session_id) = current_session_id {
         let current_session_path = roots.session_memdir.join(format!(
             "{}.md",
@@ -314,6 +421,7 @@ async fn select_surfaced(
             .entries
             .retain(|entry| entry.path != current_session_path);
         snapshot.frontmatter.remove(&current_session_path);
+        snapshot.recall_content.remove(&current_session_path);
     }
     if snapshot.entries.is_empty() {
         return Vec::new();
@@ -346,7 +454,13 @@ async fn select_surfaced(
                 );
                 SurfacedMemory {
                     path: e.path.clone(),
-                    content: truncate_surfaced_content(&f.content, &e.path),
+                    content: truncate_surfaced_content(
+                        snapshot
+                            .recall_content
+                            .get(&e.path)
+                            .map_or(f.content.as_str(), String::as_str),
+                        &e.path,
+                    ),
                     age_days: e.age_days,
                     mtime: f.mtime,
                 }
@@ -374,6 +488,57 @@ mod tests {
     /// one-shot resolves (the production posix runtime does this; the test needs
     /// the task to execute inline on the current tokio runtime).
     struct InlineRuntime;
+
+    struct BlockedSelection {
+        started: tokio::sync::Notify,
+        dropped: Arc<tokio::sync::Notify>,
+    }
+    struct SelectionDrop(Arc<tokio::sync::Notify>);
+    impl Drop for SelectionDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    #[async_trait]
+    impl SideQueryClient for BlockedSelection {
+        async fn query(&self, _: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+            let _guard = SelectionDrop(self.dropped.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_old_prefetch_cancels_its_in_flight_selector() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = crate::memdir::paths::memdir_roots_at(home.path(), home.path(), false);
+        std::fs::create_dir_all(&roots.user_memdir).unwrap();
+        std::fs::write(roots.user_memdir.join("topic.md"), "---\ndescription: A memory worth checking\nmetadata:\n  type: project\n---\nA durable fact\n").unwrap();
+        let client = Arc::new(BlockedSelection {
+            started: tokio::sync::Notify::new(),
+            dropped: Arc::new(tokio::sync::Notify::new()),
+        });
+        let prefetch = MemoryPrefetch::new(
+            Arc::new(MemorySelector::new(client.clone())),
+            Arc::new(InlineRuntime),
+            roots,
+        );
+        let pending = prefetch
+            .start(
+                "relevant fact".into(),
+                "test-model".into(),
+                None,
+                home.path().into(),
+            )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.started.notified())
+            .await
+            .unwrap();
+        drop(pending);
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.dropped.notified())
+            .await
+            .unwrap();
+    }
     #[async_trait]
     impl RuntimeSpawner for InlineRuntime {
         async fn spawn(
@@ -430,6 +595,86 @@ mod tests {
                 retry_count: 0,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn dormant_memory_can_activate_and_disable_again_without_rebuilding_the_store() {
+        let config = tempfile::tempdir().unwrap();
+        let roots =
+            crate::memdir::paths::memdir_roots_at(config.path(), Path::new("/project"), false);
+        let directory = roots.user_memdir.clone();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
+            names: vec!["guidance.md".into()],
+            prompts: Some(prompts.clone()),
+        })));
+        let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
+        prefetch.set_enabled(false);
+        assert_eq!(prefetch.configured_user_memdir(), Some(directory.clone()));
+        assert!(prefetch.user_memdir().is_none());
+        let dormant = prefetch
+            .start("question".into(), "model".into(), None, "/project".into())
+            .await;
+        assert!(dormant.is_ready());
+        assert!(dormant.take().await.is_empty());
+        assert!(prompts.lock().unwrap().is_empty());
+        assert!(
+            !directory.exists(),
+            "dormant memory must not create its directory"
+        );
+
+        // The host creates the exact configured directory before enabling it.
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("guidance.md"),
+            "Use the focused verification target.\n",
+        )
+        .unwrap();
+        prefetch.set_enabled(true);
+        assert_eq!(prefetch.user_memdir(), Some(directory.clone()));
+        let recalled = prefetch
+            .start("question".into(), "model".into(), None, "/project".into())
+            .await
+            .take()
+            .await;
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].path, directory.join("guidance.md"));
+        let replacement = config.path().join("custom-memory");
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(
+            replacement.join("guidance.md"),
+            "The custom store owns this guidance.\n",
+        )
+        .unwrap();
+        prefetch.set_enabled(false);
+        prefetch.retarget_user_memdir(replacement.clone());
+        assert!(prefetch.user_memdir().is_none());
+        assert_eq!(prefetch.configured_user_memdir(), Some(replacement.clone()));
+        prefetch.set_enabled(true);
+        let retargeted = prefetch
+            .start("question".into(), "model".into(), None, "/project".into())
+            .await
+            .take()
+            .await;
+        assert_eq!(retargeted.len(), 1);
+        assert_eq!(retargeted[0].path, replacement.join("guidance.md"));
+        assert!(retargeted[0].content.contains("custom store"));
+        assert!(
+            directory.join("guidance.md").exists(),
+            "retargeting retains the previous store"
+        );
+        let previous_calls = prompts.lock().unwrap().len();
+        assert!(previous_calls > 0);
+
+        prefetch.set_enabled(false);
+        assert!(prefetch
+            .start("question".into(), "model".into(), None, "/project".into())
+            .await
+            .take()
+            .await
+            .is_empty());
+        assert_eq!(prompts.lock().unwrap().len(), previous_calls);
+        assert_eq!(prefetch.configured_user_memdir(), Some(replacement));
     }
 
     #[tokio::test]
@@ -495,8 +740,8 @@ mod tests {
             surfaced[0].content
         );
         assert!(
-            !surfaced[0].content.contains("description: shell helper"),
-            "frontmatter must be stripped before surfacing: {:?}",
+            surfaced[0].content.contains("description: shell helper"),
+            "native recall retains the memory file's redacted frontmatter: {:?}",
             surfaced[0].content
         );
     }
@@ -635,6 +880,27 @@ mod tests {
     }
 
     #[test]
+    fn recall_projection_matches_native_319_corpus() {
+        let fixture = Utf16JsonProjection::parse(include_str!(
+            "../tests/fixtures/memory_storage_2_1_319.json"
+        ))
+        .expect("native UTF-16 fixture");
+        let cases = fixture.get_property("recall_cases").unwrap();
+        for index in 0..cases.array_len().unwrap() {
+            let case = cases.get_index(index).unwrap();
+            let input = case.get_property("input").unwrap().as_str().unwrap();
+            let path = case.get_property("path").unwrap().as_str().unwrap();
+            let expected = case.get_property("expected").unwrap().as_str().unwrap();
+            assert_eq!(
+                truncate_surfaced_content(input, Path::new(path)),
+                expected,
+                "{}",
+                case.get_property("name").unwrap().as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn surfaced_content_over_line_cap_appends_first_n_lines_notice() {
         // > 200 lines ⇒ keep the first 200 and APPEND the notice with the
         // "first 200 lines" wording (binary `i = totalLines > xHo`, byte budget
@@ -646,7 +912,7 @@ mod tests {
         let out = truncate_surfaced_content(&content, Path::new("/m/big.md"));
         assert!(out.starts_with("L1\nL2\n"), "kept body starts at line 1");
         assert!(
-            out.contains("\nL200\n> This memory file was truncated"),
+            out.contains("\nL200\n\n> This memory file was truncated"),
             "notice after the 200th kept line: {out}"
         );
         assert!(
@@ -667,7 +933,7 @@ mod tests {
         let out = truncate_surfaced_content(&huge, Path::new("/m/wide.md"));
         assert_eq!(
             out,
-            "\n> This memory file was truncated (4096 byte limit). Use the Read tool to view the complete file at: /m/wide.md",
+            "\n\n> This memory file was truncated (4096 byte limit). Use the Read tool to view the complete file at: /m/wide.md",
             "byte-limit notice appended to an empty body when line 1 alone exceeds the cap"
         );
     }

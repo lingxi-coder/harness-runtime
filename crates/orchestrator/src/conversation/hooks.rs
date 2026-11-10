@@ -725,6 +725,9 @@ impl ConversationOrchestrator {
     /// Deliver the settled main-loop turn to Mods. A changed nonblank result
     /// becomes a UI notice while the recorded assistant answer stays intact.
     pub(super) async fn fire_mod_turn_complete(&self, is_aborted: bool, has_error: bool) {
+        if !is_aborted && !has_error {
+            self.maybe_start_background_memory().await;
+        }
         // Resolve the host before consuming the lifecycle record so canceling
         // this future while it waits for the registry cannot lose a settled
         // turn.

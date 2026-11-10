@@ -153,6 +153,8 @@ pub fn merge(
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
+        auto_memory_directory: next.auto_memory_directory.or(prev.auto_memory_directory),
+        auto_dream_enabled: next.auto_dream_enabled.or(prev.auto_dream_enabled),
         auto_compact_enabled: next.auto_compact_enabled.or(prev.auto_compact_enabled),
         auto_compact_window: next.auto_compact_window.or(prev.auto_compact_window),
         effort_level: next.effort_level.or(prev.effort_level),
@@ -3085,6 +3087,12 @@ mod tests {
             ("outputStyle", json!("lower"), json!("upper")),
             ("model", json!("m-lower"), json!("m-upper")),
             ("availableModels", json!(["lower"]), json!(["upper"])),
+            (
+                "autoMemoryDirectory",
+                json!("/lower/memory"),
+                json!("/upper/memory"),
+            ),
+            ("autoDreamEnabled", json!(true), json!(false)),
         ]
     }
 

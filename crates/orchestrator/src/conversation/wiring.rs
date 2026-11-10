@@ -1115,11 +1115,14 @@ impl ConversationOrchestrator {
         Some(tool)
     }
 
-    /// Whether a memory prefetcher has been wired via
+    /// Whether an active memory prefetcher has been wired via
     /// [`Self::with_memory_prefetch`]. (P0.1)
     #[must_use]
     pub fn has_memory_prefetch(&self) -> bool {
-        self.prompt_runtime.memory_prefetch.is_some()
+        self.prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .is_some_and(|prefetch| prefetch.is_enabled())
     }
 
     /// Wire the EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetcher. The

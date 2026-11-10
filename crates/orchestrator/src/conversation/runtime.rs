@@ -806,6 +806,12 @@ impl ConversationOrchestrator {
 }
 
 pub(crate) struct PromptRuntime {
+    pub(crate) auto_memory: Option<Arc<super::auto_memory::AutoMemoryHandle>>,
+    pub(crate) auto_dream: Option<super::background_memory::AutoDreamBinding>,
+    pub(crate) background_memory_lifecycle: Mutex<()>,
+    pub(crate) memory_preferences_provider:
+        Option<Arc<super::background_memory::MemoryPreferencesProvider>>,
+    pub(crate) memory_preferences: Mutex<Option<super::background_memory::MemoryPreferences>>,
     /// Host-only, nonserialized boundary for private workspaces. Prompt and
     /// transcript metadata must not execute commands against model-owned Git.
     pub(crate) host_environment_probes_disabled: bool,
@@ -887,8 +893,7 @@ pub(crate) struct PromptRuntime {
     /// Exact deferred-schema token counts, memoized by the same stable schema
     /// key as `wire_tool_schema_cache`. `None` is cached too: unsupported
     /// providers must not retry a doomed count endpoint every turn.
-    pub(super) deferred_tool_token_cache:
-        Mutex<std::collections::HashMap<u64, Option<u64>>>,
+    pub(super) deferred_tool_token_cache: Mutex<std::collections::HashMap<u64, Option<u64>>>,
     /// `history.len()` captured at each `silent_turn_reminder` emission.
     ///
     /// The oracle keeps its emitted attachments IN the message list, so `Ezm`
@@ -1099,6 +1104,17 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// Metadata retained while a live memory change replaces an existing
+    /// snapshot. A resumed session without a snapshot never creates one here.
+    pub(crate) pending_memory_prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// A live memory change awaits a main request with a matching wire prefix,
+    /// independently of whether static prompt snapshots are enabled.
+    pub(crate) memory_prompt_dirty: std::sync::atomic::AtomicBool,
+    /// Only the serialized main request captures this epoch; previews and
+    /// prewarm cannot acknowledge a changed dynamic memory directory.
+    pub(crate) memory_prompt_generation: std::sync::atomic::AtomicU64,
+    pub(crate) main_memory_prompt_generation: std::sync::atomic::AtomicU64,
+    pub(crate) memory_resume_prompt_checked: std::sync::atomic::AtomicBool,
     pub(super) frozen_prompt_source_vector: Mutex<Option<Arc<FrozenPromptSourceVector>>>,
     /// Admitted conversation epoch that produced the static snapshot and
     /// its rendering hint. Legacy transcripts belong to epoch zero.
@@ -1144,6 +1160,11 @@ impl PromptRuntime {
 
     pub(crate) fn new() -> Self {
         Self {
+            auto_memory: None,
+            auto_dream: None,
+            background_memory_lifecycle: Mutex::new(()),
+            memory_preferences_provider: None,
+            memory_preferences: Mutex::new(None),
             host_environment_probes_disabled: false,
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
             suggestion_background: std::sync::Mutex::new(Default::default()),
@@ -1207,6 +1228,11 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            pending_memory_prompt_snapshot: Mutex::new(None),
+            memory_prompt_dirty: std::sync::atomic::AtomicBool::new(false),
+            memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
+            main_memory_prompt_generation: std::sync::atomic::AtomicU64::new(0),
+            memory_resume_prompt_checked: std::sync::atomic::AtomicBool::new(false),
             frozen_prompt_source_vector: Mutex::new(None),
             prompt_snapshot_epoch: Mutex::new(None),
             pending_prompt_source_vector: Mutex::new(None),
@@ -1308,6 +1334,15 @@ impl PromptRuntime {
         *self.pending_memory_prefetch.lock().await = None;
         *self.pending_skill_prefetch.lock().await = None;
         *self.pending_prompt_source_vector.lock().await = None;
+        *self.pending_memory_prompt_snapshot.lock().await = None;
+        self.memory_prompt_dirty
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.memory_prompt_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.main_memory_prompt_generation
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.memory_resume_prompt_checked
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.prompt_snapshot.lock().await = None;
         *self.frozen_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot_epoch.lock().await = None;
@@ -1599,6 +1634,11 @@ impl CompactionRuntime {
         if let Some(compactor) = self.compaction.as_ref() {
             let _ = compactor.context_collapse.reset("session_boundary");
         }
+        self.reset_session_memory().await;
+    }
+
+    /// Fence pending legacy extraction before disabling or changing stores.
+    pub(crate) async fn reset_session_memory(&self) {
         if let Some(handle) = self.session_memory.as_ref() {
             let mut extractor = handle.extractor.lock().await;
             handle

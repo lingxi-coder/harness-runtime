@@ -35,6 +35,8 @@
 #![forbid(unsafe_code)]
 
 use crate::{MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES};
+use lingxi_core::host::effort::{javascript_whitespace, trim_js_whitespace};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Telemetry event the write-hook emits when the memory index is at/over cap,
 /// carrying an `over_cap: bool` field (claude-code `XGu` →
@@ -86,7 +88,7 @@ pub struct IndexMeasure {
 /// `String.length`), matching `qAt`'s `byteCount: t.length`.
 #[must_use]
 pub fn measure(content: &str) -> IndexMeasure {
-    let trimmed = content.trim();
+    let trimmed = trim_js_whitespace(content);
     IndexMeasure {
         line_count: trimmed.matches('\n').count() + 1,
         byte_count: trimmed.chars().map(|c| c.len_utf16()).sum(),
@@ -118,11 +120,134 @@ pub fn human_bytes(bytes: usize) -> String {
 /// `x.toFixed(1)` with a trailing `.0` stripped (claude-code
 /// `.toFixed(1).replace(/\.0$/,"")`).
 fn one_decimal(x: f64) -> String {
-    let s = format!("{x:.1}");
+    // JS toFixed rounds an exactly representable positive halfway value up;
+    // Rust's formatter uses ties-to-even (1.25 would otherwise become 1.2).
+    let rounded = (x * 10.0).round() / 10.0;
+    let s = format!("{rounded:.1}");
     match s.strip_suffix(".0") {
         Some(head) => head.to_string(),
         None => s,
     }
+}
+
+/// The native `xvr` memory-index read projection (Claude Code 2.1.319).
+///
+/// The so-called byte cap is a JavaScript String.length cap. Keep the source
+/// carrier because a 25,000-unit slice can retain a lone high surrogate.
+#[derive(Debug, Clone)]
+pub struct MemoryIndexView {
+    /// Loaded source string, including Native's warning when truncated.
+    pub content: Utf16JsonProjection,
+    /// Original trimmed line count.
+    pub line_count: usize,
+    /// Original JavaScript string length (the upstream byteCount field).
+    pub byte_count: usize,
+    /// Whether the source exceeded the 200-line limit.
+    pub was_line_truncated: bool,
+    /// Whether the source exceeded 25,000 UTF-16 code units.
+    pub was_byte_truncated: bool,
+}
+
+/// Trim and splice a MEMORY.md index exactly as the pinned native renderer
+/// does, including its omitted-line preview and model-facing warning.
+#[must_use]
+pub fn truncate_memory_index(content: &str) -> MemoryIndexView {
+    let trimmed = trim_js_whitespace(content);
+    let units: Vec<u16> = trimmed.encode_utf16().collect();
+    let line_count = units.iter().filter(|&&unit| unit == 10).count() + 1;
+    let byte_count = units.len();
+    let was_line_truncated = line_count > MAX_ENTRYPOINT_LINES;
+    let was_byte_truncated = byte_count > MAX_ENTRYPOINT_BYTES;
+    let mut end = units.len();
+    if was_line_truncated {
+        end = units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| **unit == 10)
+            .nth(MAX_ENTRYPOINT_LINES - 1)
+            .map_or(end, |(offset, _)| offset);
+    }
+    if end > MAX_ENTRYPOINT_BYTES {
+        end = units[..=MAX_ENTRYPOINT_BYTES]
+            .iter()
+            .rposition(|&unit| unit == 10)
+            .filter(|&offset| offset > 0)
+            .unwrap_or(MAX_ENTRYPOINT_BYTES);
+    }
+    let mut kept = units[..end].to_vec();
+    if was_line_truncated || was_byte_truncated {
+        let kept_lines = if units.get(end) == Some(&10) {
+            kept.iter().filter(|&&unit| unit == 10).count() + 1
+        } else {
+            0
+        };
+        let omission = if kept_lines == 0 {
+            format!("everything after the first {end} characters of line 1 was cut off")
+        } else {
+            let next_start = end + 1;
+            let next_end = units[next_start..]
+                .iter()
+                .position(|&unit| unit == 10)
+                .map_or(units.len(), |offset| next_start + offset);
+            let next = String::from_utf16_lossy(&units[next_start..next_end]);
+            let next = trim_js_whitespace(&next);
+            let preview = if next.is_empty() {
+                String::new()
+            } else {
+                format!(" (\"{}\")", omitted_line_preview(next, 80))
+            };
+            format!(
+                "{} of {line_count} lines were cut off, starting at line {}{preview}",
+                line_count - kept_lines,
+                kept_lines + 1,
+            )
+        };
+        let size = match (was_line_truncated, was_byte_truncated) {
+            (false, true) => format!(
+                "{} (limit: {}) \u{2014} index entries are too long",
+                human_bytes(byte_count),
+                human_bytes(MAX_ENTRYPOINT_BYTES)
+            ),
+            (true, false) => format!("{line_count} lines (limit: {MAX_ENTRYPOINT_LINES})"),
+            _ => format!("{line_count} lines and {}", human_bytes(byte_count)),
+        };
+        kept.extend(format!(
+            "\n\n> WARNING: MEMORY.md is {size}. Only part of it was loaded: {omission}. Keep index entries to one line under ~200 chars; move detail into topic files."
+        ).encode_utf16());
+    }
+    MemoryIndexView {
+        content: Utf16JsonProjection::root_string(String::from_utf16_lossy(&kept), kept)
+            .expect("index display matches its UTF-16 source"),
+        line_count,
+        byte_count,
+        was_line_truncated,
+        was_byte_truncated,
+    }
+}
+
+/// Native `LH`/`Q`: avoid splitting a surrogate pair, and prefer a whole-word
+/// preview when the preceding phrase is longer than half the budget.
+fn omitted_line_preview(text: &str, cap: usize) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.len() <= cap {
+        return text.to_owned();
+    }
+    let mut end = cap - 1;
+    if (0xd800..=0xdbff).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    let head = String::from_utf16_lossy(&units[..end]);
+    let phrase = head
+        .char_indices()
+        .rfind(|(_, character)| javascript_whitespace(*character))
+        .map_or("", |(offset, _)| &head[..offset])
+        .trim_end_matches(javascript_whitespace);
+    let head = if phrase.encode_utf16().count() > cap / 2 {
+        phrase
+    } else {
+        head.trim_end_matches(javascript_whitespace)
+    };
+    format!("{head}\u{2026}")
 }
 
 /// One cap dimension considered by [`memory_index_cap_notice`] (claude-code

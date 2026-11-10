@@ -166,7 +166,7 @@ fn native_tool_search_absent_admitted(
         && pool_gate
 }
 
-fn wrap_system_reminder_source(
+pub(super) fn wrap_system_reminder_source(
     source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let mut units = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
@@ -183,7 +183,7 @@ fn wrap_system_reminder_source(
     .expect("wrapped reminder is a root string")
 }
 
-fn source_user_meta(
+pub(super) fn source_user_meta(
     id: MessageId,
     source: lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> ConversationMessage {
@@ -1464,7 +1464,17 @@ impl ConversationOrchestrator {
         let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
             return Vec::new();
         };
-        let notifications = provider.take_pending_task_notifications().await;
+        let notifications = provider
+            .take_pending_task_notifications()
+            .await
+            .into_iter()
+            .filter(|notification| {
+                self.prompt_runtime
+                    .auto_dream
+                    .as_ref()
+                    .is_none_or(|binding| !binding.scheduler.owns_task(&notification.task_id))
+            })
+            .collect::<Vec<_>>();
         self.enqueue_memory_updates_from(&notifications);
         // ONE message per completion: claude-code's `ha(…)` enqueue runs once
         // per notification and the envelope is applied per message, so two
@@ -1596,6 +1606,7 @@ impl ConversationOrchestrator {
     ///
     /// Silent in a stock session: nothing queues unless a `dream` task completes.
     pub(crate) async fn memory_update_reminder_messages(&self) -> Vec<ConversationMessage> {
+        let native_updates = self.native_memory_update_reminders().await;
         let pending: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = {
             let mut queue = self
                 .prompt_runtime
@@ -1605,16 +1616,15 @@ impl ConversationOrchestrator {
             std::mem::take(&mut *queue)
         };
         if pending.is_empty() {
-            return Vec::new();
+            return native_updates;
         }
         let Some(memdir) = self
             .prompt_runtime
             .memory_prefetch
             .as_ref()
             .and_then(|p| p.user_memdir())
-            .map(std::path::Path::to_path_buf)
         else {
-            return Vec::new();
+            return native_updates;
         };
 
         // Which memdir files moved since the last scan.
@@ -1657,9 +1667,9 @@ impl ConversationOrchestrator {
             })
         };
 
-        pending
+        native_updates
             .into_iter()
-            .map(|queued| {
+            .chain(pending.into_iter().map(|queued| {
                 let body = crate::prompt::memory_update::render_memory_update(
                     &crate::prompt::memory_update::MemoryUpdate {
                         source: queued.source,
@@ -1669,7 +1679,7 @@ impl ConversationOrchestrator {
                     },
                 );
                 source_user_meta(MessageId::new(), wrap_system_reminder_source(&body))
-            })
+            }))
             .collect()
     }
 
@@ -3030,6 +3040,10 @@ message with multiple tool uses so they run concurrently."
         let Some(prefetch) = self.prompt_runtime.memory_prefetch.as_ref() else {
             return; // no prefetch wired ⇒ surfacing channel stays inert
         };
+        if !prefetch.is_enabled() {
+            *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
+            return;
+        }
         // Keep at most one in-flight selector. A slow result continues under
         // the current model call instead of being overwritten or queueing
         // unbounded side queries.
@@ -3098,6 +3112,15 @@ message with multiple tool uses so they run concurrently."
     /// per-turn OUTGOING snapshot (never `session.history` / JSONL), so it is
     /// recomputed each turn and never accumulates.
     pub(crate) async fn relevant_memory_reminder_messages(&self) -> Vec<ConversationMessage> {
+        if self
+            .prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .is_some_and(|prefetch| !prefetch.is_enabled())
+        {
+            *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
+            return Vec::new();
+        }
         // Never await an unresolved side query on the model-call critical path.
         // Leave it in the slot so it can run concurrently with this iteration
         // and be collected by a later one.

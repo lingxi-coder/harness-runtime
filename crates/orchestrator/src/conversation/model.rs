@@ -2169,8 +2169,12 @@ impl ConversationOrchestrator {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
             return Ok(());
         };
-        slot.save(self.build_cache_safe_params(system, model, tools).await?)
-            .await;
+        self.publish_memory_cache_safe_params(
+            slot,
+            self.build_cache_safe_params(system, model, tools).await?,
+            false,
+        )
+        .await;
         Ok(())
     }
 
@@ -2202,7 +2206,7 @@ impl ConversationOrchestrator {
         if let Some(inline_context) = inline_context {
             params.user_context_message = Some(inline_context.clone());
         }
-        slot.save(params).await;
+        self.publish_memory_cache_safe_params(slot, params, true).await;
         Ok(())
     }
 

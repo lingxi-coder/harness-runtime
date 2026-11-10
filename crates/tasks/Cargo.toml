@@ -9,6 +9,7 @@ mobile-linux-api.workspace = true
 
 branding.workspace = true
 mcp = { path = "../mcp" }
+memory = { path = "../memory" }
 core = { path = "../core" }
 agent = { path = "../agent" }
 hooks = { path = "../hooks" }
@@ -21,7 +22,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 rand = "0.9"
 futures = "0.3"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tokio-util.workspace = true
 task-store = { path = "../task-store" }
 tracing.workspace = true

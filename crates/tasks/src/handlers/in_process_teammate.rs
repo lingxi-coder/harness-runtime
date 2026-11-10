@@ -1344,6 +1344,7 @@ impl InProcessTeammateHandler {
             // Coordinator-managed teammates are launched by the team service,
             // not admitted through the Agent tool statistics producer.
             agent_spawn_token: None,
+            memory_fork_wire: None,
             // Swarm identity (claude-code `TeammateContext.agentName` /
             // `.teamName`): the DISPLAY name is always reachable here (it is the
             // spawn input); `team_name` is threaded from the coordinator team via

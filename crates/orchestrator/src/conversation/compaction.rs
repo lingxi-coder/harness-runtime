@@ -1525,6 +1525,15 @@ impl ConversationOrchestrator {
     /// byte-identical by default. Never blocks the turn (the fork runs on the
     /// handle's runtime); a failed extraction is swallowed, never surfaced.
     pub(crate) async fn maybe_extract_session_memory(&self) {
+        let _lifecycle = self.prompt_runtime.background_memory_lifecycle.lock().await;
+        if self
+            .prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .is_some_and(|prefetch| !prefetch.is_enabled())
+        {
+            return;
+        }
         let safety_observer = self.model_safety_observer().await;
         let Some(handle) = self.compaction_runtime.session_memory.clone() else {
             return;
@@ -2642,7 +2651,6 @@ impl ConversationOrchestrator {
             .memory_prefetch
             .as_ref()
             .and_then(|p| p.user_memdir())
-            .map(std::path::Path::to_path_buf)
             .or_else(|| {
                 config_home
                     .as_ref()

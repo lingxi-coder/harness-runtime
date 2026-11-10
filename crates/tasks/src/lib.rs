@@ -27,6 +27,7 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+pub mod auto_dream;
 pub mod cron;
 pub mod handle;
 pub mod handlers;

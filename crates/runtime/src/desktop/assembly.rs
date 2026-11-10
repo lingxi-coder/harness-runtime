@@ -779,6 +779,194 @@ mod desktop_process_windows_tests {
     }
 }
 
+/// Native's default memory identity follows the nearest Git marker and, for
+/// linked worktrees, its verified common repository. Discovery runs once at
+/// composition and shares the host's marker cache; it never starts Git.
+fn desktop_memory_project_root(
+    cwd: &std::path::Path,
+    cache: &tool_api::HostGitRootCache,
+) -> std::path::PathBuf {
+    let Some(root) = cwd.ancestors().find(|root| {
+        cache.get_or_insert_with(root, |root| {
+            std::fs::symlink_metadata(root.join(".git"))
+                .is_ok_and(|metadata| metadata.is_dir() || metadata.is_file())
+        })
+    }) else {
+        return cwd.to_path_buf();
+    };
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    verified_memory_worktree_main_root(&root).unwrap_or(root)
+}
+
+fn verified_memory_worktree_main_root(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Native `cr` rejects symlinked pointer files and requires the worktree's
+    // gitdir backlink to identify this exact `.git` file.
+    let read_pointer = |path: &std::path::Path| {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        if !metadata.is_file() || metadata.len() > 16_384 {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    };
+    let canonical_local = |path: &std::path::Path| {
+        let path =
+            memory::memdir::paths::validated_auto_memory_directory(root, Some(path.to_str()?))?;
+        std::fs::canonicalize(path).ok()
+    };
+    let marker = root.join(".git");
+    let pointer = read_pointer(&marker)?;
+    let target = pointer.trim().strip_prefix("gitdir:")?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let git_dir = canonical_local(&root.join(target))?;
+    let common_pointer = read_pointer(&git_dir.join("commondir"))?;
+    let common = canonical_local(&git_dir.join(common_pointer.trim()))?;
+    if git_dir.parent()? != common.join("worktrees") {
+        return None;
+    }
+    let backlink = read_pointer(&git_dir.join("gitdir"))?;
+    if canonical_local(&git_dir.join(backlink.trim()))? != marker {
+        return None;
+    }
+    if common.file_name()? == ".git" {
+        common.parent().map(std::path::Path::to_path_buf)
+    } else if !common.join(".git").exists() {
+        Some(common)
+    } else {
+        None
+    }
+}
+
+fn desktop_memory_preferences_provider(
+    config: &DesktopConfig,
+) -> Arc<orchestrator::MemoryPreferencesProvider> {
+    // Keep settings source identity and policy state; credentials and tool
+    // services from the full launch configuration are not retained here.
+    let config_home = config.lingxi_home.clone();
+    let scope = config.setting_source_scope;
+    let restricted = config.restricted;
+    let flag_settings = config.flag_settings.clone();
+    let flag_source = config.flag_settings_source.clone();
+    let policy = config.managed_policy_snapshot_cache.clone();
+    let host_trust = config.host_workspace_trusted;
+    let trust_path = migrations::global_config::global_config_path();
+    let git_cache = config.host_git_root_cache.clone();
+    let identity_cache = Arc::new(std::sync::Mutex::new(
+        None::<(std::path::PathBuf, std::path::PathBuf)>,
+    ));
+    let home = dirs::home_dir()
+        .unwrap_or_else(|| config_home.parent().unwrap_or(&config_home).to_path_buf());
+    Arc::new(move |cwd| {
+        let config_home = config_home.clone();
+        let flag_settings = flag_settings.clone();
+        let flag_source = flag_source.clone();
+        let policy = policy.clone();
+        let trust_path = trust_path.clone();
+        let git_cache = git_cache.clone();
+        let identity_cache = identity_cache.clone();
+        let home = home.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut config = DesktopConfig::default();
+                config.lingxi_home = config_home;
+                config.cwd = cwd.clone();
+                config.restricted = restricted;
+                config.setting_source_scope = scope;
+                config.flag_settings = flag_settings;
+                config.flag_settings_source = flag_source;
+                let snapshot = policy
+                    .snapshot()
+                    .ok_or_else(|| "memory settings policy is not initialized".to_string())?;
+                let effective = load_effective_settings_for_config(&config, Some(&snapshot))
+                    .map_err(|error| error.to_string())?;
+                if effective.source_incomplete {
+                    return Err("memory settings sources are incomplete".into());
+                }
+                let trusted = resolve_workspace_trust(host_trust, &cwd, trust_path.as_deref());
+                let setting = effective.auto_memory_directory(trusted);
+                let project_root = {
+                    let mut cache = identity_cache
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some((_, root)) = cache.as_ref().filter(|(key, _)| key == &cwd) {
+                        root.clone()
+                    } else {
+                        let root = desktop_memory_project_root(&cwd, &git_cache);
+                        *cache = Some((cwd.clone(), root.clone()));
+                        root
+                    }
+                };
+                Ok(orchestrator::MemoryPreferences {
+                    directory: memory::memdir::paths::resolve_auto_memory_directory(
+                        &config.lingxi_home,
+                        &project_root,
+                        &home,
+                        setting.as_deref(),
+                    ),
+                    enabled: effective.settings.auto_memory_enabled,
+                    auto_dream_enabled: effective.settings.auto_dream_enabled,
+                })
+            })
+            .await
+            .map_err(|error| format!("memory settings task: {error}"))?
+        })
+    })
+}
+
+#[cfg(test)]
+mod memory_project_identity_tests {
+    use super::desktop_memory_project_root;
+
+    #[test]
+    fn nested_directories_share_the_repository_memory_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let nested = root.join("src/nested");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            desktop_memory_project_root(&nested, &tool_api::HostGitRootCache::new()),
+            std::fs::canonicalize(root).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_requires_the_common_directory_and_exact_backlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let worktree = temp.path().join("worktree");
+        let private = main.join(".git/worktrees/fixture");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .unwrap();
+        std::fs::write(private.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            private.join("gitdir"),
+            worktree.join(".git").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let cache = tool_api::HostGitRootCache::new();
+        assert_eq!(
+            desktop_memory_project_root(&worktree, &cache),
+            std::fs::canonicalize(&main).unwrap()
+        );
+        std::fs::write(
+            private.join("gitdir"),
+            main.join(".git").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_memory_project_root(&worktree, &cache),
+            std::fs::canonicalize(&worktree).unwrap()
+        );
+    }
+}
+
 pub async fn build(
     mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
@@ -1545,6 +1733,12 @@ pub async fn build_with_credential_stack(
     });
     let insights_native_system_prefix =
         crate::insights::desktop_native_insights_system_prefix(&cfg, &user_agent_environment);
+    // Native `h4` checks the actual SDK entrypoint, not the bridge's query
+    // source. Ordinary Desktop transports still own a main app session.
+    let memory_sdk_entrypoint = matches!(
+        user_agent_environment.entrypoint.as_deref(),
+        Some("sdk-ts" | "sdk-py" | "sdk-cli")
+    );
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
@@ -5625,7 +5819,11 @@ pub async fn build_with_credential_stack(
         }
         tools_inner.register_builtin(workflow_tool.clone());
     }
-    if let Some(read_tools) = cfg.team_invocation.as_ref().and_then(|p| p.read_tools.as_ref()) {
+    if let Some(read_tools) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|p| p.read_tools.as_ref())
+    {
         super::team_process::read_tools::register(&mut tools_inner, read_tools.clone());
     }
     let registered_mcp_tools =
@@ -5946,6 +6144,7 @@ pub async fn build_with_credential_stack(
     dream_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
             .with_gate(perms.clone())
+            .with_read_file_state(read_state_map.clone())
             .with_background_owned(true),
     ));
 
@@ -6439,19 +6638,16 @@ pub async fn build_with_credential_stack(
         orch_builder
     };
 
-    // MEM-1 ACTIVATION. The composition-root presence of the prefetch IS the
-    // gate (`memory_prefetch.is_some()`), and that presence is now decided by
-    // `memory::auto_memory_enabled` — the port of claude-code `dLt()`, whose
-    // last statement is `return!0`, i.e. **ON by default**.
-    //
-    // 🚨 This used to read `LINGXI_MEMDIR_PREFETCH` and cite `tengu_moth_copse`
-    // as the upstream gate. That attribution was wrong: `tengu_moth_copse`
-    // (`X$()`) guards `CLAUDE_MEMORY_STORES`, a different feature. So the port
-    // shipped auto-memory OFF for everyone on a mis-mapped flag.
-    //
-    // Memory selection follows the live session's model and profile; turn it
-    // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
+    // Normal main sessions retain dormant roots and workers while memory is
+    // disabled. The live gate controls recall and prompt exposure, so an
+    // off-to-on settings change activates the same project store.
+    let memory_session_allowed = cfg.app_invocation.is_none()
+        && cfg.team_invocation.is_none()
+        && matches!(
+            cfg.native_settings_agent_context,
+            lingxi_core::host::NativeSettingsAgentContext::Main
+        );
+    let (memory_prefetch_on, session_memory_on) = if !memory_session_allowed {
         (false, false)
     } else {
         resolve_memory_feature_gates(
@@ -6462,10 +6658,105 @@ pub async fn build_with_credential_stack(
             is_env_truthy("LINGXI_SESSION_MEMORY"),
         )
     };
-    let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
-            side_query_client.clone(), Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>, &home, &cfg.cwd)),
-        _ => orch_builder,
+    let mut memory_active = memory_prefetch_on;
+    let memory_runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(PosixRuntime::new());
+    let memory_directory = if memory_session_allowed {
+        let home = dirs::home_dir().unwrap_or_else(|| {
+            cfg.lingxi_home
+                .parent()
+                .unwrap_or(&cfg.lingxi_home)
+                .to_path_buf()
+        });
+        let setting = effective_settings.auto_memory_directory(workspace_trusted);
+        let memory_project_root = {
+            let cwd = cfg.cwd.clone();
+            let cache = cfg.host_git_root_cache.clone();
+            tokio::task::spawn_blocking(move || desktop_memory_project_root(&cwd, &cache))
+                .await
+                .unwrap_or_else(|_| cfg.cwd.clone())
+        };
+        let directory = memory::memdir::paths::resolve_auto_memory_directory(
+            &cfg.lingxi_home,
+            &memory_project_root,
+            &home,
+            setting.as_deref(),
+        );
+        if memory_active {
+            if let Err(error) = tokio::fs::create_dir_all(&directory).await {
+                tracing::warn!(%error, path = %directory.display(), "auto-memory directory unavailable");
+                memory_active = false;
+            }
+        }
+        Some(directory)
+    } else {
+        None
+    };
+    let orch_builder = if let Some(directory) = memory_directory.as_ref() {
+        let mut roots = memory::memdir::paths::memdir_roots_at(&cfg.lingxi_home, &cfg.cwd, false);
+        roots.user_memdir = directory.clone();
+        let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::new(
+            Arc::new(memory::selector::MemorySelector::new(
+                side_query_client.clone(),
+            )),
+            memory_runtime.clone(),
+            roots,
+        ));
+        prefetch.set_enabled(memory_active);
+        let builder = orch_builder
+            .with_memory_prefetch(prefetch)
+            .with_memory_preferences_provider(desktop_memory_preferences_provider(&cfg));
+        // The orchestrator reads the extractor's independent rollout on every
+        // eligible turn, so a refreshed flag can enable this already-wired
+        // handle without rebuilding the conversation.
+        let builder = builder.with_auto_memory(Arc::new(orchestrator::AutoMemoryHandle::new(
+            directory.clone(),
+            subagent_spawner.clone(),
+            dream_invoker.clone(),
+            budget_enforcer.clone(),
+            memory_runtime.clone(),
+        )));
+        let flag =
+            telemetry::feature_flags::flag_value("tengu_onyx_plover", serde_json::Value::Null);
+        let scheduler = Arc::new(tasks::auto_dream::AutoDreamScheduler::new(
+            Arc::new(tasks::auto_dream::LocalAutoDreamStorage::new(Arc::new(
+                cron::scheduler::pid_alive_check,
+            ))),
+            task_registry.clone(),
+            clock.clone(),
+            memory_runtime.clone(),
+        ));
+        builder.with_auto_dream(
+            scheduler,
+            tasks::auto_dream::AutoDreamRunContext {
+                current_session_id: main_session_uuid.clone(),
+                prompt_context: tasks::DreamPromptContext {
+                    memory_directory: memory::memdir::paths::memory_directory_prompt_path(
+                        directory,
+                    ),
+                    transcript_directory: main_transcript_path
+                        .parent()
+                        .unwrap_or(&cfg.lingxi_home)
+                        .to_string_lossy()
+                        .into_owned(),
+                    additional_context: None,
+                    team_memory: false,
+                    mcp_memory: false,
+                },
+                gates: tasks::auto_dream::AutoDreamGates {
+                    auto_memory_enabled: memory_active,
+                    setting: effective_settings.settings.auto_dream_enabled,
+                    is_sdk: memory_sdk_entrypoint,
+                    ..Default::default()
+                }
+                .with_flag(&flag),
+                config: tasks::auto_dream::AutoDreamConfig::from_flag(&flag),
+                writes_permitted: true,
+                fork_request: None,
+                fork_wire: None,
+            },
+        )
+    } else {
+        orch_builder
     };
 
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
@@ -6539,11 +6830,21 @@ pub async fn build_with_credential_stack(
     // scan re-loads next session. The current 10k/5k/3 config defaults apply.
     // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
-    let orch_builder = match (session_memory_on, dirs::home_dir()) {
-        (true, Some(home)) => orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
-            side_query_client.clone(), default_model_id.clone(), memory::session_memory::SessionMemoryConfig {enabled:true,..Default::default()},
-            &home, Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>)),
-        _ => orch_builder,
+    let orch_builder = if session_memory_on {
+        orch_builder.with_session_memory(
+            orchestrator::prompt::memory_block::build_session_memory_handle_at(
+                side_query_client.clone(),
+                default_model_id.clone(),
+                memory::session_memory::SessionMemoryConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                cfg.lingxi_home.clone(),
+                memory_runtime,
+            ),
+        )
+    } else {
+        orch_builder
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch_builder = if cfg.team_invocation.is_some() {

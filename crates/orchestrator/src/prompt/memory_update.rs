@@ -1,72 +1,20 @@
-//! `memory_update` — the reminder claude-code emits after a BACKGROUND process
-//! rewrites the user's memory directory, so the model learns that files it may
-//! be holding in context are now stale on disk.
-//!
-//! Oracle anatomy (offsets into `~/.local/share/claude/versions/2.1.238`;
-//! present unchanged in 2.1.220, so this is a long-standing port gap, not
-//! 2.1.238 drift):
-//!
-//! * renderer @ **296705761** (the `xBi` switch):
-//!   ```js
-//!   case"memory_update":{
-//!     let o=[`${F5T[e.source]} updated your memory directory: ${e.summary}`],
-//!         i=AP(e.paths), s=AP(e.inContextPaths);
-//!     if(i.length>0)o.push(`Files changed: ${i.map(Kae).join(", ")}`);
-//!     if(s.length>0)o.push(`Your loaded copy of ${s.map(Kae).join(", ")} is now stale relative to disk — Read it again if you need current contents.`);
-//!     return o.push($io),Zy([kn({content:o.join(`\n`),isMeta:!0})])}
-//!   ```
-//! * `F5T={dream:"Background memory consolidation"}` @ **296741219** — the only
-//!   source the table names.
-//! * `$io` @ **296730196** — the shared ambient-context trailer, pushed
-//!   unconditionally as the LAST line.
-//! * `Kae` @ **285128585** — the filename escape
-//!   ([`super::sanitize::escape_reminder_path`]).
-//! * `AP` @ **281462785** — `Array.isArray` + per-element `typeof === "string"`
-//!   guard for a REPLAYED JSONL attachment. Rust's `&[String]` is that guard,
-//!   so it has no analogue here.
-//! * producer `jzm(ctx)` @ **296554545**:
-//!   ```js
-//!   function jzm(e){let t=e.getAppState().pendingMemoryUpdates;if(t.length===0)return[];
-//!     e.setAppState(…clear…);
-//!     let n=…memory index path…, o=XAa(e.session),
-//!         i=(s)=>s===n||o.has(s)||e.readFileState.has(s)||e.loadedNestedMemoryPaths?.[s]===!0;
-//!     return t.map((s)=>({type:"memory_update",source:s.source,summary:s.summary,
-//!                         paths:s.paths,inContextPaths:s.paths.filter(i)}))}
-//!   ```
-//!   i.e. a consume-once drain of an app-state queue, with `inContextPaths` =
-//!   the changed paths the model is currently holding (memory-index file,
-//!   session-memory set, `readFileState`, or a loaded nested-memory file).
-//!   [`select_in_context_paths`] is that filter, minus the host lookups the
-//!   caller owns.
-//!
-//! **STATUS — PORTED AND WIRED.** The producer is
-//! `ConversationOrchestrator::memory_update_reminder_messages`, called from the
-//! streaming turn driver's per-turn reminder fan-out in `conversation.rs`
-//! directly after the `<task-notification>` drain. The queue
-//! (`ConversationOrchestrator::pending_memory_updates`, this module's
-//! [`PendingMemoryUpdate`]) is filled by that same drain: the port's background
-//! consolidator is a FORKED SUBAGENT whose completion only surfaces as a
-//! terminal `dream` task notification, so that is where the oracle's
-//! `setAppState({pendingMemoryUpdates:[…]})` enqueue lands here.
-//!
-//! Two reconstructions, because the port's dream task carries less than the
-//! oracle's queue entry:
-//!
-//! * `summary` — the oracle's consolidator supplies it directly. Here it is the
-//!   dream agent's own final text (`TaskNotification::result`), which is exactly
-//!   what `dream.rs`'s prompt asks for ("Return a brief summary of what you
-//!   consolidated, updated, or pruned"), falling back to the task description.
-//!   No copy is invented.
-//! * `paths` — recomputed by listing the user memdir for files whose mtime is
-//!   newer than the previous scan, instead of being reported by the writer.
+//! Native 2.1.319 memory-update attachments, including extraction and sync.
+//! The file writer supplies exact changed paths; context membership is resolved
+//! when updates are drained. See scripts/tests/memory_prompts_319_oracle.mjs.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-/// `F5T` @296741219 — the only `source` the oracle's label table defines.
+/// Native source labels (`Nfo` / `Ffo` in 2.1.319).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryUpdateSource {
     /// `dream` ⇒ `"Background memory consolidation"`.
     Dream,
+    /// Successful automatic file-memory extraction.
+    Extract,
+    /// Unknown source labels use Native's generic wording.
+    Other,
+    /// Pending local changes already supply the complete reminder body.
+    SyncUnsaved,
 }
 
 impl MemoryUpdateSource {
@@ -75,6 +23,8 @@ impl MemoryUpdateSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::Dream => "Background memory consolidation",
+            Self::Extract => "Background memory extraction",
+            Self::Other | Self::SyncUnsaved => "A background memory process",
         }
     }
 }
@@ -144,6 +94,9 @@ where
 /// markup — or a closing `</system-reminder>` — inside the envelope.
 #[must_use]
 pub fn render_memory_update(update: &MemoryUpdate) -> Utf16JsonProjection {
+    if update.source == MemoryUpdateSource::SyncUnsaved {
+        return update.summary.clone();
+    }
     let escape_join = |paths: &[String]| {
         paths
             .iter()
@@ -258,5 +211,45 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
             MemoryUpdateSource::Dream.label(),
             "Background memory consolidation"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_319_tests {
+    use super::*;
+    #[test]
+    fn all_native_update_sources_and_path_branches_match_the_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/memory_prompts_319.json"
+        ))
+        .unwrap();
+        for case in fixture["updates"].as_array().unwrap() {
+            let input = &case["input"];
+            let source = match input["source"].as_str().unwrap() {
+                "dream" => MemoryUpdateSource::Dream,
+                "extract" => MemoryUpdateSource::Extract,
+                "sync_unsaved" => MemoryUpdateSource::SyncUnsaved,
+                _ => MemoryUpdateSource::Other,
+            };
+            let paths = |key: &str| {
+                input[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect()
+            };
+            let body = render_memory_update(&MemoryUpdate {
+                source,
+                summary: input["summary"].as_str().unwrap().into(),
+                paths: paths("paths"),
+                in_context_paths: paths("inContextPaths"),
+            });
+            assert_eq!(
+                body.string_at(""),
+                case["expected"][0]["content"].as_str(),
+                "{case}"
+            );
+        }
     }
 }

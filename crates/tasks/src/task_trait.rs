@@ -25,6 +25,22 @@ impl std::fmt::Debug for WebSocketMonitorInput {
     }
 }
 
+/// Host-resolved directories for the native memory consolidation prompt.
+/// These paths belong to the active project and configuration home.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DreamPromptContext {
+    /// The same memory directory advertised to the main conversation.
+    pub memory_directory: String,
+    /// The owning project's transcript directory.
+    pub transcript_directory: String,
+    /// Optional additional consolidation instructions.
+    pub additional_context: Option<String>,
+    /// Whether this host actually provides shared team memory.
+    pub team_memory: bool,
+    /// Whether this host actually provides the memory-service MCP tools.
+    pub mcp_memory: bool,
+}
+
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -37,6 +53,13 @@ pub trait Task: Send + Sync {
         -> Result<TaskHandle, TaskError>;
     /// Kill a running task instance.
     async fn kill(&self, task_id: &str, ctx: TaskContext) -> Result<(), TaskError>;
+    /// False means natural completion already owns terminal publication.
+    /// The registry must await that row's terminal transition instead of
+    /// manufacturing a Killed outcome after cancellation lost the race.
+    async fn request_stop(&self, task_id: &str, ctx: TaskContext) -> Result<bool, TaskError> {
+        self.kill(task_id, ctx).await?;
+        Ok(true)
+    }
     /// Wait for handler-owned workers that already won natural finalization.
     ///
     /// Ordinary [`Self::kill`] must return immediately when cancellation loses
@@ -297,6 +320,14 @@ pub enum TaskSpawnInput {
     Dream {
         /// Initial prompt.
         prompt: String,
+        /// Required for generating the native prompt when `prompt` is empty.
+        context: Option<DreamPromptContext>,
+        /// Live parent prefix and provider route for an automatic consolidation.
+        fork_request: Option<Box<SubagentSpawnRequest>>,
+        /// Exact inherited provider prompt, tools and attachment provenance.
+        fork_wire: Option<Arc<agent::memory_fork::MemoryForkProjection>>,
+        /// Successful file writes, published before the task becomes terminal.
+        writes: Option<Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>>,
         /// Optional cap on iterations.
         max_iterations: Option<u32>,
     },

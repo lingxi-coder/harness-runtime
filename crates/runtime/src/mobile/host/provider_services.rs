@@ -282,9 +282,16 @@ pub(super) const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
 pub(super) fn mobile_provider_settings(
     cfg: &MobileConfig,
 ) -> Result<lingxi_core::settings::SettingsJson, lingxi_core::settings::SettingsError> {
-    use lingxi_core::settings::SettingsJson;
+    mobile_provider_settings_from_layered(cfg, mobile_effective_settings(cfg)?.settings)
+}
 
-    let layered = mobile_effective_settings(cfg)?.settings;
+/// Apply host provider defaults to one already-admitted settings snapshot.
+/// Callers retaining source-sensitive settings can share this exact snapshot.
+pub(super) fn mobile_provider_settings_from_layered(
+    cfg: &MobileConfig,
+    layered: lingxi_core::settings::SettingsJson,
+) -> Result<lingxi_core::settings::SettingsJson, lingxi_core::settings::SettingsError> {
+    use lingxi_core::settings::SettingsJson;
     let explicit_allowlist = layered
         .routing
         .as_ref()

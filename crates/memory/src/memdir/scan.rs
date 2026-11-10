@@ -63,6 +63,10 @@ pub struct MemdirSnapshot {
     /// public `MemoryEntry` body intentionally remains frontmatter-free, while
     /// the selector still needs descriptions/tags to rank candidates.
     pub(crate) frontmatter: HashMap<std::path::PathBuf, MemoryFrontmatter>,
+    /// Redacted original file bytes when parsing removed frontmatter. Native
+    /// recall includes that header and counts it toward the read limits; the
+    /// public MemoryEntry and selector continue to receive parsed bodies.
+    pub(crate) recall_content: HashMap<std::path::PathBuf, String>,
 }
 
 /// Scan with `now = SystemTime::now()`. Convenience wrapper around
@@ -171,6 +175,7 @@ fn scan_memdir_at_with_limits(
 
     let mut entries = Vec::new();
     let mut frontmatter = HashMap::new();
+    let mut recall_content = HashMap::new();
     for tier in [
         MemoryEntryTier::User,
         MemoryEntryTier::Session,
@@ -178,11 +183,14 @@ fn scan_memdir_at_with_limits(
     ] {
         if let Some(scan) = scans.iter_mut().find(|scan| scan.tier == tier) {
             for candidate in scan.selected.drain(..) {
-                let (body, parsed_frontmatter) = std::fs::read_to_string(&candidate.path)
+                let (body, parsed_frontmatter, original) = std::fs::read_to_string(&candidate.path)
                     .map(|raw| sanitize_body(&raw))
                     .unwrap_or_default();
                 if let Some(metadata) = parsed_frontmatter {
                     frontmatter.insert(candidate.path.clone(), metadata);
+                }
+                if let Some(original) = original {
+                    recall_content.insert(candidate.path.clone(), original);
                 }
                 entries.push(MemoryEntry {
                     path: candidate.path,
@@ -197,6 +205,7 @@ fn scan_memdir_at_with_limits(
     Ok(MemdirSnapshot {
         entries,
         frontmatter,
+        recall_content,
     })
 }
 
@@ -363,14 +372,17 @@ const fn tier_priority(tier: MemoryEntryTier) -> u8 {
     }
 }
 
-fn sanitize_body(raw: &str) -> (String, Option<MemoryFrontmatter>) {
+fn sanitize_body(raw: &str) -> (String, Option<MemoryFrontmatter>, Option<String>) {
     // Redact before parsing so secrets in descriptions/tags cannot reach the
     // selector side query. The public entry body remains the parsed markdown
     // body, while the parsed metadata is retained in the snapshot sidecar.
     let redacted = crate::secret_scan::redact(raw);
     match parse_markdown_with_frontmatter(&redacted) {
-        Ok((metadata, body)) => (body, Some(metadata)),
-        Err(_) => (redacted, None),
+        Ok((metadata, body)) => {
+            let original = (body != redacted).then_some(redacted);
+            (body, Some(metadata), original)
+        }
+        Err(_) => (redacted, None, None),
     }
 }
 

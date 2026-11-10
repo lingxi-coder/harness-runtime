@@ -1,7 +1,8 @@
 //! Config-home memdir resolution: `<config-home>/{memdir, agents/session-memory,
 //! team-mem}`, where config-home honors `$LINGXI_CONFIG_DIR` (else `~/.claude`).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 /// Subdirectory under the config-home for individual memdir entries.
 pub const MEMDIR_SUBDIR: &str = "memdir";
@@ -29,6 +30,131 @@ pub fn user_memdir_for_project(config_home: &Path, cwd: &Path) -> PathBuf {
             &cwd.to_string_lossy(),
         ))
         .join(MEMDIR_SUBDIR)
+}
+
+/// Resolve a trusted `autoMemoryDirectory` value using native .319 `fc`/`Nvo`.
+/// Invalid, relative, root, network/device and tilde-escape paths fall back to
+/// the project's configured-home directory. Settings provenance is owned by
+/// the caller: only settings admitted for this trusted workspace reach it.
+#[must_use]
+pub fn resolve_auto_memory_directory(
+    config_home: &Path,
+    cwd: &Path,
+    home: &Path,
+    setting: Option<&str>,
+) -> PathBuf {
+    validated_auto_memory_directory(home, setting)
+        .unwrap_or_else(|| user_memdir_for_project(config_home, cwd))
+}
+
+/// Native fc/El directory strings always end in the platform path separator.
+/// Use this only at the model-facing render boundary; filesystem ownership
+/// continues to use Path/PathBuf values.
+#[must_use]
+pub fn memory_directory_prompt_path(directory: &Path) -> String {
+    let mut path = directory.to_string_lossy().into_owned();
+    if !path.ends_with(std::path::MAIN_SEPARATOR) {
+        path.push(std::path::MAIN_SEPARATOR);
+    }
+    path
+}
+
+/// Validated custom memory directory before the ordinary project fallback.
+#[must_use]
+pub fn validated_auto_memory_directory(home: &Path, setting: Option<&str>) -> Option<PathBuf> {
+    let value = setting.filter(|value| !value.is_empty() && !value.contains('\0'))?;
+    let candidate = if let Some(relative) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        let relative = lexical_normalize(Path::new(relative));
+        let spelling = relative.to_string_lossy();
+        if spelling.is_empty()
+            || spelling == "."
+            || spelling == ".."
+            || spelling.starts_with("../")
+            || spelling.starts_with("..\\")
+        {
+            return None;
+        }
+        // Node path.join concatenates an absolute-looking later segment;
+        // PathBuf::join would discard home for `~//notes`.
+        let joined = format!(
+            "{}{}{}",
+            home.display(),
+            std::path::MAIN_SEPARATOR,
+            spelling
+        );
+        lexical_normalize(Path::new(&joined))
+    } else {
+        lexical_normalize(Path::new(value))
+    };
+    let spelling = candidate.to_string_lossy();
+    let spelling = spelling.trim_end_matches(['/', '\\']);
+    if spelling.encode_utf16().count() < 3
+        || !Path::new(spelling).is_absolute()
+        || native_remote_or_device_path(spelling)
+    {
+        return None;
+    }
+    Some(PathBuf::from(spelling.nfc().collect::<String>()))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some_and(|name| name != "..") {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn native_remote_or_device_path(spelling: &str) -> bool {
+    if spelling.starts_with(['/', '\\']) {
+        let bytes = spelling.as_bytes();
+        if bytes
+            .get(1)
+            .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+            || (bytes.get(1..3) == Some(b"??".as_slice())
+                && bytes
+                    .get(3)
+                    .is_some_and(|byte| matches!(*byte, b'/' | b'\\')))
+        {
+            return true;
+        }
+    }
+    let components = spelling
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = components.first() else {
+        return true;
+    };
+    let first_lower = first.to_lowercase();
+    if matches!(
+        first_lower.as_str(),
+        ".vol" | ".file" | ".nofollow" | ".resolve" | "network"
+    ) {
+        return true;
+    }
+    let folded = |value: &str| {
+        value.chars()
+        .filter(|character| !matches!(character, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}'))
+        .flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect::<String>()
+    };
+    (components.len() >= 2 && folded(first) == "net")
+        || (components.len() >= 3
+            && folded(first) == "network"
+            && folded(components[1]) == "servers")
 }
 /// Subdirectory under the config-home for team-shared entries.
 pub const TEAM_MEM_SUBDIR: &str = "team-mem";

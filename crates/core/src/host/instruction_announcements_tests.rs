@@ -14,6 +14,42 @@ fn projection(value: &Value) -> Utf16JsonProjection {
     Utf16JsonProjection::from_serde_value(value).unwrap()
 }
 
+#[test]
+fn memory_directory_enable_and_retarget_announce_after_prior_context_sections() {
+    let mut context = InstructionContext::default();
+    context
+        .set_user_context_text("Environment", "Frozen environment")
+        .unwrap();
+    context.announcement_history = context_attachments(&context, "2026-11-09", "session_start");
+    assert!(
+        !context_attachments(&context, "2026-11-09", "settings_sync")
+            .iter()
+            .any(|attachment| attachment.string_at("/type") == Some("context_sections"))
+    );
+    for directory in ["/first/memory/", "/second/memory/"] {
+        let expected = format!("Memory directory: `{directory}`");
+        context
+            .set_user_context_text("auto memory", expected.clone())
+            .unwrap();
+        let announcements = context_attachments(&context, "2026-11-09", "settings_sync");
+        let sections = announcements
+            .iter()
+            .find(|attachment| attachment.string_at("/type") == Some("context_sections"))
+            .unwrap();
+        assert_eq!(sections.string_at("/sections/1/name"), Some("auto memory"));
+        assert_eq!(
+            sections.string_at("/sections/1/text"),
+            Some(expected.as_str())
+        );
+        context.announcement_history.extend(announcements);
+        assert!(
+            !context_attachments(&context, "2026-11-09", "settings_sync")
+                .iter()
+                .any(|attachment| attachment.string_at("/type") == Some("context_sections"))
+        );
+    }
+}
+
 fn branded(text: &str) -> String {
     text.replace("Claude Code", branding::PRODUCT_NAME)
 }

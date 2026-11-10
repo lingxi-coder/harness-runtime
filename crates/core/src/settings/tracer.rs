@@ -112,6 +112,9 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
             layer.vision_delegation_enabled.is_some(),
         ),
         ("model", layer.model.is_some()),
+        ("autoMemoryEnabled", layer.auto_memory_enabled.is_some()),
+        ("autoMemoryDirectory", layer.auto_memory_directory.is_some()),
+        ("autoDreamEnabled", layer.auto_dream_enabled.is_some()),
         ("availableModels", layer.available_models.is_some()),
         (
             "enforceAvailableModels",

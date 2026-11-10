@@ -29,19 +29,15 @@
 //! Zero new dependency: a `HashMap` + monotonic recency counter (the cap is 100
 //! entries, so the O(n) LRU scan on eviction is trivial and deterministic).
 //!
-//! DEFERRED follow-ups (separate file-tracking items, out of scope here): the
-//! `dump()`/`load()` + `cloneFileStateCache` persistence used to snapshot
-//! read-state into forked agents (`AgentTool/runAgent.ts:377`),
+//! Memory forks clone this cache and strip seeded-context markers. Their
+//! successful writes invalidate the foreground view without importing private
+//! child reads. Ordinary Agent fork persistence remains a separate follow-up:
+//! `dump()`/`load()` + `cloneFileStateCache` (`AgentTool/runAgent.ts:377`),
 //! `mergeFileStateCaches` (timestamp merge), the `normalize(key)` path
 //! normalization (Rust callers already pass canonicalized absolute keys — see
 //! `tools/file/src/lib.rs`), and the `file_state_cache:{entries, bytes}`
 //! telemetry.
 //!
-//! [`ReadFileStateLru::strip_seeded_from_context`] belongs to that deferred
-//! group: it is the `Gxe(e,{stripSeededFromContext})` half of the clone seam
-//! and therefore has NO caller yet. It is implemented and tested rather than
-//! omitted so the seam does not have to re-derive the semantics — a named
-//! pending consumer, not dead code.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -267,12 +263,8 @@ impl ReadFileStateLru {
     /// @232454658), which clones the LRU dump and rewrites each slot
     /// `value = {...value, seededFromContext:!1}`.
     ///
-    /// CURRENTLY UNUSED in LingXi: the oracle only reaches this through the
-    /// `dump()`/`load()` + `cloneFileStateCache` persistence seam used to
-    /// snapshot read-state into forked agents, which is on this module's
-    /// DEFERRED list (see the module docs). It is implemented and tested here
-    /// so that seam does not have to re-derive the semantics — it is a named
-    /// pending consumer, not dead code.
+    /// Memory workers use this on their private snapshot before dispatching
+    /// tools; their inherited history must not rely on a seeded Read stub.
     pub fn strip_seeded_from_context(&mut self) {
         for node in self.map.values_mut() {
             node.entry.seeded_from_context = false;
@@ -503,6 +495,117 @@ impl ReadFileStateLru {
 /// write from one file tool is visible to every other holder.
 pub type ReadFileStateMap = Arc<Mutex<ReadFileStateLru>>;
 
+/// One memory worker's private cache. The registry and builtin tools remain
+/// shared; only their file-state operations are rebound while its call runs.
+pub(crate) struct MemoryForkReadState {
+    parent: ReadFileStateMap,
+    private: ReadFileStateMap,
+}
+
+tokio::task_local! {
+    static MEMORY_FORK_READ_STATE: Arc<MemoryForkReadState>;
+}
+
+impl MemoryForkReadState {
+    pub(crate) fn fork(&self) -> Self {
+        let snapshot = self
+            .private
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Self {
+            parent: self.parent.clone(),
+            private: Arc::new(Mutex::new(snapshot)),
+        }
+    }
+
+    pub(crate) fn new(parent: ReadFileStateMap, inherit_reads: bool) -> Self {
+        let mut snapshot = {
+            let parent = parent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if inherit_reads {
+                parent.clone()
+            } else {
+                ReadFileStateLru::with_limits(parent.max_entries, parent.max_bytes)
+            }
+        };
+        snapshot.strip_seeded_from_context();
+        Self {
+            parent,
+            private: Arc::new(Mutex::new(snapshot)),
+        }
+    }
+
+    pub(crate) async fn scope<F: std::future::Future>(self: &Arc<Self>, future: F) -> F::Output {
+        MEMORY_FORK_READ_STATE.scope(self.clone(), future).await
+    }
+
+    fn invalidate_parent_write(&self, path: &Path, written: &ReadFileEntry) {
+        let canonical = std::fs::canonicalize(path).ok();
+        let candidates = {
+            let parent = self
+                .parent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            parent
+                .keys()
+                .into_iter()
+                .map(|key| {
+                    let aliases = parent
+                        .requested_path_groups(&key)
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    (key, aliases)
+                })
+                .collect::<Vec<_>>()
+        };
+        // Foreground reads may use a symlinked or translated model spelling.
+        // Resolve aliases outside the cache lock and preserve their old view.
+        let affected = candidates
+            .into_iter()
+            .filter_map(|(key, aliases)| {
+                std::iter::once(&key)
+                    .chain(aliases.iter())
+                    .any(|route| {
+                        route == path
+                            || canonical.as_ref().is_some_and(|target| {
+                                std::fs::canonicalize(route).ok().as_ref() == Some(target)
+                            })
+                    })
+                    .then_some(key)
+            })
+            .collect::<Vec<_>>();
+        let mut parent = self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for key in affected {
+            let Some(view) = parent.peek(&key) else {
+                continue;
+            };
+            // A foreground Read that already saw these bytes may race this
+            // callback. Preserve that observation.
+            if view.content != written.content || view.is_partial_view {
+                parent.mark_stale_if_unchanged(&key, &view);
+            }
+        }
+    }
+}
+
+fn active_map(map: &ReadFileStateMap) -> ReadFileStateMap {
+    MEMORY_FORK_READ_STATE
+        .try_with(|state| {
+            if Arc::ptr_eq(map, &state.parent) {
+                state.private.clone()
+            } else {
+                map.clone()
+            }
+        })
+        .unwrap_or_else(|_| map.clone())
+}
+
 /// Construct a fresh, empty read-state registry with the claude-code defaults
 /// (100 entries / 25 MiB).
 #[must_use]
@@ -548,7 +651,7 @@ pub fn mtime_ms_floor(mtime: std::time::SystemTime) -> i64 {
 /// the changed-file route. A producer with a distinct requested spelling must
 /// use [`set_with_requested_path`] or [`set_with_requested_aliases`].
 pub fn set(map: &ReadFileStateMap, path: PathBuf, entry: ReadFileEntry) {
-    if let Ok(mut guard) = map.lock() {
+    if let Ok(mut guard) = active_map(map).lock() {
         guard.set(path, entry);
     }
 }
@@ -567,7 +670,7 @@ pub fn set_with_model_context(
     entry: ReadFileEntry,
     in_model_context: bool,
 ) {
-    if let Ok(mut guard) = map.lock() {
+    if let Ok(mut guard) = active_map(map).lock() {
         guard.set_with_model_context(path, entry, in_model_context);
     }
 }
@@ -584,7 +687,7 @@ pub fn set_with_requested_path(
     in_model_context: bool,
     requested_path: Option<PathBuf>,
 ) {
-    if let Ok(mut guard) = map.lock() {
+    if let Ok(mut guard) = active_map(map).lock() {
         guard.set_with_requested_path(path, entry, in_model_context, requested_path);
     }
 }
@@ -600,9 +703,32 @@ pub fn set_with_requested_aliases(
     in_model_context: bool,
     requested_paths: Vec<PathBuf>,
 ) {
-    if let Ok(mut guard) = map.lock() {
+    if let Ok(mut guard) = active_map(map).lock() {
         guard.set_with_requested_aliases(path, entry, in_model_context, requested_paths);
     }
+}
+
+/// Record successful file mutation in the executing model's cache and fence
+/// an older foreground observation when this is a private memory-fork call.
+pub fn set_after_write_with_requested_aliases(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+    requested_paths: Vec<PathBuf>,
+) {
+    set_with_requested_aliases(
+        map,
+        path.clone(),
+        entry.clone(),
+        in_model_context,
+        requested_paths,
+    );
+    let _ = MEMORY_FORK_READ_STATE.try_with(|state| {
+        if Arc::ptr_eq(map, &state.parent) {
+            state.invalidate_parent_write(&path, &entry);
+        }
+    });
 }
 
 /// Fetch a clone of the read-state entry for `path`, if present, promoting it to
@@ -611,7 +737,10 @@ pub fn set_with_requested_aliases(
 /// 1:1 with TS `readFileState.get(fullFilePath)`.
 #[must_use]
 pub fn get(map: &ReadFileStateMap, path: &Path) -> Option<ReadFileEntry> {
-    map.lock().ok().and_then(|mut guard| guard.get(path))
+    active_map(map)
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.get(path))
 }
 
 #[cfg(test)]
@@ -629,6 +758,52 @@ mod tests {
             seeded_from_context: false,
             is_partial_view: false,
         }
+    }
+
+    #[tokio::test]
+    async fn memory_fork_reads_are_private_and_only_writes_fence_the_foreground_view() {
+        let parent = new_read_file_state_map();
+        let path = PathBuf::from("/memory/topic.md");
+        let private_path = PathBuf::from("/memory/private-read.md");
+        let mut seeded = entry("foreground bytes");
+        seeded.seeded_from_context = true;
+        set(&parent, path.clone(), seeded.clone());
+        let fork = Arc::new(MemoryForkReadState::new(parent.clone(), true));
+        fork.scope(async {
+            assert!(!get(&parent, &path).unwrap().seeded_from_context);
+            set(&parent, private_path.clone(), entry("private observation"));
+            tokio::spawn({
+                let parent = parent.clone();
+                let private_path = private_path.clone();
+                async move {
+                    assert!(get(&parent, &private_path).is_none());
+                }
+            })
+            .await
+            .unwrap();
+            let mut written = entry("background bytes");
+            written.mtime_ms = 2;
+            written.from_read = false;
+            set_after_write_with_requested_aliases(
+                &parent,
+                path.clone(),
+                written,
+                true,
+                vec![path.clone()],
+            );
+            assert_eq!(get(&parent, &path).unwrap().content, "background bytes");
+        })
+        .await;
+        assert!(get(&parent, &private_path).is_none());
+        let view = get(&parent, &path).unwrap();
+        assert_eq!(view.content, "foreground bytes");
+        assert_eq!(view.mtime_ms, i64::MIN);
+        assert!(view.seeded_from_context);
+        let next = Arc::new(MemoryForkReadState::new(parent.clone(), true));
+        next.scope(async {
+            assert!(get(&parent, &private_path).is_none());
+        })
+        .await;
     }
 
     #[test]

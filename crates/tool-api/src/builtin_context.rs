@@ -471,6 +471,21 @@ impl BuiltinToolContext {
         self.session_cwd.trusted_dirs()
     }
 
+    /// Containment roots for one exact host-admitted memory file call.
+    /// Ordinary and unrelated nested tools retain the session roots.
+    #[must_use]
+    pub fn trusted_dirs_for_tool(
+        &self,
+        name: &str,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Vec<PathBuf> {
+        let mut roots = self.trusted_dirs();
+        roots.extend(
+            lingxi_core::host::memory_tool_scope::memory_tool_scope_file_roots(name, input),
+        );
+        roots
+    }
+
     /// Read-only tools may also access registered skill assets. Canonical and
     /// rooted-open checks still reject paths/symlinks escaping these roots.
     pub async fn read_roots(&self) -> Vec<PathBuf> {
@@ -478,6 +493,20 @@ impl BuiltinToolContext {
         if let Some(provider) = &self.skill_read_roots {
             roots.extend(provider.roots().await);
         }
+        roots
+    }
+
+    /// Read roots including the exact memory call's host-owned transcript
+    /// directories, without making those directories writable.
+    pub async fn read_roots_for_tool(
+        &self,
+        name: &str,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Vec<PathBuf> {
+        let mut roots = self.read_roots().await;
+        roots.extend(
+            lingxi_core::host::memory_tool_scope::memory_tool_scope_file_roots(name, input),
+        );
         roots
     }
 

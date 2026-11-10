@@ -689,6 +689,48 @@ pub(crate) fn native_managed_insertion_index(files: &[MemoryFile]) -> usize {
         .unwrap_or(files.len())
 }
 
+fn append_auto_memory_index(
+    context: &mut lingxi_core::host::instructions::InstructionContext,
+    path: &Path,
+    content: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) {
+    use lingxi_core::host::instructions::{InstructionFile, InstructionFileType};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let units = content
+        .string_units("")
+        .expect("memory index is a source string");
+    if units.is_empty() {
+        return;
+    }
+    let key = "instructions".encode_utf16().collect::<Vec<_>>();
+    let mut instructions = context
+        .user_context_value(&key)
+        .and_then(|value| value.string_units(""))
+        .unwrap_or_default();
+    if instructions.is_empty() {
+        instructions.extend(MEMORY_INSTRUCTION_PROMPT.encode_utf16());
+    }
+    instructions.extend("\n\nContents of ".encode_utf16());
+    instructions.extend(path.to_string_lossy().encode_utf16());
+    instructions.extend(" (user's auto-memory, persists across conversations):\n\n".encode_utf16());
+    instructions.extend(&units);
+    context
+        .set_user_context_value(
+            &key,
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&instructions), instructions)
+                .expect("memory index context preserves source units"),
+        )
+        .expect("instructions key exists");
+    context
+        .eager_instructions
+        .get_or_insert_with(Vec::new)
+        .push(InstructionFile::new(
+            path_projection(path),
+            InstructionFileType::AutoMem,
+            content,
+        ));
+}
+
 fn context_from_instruction_files(
     cwd: &Path,
     files: &[MemoryFile],
@@ -1222,6 +1264,15 @@ impl crate::ConversationOrchestrator {
         let email_provider = self.prompt_runtime.instruction_user_email_provider.clone();
         let configured_email = self.config.user_email.clone();
         let date = self.session_start_date(session_id);
+        let memory_index = (!managed)
+            .then(|| {
+                self.prompt_runtime
+                    .memory_prefetch
+                    .as_ref()
+                    .and_then(|prefetch| prefetch.user_memdir())
+                    .map(|directory| directory.join("MEMORY.md"))
+            })
+            .flatten();
         let load = self.prompt_runtime.instruction_cache.begin_context_with_files(
             key,
             InstructionFileCacheKey { scope: file_scope, force_external: false },
@@ -1237,6 +1288,12 @@ impl crate::ConversationOrchestrator {
                 let native_managed = provider_for_context.native_managed_instruction_files();
                 let mut context =
                     context_from_instruction_files(&cwd, &files, &native_managed, managed);
+                if let Some(index_path) = memory_index {
+                    if let Ok(bytes) = tokio::fs::read(&index_path).await {
+                        let view = memory::prefetch::load_memory_index(&String::from_utf8_lossy(&bytes));
+                        append_auto_memory_index(&mut context, &index_path, view.content);
+                    }
+                }
                 let email = if let Some(provider) = email_provider {
                     provider.current_user_email().await
                 } else {

@@ -1103,7 +1103,7 @@ impl ConversationOrchestrator {
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(self.provider_system_prompt().await?);
+        > = Some(self.provider_system_prompt_for_main_request().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
@@ -3651,7 +3651,7 @@ impl ConversationOrchestrator {
         // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
-        > = Some(self.provider_system_prompt().await?);
+        > = Some(self.provider_system_prompt_for_main_request().await?);
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
