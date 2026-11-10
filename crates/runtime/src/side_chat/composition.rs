@@ -64,6 +64,10 @@ pub fn skill_listing(
                         },
                     )
                     .collect::<Vec<_>>();
+                let display_names =
+                    orchestrator::prompt::skill_listing::NativeDisplayNameResolver::new(
+                        &full_catalog,
+                    );
                 let touched = read_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -115,11 +119,7 @@ pub fn skill_listing(
                             is_name_only: false,
                             priority: 0.0,
                         };
-                        entry.display_name =
-                            orchestrator::prompt::skill_listing::native_display_name(
-                                &entry,
-                                &full_catalog,
-                            );
+                        entry.display_name = display_names.display_name(&entry);
                         entry
                     })
                     .collect();

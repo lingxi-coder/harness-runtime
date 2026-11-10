@@ -6,7 +6,63 @@
 
 use crate::error::OrchestratorError;
 use lingxi_core::types::ImageSource;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
+
+/// Decode one ordered batch without blocking a runtime worker. A running file
+/// read cannot be interrupted, but cancellation can discard it before admission
+/// and stops the worker before it starts the next image.
+pub(crate) async fn load_image_sources(
+    image_paths: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<ImageSource>>, OrchestratorError> {
+    load_image_sources_with(image_paths, cancel, load_image_source).await
+}
+
+async fn load_image_sources_with<L>(
+    image_paths: &[PathBuf],
+    cancel: &CancellationToken,
+    mut load: L,
+) -> Result<Option<Vec<ImageSource>>, OrchestratorError>
+where
+    L: FnMut(&Path) -> Result<ImageSource, OrchestratorError> + Send + 'static,
+{
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    if image_paths.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let image_paths = image_paths.to_vec();
+    let load_cancel = cancel.clone();
+    let mut task = tokio::task::spawn_blocking(move || {
+        let mut images = Vec::with_capacity(image_paths.len());
+        for path in image_paths {
+            if load_cancel.is_cancelled() {
+                return Ok(None);
+            }
+            images.push(load(&path)?);
+        }
+        Ok(Some(images))
+    });
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            // This prevents a queued job from starting; an active decoder is
+            // read-only and will observe the token before the next image.
+            task.abort();
+            Ok(None)
+        }
+        result = &mut task => {
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
+            result.map_err(|error| {
+                OrchestratorError::Internal(format!("could not load image attachments: {error}"))
+            })?
+        }
+    }
+}
 
 /// Detect the image MIME type from a file extension. `None` for unsupported
 /// extensions.
@@ -136,6 +192,164 @@ pub fn load_image_source(path: &Path) -> Result<ImageSource, OrchestratorError> 
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
+
+    struct ReleaseDecoderOnDrop(Option<mpsc::SyncSender<()>>);
+
+    impl ReleaseDecoderOnDrop {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.try_send(());
+            }
+        }
+    }
+
+    impl Drop for ReleaseDecoderOnDrop {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    struct DecoderFinished(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DecoderFinished {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_batch_yields_and_cancels_before_a_blocked_decoder_finishes() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let mut release = ReleaseDecoderOnDrop(Some(release_tx));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let pending = tokio::spawn({
+            let cancel = cancel.clone();
+            let calls = calls.clone();
+            async move {
+                let mut started_tx = Some(started_tx);
+                let finished = DecoderFinished(Some(finished_tx));
+                load_image_sources_with(
+                    &[PathBuf::from("first.png"), PathBuf::from("second.png")],
+                    &cancel,
+                    move |_| {
+                        let _keep_finished_alive = &finished;
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        if let Some(sender) = started_tx.take() {
+                            let _ = sender.send(());
+                            release_rx
+                                .recv_timeout(Duration::from_secs(10))
+                                .expect("test must release the blocking decoder");
+                        }
+                        Ok(ImageSource::Base64 {
+                            media_type: "image/png".into(),
+                            data: "iVBORw==".into(),
+                        })
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .expect("decoder should start")
+            .unwrap();
+        let heartbeat = tokio::spawn(async { 42 });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), heartbeat)
+                .await
+                .expect("the runtime must remain responsive during decoding")
+                .unwrap(),
+            42
+        );
+        cancel.cancel();
+        assert!(tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("cancellation must not wait for the blocked decoder")
+            .unwrap()
+            .unwrap()
+            .is_none());
+        release.release();
+        tokio::time::timeout(Duration::from_secs(5), finished_rx)
+            .await
+            .expect("the read-only worker should finish after release")
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn image_batch_cancellation_wins_over_decoder_completion_or_error() {
+        for fail in [false, true] {
+            let cancel = CancellationToken::new();
+            let decoder_cancel = cancel.clone();
+            let result =
+                load_image_sources_with(&[PathBuf::from("completed.png")], &cancel, move |_| {
+                    decoder_cancel.cancel();
+                    if fail {
+                        return Err(OrchestratorError::Internal("cancelled decode error".into()));
+                    }
+                    Ok(ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "iVBORw==".into(),
+                    })
+                })
+                .await
+                .unwrap();
+            assert!(result.is_none(), "cancellation wins even when fail={fail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn image_batch_preserves_source_order_bytes_and_first_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("jpeg-with-png-extension.png");
+        let png = dir.path().join("png-with-jpg-extension.jpg");
+        std::fs::write(&jpeg, b"\xff\xd8\xff\xe0").unwrap();
+        std::fs::write(&png, b"\x89PNG").unwrap();
+        let images = load_image_sources(&[jpeg, png], &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded: Vec<_> = images
+            .into_iter()
+            .map(|source| match source {
+                ImageSource::Base64 { media_type, data } => (media_type, data),
+                ImageSource::Url { .. } => panic!("expected base64"),
+            })
+            .collect();
+        assert_eq!(
+            decoded,
+            vec![
+                ("image/jpeg".to_string(), "/9j/4A==".to_string()),
+                ("image/png".to_string(), "iVBORw==".to_string()),
+            ]
+        );
+
+        let paths = ["first", "failing", "unvisited"].map(PathBuf::from);
+        let visited = Arc::new(Mutex::new(Vec::new()));
+        let worker_visited = visited.clone();
+        let error = load_image_sources_with(&paths, &CancellationToken::new(), move |path| {
+            worker_visited.lock().unwrap().push(path.to_path_buf());
+            if path == Path::new("failing") {
+                return Err(OrchestratorError::Internal("first image failure".into()));
+            }
+            Ok(ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: String::new(),
+            })
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("first image failure"));
+        assert_eq!(*visited.lock().unwrap(), paths[..2]);
+    }
 
     #[test]
     fn base64_encodes_known_vectors() {

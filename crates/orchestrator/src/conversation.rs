@@ -10,8 +10,9 @@ use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
     execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
-    MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_LIMIT, MALFORMED_TOOL_USE_RETRY_NUDGE,
-    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
+    MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_LIMIT,
+    MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
 use hooks::events::HookEvent;
@@ -1301,14 +1302,15 @@ fn strip_vertex_model_date(model: &str) -> &str {
 /// the literal `"HEAD"`; we surface that verbatim (claude-code's `getBranch`
 /// returns it too — it does not special-case detached HEAD).
 ///
-/// Uses [`std::process::Command`] (no new dependency), the same shell-git pattern
-/// the loader already uses for worktree enumeration. One-shot + cached by the
-/// caller, so the synchronous `output()` runs at most once per session.
-fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+/// Uses an async subprocess so the caller's one-shot cache can resolve without
+/// blocking a runtime worker. Dropping the probe terminates its child process.
+async fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
+        .kill_on_drop(true)
         .output()
+        .await
         .ok()?;
     if !output.status.success() {
         return None;
@@ -1318,6 +1320,84 @@ fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
         None
     } else {
         Some(branch)
+    }
+}
+
+#[cfg(test)]
+mod git_branch_probe_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    async fn git(cwd: &std::path::Path, args: &[&str]) {
+        let hooks = cwd.join("empty-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let output = tokio::process::Command::new("git")
+            .arg("-c")
+            .arg("user.name=Branch Probe Test")
+            .arg("-c")
+            .arg("user.email=branch-probe@example.invalid")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg(format!("core.hooksPath={}", hooks.display()))
+            .args(args)
+            .current_dir(cwd)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn git_branch_probe_preserves_branch_none_cache_and_reset_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        );
+        assert_eq!(orch.resolve_git_branch().await, None);
+        assert_eq!(*orch.transcript.git_branch_cache.lock().await, Some(None));
+
+        git(dir.path(), &["init", "--initial-branch=original"]).await;
+        git(dir.path(), &["commit", "--allow-empty", "-m", "seed"]).await;
+        assert_eq!(
+            git_branch_for_cwd(dir.path()).await.as_deref(),
+            Some("original")
+        );
+        assert_eq!(orch.resolve_git_branch().await, None, "None stays cached");
+
+        orch.transcript.reset_session_scoped().await;
+        assert_eq!(orch.resolve_git_branch().await.as_deref(), Some("original"));
+        git(dir.path(), &["checkout", "-b", "next"]).await;
+        assert_eq!(
+            orch.resolve_git_branch().await.as_deref(),
+            Some("original"),
+            "a resolved branch stays cached"
+        );
+        orch.transcript.reset_session_scoped().await;
+        assert_eq!(orch.resolve_git_branch().await.as_deref(), Some("next"));
+
+        git(dir.path(), &["checkout", "--detach"]).await;
+        assert_eq!(
+            git_branch_for_cwd(dir.path()).await.as_deref(),
+            Some("HEAD")
+        );
+        orch.transcript.reset_session_scoped().await;
+        assert_eq!(orch.resolve_git_branch().await.as_deref(), Some("HEAD"));
     }
 }
 

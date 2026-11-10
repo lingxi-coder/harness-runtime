@@ -1044,22 +1044,34 @@ async fn finalize_prompt_ingress_batch_with_enabled(
 
     let sdk_query_source = crate::config::sanitize_query_source(&orchestrator.config.query_source)
         == crate::config::QUERY_SOURCE_SDK;
+    let placement_enabled = enabled && sdk_query_source;
     let (prior_history, user_message, model, profile, trusted_closing_ids) = {
         let session = orchestrator.session.lock().await;
         let current_index = session
             .history
             .iter()
             .position(|message| message.id() == prompt_id);
-        let prior_history = match current_index {
-            Some(index) => session.history[..index].to_vec(),
-            None if prompt_compacted => session.history.clone(),
+        let prior_end = match current_index {
+            Some(index) => index,
+            None if prompt_compacted => session.history.len(),
             None => {
                 return Err(OrchestratorError::Internal(
                     "accepted prompt-ingress history row is missing during finalization".into(),
                 ));
             }
         };
-        let user_message = current_index.map(|index| session.history[index].clone());
+        // Prompt identity validation above applies even when placement is
+        // disabled. Only the selector needs owned copies of these messages.
+        let prior_history = if placement_enabled {
+            session.history[..prior_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let user_message = if placement_enabled {
+            current_index.map(|index| session.history[index].clone())
+        } else {
+            None
+        };
         (
             prior_history,
             user_message,
@@ -1096,12 +1108,15 @@ async fn finalize_prompt_ingress_batch_with_enabled(
             raw_attachment_types.insert(id, attachment_type.to_owned());
         }
     }
-    let current_turn_messages = user_message
-        .into_iter()
-        .chain(staged.iter().map(|attachment| attachment.message.clone()))
-        .collect::<Vec<_>>();
-    let model_supported = enabled
-        && sdk_query_source
+    let current_turn_messages = if placement_enabled {
+        user_message
+            .into_iter()
+            .chain(staged.iter().map(|attachment| attachment.message.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let model_supported = placement_enabled
         && orchestrator
             .api
             .supports_native_mid_conversation_system(&model, profile.as_deref());
@@ -1115,7 +1130,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
                 .selected_before_closing_line_ids
                 .get_or_insert_with(|| {
                     super::conversation::closing_placement::select_current_before_closing_line_ids(
-                        enabled && sdk_query_source,
+                        placement_enabled,
                         model_supported,
                         &prior_history,
                         &current_turn_messages,

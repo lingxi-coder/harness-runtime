@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 use lingxi_core::settings::{SettingsError, SkillOverride, SkillOverrides};
 use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection as Source};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -210,12 +211,104 @@ const fn skill_override_rank(value: SkillOverride) -> u8 {
     }
 }
 
-/// Resolve Native `Rwt(cmd, fullCatalog)`. Keep the whole catalog's order:
-/// exact canonical names win, otherwise its first user-facing/alias match does.
+/// Native `Rwt` name resolution for one immutable skill catalog.
+/// Create once before mapping a listing's entries. The index is built only
+/// when a display-name candidate needs catalog resolution; ordinary canonical
+/// labels and invalid/qualified candidates do not decode the catalog. Exact
+/// canonical names win; otherwise the first catalog entry with a matching
+/// user-facing name or alias wins. All identities retain exact UTF-16 units.
+#[derive(Debug)]
+pub struct NativeDisplayNameResolver<'catalog> {
+    catalog: &'catalog [SkillListingCatalogName],
+    index: std::sync::OnceLock<NativeDisplayNameIndex>,
+}
+
+impl<'catalog> NativeDisplayNameResolver<'catalog> {
+    #[must_use]
+    pub const fn new(full_catalog: &'catalog [SkillListingCatalogName]) -> Self {
+        Self {
+            catalog: full_catalog,
+            index: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn display_name(&self, entry: &SkillListingEntry) -> Source {
+        native_display_name_with(entry, |candidate, name| {
+            self.index
+                .get_or_init(|| NativeDisplayNameIndex::new(self.catalog))
+                .resolves_to(candidate, name)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NativeDisplayNameIndex {
+    exact_names: HashSet<Arc<[u16]>>,
+    candidates: HashMap<Vec<u16>, Arc<[u16]>>,
+}
+
+impl NativeDisplayNameIndex {
+    fn new(full_catalog: &[SkillListingCatalogName]) -> Self {
+        let mut exact_names = HashSet::with_capacity(full_catalog.len());
+        let mut candidates = HashMap::with_capacity(full_catalog.len());
+        for item in full_catalog {
+            let name: Arc<[u16]> = units(&item.name).into();
+            exact_names.insert(Arc::clone(&name));
+            // Index both candidate sources together in catalog order. Separate
+            // passes could let a later user-facing name displace an earlier alias.
+            for candidate in item.user_facing_name.iter().chain(&item.aliases) {
+                candidates
+                    .entry(units(candidate))
+                    .or_insert_with(|| Arc::clone(&name));
+            }
+        }
+        Self {
+            exact_names,
+            candidates,
+        }
+    }
+
+    fn resolves_to(&self, candidate: &[u16], name: &[u16]) -> bool {
+        if self.exact_names.contains(candidate) {
+            candidate == name
+        } else {
+            self.candidates
+                .get(candidate)
+                .is_some_and(|resolved| resolved.as_ref() == name)
+        }
+    }
+}
+
+/// Resolve Native `Rwt(cmd, fullCatalog)` for a single entry. Listing loops
+/// should share a [`NativeDisplayNameResolver`] instead of scanning per entry.
 #[must_use]
 pub fn native_display_name(
     entry: &SkillListingEntry,
     full_catalog: &[SkillListingCatalogName],
+) -> Source {
+    native_display_name_with(entry, |candidate, name| {
+        let exact = full_catalog
+            .iter()
+            .find(|item| units(&item.name).as_slice() == candidate);
+        let resolved = exact.or_else(|| {
+            full_catalog.iter().find(|item| {
+                item.user_facing_name
+                    .as_ref()
+                    .is_some_and(|value| units(value).as_slice() == candidate)
+                    || item
+                        .aliases
+                        .iter()
+                        .any(|alias| units(alias).as_slice() == candidate)
+            })
+        });
+        resolved.is_some_and(|item| units(&item.name).as_slice() == name)
+    })
+}
+
+fn native_display_name_with(
+    entry: &SkillListingEntry,
+    resolves_to: impl FnOnce(&[u16], &[u16]) -> bool,
 ) -> Source {
     let Some(candidate) = entry.user_facing_name.as_ref() else {
         return entry.name.clone();
@@ -224,26 +317,12 @@ pub fn native_display_name(
     let name_units = units(&entry.name);
     if candidate_units == name_units
         || name_ends_with_qualified_candidate(&name_units, &candidate_units)
-        || !valid_native_display_name(candidate)
+        || !valid_native_display_name(&candidate_units)
     {
         return entry.name.clone();
     }
 
-    let exact = full_catalog
-        .iter()
-        .find(|item| units(&item.name) == candidate_units);
-    let resolved = exact.or_else(|| {
-        full_catalog.iter().find(|item| {
-            item.user_facing_name
-                .as_ref()
-                .is_some_and(|name| units(name) == candidate_units)
-                || item
-                    .aliases
-                    .iter()
-                    .any(|alias| units(alias) == candidate_units)
-        })
-    });
-    if resolved.is_some_and(|item| units(&item.name) == name_units) {
+    if resolves_to(&candidate_units, &name_units) {
         concatenate(&[&entry.name, &" (".into(), candidate, &")".into()])
     } else {
         entry.name.clone()
@@ -256,12 +335,11 @@ fn name_ends_with_qualified_candidate(name: &[u16], candidate: &[u16]) -> bool {
         && name.ends_with(candidate)
 }
 
-fn valid_native_display_name(value: &Source) -> bool {
-    let value_units = units(value);
+fn valid_native_display_name(value_units: &[u16]) -> bool {
     if value_units.is_empty() || value_units.len() > 256 {
         return false;
     }
-    let Ok(value) = String::from_utf16(&value_units) else {
+    let Ok(value) = String::from_utf16(value_units) else {
         return false;
     };
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -595,9 +673,10 @@ pub fn native_skill_listing_diagnostics(
     // J2t/Osr resolve Rwt against the included diagnostic list, while eYt
     // resolves against the full registry catalog. Keep these source scopes
     // separate even though both use the same Rwt helper.
+    let diagnostic_resolver = NativeDisplayNameResolver::new(&included_catalog);
     let diagnostic_display_names = entries
         .iter()
-        .map(|entry| native_display_name(entry, &included_catalog))
+        .map(|entry| diagnostic_resolver.display_name(entry))
         .collect::<Vec<_>>();
     let max_desc_chars = settings.max_desc_chars.unwrap_or(DEFAULT_MAX_DESC_CHARS);
     let measured: Vec<BudgetEntry> = entries
@@ -979,7 +1058,16 @@ fn full_line(e: &SkillListingEntry, max_desc_chars: f64) -> Source {
     concatenate(&[&"- ".into(), &e.display_name, &": ".into(), &description])
 }
 
+// Count actual projection-to-UTF-16 vector reads in focused scaling tests;
+// production builds carry neither the counter nor its increment.
+#[cfg(test)]
+std::thread_local! {
+    static SOURCE_UNIT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn units(source: &Source) -> Vec<u16> {
+    #[cfg(test)]
+    SOURCE_UNIT_READS.with(|count| count.set(count.get() + 1));
     source.string_units("").expect("skill listing text")
 }
 
@@ -1350,6 +1438,7 @@ mod tests {
     ) -> Vec<SkillListingEntry> {
         use lingxi_core::settings::SkillOverride;
 
+        let display_names = NativeDisplayNameResolver::new(catalog);
         array_values(value)
             .into_iter()
             .filter_map(|item| {
@@ -1408,7 +1497,7 @@ mod tests {
                     return None;
                 }
                 entry.is_name_only = mode == SkillOverride::NameOnly;
-                entry.display_name = native_display_name(&entry, catalog);
+                entry.display_name = display_names.display_name(&entry);
                 Some(entry)
             })
             .collect()
@@ -1816,6 +1905,241 @@ mod tests {
             native_display_name(&skill, &matching_catalog).string_at(""),
             Some("plugin:review")
         );
+    }
+
+    #[test]
+    fn native_display_name_index_matches_linear_scan_for_generated_catalogs() {
+        let names = vec![
+            "review".into(),
+            "build".into(),
+            "plugin:review".into(),
+            "dotted.name".into(),
+            "caf\u{e9}".into(),
+            "\u{7a7a}\u{95f4}".into(),
+            "".into(),
+            "bad name".into(),
+            "slash/name".into(),
+            "a".repeat(257).into(),
+            from_units(vec![b'p' as u16, 0xd800]),
+            from_units(vec![b'p' as u16, 0xd801]),
+        ];
+        for catalog_len in [0, 1, 2, 7, 31] {
+            for seed in 0..8 {
+                let mut state = seed + 1_u64;
+                let mut choose = |limit: usize| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    (state as usize) % limit
+                };
+                let catalog = (0..catalog_len)
+                    .map(|index| SkillListingCatalogName {
+                        name: if index % 4 == 0 {
+                            format!("plugin-{seed}:skill-{index}").into()
+                        } else {
+                            names[choose(names.len())].clone()
+                        },
+                        user_facing_name: (choose(3) != 0)
+                            .then(|| names[choose(names.len())].clone()),
+                        aliases: (0..choose(4))
+                            .map(|_| names[choose(names.len())].clone())
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                let resolver = NativeDisplayNameResolver::new(&catalog);
+                let mut queries = Vec::new();
+                for name in names.iter().chain(catalog.iter().map(|item| &item.name)) {
+                    for candidate in std::iter::once(None).chain(names.iter().map(Some)) {
+                        let mut query = entry("unused", "desc", None, false);
+                        query.name = name.clone();
+                        query.user_facing_name = candidate.cloned();
+                        queries.push(query);
+                    }
+                }
+                // Keep the whole sequence: repeated names must not remove or
+                // reorder entries, even when catalog identities are duplicated.
+                let expected = queries
+                    .iter()
+                    .map(|query| {
+                        native_display_name(query, &catalog)
+                            .to_json_string()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let actual = queries
+                    .iter()
+                    .map(|query| resolver.display_name(query).to_json_string().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "catalog_len={catalog_len}, seed={seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_display_name_index_preserves_utf16_and_catalog_scope() {
+        let mut skill = entry("unused", "desc", None, false);
+        skill.name = from_units(vec![b'p' as u16, 0xd800]);
+        skill.user_facing_name = Some("review".into());
+        let included = [SkillListingCatalogName {
+            name: skill.name.clone(),
+            user_facing_name: skill.user_facing_name.clone(),
+            aliases: vec![],
+        }];
+        let full = [
+            SkillListingCatalogName {
+                // The Rust display strings for these distinct identities may
+                // both contain a replacement character; the UTF-16 keys differ.
+                name: from_units(vec![b'p' as u16, 0xd801]),
+                user_facing_name: None,
+                aliases: vec!["review".into()],
+            },
+            included[0].clone(),
+        ];
+        let full_resolver = NativeDisplayNameResolver::new(&full);
+        assert_eq!(
+            units(&full_resolver.display_name(&skill)),
+            units(&skill.name),
+            "an earlier alias wins over a later user-facing name"
+        );
+        let included_resolver = NativeDisplayNameResolver::new(&included);
+        let expected_label = [
+            vec![b'p' as u16, 0xd800],
+            " (review)".encode_utf16().collect(),
+        ]
+        .concat();
+        assert_eq!(
+            units(&included_resolver.display_name(&skill)),
+            expected_label,
+            "diagnostics resolve against their included catalog"
+        );
+
+        let mut refreshed = full.to_vec();
+        refreshed[0].aliases.clear();
+        let refreshed_resolver = NativeDisplayNameResolver::new(&refreshed);
+        assert_eq!(
+            units(&refreshed_resolver.display_name(&skill)),
+            expected_label,
+            "a new catalog gets an independent index"
+        );
+        assert_eq!(
+            units(&full_resolver.display_name(&skill)),
+            units(&skill.name)
+        );
+
+        refreshed.push(SkillListingCatalogName {
+            name: "review".into(),
+            user_facing_name: None,
+            aliases: vec![],
+        });
+        assert_eq!(
+            units(&NativeDisplayNameResolver::new(&refreshed).display_name(&skill)),
+            units(&skill.name),
+            "every canonical name participates, even without a user-facing name"
+        );
+    }
+
+    #[test]
+    fn native_display_name_index_decoding_scales_linearly_and_skips_early_returns() {
+        fn count_unit_reads<T>(run: impl FnOnce() -> T) -> (T, usize) {
+            let before = SOURCE_UNIT_READS.with(std::cell::Cell::get);
+            let output = run();
+            let reads = SOURCE_UNIT_READS.with(std::cell::Cell::get) - before;
+            (output, reads)
+        }
+        let json = |values: Vec<Source>| {
+            values
+                .into_iter()
+                .map(|value| value.to_json_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        for size in [16, 64, 256] {
+            let entries = (0..size)
+                .map(|index| {
+                    let mut skill = entry(&format!("plugin:skill-{index}"), "desc", None, false);
+                    skill.user_facing_name = Some(format!("display-{index}").into());
+                    skill.aliases = vec![skill.user_facing_name.clone().unwrap()];
+                    skill
+                })
+                .collect::<Vec<_>>();
+            let catalog = entries
+                .iter()
+                .map(|skill| SkillListingCatalogName {
+                    name: skill.name.clone(),
+                    user_facing_name: skill.user_facing_name.clone(),
+                    aliases: skill.aliases.clone(),
+                })
+                .collect::<Vec<_>>();
+            let (linear, linear_reads) = count_unit_reads(|| {
+                entries
+                    .iter()
+                    .map(|skill| native_display_name(skill, &catalog))
+                    .collect::<Vec<_>>()
+            });
+            let (indexed, indexed_reads) = count_unit_reads(|| {
+                let resolver = NativeDisplayNameResolver::new(&catalog);
+                entries
+                    .iter()
+                    .map(|skill| resolver.display_name(skill))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(json(indexed), json(linear));
+            assert!(linear_reads >= size * size);
+            assert!(
+                indexed_reads <= size * 10,
+                "size={size}, reads={indexed_reads}"
+            );
+            assert!(indexed_reads < linear_reads);
+            eprintln!("display-name UTF-16 reads: entries={size}, scan={linear_reads}, index={indexed_reads}");
+
+            let mut early_entries = entries.clone();
+            for skill in &mut early_entries {
+                skill.user_facing_name = None;
+            }
+            let mut early_catalog = catalog.clone();
+            for item in &mut early_catalog {
+                item.user_facing_name = None;
+                item.aliases.clear();
+            }
+            let (linear, linear_reads) = count_unit_reads(|| {
+                early_entries
+                    .iter()
+                    .map(|skill| native_display_name(skill, &early_catalog))
+                    .collect::<Vec<_>>()
+            });
+            let (indexed, indexed_reads) = count_unit_reads(|| {
+                let resolver = NativeDisplayNameResolver::new(&early_catalog);
+                early_entries
+                    .iter()
+                    .map(|skill| resolver.display_name(skill))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(json(indexed), json(linear));
+            assert_eq!((linear_reads, indexed_reads), (0, 0));
+
+            for (index, skill) in early_entries.iter_mut().enumerate() {
+                skill.user_facing_name = Some(match index % 4 {
+                    0 => skill.name.clone(),
+                    1 => format!("skill-{index}").into(), // already a qualified suffix
+                    2 => "bad name".into(),
+                    _ => from_units(vec![0xd800]),
+                });
+            }
+            let (linear, linear_reads) = count_unit_reads(|| {
+                early_entries
+                    .iter()
+                    .map(|skill| native_display_name(skill, &early_catalog))
+                    .collect::<Vec<_>>()
+            });
+            let (indexed, indexed_reads) = count_unit_reads(|| {
+                let resolver = NativeDisplayNameResolver::new(&early_catalog);
+                early_entries
+                    .iter()
+                    .map(|skill| resolver.display_name(skill))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(json(indexed), json(linear));
+            assert_eq!((linear_reads, indexed_reads), (size * 2, size * 2));
+        }
     }
 
     #[test]

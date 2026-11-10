@@ -2235,6 +2235,7 @@ async fn fixed_mode_rejection_keeps_pending_receipt_recoverable() {
 
     for cold in [false, true] {
         let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+        fixture.orch.initialize_conversation_mode().await.unwrap();
         let (_, saved) = fixture.prepared_receipt().await;
         let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
         assert!(fixture
@@ -2373,6 +2374,7 @@ async fn fixed_mode_retains_provider_continuations_after_cold_recovery() {
         NativeComputerProvider::Gemini,
     ] {
         let fixture = Fixture::new(provider, false, false).await;
+        fixture.orch.initialize_conversation_mode().await.unwrap();
         let retired = ConversationMessage::user_meta(MessageId::new(), "old skill".into())
             .with_origin(compaction::invoked_skills::skill_activation_origin(0));
         fixture
@@ -2426,7 +2428,156 @@ async fn fixed_mode_retains_provider_continuations_after_cold_recovery() {
 }
 
 #[tokio::test]
-async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
+async fn profile_change_keeps_new_anthropic_receipt_in_the_actual_request() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    for cold in [false, true] {
+        let mut successor = mock_message_response(vec![], Some("end_turn"));
+        successor.id = "anthropic-successor".into();
+        successor.model = MODEL.into();
+        let fixture = Fixture::with_responses(
+            NativeComputerProvider::Anthropic,
+            false,
+            false,
+            vec![successor],
+        )
+        .await;
+        fixture.orch.initialize_conversation_mode().await.unwrap();
+        fixture.native().await;
+        let mut old = claude_screenshot();
+        old.id = "old-profile-response".into();
+        let old_blocks = fixture.bind(&old).await.unwrap();
+        let old_result = fixture.dispatch(old_blocks).await;
+        fixture.publish(&old_result.results).await;
+        prepare_receipts(&fixture.orch, &result_ids(&old_result.results))
+            .await
+            .unwrap();
+        let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
+        prepare_projection(&fixture.orch, MODEL, None, &catalog)
+            .await
+            .unwrap()
+            .unwrap()
+            .submission
+            .unwrap()
+            .before_submit()
+            .await
+            .unwrap();
+        let mut old_successor = response(NativeComputerProvider::Anthropic, vec![]);
+        old_successor.id = "old-profile-successor".into();
+        fixture.accept_response(&old_successor).await.unwrap();
+        assert!(fixture
+            .orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+
+        let profile = "fresh-anthropic-profile";
+        let epoch = fixture.orch.profile_epoch().await;
+        fixture.orch.session.lock().await.model_profile = Some(profile.into());
+        fixture
+            .orch
+            .computer_runtime
+            .verified
+            .write()
+            .unwrap()
+            .push(VerifiedComputerProfile {
+                model: MODEL.into(),
+                profile: Some(profile.into()),
+                provider: NativeComputerProvider::Anthropic,
+                evidence: "fixture acceptance only".into(),
+            });
+        let ctx = crate::turn_loop::streaming_tool_context_base(&fixture.orch, vec![]).await;
+        let tool: Arc<dyn Tool> = fixture.computer.clone();
+        note_computer_result(&fixture.orch, &tool, &ctx, true).await;
+        assert!(
+            prepare_projection(&fixture.orch, MODEL, Some(profile), &catalog)
+                .await
+                .unwrap()
+                .unwrap()
+                .native
+                .is_some()
+        );
+        let mut fresh = claude_screenshot();
+        fresh.id = "fresh-anthropic-response".into();
+        fresh.provider_metadata = sdk_source!({"llm_client":{"computer_binding":{
+            "account":"fresh-anthropic-account", "profile":profile, "model":MODEL,
+            "endpoint":"fresh-anthropic-endpoint", "protocol":"anthropic_messages"
+        }}});
+        let blocks = fixture.bind(&fresh).await.unwrap();
+        let dispatched = fixture.dispatch(blocks).await;
+        fixture.publish(&dispatched.results).await;
+        prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
+            .await
+            .unwrap();
+        let saved = fixture
+            .journal
+            .receipts
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| record.binding.profile == profile)
+            .unwrap()
+            .clone();
+        assert_eq!(saved.binding.account, "fresh-anthropic-account");
+        assert_eq!(saved.binding.endpoint, "fresh-anthropic-endpoint");
+        let expected = load_receipt(&saved.receipt).await.unwrap().block;
+        if cold {
+            fixture.forget_runtime().await;
+            fixture
+                .orch
+                .restore_conversation_profile(ConversationMode::Code)
+                .await
+                .unwrap();
+        }
+        let projection = prepare_projection(&fixture.orch, MODEL, Some(profile), &catalog)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixture.orch.profile_epoch().await, epoch);
+        // This flag marks an instruction-epoch fallback, not Anthropic's
+        // ordinary full-history request shape.
+        assert!(!projection.ordinary_history);
+        assert!(projection.continuation.is_none());
+        assert_eq!(projection.binding.as_ref(), Some(&saved.binding));
+        let submission = projection.submission.unwrap();
+        assert_eq!(submission.receipts[0], saved);
+        *fixture.api.submission_probe.lock().unwrap() = Some(submission);
+        crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &fixture.orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        let inputs = fixture.api.provider_inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0]
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|block| block == &expected),
+            "cold={cold}: submitted receipt differs from request input"
+        );
+        drop(inputs);
+        assert_eq!(
+            fixture
+                .journal
+                .receipt(&saved.receipt_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .stage,
+            NativeReceiptStage::ResponseReceived
+        );
+        assert_eq!(fixture.computer.calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn provider_change_rejects_retained_cross_protocol_continuations_without_resubmission() {
     use lingxi_core::host::session_context::ConversationMode;
 
     for old_provider in [
@@ -2434,11 +2585,8 @@ async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
         NativeComputerProvider::Gemini,
     ] {
         for cold in [false, true] {
-            let mut successor = mock_message_response(vec![], Some("end_turn"));
-            successor.id = "anthropic-successor".into();
-            successor.model = MODEL.into();
-            let fixture =
-                Fixture::with_responses(old_provider, false, false, vec![successor]).await;
+            let fixture = Fixture::new(old_provider, false, false).await;
+            fixture.orch.initialize_conversation_mode().await.unwrap();
             fixture.native().await;
             let mut old = match old_provider {
                 NativeComputerProvider::OpenAi => openai(json!([{"type":"screenshot"}])),
@@ -2504,6 +2652,15 @@ async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
                 .ensure_conversation_mode(ConversationMode::Chat)
                 .await
                 .is_err());
+            let before = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+                .await
+                .unwrap()
+                .unwrap();
+            let continuation = before.continuation.unwrap();
+            let continuation_bytes = serde_json::to_vec(&continuation).unwrap();
+            let history = fixture.orch.session.lock().await.history.clone();
+            let transcript_bytes = std::fs::read(&fixture.transcript_path).unwrap();
+            let journal_events = fixture.journal.events.lock().unwrap().clone();
 
             *fixture.api.provider.lock().unwrap() = NativeComputerProvider::Anthropic;
             fixture
@@ -2518,25 +2675,6 @@ async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
                     provider: NativeComputerProvider::Anthropic,
                     evidence: "fixture acceptance only".into(),
                 });
-            fixture.native().await;
-            let mut fresh = claude_screenshot();
-            fresh.id = "fresh-anthropic-response".into();
-            let blocks = fixture.bind(&fresh).await.unwrap();
-            let dispatched = fixture.dispatch(blocks).await;
-            fixture.publish(&dispatched.results).await;
-            prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
-                .await
-                .unwrap();
-            let saved = fixture
-                .journal
-                .receipts
-                .lock()
-                .unwrap()
-                .values()
-                .find(|record| record.binding.protocol == "anthropic_messages")
-                .unwrap()
-                .clone();
-            let expected = load_receipt(&saved.receipt).await.unwrap().block;
             if cold {
                 fixture.forget_runtime().await;
                 fixture
@@ -2545,46 +2683,35 @@ async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
                     .await
                     .unwrap();
             }
-            let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+            let error = prepare_projection(&fixture.orch, MODEL, None, &catalog)
                 .await
-                .unwrap()
-                .unwrap();
-            assert!(projection.ordinary_history);
-            assert!(projection.continuation.is_none());
-            let submission = projection.submission.unwrap();
-            assert_eq!(submission.receipts[0].receipt_id, saved.receipt_id);
-            *fixture.api.submission_probe.lock().unwrap() = Some(submission);
-            crate::turn_loop::execute_one_turn_with_recovery_tracked(
-                &fixture.orch,
-                None,
-                &mut crate::turn_loop::RecoveryState::default(),
-                None,
-                0,
-            )
-            .await
-            .unwrap();
-            let inputs = fixture.api.provider_inputs.lock().unwrap();
-            assert_eq!(inputs.len(), 1);
+                .err()
+                .expect("retained continuation must reject a different protocol");
             assert!(
-                inputs[0]
-                    .messages
-                    .iter()
-                    .flat_map(|message| &message.content)
-                    .any(|block| block == &expected),
-                "{old_provider:?}, cold={cold}: submitted receipt differs from request input"
+                error
+                    .to_string()
+                    .contains("computer continuation cannot change protocol"),
+                "{old_provider:?}, cold={cold}: {error}"
             );
-            drop(inputs);
+            let retained = fixture
+                .orch
+                .computer_runtime
+                .state
+                .lock()
+                .await
+                .continuation
+                .clone()
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&retained).unwrap(), continuation_bytes);
+            assert_eq!(fixture.orch.session.lock().await.history, history);
             assert_eq!(
-                fixture
-                    .journal
-                    .receipt(&saved.receipt_id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .stage,
-                NativeReceiptStage::ResponseReceived
+                std::fs::read(&fixture.transcript_path).unwrap(),
+                transcript_bytes
             );
-            assert_eq!(fixture.computer.calls.lock().unwrap().len(), 2);
+            assert_eq!(*fixture.journal.events.lock().unwrap(), journal_events);
+            assert!(fixture.api.inner.captured_requests().await.is_empty());
+            assert!(fixture.api.provider_inputs.lock().unwrap().is_empty());
+            assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
         }
     }
 }
@@ -3458,6 +3585,308 @@ async fn saved_complete_successor_repairs_received_acknowledgement_without_resub
         "the full row was already durable; recovery must not append it twice"
     );
     assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
+}
+
+fn recovery_join_execution(
+    session_id: lingxi_core::types::SessionId,
+    call_id: &str,
+) -> ToolExecutionRecord {
+    let output = DurableToolOutput {
+        digest: "unused-recovery-fixture".into(),
+        payload: Value::Null,
+        media_refs: vec![],
+    };
+    ToolExecutionRecord {
+        identity: ToolExecutionIdentity {
+            session_id,
+            provider_response_id: "join-origin".into(),
+            provider_call_id: call_id.into(),
+            member_index: 0,
+        },
+        tool_name: "computer".into(),
+        input_digest: "join-input".into(),
+        recovery_binding: output.clone(),
+        acknowledged_safety_checks: vec![],
+        stage: ToolExecutionStage::OutputPublished,
+        outcome: Some(ToolExecutionOutcome::Succeeded),
+        output: Some(output),
+    }
+}
+
+fn recovery_join_receipt(execution: &ToolExecutionRecord, id: &str) -> NativeReceiptRecord {
+    NativeReceiptRecord {
+        session_id: execution.identity.session_id,
+        receipt_id: id.into(),
+        execution_ids: vec![execution.execution_id()],
+        binding: NativeContinuationBinding {
+            account: "fixture-account".into(),
+            profile: "fixture-profile".into(),
+            model: MODEL.into(),
+            endpoint: "fixture-endpoint".into(),
+            protocol: protocol_name(NativeComputerProvider::OpenAi),
+        },
+        stage: NativeReceiptStage::Submitted,
+        submission_attempt: 1,
+        receipt: execution.recovery_binding.clone(),
+        response: None,
+        provider_response_id: None,
+    }
+}
+
+async fn recovery_join_output(
+    fixture: &Fixture,
+    response_id: &str,
+    receipts: &[NativeReceiptRecord],
+    call_ids: &[&str],
+) -> DurableToolOutput {
+    let associations = receipts
+        .iter()
+        .map(ReceiptAcknowledgement::from_record)
+        .collect::<Vec<_>>();
+    let message = ConversationMessage::Assistant {
+        per_turn_effort: None,
+        id: MessageId::new(),
+        content: vec![
+            ContentBlock::ProviderContent {
+                protocol: protocol_name(NativeComputerProvider::OpenAi),
+                value: core_source!({
+                    "type": "lingxi_computer_receipt_ack",
+                    "provider_response_id": response_id,
+                    "receipts": associations,
+                    "call_ids": call_ids,
+                }),
+            },
+            ContentBlock::TextJsUtf16 {
+                text: "\u{fffd}".into(),
+                utf16_code_units: vec![0xd800],
+                citations: None,
+            },
+        ],
+        stop_reason: Some("end_turn".into()),
+        resumable: None,
+    };
+    let mut row = prepare_stored_row(&fixture.orch, &message).await.unwrap();
+    row.message.set_field("id", response_id.into()).unwrap();
+    store_payload(&fixture.orch, response_id, &StoredOutput::new(message, row))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn native_recovery_join_uses_first_receipt_and_mutates_all_duplicates_in_vec_order() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    let session_id = fixture.orch.session.lock().await.session_id;
+    let executions = vec![
+        recovery_join_execution(session_id, "call-a"),
+        recovery_join_execution(session_id, "call-b"),
+    ];
+    let mut first = recovery_join_receipt(&executions[0], "receipt-a");
+    let second = recovery_join_receipt(&executions[1], "receipt-b");
+    // Associations deliberately reverse the receipt Vec's mutation order.
+    let output = recovery_join_output(
+        &fixture,
+        "join-successor",
+        &[second.clone(), first.clone()],
+        &["call-b", "call-a"],
+    )
+    .await;
+    first.stage = NativeReceiptStage::ResponsePrepared;
+    first.response = Some(output.clone());
+    first.provider_response_id = Some("join-successor".into());
+    let mut duplicate_first = first.clone();
+    duplicate_first.stage = NativeReceiptStage::Submitted;
+    duplicate_first.submission_attempt += 1;
+    duplicate_first.response = None;
+    duplicate_first.provider_response_id = None;
+    let mut duplicate_second = second.clone();
+    duplicate_second.submission_attempt += 1;
+    let mut recovered = ToolJournalRecovery {
+        executions,
+        receipts: vec![first, second, duplicate_first, duplicate_second],
+    };
+    let original = recovered.receipts.clone();
+    super::recovery::finish_prepared_responses(&fixture.orch, &mut recovered, session_id)
+        .await
+        .unwrap();
+    assert!(recovered.receipts.iter().all(|record| {
+        record.stage == NativeReceiptStage::ResponseReceived
+            && record.response.as_ref() == Some(&output)
+            && record.provider_response_id.as_deref() == Some("join-successor")
+    }));
+    let expected_events = [
+        (1, NativeReceiptStage::ResponsePrepared),
+        (2, NativeReceiptStage::ResponsePrepared),
+        (3, NativeReceiptStage::ResponsePrepared),
+        (0, NativeReceiptStage::ResponseReceived),
+        (1, NativeReceiptStage::ResponseReceived),
+        (2, NativeReceiptStage::ResponseReceived),
+        (3, NativeReceiptStage::ResponseReceived),
+    ]
+    .into_iter()
+    .map(|(index, stage)| {
+        let mut record = original[index].clone();
+        record.stage = stage;
+        record.event_id()
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(*fixture.journal.events.lock().unwrap(), expected_events);
+    let bytes = std::fs::read(&fixture.transcript_path).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("\\ud800"));
+    super::recovery::finish_prepared_responses(&fixture.orch, &mut recovered, session_id)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&fixture.transcript_path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn native_recovery_join_preserves_missing_and_duplicate_error_order() {
+    for case in ["execution", "receipt", "duplicate", "first-stage"] {
+        let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+        let session_id = fixture.orch.session.lock().await.session_id;
+        let execution = recovery_join_execution(session_id, "call-a");
+        let mut proof = recovery_join_receipt(&execution, "receipt-a");
+        if case == "execution" {
+            proof.execution_ids = vec!["missing-execution".into()];
+        }
+        let mut associations = vec![proof.clone()];
+        if case == "duplicate" {
+            associations.push(proof.clone());
+        } else if case != "first-stage" {
+            associations.push(recovery_join_receipt(&execution, "missing-receipt"));
+        }
+        let output = recovery_join_output(
+            &fixture,
+            "invalid-join-successor",
+            &associations,
+            &["call-a"],
+        )
+        .await;
+        proof.stage = NativeReceiptStage::ResponsePrepared;
+        proof.response = Some(output);
+        proof.provider_response_id = Some("invalid-join-successor".into());
+        let mut receipts = vec![proof.clone()];
+        if case == "first-stage" {
+            let mut first = proof;
+            first.stage = NativeReceiptStage::Prepared;
+            receipts.insert(0, first);
+        }
+        let mut recovered = ToolJournalRecovery {
+            executions: vec![execution],
+            receipts,
+        };
+        let original = recovered.clone();
+        let error =
+            super::recovery::finish_prepared_responses(&fixture.orch, &mut recovered, session_id)
+                .await
+                .unwrap_err();
+        let expected = match case {
+            "execution" => "acknowledged execution is missing",
+            "receipt" => "successor references missing receipt",
+            _ => "successor changed receipt scope, attempt or complete response",
+        };
+        assert!(error.to_string().contains(expected), "{case}: {error}");
+        assert_eq!(recovered, original);
+        assert!(fixture.journal.events.lock().unwrap().is_empty());
+        assert!(fixture.orch.session.lock().await.history.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn native_recovery_join_observes_receipt_changes_from_an_earlier_proof() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    let session_id = fixture.orch.session.lock().await.session_id;
+    let executions = ["call-a", "call-b", "call-shared"]
+        .into_iter()
+        .map(|call_id| recovery_join_execution(session_id, call_id))
+        .collect::<Vec<_>>();
+    let mut first = recovery_join_receipt(&executions[0], "receipt-a");
+    let mut second = recovery_join_receipt(&executions[1], "receipt-b");
+    let shared = recovery_join_receipt(&executions[2], "receipt-shared");
+    let first_output = recovery_join_output(
+        &fixture,
+        "first-join-successor",
+        &[first.clone(), shared.clone()],
+        &["call-a", "call-shared"],
+    )
+    .await;
+    let second_output = recovery_join_output(
+        &fixture,
+        "second-join-successor",
+        &[second.clone(), shared.clone()],
+        &["call-b", "call-shared"],
+    )
+    .await;
+    first.stage = NativeReceiptStage::ResponsePrepared;
+    first.response = Some(first_output.clone());
+    first.provider_response_id = Some("first-join-successor".into());
+    second.stage = NativeReceiptStage::ResponsePrepared;
+    second.response = Some(second_output.clone());
+    second.provider_response_id = Some("second-join-successor".into());
+    let mut recovered = ToolJournalRecovery {
+        executions,
+        receipts: vec![first, second, shared],
+    };
+    let error =
+        super::recovery::finish_prepared_responses(&fixture.orch, &mut recovered, session_id)
+            .await
+            .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("successor changed receipt scope, attempt or complete response"));
+    for index in [0, 2] {
+        assert_eq!(
+            recovered.receipts[index].stage,
+            NativeReceiptStage::ResponseReceived
+        );
+        assert_eq!(
+            recovered.receipts[index].response,
+            Some(first_output.clone())
+        );
+    }
+    assert_eq!(
+        recovered.receipts[1].stage,
+        NativeReceiptStage::ResponsePrepared
+    );
+    assert_eq!(recovered.receipts[1].response, Some(second_output));
+    assert_eq!(fixture.journal.events.lock().unwrap().len(), 3);
+    let history = fixture.orch.session.lock().await.history.clone();
+    assert_eq!(history.len(), 1);
+    let first_stored = load_output(&first_output).await.unwrap();
+    assert_eq!(history[0], first_stored.message);
+    let bytes = std::fs::read(&fixture.transcript_path).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("\\ud800"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("second-join-successor"));
+}
+
+#[tokio::test]
+async fn native_recovery_join_pending_tail_keeps_missing_execution_errors() {
+    for empty in [false, true] {
+        let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+        let session_id = fixture.orch.session.lock().await.session_id;
+        let execution = recovery_join_execution(session_id, "missing-call");
+        let mut receipt = recovery_join_receipt(&execution, "pending-receipt");
+        receipt.stage = NativeReceiptStage::Prepared;
+        if empty {
+            receipt.execution_ids.clear();
+        }
+        fixture
+            .journal
+            .receipts
+            .lock()
+            .unwrap()
+            .insert(receipt.receipt_id.clone(), receipt);
+        let error = super::preserve_pending_compaction_tail(&fixture.orch, &[])
+            .await
+            .unwrap_err();
+        let expected = if empty {
+            "pending receipt has no execution identities"
+        } else {
+            "pending receipt has no durable execution facts"
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(fixture.journal.events.lock().unwrap().is_empty());
+        assert!(fixture.orch.session.lock().await.history.is_empty());
+    }
 }
 
 #[tokio::test]

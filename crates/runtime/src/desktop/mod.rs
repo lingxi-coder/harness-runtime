@@ -6264,6 +6264,8 @@ fn registry_skill_listing_provider_with_sources(
                     },
                 )
                 .collect::<Vec<_>>();
+            let display_names =
+                orchestrator::prompt::skill_listing::NativeDisplayNameResolver::new(&full_catalog);
             let entries = commands
                 .into_iter()
                 // Native `getSkillToolCommands`: preserve the registry's
@@ -6300,10 +6302,7 @@ fn registry_skill_listing_provider_with_sources(
                             .as_ref()
                             .map_or(0.0, |snapshot| snapshot.priority_for_command(&c.name)),
                     );
-                    entry.display_name = orchestrator::prompt::skill_listing::native_display_name(
-                        &entry,
-                        &full_catalog,
-                    );
+                    entry.display_name = display_names.display_name(&entry);
                     let listing_mode = settings.listing_mode_for_command(c, &entry);
                     if matches!(
                         listing_mode,

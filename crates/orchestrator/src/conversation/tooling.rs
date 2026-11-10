@@ -32,6 +32,47 @@ fn normalize_absolute_lexical_read_path(path: &std::path::Path) -> std::path::Pa
     normalized
 }
 
+async fn read_seed_content(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    max_bytes: u64,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await
+        .ok()?;
+    if u64::try_from(bytes.len()).ok()? > max_bytes {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod seed_content_tests {
+    use super::read_seed_content;
+
+    #[tokio::test]
+    async fn seed_content_reads_at_most_one_byte_past_the_budget() {
+        let mut input = &b"0123456789"[..];
+        assert!(read_seed_content(&mut input, 4).await.is_none());
+        assert_eq!(input, b"56789");
+    }
+
+    #[tokio::test]
+    async fn seed_content_preserves_utf8_at_the_byte_limit() {
+        assert_eq!(
+            read_seed_content("😀".as_bytes(), 4).await.as_deref(),
+            Some("😀")
+        );
+        assert!(read_seed_content("😀".as_bytes(), 3).await.is_none());
+        assert!(read_seed_content(&b"\xff"[..], 4).await.is_none());
+        assert_eq!(read_seed_content(&b""[..], 0).await.as_deref(), Some(""));
+    }
+}
+
 impl ConversationOrchestrator {
     pub(crate) fn refresh_main_loop_model_for_route(&self, model: &str, profile: Option<&str>) {
         let context = self
@@ -61,7 +102,10 @@ impl ConversationOrchestrator {
         };
         let absolute = normalize_absolute_lexical_read_path(&absolute);
 
-        let Ok(metadata) = tokio::fs::metadata(&absolute).await else {
+        let Ok(file) = tokio::fs::File::open(&absolute).await else {
+            return false;
+        };
+        let Ok(metadata) = file.metadata().await else {
             return false;
         };
         if metadata.len() > MAX_SEED_BYTES {
@@ -77,7 +121,7 @@ impl ConversationOrchestrator {
         if (mtime_ms as f64) > host_mtime_ms.floor() {
             return false;
         }
-        let Ok(content) = tokio::fs::read_to_string(&absolute).await else {
+        let Some(content) = read_seed_content(file, MAX_SEED_BYTES).await else {
             return false;
         };
         let content = content
@@ -695,7 +739,8 @@ impl ConversationOrchestrator {
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
                 (true, Some(provider)) => {
-                    let snapshot = crate::prompt::skill_listing::preparation_snapshot(provider).await?;
+                    let snapshot =
+                        crate::prompt::skill_listing::preparation_snapshot(provider).await?;
                     provider.bash_precommit_skills(&snapshot.entries).await?
                 }
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
@@ -748,7 +793,10 @@ impl ConversationOrchestrator {
         let mut wire = {
             let cached_wire = {
                 let cache = self.prompt_runtime.wire_tool_schema_cache.lock().await;
-                cache.as_ref().filter(|entry| entry.key == cache_key).map(|entry| entry.wire.clone())
+                cache
+                    .as_ref()
+                    .filter(|entry| entry.key == cache_key)
+                    .map(|entry| entry.wire.clone())
             };
             if let Some(wire) = cached_wire {
                 wire
@@ -762,7 +810,11 @@ impl ConversationOrchestrator {
                     });
                 // Token counts belong to this exact wire generation. Clearing
                 // on replacement also rules out ABA reuse of an old pointer key.
-                self.prompt_runtime.deferred_tool_token_cache.lock().await.clear();
+                self.prompt_runtime
+                    .deferred_tool_token_cache
+                    .lock()
+                    .await
+                    .clear();
                 wire
             }
         };
@@ -893,7 +945,9 @@ impl ConversationOrchestrator {
                 let mut cache = self.prompt_runtime.deferred_tool_token_cache.lock().await;
                 // Bounded even if concurrent request routes replace the wire
                 // cache while exact token-count requests are in flight.
-                if cache.len() >= 16 { cache.clear(); }
+                if cache.len() >= 16 {
+                    cache.clear();
+                }
                 cache.insert(token_cache_key, counted);
                 counted
             }

@@ -2350,15 +2350,21 @@ impl ConversationOrchestrator {
                     inner_stop_details: pumped.stop_details.clone(),
                     refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
                         pumped.response_message_id.as_deref(),
-                    ).map(str::to_owned),
+                    )
+                    .map(str::to_owned),
                     ..ApiErrorEnvelope::default()
                 },
                 _ => ApiErrorEnvelope::default(),
             };
             self.persist_api_error_message_to_jsonl(&err_msg, envelope.clone())
                 .await;
-            let terminal_reason = if stop_reason == "refusal" { "api_error" } else { stop_reason };
-            self.emit_synthetic_api_error_message(&err_msg, &envelope, terminal_reason, true).await;
+            let terminal_reason = if stop_reason == "refusal" {
+                "api_error"
+            } else {
+                stop_reason
+            };
+            self.emit_synthetic_api_error_message(&err_msg, &envelope, terminal_reason, true)
+                .await;
             Some(err_msg.id())
         } else {
             None
@@ -2389,13 +2395,13 @@ impl ConversationOrchestrator {
     ) -> Result<bool, OrchestratorError> {
         let request_id = self.api.last_request_id();
         let text = crate::turn_loop::terminal_api_error_text(
-                request_model,
-                self.prompt_is_interactive(),
-                "refusal",
-                request_id.as_deref(),
-                stop_details,
-                response_message_id,
-            );
+            request_model,
+            self.prompt_is_interactive(),
+            "refusal",
+            request_id.as_deref(),
+            stop_details,
+            response_message_id,
+        );
         let Some(text) = text else {
             return Ok(false);
         };
@@ -2416,18 +2422,20 @@ impl ConversationOrchestrator {
             resumable: None,
         };
         let envelope = ApiErrorEnvelope {
-                request_id,
-                error: Some("invalid_request"),
-                inner_stop_reason: Some("refusal"),
-                inner_stop_details: stop_details.cloned(),
-                refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
-                    response_message_id,
-                ).map(str::to_owned),
-                ..ApiErrorEnvelope::default()
-            };
+            request_id,
+            error: Some("invalid_request"),
+            inner_stop_reason: Some("refusal"),
+            inner_stop_details: stop_details.cloned(),
+            refused_message_id: lingxi_core::host::refusal_api_text::sanitized_refusal_id(
+                response_message_id,
+            )
+            .map(str::to_owned),
+            ..ApiErrorEnvelope::default()
+        };
         self.persist_api_error_message_to_jsonl(&err_msg, envelope.clone())
-        .await;
-        self.emit_synthetic_api_error_message(&err_msg, &envelope, "api_error", true).await;
+            .await;
+        self.emit_synthetic_api_error_message(&err_msg, &envelope, "api_error", true)
+            .await;
         Ok(true)
     }
 
@@ -2940,12 +2948,19 @@ impl ConversationOrchestrator {
                         api_error: Some("malformed_tool_use_exhausted"),
                         ..Default::default()
                     };
-                    self.persist_api_error_message_to_jsonl(&failed_msg, envelope.clone()).await;
-                    self.note_turn_api_error_terminal_reason("malformed_tool_use_exhausted");
-                    self.emit_synthetic_api_error_message(&failed_msg, &envelope, "malformed_tool_use_exhausted", true)
+                    self.persist_api_error_message_to_jsonl(&failed_msg, envelope.clone())
                         .await;
+                    self.note_turn_api_error_terminal_reason("malformed_tool_use_exhausted");
+                    self.emit_synthetic_api_error_message(
+                        &failed_msg,
+                        &envelope,
+                        "malformed_tool_use_exhausted",
+                        true,
+                    )
+                    .await;
                     let cost = self.snapshot_cost_real().await;
-                    self.emit_turn_terminal("malformed_tool_use_exhausted", &cost).await;
+                    self.emit_turn_terminal("malformed_tool_use_exhausted", &cost)
+                        .await;
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -3990,7 +4005,9 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() {
             return Ok(TurnOutcome::Cancelled);
         }
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.run_turn_streaming_source_with_origin(prompt, images, cancel, None, true)
             .await
     }
@@ -4011,7 +4028,9 @@ impl ConversationOrchestrator {
         // the already-decoded entry below — so the path-based and bridge (inline
         // base64) flows share ONE cancel race + ONE turn core. A failed image read
         // aborts the turn with `Err` before any API call (unchanged).
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.run_turn_streaming_with_cancel_image_sources_and_message_id(
             prompt, images, cancel, message_id,
         )
@@ -4063,7 +4082,9 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() {
             return Ok(TurnOutcome::Cancelled);
         }
-        let images = Self::load_images(image_paths)?;
+        let Some(images) = Self::load_images(image_paths, &cancel).await? else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.reset_goal_interruption();
         let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
             return Ok(TurnOutcome::Cancelled);
@@ -4637,14 +4658,13 @@ impl ConversationOrchestrator {
         Ok(TurnOutcome::Cancelled)
     }
 
-    /// Load + base64-encode each pasted image path into an [`ImageSource`].
-    fn load_images(
+    /// Load + base64-encode pasted images off the runtime worker, in path order.
+    /// `None` means cancellation won before turn admission.
+    async fn load_images(
         image_paths: &[std::path::PathBuf],
-    ) -> Result<Vec<lingxi_core::types::ImageSource>, OrchestratorError> {
-        image_paths
-            .iter()
-            .map(|p| crate::image_input::load_image_source(p))
-            .collect()
+        cancel: &CancellationToken,
+    ) -> Result<Option<Vec<lingxi_core::types::ImageSource>>, OrchestratorError> {
+        crate::image_input::load_image_sources(image_paths, cancel).await
     }
 }
 
