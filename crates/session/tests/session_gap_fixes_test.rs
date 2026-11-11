@@ -347,8 +347,7 @@ fn make_transcript(messages: &[(&str, Option<&str>, &str, &str, bool)]) -> Loade
             .into_iter()
             .next()
             .unwrap();
-        t.by_uuid.insert(uuid.to_string(), m.clone());
-        t.messages_in_order.push(m);
+        t.push_message(m);
     }
     t
 }

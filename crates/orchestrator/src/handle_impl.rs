@@ -4869,6 +4869,138 @@ mod tests {
 
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
+    #[derive(Debug)]
+    struct ListingSnapshotSource {
+        calls: std::sync::atomic::AtomicUsize,
+        snapshot: std::sync::Mutex<Arc<llm_runtime::ModelRuntime>>,
+    }
+
+    impl llm_runtime::client::ModelRuntimeSource for ListingSnapshotSource {
+        fn current(&self, _template: &llm_runtime::ModelRuntime) -> Arc<llm_runtime::ModelRuntime> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    struct ListingSnapshotApi(llm_runtime::ModelRuntime);
+
+    #[async_trait::async_trait]
+    impl crate::OrchestratorApiClient for ListingSnapshotApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            Err(llm_runtime::LlmError::ModelUnavailable)
+        }
+
+        fn available_models(&self) -> Vec<String> {
+            self.0
+                .current()
+                .configuration()
+                .providers
+                .into_iter()
+                .flat_map(|profile| profile.models.into_iter().map(|model| model.request_model))
+                .collect()
+        }
+
+        fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
+            self.0
+                .current()
+                .configuration()
+                .providers
+                .into_iter()
+                .flat_map(|profile| {
+                    profile
+                        .models
+                        .into_iter()
+                        .map(move |model| lingxi_core::host::ModelListing {
+                            request_model: model.request_model,
+                            display_model: model.display_model,
+                            provider_id: profile.profile_name.clone(),
+                            ..Default::default()
+                        })
+                })
+                .collect()
+        }
+
+        fn resolve_media_route(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
+            self.0.resolve_media_route(model, profile)
+        }
+    }
+
+    fn listing_runtime(prefix: &str) -> Arc<llm_runtime::ModelRuntime> {
+        let mut config = llm_runtime::builtin_presets();
+        config
+            .providers
+            .retain(|profile| profile.profile_name == "anthropic");
+        let profile = &mut config.providers[0];
+        profile.profile_name = "listing-fixture".into();
+        profile.provider_id = llm_runtime::ProviderId::Custom {
+            name: "listing-fixture".into(),
+        };
+        profile.wire_profile = None;
+        let template = profile.models[0].clone();
+        profile.models = (0..3)
+            .map(|index| {
+                let mut model = template.clone();
+                model.display_model = format!("{prefix}-{index}");
+                model.request_model = model.display_model.clone();
+                model.billing_model = model.display_model.clone();
+                model.aliases.clear();
+                model
+            })
+            .collect();
+        Arc::new(
+            llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+                providers: config.providers,
+            })
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn model_enumerations_capture_one_catalog_snapshot_and_refresh_next_call() {
+        use std::sync::atomic::Ordering;
+        let initial = listing_runtime("first");
+        let source = Arc::new(ListingSnapshotSource {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            snapshot: std::sync::Mutex::new(initial.clone()),
+        });
+        let api = ListingSnapshotApi((*initial).clone().with_catalog_source(source.clone()));
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(api),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        source.calls.store(0, Ordering::SeqCst);
+        for (index, prefix) in ["first", "second"].into_iter().enumerate() {
+            *source.snapshot.lock().unwrap() = listing_runtime(prefix);
+            let models = OrchestratorHandle::list_available_models(&orch).await;
+            assert_eq!(models.len(), 3);
+            assert!(models.iter().all(|model| model.starts_with(prefix)));
+            assert_eq!(source.calls.load(Ordering::SeqCst), index * 2 + 1);
+            let listings = OrchestratorHandle::list_model_listings(&orch).await;
+            assert_eq!(listings.len(), 3);
+            assert!(listings
+                .iter()
+                .all(|model| model.request_model.starts_with(prefix)));
+            assert_eq!(
+                source.calls.load(Ordering::SeqCst),
+                index * 2 + 2,
+                "every enumeration captures once; separate calls observe a fresh catalog"
+            );
+        }
+    }
+
     struct ResumePostTargetRecorder(Arc<std::sync::Mutex<Vec<Utf16JsonProjection>>>);
 
     #[async_trait::async_trait]

@@ -1225,6 +1225,8 @@ struct CatalogCandidate {
     file_len: u64,
     file_modified: SystemTime,
     file_created: SystemTime,
+    /// Reuse metadata only after a guarded read succeeded in this invocation.
+    current_read_validated: bool,
 }
 
 /// Native G9 runs on KBe's lite rows before jAt clamps logical timestamps.
@@ -1251,23 +1253,112 @@ fn deduplicate_catalog_candidates(candidates: Vec<CatalogCandidate>) -> Vec<Cata
     rows
 }
 
-#[derive(Clone)]
-struct CatalogCacheEntry {
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CatalogCacheKey {
     fs_identity: FileSystemCacheIdentity,
     path: PathBuf,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: Vec<String>,
+}
+
+struct CatalogCacheEntry {
     file_len: u64,
     file_modified: SystemTime,
     file_created: SystemTime,
-    current_is_sdk_entrypoint: bool,
-    target_cwds: Vec<String>,
     scoped_cwd: Option<String>,
     row: Option<SessionMetadata>,
     skipped: bool,
+    last_access: u64,
+    retained_bytes: usize,
 }
 
-fn catalog_cache() -> &'static Mutex<Vec<CatalogCacheEntry>> {
-    static CACHE: OnceLock<Mutex<Vec<CatalogCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+const CATALOG_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct CatalogCache {
+    entries: HashMap<CatalogCacheKey, CatalogCacheEntry>,
+    recency: std::collections::BTreeMap<u64, CatalogCacheKey>,
+    retained_bytes: usize,
+    clock: u64,
+}
+
+impl CatalogCache {
+    fn next_access(&mut self) -> u64 {
+        self.clock = self.clock.wrapping_add(1);
+        if self.clock == 0 {
+            // A cache lifetime of 2^64 accesses may safely evict its metadata.
+            *self = Self::default();
+            self.clock = 1;
+        }
+        self.clock
+    }
+
+    fn touch(&mut self, key: &CatalogCacheKey) {
+        let access = self.next_access();
+        if let Some(entry) = self.entries.get_mut(key) {
+            if let Some(owned_key) = self.recency.remove(&entry.last_access) {
+                self.recency.insert(access, owned_key);
+            }
+            entry.last_access = access;
+        }
+    }
+
+    fn remove(&mut self, key: &CatalogCacheKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.recency.remove(&entry.last_access);
+            self.retained_bytes -= entry.retained_bytes;
+        }
+    }
+
+    fn insert(&mut self, key: CatalogCacheKey, mut entry: CatalogCacheEntry) {
+        // A revision replaces its path/context slot instead of retaining stale
+        // versions until an unrelated entry-count limit is reached.
+        self.remove(&key);
+        entry.retained_bytes = catalog_entry_bytes(&key, &entry);
+        if entry.retained_bytes > CATALOG_CACHE_BYTES {
+            return;
+        }
+        while self.retained_bytes + entry.retained_bytes > CATALOG_CACHE_BYTES {
+            let Some((_, oldest)) = self.recency.first_key_value() else {
+                break;
+            };
+            let oldest = oldest.clone();
+            self.remove(&oldest);
+        }
+        entry.last_access = self.next_access();
+        self.retained_bytes += entry.retained_bytes;
+        self.recency.insert(entry.last_access, key.clone());
+        self.entries.insert(key, entry);
+    }
+}
+
+fn catalog_entry_bytes(key: &CatalogCacheKey, entry: &CatalogCacheEntry) -> usize {
+    let optional_string = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
+    // Include both key owners (lookup and LRU) and conservative node overhead.
+    // Debug spelling bounds the cache namespace's private owned path bytes.
+    let key_bytes = std::mem::size_of::<CatalogCacheKey>()
+        + key.path.capacity()
+        + key.target_cwds.capacity() * std::mem::size_of::<String>()
+        + key.target_cwds.iter().map(String::capacity).sum::<usize>()
+        + format!("{:?}", key.fs_identity).len();
+    let mut bytes = 2 * key_bytes
+        + std::mem::size_of::<CatalogCacheEntry>()
+        + 128
+        + optional_string(&entry.scoped_cwd);
+    if let Some(row) = &entry.row {
+        bytes += row.title.capacity()
+            + row.path.capacity()
+            + optional_string(&row.workspace_path)
+            + optional_string(&row.custom_or_ai_title)
+            + optional_string(&row.resume_model)
+            + optional_string(&row.resume_model_profile);
+    }
+    bytes
+}
+
+fn catalog_cache() -> &'static Mutex<CatalogCache> {
+    static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CatalogCache::default()))
 }
 
 async fn collect_dir(
@@ -1347,11 +1438,10 @@ async fn collect_dir(
         // skipped without parsing the rest of the JSONL. Survivors still take
         // the full `read_routed` path (custom titles live at file tail).
         let path_str = path.to_str().unwrap_or("");
+        let mut current_read_validated = false;
         if !path_str.is_empty() {
-            if let Ok(prefix) = fs
-                .read_file_prefix(path_str, crate::jsonl::LITE_READ_BUF_SIZE)
-                .await
-            {
+            if let Ok(prefix) = read_catalog_prefix(fs, path_str).await {
+                current_read_validated = true;
                 let content = prefix
                     .content
                     .strip_prefix('\u{FEFF}')
@@ -1369,9 +1459,22 @@ async fn collect_dir(
             file_len: metadata.len(),
             file_modified,
             file_created,
+            current_read_validated,
         });
     }
     Ok(true)
+}
+
+async fn read_catalog_prefix(
+    fs: &Arc<dyn FileSystem>,
+    path: &str,
+) -> Result<lingxi_core::host::FileContent, lingxi_core::host::FsError> {
+    #[cfg(test)]
+    if let Some(error) = optimization_tests::catalog_read_fault(Path::new(path), true) {
+        return Err(error);
+    }
+    fs.read_file_prefix(path, crate::jsonl::LITE_READ_BUF_SIZE)
+        .await
 }
 
 // An alias is written before the cwd marker, and can also remain after a later
@@ -1395,14 +1498,31 @@ fn retain_current_cwd_alias_rows(
     ordinary_paths: &HashSet<PathBuf>,
     aliases: &[(PathBuf, PathBuf)],
 ) {
+    let alias_rows: HashSet<&Path> = rows
+        .iter()
+        .filter(|row| !ordinary_paths.contains(&row.path))
+        .map(|row| row.path.as_path())
+        .collect();
+    if alias_rows.is_empty() {
+        return;
+    }
+    let mut destinations: HashMap<&Path, HashSet<PathBuf>> = HashMap::new();
+    for (path, cwd) in aliases {
+        if !alias_rows.contains(path.as_path()) {
+            continue;
+        }
+        destinations
+            .entry(path.as_path())
+            .or_default()
+            .insert(normalized_directory_path(cwd));
+    }
+    drop(alias_rows);
     rows.retain(|row| {
         ordinary_paths.contains(&row.path)
-            || aliases.iter().any(|(path, cwd)| {
-                path == &row.path
-                    && row.workspace_path.as_deref().is_some_and(|recorded| {
-                        normalized_directory_path(Path::new(recorded))
-                            == normalized_directory_path(cwd)
-                    })
+            || destinations.get(row.path.as_path()).is_some_and(|cwds| {
+                row.workspace_path.as_deref().is_some_and(|recorded| {
+                    cwds.contains(&normalized_directory_path(Path::new(recorded)))
+                })
             })
     });
 }
@@ -1417,8 +1537,12 @@ async fn collect_cwd_aliases(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
     );
+    let mut admitted_paths: HashSet<PathBuf> = candidates
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .collect();
     for (path, cwd) in aliases {
-        if candidates.iter().any(|candidate| candidate.path == *path) {
+        if admitted_paths.contains(path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -1463,7 +1587,9 @@ async fn collect_cwd_aliases(
             file_len: metadata.len(),
             file_modified,
             file_created: metadata.created().unwrap_or(file_modified),
+            current_read_validated: true,
         });
+        admitted_paths.insert(path.clone());
     }
 }
 
@@ -1496,11 +1622,12 @@ async fn enrich_candidates(
                 break;
             };
             let fs = Arc::clone(fs);
-            let cache_identity = if uncached_paths.contains(&candidate.path) {
-                None
-            } else {
-                cache_identity.clone()
-            };
+            let cache_identity =
+                if !candidate.current_read_validated || uncached_paths.contains(&candidate.path) {
+                    None
+                } else {
+                    cache_identity.clone()
+                };
             let target_cwds =
                 if candidate.path.parent().is_some_and(|parent| {
                     unfiltered_dirs.iter().any(|directory| directory == parent)
@@ -1569,18 +1696,20 @@ async fn enrich_candidate(
         .await;
     };
     let cache = catalog_cache();
+    let key = CatalogCacheKey {
+        fs_identity: cache_identity.clone(),
+        path: candidate.path.clone(),
+        current_is_sdk_entrypoint,
+        target_cwds: target_cwds.to_vec(),
+    };
     {
-        let cache = cache
+        let mut cache = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = cache.iter().find(|entry| {
-            entry.fs_identity == *cache_identity
-                && entry.path == candidate.path
-                && entry.file_len == candidate.file_len
+        if let Some(entry) = cache.entries.get(&key).filter(|entry| {
+            entry.file_len == candidate.file_len
                 && entry.file_modified == candidate.file_modified
                 && entry.file_created == candidate.file_created
-                && entry.current_is_sdk_entrypoint == current_is_sdk_entrypoint
-                && entry.target_cwds == target_cwds
         }) {
             // Directory existence or a local link target can change without
             // changing the transcript revision. Recheck native m3r for a
@@ -1592,7 +1721,9 @@ async fn enrich_candidate(
                 if entry.skipped {
                     *skipped_files += 1;
                 }
-                return Ok(entry.row.clone());
+                let row = entry.row.clone();
+                cache.touch(&key);
+                return Ok(row);
             }
         }
     }
@@ -1612,21 +1743,19 @@ async fn enrich_candidate(
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cache.len() >= 128 {
-        cache.remove(0);
-    }
-    cache.push(CatalogCacheEntry {
-        fs_identity: cache_identity.clone(),
-        path: candidate.path,
-        file_len: candidate.file_len,
-        file_modified: candidate.file_modified,
-        file_created: candidate.file_created,
-        current_is_sdk_entrypoint,
-        target_cwds: target_cwds.to_vec(),
-        scoped_cwd,
-        row: result.clone(),
-        skipped,
-    });
+    cache.insert(
+        key,
+        CatalogCacheEntry {
+            file_len: candidate.file_len,
+            file_modified: candidate.file_modified,
+            file_created: candidate.file_created,
+            scoped_cwd,
+            row: result.clone(),
+            skipped,
+            last_access: 0,
+            retained_bytes: 0,
+        },
+    );
     Ok(result)
 }
 
@@ -1644,6 +1773,13 @@ async fn enrich_candidate_uncached(
     // needs to surface a session's stored title — `summaries` (keyed by
     // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
     // `LoadedTranscript`.
+    #[cfg(test)]
+    optimization_tests::record_catalog_read(&candidate.path);
+    #[cfg(test)]
+    if optimization_tests::catalog_read_fault(&candidate.path, false).is_some() {
+        *skipped_files += 1;
+        return Ok(None);
+    }
     let content = match fs
         .read_file(candidate.path.to_str().expect("UTF-8 path"), None, None)
         .await
@@ -1920,6 +2056,7 @@ fn persisted_model_ref(
     let preserved = preserved_tail_state(loaded, tip.map(|row| row.session_id.as_str()));
     let reparent = &preserved.parents;
     let mut current = tip;
+    let mut fallback = None;
     while let Some(message) = current {
         if !seen.insert(message.uuid.clone()) {
             break;
@@ -1957,10 +2094,13 @@ fn persisted_model_ref(
             .or(message.parent_uuid.as_deref());
         current = match parent {
             Some(parent_uuid) => loaded
-                .by_uuid
-                .get(parent_uuid)
+                .message(parent_uuid)
                 .filter(|parent| !seen.contains(&parent.uuid))
-                .or_else(|| timestamp_parent_fallback(loaded, message, &seen)),
+                .or_else(|| {
+                    fallback
+                        .get_or_insert_with(|| TimestampParentIndex::new(loaded))
+                        .nearest(message, &seen)
+                }),
             None => None,
         };
     }
@@ -2547,6 +2687,7 @@ async fn describe_session_source_inner<F: FnOnce()>(
         file_len: metadata.len(),
         file_modified: modified,
         file_created: metadata.created().unwrap_or(modified),
+        current_read_validated: true,
     };
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
@@ -2612,6 +2753,7 @@ pub async fn find_session_exact_raw_with_diagnostics(
         file_len: metadata.len(),
         file_modified: modified,
         file_created: metadata.created().unwrap_or(modified),
+        current_read_validated: false,
     };
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
@@ -3278,7 +3420,7 @@ async fn read_cli_transcript_source(
     // Mui first requires at least one parsed message; a cleared transcript
     // can then represent an empty continuation. Local selection uses the full
     // parser, so spaces around a JSON type colon remain valid here.
-    if loaded.by_uuid.is_empty()
+    if loaded.messages_in_order.is_empty()
         || (!loaded.cleared_to_empty && find_tip(&loaded, session_id).is_none())
     {
         return Ok(None);
@@ -4141,51 +4283,80 @@ fn timestamp_millis(ts: &str) -> i64 {
 /// removed (for example, by a server-fallback tombstone) or points into an
 /// already-visited cycle. This is a read-time recovery only: the JSONL row's
 /// `parentUuid` is never repaired or rewritten.
-fn timestamp_parent_fallback<'a>(
-    loaded: &'a LoadedTranscript,
-    current: &JsonlMessage,
-    visited: &HashSet<String>,
-) -> Option<&'a JsonlMessage> {
-    const MAX_PARENT_GAP_MS: i64 = 5_000;
+struct TimestampParentIndex<'a> {
+    // Timestamp descending selection, then first UUID insertion for ties.
+    candidates:
+        [std::collections::BTreeMap<i64, std::collections::BTreeMap<usize, &'a JsonlMessage>>; 2],
+    #[cfg(test)]
+    parsed_timestamps: usize,
+    #[cfg(test)]
+    candidate_probes: usize,
+}
 
-    let current_ms = chrono::DateTime::parse_from_rfc3339(&current.timestamp)
-        .ok()?
-        .timestamp_millis();
-    let mut seen_ids = HashSet::new();
-    let mut nearest: Option<(i64, &JsonlMessage)> = None;
-
-    // `Map#set` updates a duplicate UUID in place without changing its
-    // insertion position. `messages_in_order` carries that first-seen order;
-    // `by_uuid` supplies the last value for each ID.
-    for row in &loaded.messages_in_order {
-        if !seen_ids.insert(row.uuid.as_str()) {
-            continue;
-        }
-        let Some(candidate) = loaded.by_uuid.get(row.uuid.as_str()) else {
-            continue;
+impl<'a> TimestampParentIndex<'a> {
+    fn new(loaded: &'a LoadedTranscript) -> Self {
+        let mut index = Self {
+            candidates: Default::default(),
+            #[cfg(test)]
+            parsed_timestamps: 0,
+            #[cfg(test)]
+            candidate_probes: 0,
         };
-        if visited.contains(&candidate.uuid)
-            || candidate.uuid == current.uuid
-            || candidate.is_sidechain != current.is_sidechain
-        {
-            continue;
+        let mut seen_ids = HashSet::new();
+        for (position, row) in loaded.messages_in_order.iter().enumerate() {
+            if !seen_ids.insert(row.uuid.as_str()) {
+                continue;
+            }
+            let Some(candidate) = loaded.message(&row.uuid) else {
+                continue;
+            };
+            #[cfg(test)]
+            {
+                index.parsed_timestamps += 1;
+            }
+            let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&candidate.timestamp) else {
+                continue;
+            };
+            index.candidates[usize::from(candidate.is_sidechain)]
+                .entry(timestamp.timestamp_millis())
+                .or_default()
+                .insert(position, candidate);
         }
-        let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&candidate.timestamp) else {
-            continue;
-        };
-        let candidate_ms = timestamp.timestamp_millis();
-        let Some(gap_ms) = current_ms.checked_sub(candidate_ms) else {
-            continue;
-        };
-        if !(0..=MAX_PARENT_GAP_MS).contains(&gap_ms) {
-            continue;
-        }
-        if nearest.is_none_or(|(nearest_gap, _)| gap_ms < nearest_gap) {
-            nearest = Some((gap_ms, candidate));
-        }
+        index
     }
 
-    nearest.map(|(_, candidate)| candidate)
+    fn nearest(
+        &mut self,
+        current: &JsonlMessage,
+        visited: &HashSet<String>,
+    ) -> Option<&'a JsonlMessage> {
+        const MAX_PARENT_GAP_MS: i64 = 5_000;
+        let current_ms = chrono::DateTime::parse_from_rfc3339(&current.timestamp)
+            .ok()?
+            .timestamp_millis();
+        let candidates = &mut self.candidates[usize::from(current.is_sidechain)];
+        loop {
+            let (&timestamp, group) = candidates.range(..=current_ms).next_back()?;
+            if current_ms.checked_sub(timestamp)? > MAX_PARENT_GAP_MS {
+                return None;
+            }
+            let (&position, &candidate) = group.first_key_value()?;
+            #[cfg(test)]
+            {
+                self.candidate_probes += 1;
+            }
+            if candidate.uuid != current.uuid && !visited.contains(&candidate.uuid) {
+                return Some(candidate);
+            }
+            // Walkers only add visited IDs. Retire an ineligible candidate once
+            // rather than rescan the growing visited prefix on every edge.
+            let group = candidates.get_mut(&timestamp).expect("selected timestamp");
+            group.remove(&position);
+            if group.is_empty() {
+                candidates.remove(&timestamp);
+            }
+        }
+    }
 }
 
 /// Select a resumable main-thread user/assistant tip. Claude Code 2.1.286
@@ -4196,7 +4367,7 @@ fn timestamp_parent_fallback<'a>(
 /// without write-order metadata retain newest-leaf selection with stable ties.
 #[must_use]
 pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a JsonlMessage> {
-    let by_uuid = &loaded.by_uuid;
+    let by_uuid = loaded.messages_by_uuid();
     if by_uuid.is_empty() {
         return None;
     }
@@ -4214,7 +4385,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     if loaded.cleared_to_empty {
         return None;
     }
-    let ordered = ordered_messages(loaded, by_uuid);
+    let ordered = ordered_messages(loaded, &by_uuid);
     // 2.1.286 jln/yan: an ordinary checkpoint can be a completed sibling
     // tool result. Prefer the durable continuation of that same batch even
     // when the process died before writing its next last-prompt record.
@@ -4233,7 +4404,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
             if !loaded.last_prompt_explicit
                 && selected != last
                 && follows_checkpoint(
-                    by_uuid,
+                    &by_uuid,
                     last,
                     selected,
                     true,
@@ -4442,7 +4613,7 @@ pub fn build_conversation_chain(
     loaded: &LoadedTranscript,
     arg: &str,
 ) -> (Vec<JsonlMessage>, String) {
-    let by_uuid = &loaded.by_uuid;
+    let by_uuid = loaded.messages_by_uuid();
     if by_uuid.is_empty() {
         return (Vec::new(), arg.to_string());
     }
@@ -4471,6 +4642,7 @@ pub fn build_conversation_chain(
     let mut chain: Vec<JsonlMessage> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut current: Option<&JsonlMessage> = Some(tip);
+    let mut fallback = None;
     while let Some(node) = current {
         if !seen.insert(node.uuid.clone()) {
             tracing::warn!(
@@ -4500,11 +4672,14 @@ pub fn build_conversation_chain(
                     .filter(|message| preserved.permits_owner(message))
                     .filter(|message| !seen.contains(&message.uuid));
                 parent.or_else(|| {
-                    timestamp_parent_fallback(loaded, node, &seen).filter(|message| {
-                        preserved.exact_owner.is_none()
-                            || (!preserved.pruned.contains(&message.uuid)
-                                && preserved.permits_owner(message))
-                    })
+                    fallback
+                        .get_or_insert_with(|| TimestampParentIndex::new(loaded))
+                        .nearest(node, &seen)
+                        .filter(|message| {
+                            preserved.exact_owner.is_none()
+                                || (!preserved.pruned.contains(&message.uuid)
+                                    && preserved.permits_owner(message))
+                        })
                 })
             }
             None => None, // reached a root or an intentional compact boundary
@@ -4518,13 +4693,10 @@ pub fn build_conversation_chain(
     // breaks BEFORE pushing, so no extra entries).
     let filtered;
     let recovery_messages = if preserved.pruned.is_empty() && preserved.exact_owner.is_none() {
-        by_uuid
+        &by_uuid
     } else {
         filtered = by_uuid
-            .iter()
-            .filter(|(uuid, row)| !preserved.pruned.contains(*uuid) && preserved.permits_owner(row))
-            .map(|(uuid, message)| (uuid.clone(), message.clone()))
-            .collect();
+            .filtered(|uuid, row| !preserved.pruned.contains(uuid) && preserved.permits_owner(row));
         &filtered
     };
     let ordered = ordered_messages(loaded, recovery_messages);
@@ -4718,7 +4890,7 @@ fn exact_native_tail_state(
             || position >= boundary_index
             || row.is_sidechain
             || session_uuid(&row.session_id) != Some(owner)
-            || !loaded.by_uuid.contains_key(id)
+            || !loaded.contains_message(id)
         {
             return None;
         }
@@ -4917,7 +5089,7 @@ fn preserved_tail_state(
         let head = preserved_endpoint_uuid(loaded, head, false);
         let tail = preserved_endpoint_uuid(loaded, tail, true);
         let anchor = preserved_endpoint_uuid(loaded, anchor, true);
-        let mut current = loaded.by_uuid.get(tail);
+        let mut current = loaded.message(tail);
         let mut reached_head = false;
         while let Some(message) = current {
             if !state.usage_to_clear.insert(message.uuid.clone()) {
@@ -4927,10 +5099,7 @@ fn preserved_tail_state(
                 reached_head = true;
                 break;
             }
-            current = message
-                .parent_uuid
-                .as_ref()
-                .and_then(|p| loaded.by_uuid.get(p));
+            current = message.parent_uuid.as_ref().and_then(|p| loaded.message(p));
         }
         if !reached_head {
             return PreservedTailState::default();
@@ -4961,7 +5130,7 @@ fn preserved_tail_state(
             }
             let logical_ids = ids
                 .iter()
-                .filter_map(|id| loaded.by_uuid.get(*id))
+                .filter_map(|id| loaded.message(*id))
                 .filter_map(|message| message.extra.string_at("/logicalMessageId"))
                 .collect::<Vec<_>>();
             ids.extend(logical_ids);
@@ -4973,7 +5142,7 @@ fn preserved_tail_state(
                         .is_some_and(|id| ids.contains(id))
                     || (message.message_type == "assistant"
                         && message_id(message)
-                            .is_some_and(|id| ids.contains(id) && !loaded.by_uuid.contains_key(id)))
+                            .is_some_and(|id| ids.contains(id) && !loaded.contains_message(id)))
                 {
                     state.usage_to_clear.insert(message.uuid.clone());
                 }
@@ -4982,7 +5151,7 @@ fn preserved_tail_state(
         state.parents.insert(head.to_string(), anchor.to_string());
         // Children appended against the summary before the tail was re-linked
         // must follow the tail, while the original segment internals stay intact.
-        for message in loaded.by_uuid.values() {
+        for message in loaded.messages_by_uuid().values() {
             if message.parent_uuid.as_deref() == Some(anchor) && message.uuid != head {
                 state.parents.insert(message.uuid.clone(), tail.to_string());
             }
@@ -4998,10 +5167,9 @@ fn preserved_tail_state(
 
 fn preserved_endpoint_uuid<'a>(loaded: &'a LoadedTranscript, id: &'a str, last: bool) -> &'a str {
     let logical_id = loaded
-        .by_uuid
-        .get(id)
+        .message(id)
         .and_then(|message| message.extra.string_at("/logicalMessageId"));
-    if loaded.by_uuid.contains_key(id) && logical_id.is_none() {
+    if loaded.contains_message(id) && logical_id.is_none() {
         return id;
     }
     let id = logical_id.unwrap_or(id);
@@ -5056,10 +5224,9 @@ fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String,
             // `message.id`, in file order.
             let mut resolved: Vec<&str> = Vec::new();
             let logical_id = loaded
-                .by_uuid
-                .get(preserved)
+                .message(preserved)
                 .and_then(|message| message.extra.string_at("/logicalMessageId"));
-            if loaded.by_uuid.contains_key(preserved) && logical_id.is_none() {
+            if loaded.contains_message(preserved) && logical_id.is_none() {
                 resolved.push(preserved);
             } else {
                 let preserved = logical_id.unwrap_or(preserved);
@@ -5077,6 +5244,10 @@ fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String,
     }
     reparent
 }
+
+#[cfg(test)]
+#[path = "loader_optimization_tests.rs"]
+mod optimization_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5247,8 +5418,7 @@ mod tests {
     fn loaded_transcript(rows: Vec<JsonlMessage>) -> LoadedTranscript {
         let mut loaded = LoadedTranscript::default();
         for row in rows {
-            loaded.by_uuid.insert(row.uuid.clone(), row.clone());
-            loaded.messages_in_order.push(row);
+            loaded.push_message(row);
         }
         loaded
     }
@@ -5582,7 +5752,7 @@ mod tests {
                 "streaming provider IDs must not reconnect the summarized prefix (legacy={legacy})"
             );
             assert_eq!(
-                loaded.by_uuid["text-row"].message.string_at("/id"),
+                loaded.message("text-row").unwrap().message.string_at("/id"),
                 Some("resp-provider")
             );
         }
@@ -5742,9 +5912,9 @@ mod tests {
             .read_routed()
             .await
             .unwrap();
-        assert!(!loaded.by_uuid.contains_key(&discarded_id));
+        assert!(!loaded.contains_message(&discarded_id));
         assert_eq!(
-            loaded.by_uuid[&survivor_id].parent_uuid.as_deref(),
+            loaded.message(&survivor_id).unwrap().parent_uuid.as_deref(),
             Some(discarded_id.as_str()),
             "physical deletion leaves the child's native parentUuid untouched"
         );
@@ -6532,6 +6702,7 @@ mod tests {
                             + Duration::from_millis(row["modified_ms"].as_u64().unwrap()),
                         file_created: SystemTime::UNIX_EPOCH
                             + Duration::from_millis(row["created_ms"].as_u64().unwrap()),
+                        current_read_validated: false,
                     })
                 })
                 .collect();

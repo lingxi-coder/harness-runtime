@@ -419,7 +419,9 @@ pub struct LoadedTranscript {
     /// The same chain participants indexed by their `uuid` — the input to the
     /// branch-aware DAG walk ([`crate::jsonl::loader::build_conversation_chain`]).
     /// Last-write-wins on a duplicate uuid, mirroring TS `messages.set(uuid, …)`.
-    pub by_uuid: HashMap<String, JsonlMessage>,
+    message_indices: HashMap<String, usize>,
+    /// UUID-map mutations are isolated from the original physical rows.
+    message_overrides: HashMap<String, JsonlMessage>,
     /// Exact string leaves from native escaped UTF-16, indexed by transcript
     /// UUID. The corresponding message retains the same private data through
     /// loader clones; neither carrier is emitted as a native JSON field.
@@ -519,6 +521,115 @@ pub struct LoadedTranscript {
     /// Latest `marble-origami-snapshot`, cleared by a later
     /// `marble-origami-reset` or compact boundary.
     pub context_collapse_snapshot: Option<Value>,
+}
+
+impl LoadedTranscript {
+    /// Append one physical row, retaining the last value for a duplicate UUID.
+    pub fn push_message(&mut self, message: JsonlMessage) {
+        self.message_overrides.remove(&message.uuid);
+        self.message_indices
+            .insert(message.uuid.clone(), self.messages_in_order.len());
+        self.messages_in_order.push(message);
+    }
+
+    /// Resolve the last physical row carrying this UUID without copying it.
+    #[must_use]
+    pub fn message(&self, uuid: &str) -> Option<&JsonlMessage> {
+        if let Some(message) = self.message_overrides.get(uuid) {
+            return Some(message);
+        }
+        self.message_indices
+            .get(uuid)
+            .and_then(|index| self.messages_in_order.get(*index))
+    }
+
+    /// Copy the UUID view on its first mutation, preserving physical source rows.
+    pub fn message_mut(&mut self, uuid: &str) -> Option<&mut JsonlMessage> {
+        if !self.message_overrides.contains_key(uuid) {
+            let index = *self.message_indices.get(uuid)?;
+            let message = self.messages_in_order.get(index)?.clone();
+            self.message_overrides.insert(uuid.to_owned(), message);
+        }
+        self.message_overrides.get_mut(uuid)
+    }
+
+    #[must_use]
+    pub fn contains_message(&self, uuid: &str) -> bool {
+        self.message(uuid).is_some()
+    }
+
+    #[must_use]
+    pub fn message_count(&self) -> usize {
+        self.message_indices.len()
+    }
+
+    /// Rebuild lookup positions after a caller structurally edits physical rows.
+    pub fn reindex_messages(&mut self) {
+        self.message_indices.clear();
+        self.message_overrides.clear();
+        for (index, message) in self.messages_in_order.iter().enumerate() {
+            self.message_indices.insert(message.uuid.clone(), index);
+        }
+    }
+
+    pub(crate) fn messages_by_uuid(&self) -> MessageIndex<'_> {
+        MessageIndex {
+            transcript: self,
+            allowed: None,
+        }
+    }
+}
+
+/// Borrowed UUID view. Recovery filters retain keys, never owned payload copies.
+pub(crate) struct MessageIndex<'a> {
+    transcript: &'a LoadedTranscript,
+    allowed: Option<std::collections::HashSet<&'a str>>,
+}
+
+impl<'a> MessageIndex<'a> {
+    pub(crate) fn get(&self, uuid: &str) -> Option<&'a JsonlMessage> {
+        if self.allowed.as_ref().is_some_and(|ids| !ids.contains(uuid)) {
+            return None;
+        }
+        self.transcript.message(uuid)
+    }
+
+    pub(crate) fn contains_key(&self, uuid: &str) -> bool {
+        self.get(uuid).is_some()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.allowed.as_ref().map_or(
+            self.transcript.message_count(),
+            std::collections::HashSet::len,
+        )
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a String, &'a JsonlMessage)> + '_ {
+        self.transcript
+            .message_indices
+            .keys()
+            .filter_map(|uuid| self.get(uuid).map(|row| (uuid, row)))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &'a JsonlMessage> + '_ {
+        self.iter().map(|(_, row)| row)
+    }
+
+    pub(crate) fn filtered(&self, mut keep: impl FnMut(&str, &JsonlMessage) -> bool) -> Self {
+        Self {
+            transcript: self.transcript,
+            allowed: Some(
+                self.iter()
+                    .filter_map(|(uuid, row)| keep(uuid, row).then_some(uuid.as_str()))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Failure modes for [`JsonlReader`].
@@ -776,8 +887,7 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 out.last_prompt_explicit = false;
                 out.last_prompt_was_explicit = false;
             }
-            out.by_uuid.insert(msg.uuid.clone(), msg.clone());
-            out.messages_in_order.push(msg);
+            out.push_message(msg);
             if clears_context_collapse {
                 out.context_collapse_commits.clear();
                 out.context_collapse_snapshot = None;
@@ -815,47 +925,55 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             continue;
         }
 
-        // The remaining side-record variants have named, bounded consumers;
-        // this compatibility projection is confined to those legacy DTOs.
-        // Transcript rows and content-replacement payloads stay source-backed.
+        // Native names can contain an unpaired surrogate after a UTF-16
+        // slice. Keep these display maps on the flat decoder: recursive
+        // serde_json::Value rejects an otherwise valid native title row.
+        // Exact source units remain available to callers reading the row.
+        if ty == "summary" {
+            if let (Some(leaf), Some(summary)) =
+                (row.string_at("/leafUuid"), row.string_at("/summary"))
+            {
+                out.summaries.insert(leaf.to_string(), summary.to_string());
+            }
+            continue;
+        }
+        if matches!(ty, "custom-title" | "ai-title" | "agent-name") {
+            let field = match ty {
+                "custom-title" => "/customTitle",
+                "ai-title" => "/aiTitle",
+                _ => "/agentName",
+            };
+            if let (Some(sid), Some(title)) = (row.string_at("/sessionId"), row.string_at(field)) {
+                match ty {
+                    "custom-title" => {
+                        out.custom_titles.insert(sid.to_string(), title.to_string());
+                        let key = session_metadata_key(sid);
+                        if row.number_at("/mobileEmptySession") == Some(1.0) {
+                            out.mobile_empty_sessions.insert(key.clone());
+                            if let Some(cwd) = row.string_at("/cwd") {
+                                out.mobile_empty_session_cwds.insert(key, cwd.to_string());
+                            }
+                        } else {
+                            out.mobile_empty_sessions.remove(&key);
+                        }
+                    }
+                    "ai-title" => {
+                        out.ai_titles.insert(sid.to_string(), title.to_string());
+                    }
+                    _ => {
+                        out.agent_names.insert(sid.to_string(), title.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Other side-record variants have named, bounded legacy consumers.
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             out.malformed_line_count += 1;
             continue;
         };
-        if ty == "summary" {
-            // `summaries.set(entry.leafUuid, entry.summary)` — keyed by leafUuid.
-            if let (Some(leaf), Some(summary)) = (
-                value.get("leafUuid").and_then(Value::as_str),
-                value.get("summary").and_then(Value::as_str),
-            ) {
-                out.summaries.insert(leaf.to_string(), summary.to_string());
-            }
-        } else if ty == "custom-title" {
-            // `customTitles.set(entry.sessionId, entry.customTitle)`.
-            if let (Some(sid), Some(title)) = (
-                value.get("sessionId").and_then(Value::as_str),
-                value.get("customTitle").and_then(Value::as_str),
-            ) {
-                out.custom_titles.insert(sid.to_string(), title.to_string());
-                let key = session_metadata_key(sid);
-                if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
-                    out.mobile_empty_sessions.insert(key.clone());
-                    if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
-                        out.mobile_empty_session_cwds.insert(key, cwd.to_string());
-                    }
-                } else {
-                    out.mobile_empty_sessions.remove(&key);
-                }
-            }
-        } else if ty == "ai-title" {
-            // `saveAiGeneratedTitle` writes `{sessionId, aiTitle}`.
-            if let (Some(sid), Some(title)) = (
-                value.get("sessionId").and_then(Value::as_str),
-                value.get("aiTitle").and_then(Value::as_str),
-            ) {
-                out.ai_titles.insert(sid.to_string(), title.to_string());
-            }
-        } else if ty == "pr-link" {
+        if ty == "pr-link" {
             // PR metadata is a last-write-wins side record keyed by sessionId.
             // Be tolerant of older writers that serialized the number as a
             // decimal string instead of a JSON number.
@@ -915,18 +1033,6 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 value.get("tag").and_then(Value::as_str),
             ) {
                 out.tags.insert(sid.to_string(), tag.to_string());
-            }
-        } else if ty == "agent-name" {
-            // Binary v2.1.193 @211658974: `else if(j.type==="agent-name"&&j.sessionId)
-            // a.set(j.sessionId,j.agentName)` — keyed by `sessionId` (NOT `agentId`;
-            // the write side `{type:"agent-name",agentName,sessionId}` carries no
-            // `agentId`, so the old `agentId` guard dropped every real entry).
-            if let (Some(sid), Some(agent_name)) = (
-                value.get("sessionId").and_then(Value::as_str),
-                value.get("agentName").and_then(Value::as_str),
-            ) {
-                out.agent_names
-                    .insert(sid.to_string(), agent_name.to_string());
             }
         } else if ty == "agent-setting" {
             // Binary v2.1.193 @211659124: `else if(j.type==="agent-setting"&&j.sessionId)

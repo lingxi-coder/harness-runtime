@@ -2791,6 +2791,99 @@ mod tests {
         ack_rx.await.unwrap().unwrap()
     }
 
+    #[tokio::test]
+    async fn legacy_accountless_ledger_replays_and_appends_without_losing_costs() {
+        let (_directory, coordinator, session_id) = coordinator();
+        let mut expected = state(session_id, 2, 12_345_678_901);
+        expected.total_api_duration_ms = 1_500;
+        expected.external_nano_usd = 200_000_000;
+        expected.unverified_nano_usd = 500_000_000;
+        expected.legacy_opening_balance_nano_usd = 145_678_901;
+        expected.legacy_import_evaluated = true;
+        for revision in 1..=2 {
+            let mutation_id = CostMutationId::new(format!("cost-{revision}"));
+            let mut previous = expected.clone();
+            previous.cost_revision = revision;
+            previous.total_nano_usd = expected.total_nano_usd * revision / 2;
+            let mut event = encode_session_event(&SessionEvent::Cost(CostMutationRecord {
+                cost_revision: revision,
+                mutation_id: mutation_id.clone(),
+                source: CostMutationSource::ModelResponse,
+                state: CostStateVector::from(&previous),
+            }))
+            .unwrap();
+            event["Cost"]["state"]
+                .as_object_mut()
+                .unwrap()
+                .remove("per_account_usage");
+            coordinator
+                .journal()
+                .append_once(mutation_id.as_str(), &event)
+                .unwrap();
+        }
+        let mut snapshot = serde_json::json!({
+            "team_chat": BotChatCursor::default(),
+            "cost": CostStateVector::from(&expected),
+            "tool_executions": [],
+            "native_receipts": [],
+            "fusion_terminals": [],
+            "fusion_outbox": [],
+        });
+        snapshot["cost"]
+            .as_object_mut()
+            .unwrap()
+            .remove("per_account_usage");
+        assert_eq!(
+            decode_projection_snapshot(snapshot.clone()).unwrap().cost,
+            CostStateVector::from(&expected)
+        );
+        coordinator.journal().write_snapshot(2, &snapshot).unwrap();
+        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
+        let original = std::fs::read(&wal).unwrap();
+
+        for _ in 0..2 {
+            let hydration = coordinator.hydrate_blocking().unwrap();
+            assert_eq!(hydration.state, expected);
+            assert_eq!(hydration.journal_revision, 2);
+            assert_eq!(std::fs::read(&wal).unwrap(), original);
+        }
+        let rebuilt = coordinator
+            .journal()
+            .read_snapshot::<serde_json::Value>()
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebuilt.last_journal_revision, 2);
+        assert_eq!(
+            decode_projection_snapshot(rebuilt.state).unwrap().cost,
+            CostStateVector::from(&expected)
+        );
+
+        expected.cost_revision = 3;
+        expected.total_nano_usd += 100;
+        expected.per_account_usage.push(cost::AccountModelUsage {
+            attribution: None,
+            model: "gpt-4.1-mini".into(),
+            usage: cost::Usage::default(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cost_nano_usd: 100,
+            request_count: 1,
+        });
+        let (ack, result) = tokio::sync::oneshot::channel();
+        coordinator.state.persist_request(CostPersistRequest {
+            session_id,
+            cost_revision: 3,
+            mutation_id: CostMutationId::new("cost-3"),
+            state: CostStateVector::from(&expected),
+            source: CostMutationSource::ModelResponse,
+            ack,
+        });
+        assert_eq!(result.await.unwrap().unwrap().cost_revision, 3);
+        assert!(std::fs::read(&wal).unwrap().starts_with(&original));
+        assert_eq!(coordinator.hydrate_blocking().unwrap().state, expected);
+        assert!(!coordinator.journal().root().join("quarantine").exists());
+    }
+
     #[test]
     fn constructor_rejects_a_foreign_writer_claim() {
         let directory = tempfile::tempdir().unwrap();

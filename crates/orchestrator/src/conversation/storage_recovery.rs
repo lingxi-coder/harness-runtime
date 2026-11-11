@@ -624,7 +624,7 @@ mod tests {
                 session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
             if disk_full {
                 assert!(outcomes[2].is_err());
-                assert_eq!(loaded.by_uuid.len(), 1);
+                assert_eq!(loaded.message_count(), 1);
                 assert_eq!(
                     *orch.transcript.last_jsonl_uuid.lock().await,
                     Some(third.uuid.clone())
@@ -633,24 +633,14 @@ mod tests {
                 let loaded =
                     session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
                 assert_eq!(
-                    loaded
-                        .by_uuid
-                        .get(&third.uuid)
-                        .unwrap()
-                        .parent_uuid
-                        .as_ref(),
+                    loaded.message(&third.uuid).unwrap().parent_uuid.as_ref(),
                     Some(&second.uuid)
                 );
             } else {
                 assert!(outcomes[2].is_ok());
-                assert_eq!(loaded.by_uuid.len(), 2);
+                assert_eq!(loaded.message_count(), 2);
                 assert_eq!(
-                    loaded
-                        .by_uuid
-                        .get(&third.uuid)
-                        .unwrap()
-                        .parent_uuid
-                        .as_ref(),
+                    loaded.message(&third.uuid).unwrap().parent_uuid.as_ref(),
                     Some(&first.uuid)
                 );
                 let snapshot = writer
@@ -730,14 +720,9 @@ mod tests {
         drop(pauses);
         orch.recover_session_storage().await.unwrap();
         let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
-        assert_eq!(loaded.by_uuid.len(), 3);
+        assert_eq!(loaded.message_count(), 3);
         assert_eq!(
-            loaded
-                .by_uuid
-                .get(&third.uuid)
-                .unwrap()
-                .parent_uuid
-                .as_ref(),
+            loaded.message(&third.uuid).unwrap().parent_uuid.as_ref(),
             Some(&second.uuid)
         );
     }
@@ -904,9 +889,9 @@ mod tests {
         let partial = std::fs::read(&path).unwrap();
         assert!(partial.starts_with(&original));
         let loaded = session::jsonl::reader::route_lines(std::str::from_utf8(&partial).unwrap());
-        assert_eq!(loaded.by_uuid.len(), 2);
-        assert!(loaded.by_uuid.contains_key(&first.uuid));
-        assert!(!loaded.by_uuid.contains_key(&last.uuid));
+        assert_eq!(loaded.message_count(), 2);
+        assert!(loaded.contains_message(&first.uuid));
+        assert!(!loaded.contains_message(&last.uuid));
 
         // Restore the original immutable payload, then acknowledge its UUID
         // from the shared scan and append only the still-unsaved suffix.
@@ -931,7 +916,7 @@ mod tests {
             Some(last.uuid.clone())
         );
         assert_eq!(
-            loaded.by_uuid.get(&last.uuid).unwrap().parent_uuid,
+            loaded.message(&last.uuid).unwrap().parent_uuid,
             last.parent_uuid
         );
     }
@@ -981,11 +966,15 @@ mod tests {
         let hook_uuid = hook_id.as_uuid().to_string();
         let following_uuid = following.id().as_uuid().to_string();
         assert_eq!(
-            loaded.by_uuid[&hook_uuid].parent_uuid.as_ref(),
+            loaded.message(&hook_uuid).unwrap().parent_uuid.as_ref(),
             Some(&ordinary_uuid)
         );
         assert_eq!(
-            loaded.by_uuid[&following_uuid].parent_uuid.as_ref(),
+            loaded
+                .message(&following_uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
             Some(&hook_uuid)
         );
         assert_eq!(
@@ -1017,12 +1006,20 @@ mod tests {
             .unwrap();
         let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
         assert_eq!(
-            loaded.by_uuid[&tool_result.uuid].parent_uuid.as_ref(),
+            loaded
+                .message(&tool_result.uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
             Some(&assistant_parent)
         );
-        assert_eq!(loaded.by_uuid[&boundary.uuid].parent_uuid, None);
+        assert_eq!(loaded.message(&boundary.uuid).unwrap().parent_uuid, None);
         assert_eq!(
-            loaded.by_uuid[&following.uuid].parent_uuid.as_ref(),
+            loaded
+                .message(&following.uuid)
+                .unwrap()
+                .parent_uuid
+                .as_ref(),
             Some(&boundary.uuid)
         );
     }
@@ -1053,6 +1050,6 @@ mod tests {
         orch.recover_session_storage().await.unwrap();
         orch.recover_session_storage().await.unwrap();
         let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
-        assert_eq!(loaded.by_uuid.len(), 2);
+        assert_eq!(loaded.message_count(), 2);
     }
 }

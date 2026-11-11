@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_account_rows_are_stored_and_a_missing_field_is_rejected() {
+    fn empty_account_rows_are_stored() {
         let state = crate::CostState::default();
         let value = serde_json::to_value(&state).unwrap();
         assert_eq!(value["per_account_usage"].as_array().map(Vec::len), Some(0));
@@ -235,10 +235,73 @@ mod tests {
             restored.try_into_state().unwrap().per_account_usage.len(),
             0
         );
+    }
 
-        let mut missing = value;
-        missing.as_object_mut().unwrap().remove("per_account_usage");
-        assert!(serde_json::from_value::<crate::CostStateVector>(missing).is_err());
+    #[test]
+    fn legacy_cost_states_preserve_totals_and_usage_without_account_rows() {
+        let mut expected = crate::CostState {
+            cost_revision: 7,
+            total_nano_usd: 12_345_678_901,
+            total_api_duration_ms: 1_500,
+            total_api_duration_without_retries_ms: 1_200,
+            total_tool_duration_ms: 300,
+            total_web_search_requests: 2,
+            total_lines_added: 17,
+            total_lines_removed: 5,
+            last_usage: Some(usage(53)),
+            last_usage_revision: Some(6),
+            last_cache_read_input_tokens: 11,
+            last_cache_creation_input_tokens: 13,
+            external_nano_usd: 200_000_000,
+            unverified_nano_usd: 500_000_000,
+            legacy_opening_balance_nano_usd: 145_678_901,
+            legacy_import_evaluated: true,
+            ..Default::default()
+        };
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy.as_object_mut().unwrap().remove("per_account_usage");
+        let restored: crate::CostState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored, expected);
+
+        // The durable vector also carries structured per-model identities.
+        let model = crate::ModelRef {
+            provider: crate::ProviderId::OpenAI,
+            model: "gpt-4.1-mini".into(),
+        };
+        expected.per_model_usage.insert(
+            model.clone(),
+            crate::ModelUsage {
+                model_ref: model,
+                usage: usage(53),
+                cache_read_input_tokens: 11,
+                cache_creation_input_tokens: 13,
+                cost_nano_usd: 12_000_000_000,
+            },
+        );
+        let mut legacy = serde_json::to_value(crate::CostStateVector::from(&expected)).unwrap();
+        legacy.as_object_mut().unwrap().remove("per_account_usage");
+        let restored: crate::CostStateVector = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.try_into_state().unwrap(), expected);
+    }
+
+    #[test]
+    fn malformed_account_rows_are_still_rejected() {
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!("invalid"),
+            serde_json::json!([{}]),
+        ] {
+            let mut value = serde_json::to_value(crate::CostState::default()).unwrap();
+            value["per_account_usage"] = invalid.clone();
+            assert!(serde_json::from_value::<crate::CostState>(value).is_err());
+
+            let mut value =
+                serde_json::to_value(crate::CostStateVector::from(&crate::CostState::default()))
+                    .unwrap();
+            value["per_account_usage"] = invalid;
+            assert!(serde_json::from_value::<crate::CostStateVector>(value).is_err());
+        }
     }
 
     #[test]
@@ -246,6 +309,9 @@ mod tests {
         let mut state = crate::CostState::default();
         add(&mut state.per_account_usage, None, "m", &usage(1), 1, 0, 0);
         let mut vector = crate::CostStateVector::from(&state);
+        let restored: crate::CostStateVector =
+            serde_json::from_value(serde_json::to_value(&vector).unwrap()).unwrap();
+        assert_eq!(restored.try_into_state().unwrap(), state);
         vector
             .per_account_usage
             .push(vector.per_account_usage[0].clone());

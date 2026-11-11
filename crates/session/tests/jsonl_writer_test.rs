@@ -274,8 +274,7 @@ async fn fidelity_fields_round_trip_write_then_tolerant_read() {
     let loaded = route_lines(&raw);
 
     let ru = loaded
-        .by_uuid
-        .get("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        .message("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         .expect("user round-tripped");
     assert_eq!(ru.git_branch.as_deref(), Some("main"));
     assert_eq!(ru.entrypoint.as_deref(), Some("cli"));
@@ -284,8 +283,7 @@ async fn fidelity_fields_round_trip_write_then_tolerant_read() {
     assert_eq!(ru.logical_parent_uuid, None);
 
     let rb = loaded
-        .by_uuid
-        .get("cccccccc-cccc-cccc-cccc-cccccccccccc")
+        .message("cccccccc-cccc-cccc-cccc-cccccccccccc")
         .expect("boundary round-tripped");
     assert_eq!(
         rb.logical_parent_uuid.as_deref(),

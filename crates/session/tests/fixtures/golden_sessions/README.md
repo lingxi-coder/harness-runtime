@@ -28,6 +28,7 @@ Fixture lines use four token classes:
 | `single_turn_no_tools.jsonl` | Synthetic, schema per `claude-code/src/types/logs.ts:8-17, 221-231` and `types/message.ts:72-89, 95-100` | 1 user prompt + 1 assistant end_turn response. |
 | `multi_turn_with_tools.jsonl` | Synthetic, schema-locked | 2 user prompts + 1 assistant `tool_use` (Read tool) + 1 user `tool_result` + 1 assistant `end_turn`. |
 | `compacted_session.jsonl` | Synthetic, schema-locked | `system` `compact_boundary` line between two user/assistant pairs (M5-08 surface). |
+| `compacted_session_2_1_321.jsonl` | Synthetic; envelope order verified by `scripts/tests/session_rows_321_oracle.mjs` | Current writer compact-boundary order. The older fixture remains a legacy reader byte lock. |
 
 ## RE-CAPTURE schedule
 

@@ -64,7 +64,9 @@ pub struct CostStateVector {
     pub total_nano_usd: u64,
     /// Per-model vector.
     pub per_model_usage: Vec<ModelUsage>,
-    /// Per-account vector. Always stored, including when it is empty.
+    /// Per-account vector. Always stored, including when it is empty. Older
+    /// ledgers have no account attribution; retain their existing aggregates.
+    #[serde(default)]
     pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
     /// Aggregate timing/counters.
     pub total_api_duration_ms: u64,

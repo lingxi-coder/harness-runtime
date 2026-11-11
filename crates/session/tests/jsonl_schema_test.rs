@@ -271,10 +271,10 @@ fn user_meta_outer_key_order_places_ismeta_before_uuid() {
 
 #[test]
 fn unrecognized_extra_key_tail_appended_after_trailer() {
-    // An unported claude field (e.g. agentId) is NOT in RECOGNIZED_EXTRA, so it
-    // tail-appends after the common trailer, preserving round-trip fidelity.
+    // An unported field tail-appends after the common trailer. Known chain
+    // identity fields have their own native header slots.
     let mut extra: Map<String, Value> = Map::new();
-    extra.insert("agentId".into(), Value::String("agent-42".into()));
+    extra.insert("futureField".into(), Value::String("future-value".into()));
     let msg = JsonlMessage {
         message_type: "user".into(),
         uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
@@ -303,7 +303,7 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
     };
     let s = serde_json::to_string(&msg).expect("ser");
     assert!(
-        s.ends_with(r#""version":"0.6.0","agentId":"agent-42"}"#),
+        s.ends_with(r#""version":"0.6.0","futureField":"future-value"}"#),
         "{s}"
     );
 }

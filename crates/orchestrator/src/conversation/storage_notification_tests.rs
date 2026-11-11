@@ -226,7 +226,7 @@ async fn goal_enospc_notification_reenters_after_transition_and_retains_recovera
     orch.recover_session_storage().await.unwrap();
     let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
     for row in pending {
-        assert!(loaded.by_uuid.contains_key(&row.uuid));
+        assert!(loaded.contains_message(&row.uuid));
     }
 }
 
@@ -413,7 +413,10 @@ async fn human_batched_admission_recovers_retained_storage_before_accepting_inpu
                     .count(),
                 1,
             );
-            assert_eq!(loaded.by_uuid[&row.uuid].parent_uuid, row.parent_uuid);
+            assert_eq!(
+                loaded.message(&row.uuid).unwrap().parent_uuid,
+                row.parent_uuid
+            );
         }
     }
 }
@@ -582,7 +585,7 @@ async fn ordinary_and_hook_appends_release_storage_locks_before_reentrant_pause_
         );
         let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
         for row in &pending {
-            assert!(loaded.by_uuid.contains_key(&row.uuid));
+            assert!(loaded.contains_message(&row.uuid));
         }
         let tip = orch
             .transcript
@@ -593,7 +596,7 @@ async fn ordinary_and_hook_appends_release_storage_locks_before_reentrant_pause_
             .unwrap();
         assert_ne!(tip, pending[1].uuid);
         assert_eq!(
-            loaded.by_uuid[&tip].parent_uuid.as_ref(),
+            loaded.message(&tip).unwrap().parent_uuid.as_ref(),
             Some(&pending[1].uuid)
         );
     }

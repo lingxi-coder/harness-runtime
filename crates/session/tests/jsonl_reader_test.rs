@@ -216,13 +216,13 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     );
 
     // by_uuid index mirrors the participants.
-    assert_eq!(routed.by_uuid.len(), 4);
-    assert!(routed.by_uuid.contains_key("att-1"));
-    assert!(routed.by_uuid.contains_key("sys-1"));
+    assert_eq!(routed.message_count(), 4);
+    assert!(routed.contains_message("att-1"));
+    assert!(routed.contains_message("sys-1"));
 
     // Tolerant defaults: the attachment/system lines lacked `message` /
     // `timestamp` / some outer fields — they parsed anyway.
-    let att = &routed.by_uuid["att-1"];
+    let att = &routed.message("att-1").unwrap();
     assert!(
         att.message
             .at_pointer("")

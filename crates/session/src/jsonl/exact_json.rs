@@ -238,9 +238,10 @@ mod tests {
         let loaded = route_lines(&repeated);
         assert_eq!(loaded.messages_in_order.len(), 2);
         assert!(!message_utf16_overrides(&loaded.messages_in_order[0]).is_empty());
-        assert!(
-            message_utf16_overrides(&loaded.by_uuid[&loaded.messages_in_order[0].uuid]).is_empty()
-        );
+        assert!(message_utf16_overrides(
+            loaded.message(&loaded.messages_in_order[0].uuid).unwrap()
+        )
+        .is_empty());
         assert!(loaded.utf16_by_uuid.is_empty());
     }
 }

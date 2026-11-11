@@ -2,12 +2,12 @@
 //! functions. Keep file insertion order separate from timestamps: parallel tool
 //! results can finish out of order, including after a later turn was written.
 
-use super::reader::LoadedTranscript;
+use super::reader::{LoadedTranscript, MessageIndex};
 use super::schema::JsonlMessage;
 use lingxi_core::types::utf16_json::JsonValueView;
 use std::collections::{HashMap, HashSet};
 
-type Messages = HashMap<String, JsonlMessage>;
+type Messages<'a> = MessageIndex<'a>;
 
 fn same_extra_projection(left: &JsonlMessage, right: &JsonlMessage, key: &str) -> bool {
     match (
@@ -31,7 +31,7 @@ fn same_extra_projection(left: &JsonlMessage, right: &JsonlMessage, key: &str) -
 
 pub(super) fn ordered_messages<'a>(
     loaded: &LoadedTranscript,
-    messages: &'a Messages,
+    messages: &Messages<'a>,
 ) -> Vec<&'a JsonlMessage> {
     let mut seen = HashSet::new();
     let mut ordered = Vec::with_capacity(messages.len());
@@ -43,7 +43,7 @@ pub(super) fn ordered_messages<'a>(
             }
         }
     }
-    // Some callers construct LoadedTranscript directly with only by_uuid.
+    // Keep deterministic order for any indexed rows without a physical slot.
     let mut remaining: Vec<_> = messages
         .values()
         .filter(|m| !seen.contains(m.uuid.as_str()))
@@ -132,7 +132,7 @@ fn metadata(message: &JsonlMessage) -> bool {
 }
 
 fn batch_ancestors<'a>(
-    messages: &'a Messages,
+    messages: &Messages<'a>,
     message: &JsonlMessage,
     id: &str,
 ) -> Vec<&'a JsonlMessage> {
@@ -158,7 +158,7 @@ fn batch_ancestors<'a>(
 /// `yan`: a saved checkpoint can name one completed tool result while the
 /// durable continuation descends from another result in the same model batch.
 pub(super) fn follows_checkpoint(
-    messages: &Messages,
+    messages: &Messages<'_>,
     tail: &str,
     checkpoint: &str,
     direct: bool,
@@ -319,7 +319,7 @@ struct RecoverySpan<'a> {
 /// unambiguous identities are eligible; a result belonging to a different agent
 /// or already answered call cannot enter the chain through the fallback index.
 pub(super) fn recover_parallel_results(
-    messages: &Messages,
+    messages: &Messages<'_>,
     ordered: &[&JsonlMessage],
     chain: Vec<JsonlMessage>,
     seen: &mut HashSet<String>,

@@ -4,26 +4,28 @@
 //! schema (verified against real 2.1.195 on-disk transcripts —
 //! ~810k lines). `Serialize` is hand-written ([`impl Serialize for
 //! JsonlMessage`]) to emit claude's EXACT per-kind outer-key order instead of
-//! the struct-declaration order; `Deserialize` stays derived (the reader is
-//! order-independent).
+//! the struct-declaration order. `Deserialize` captures the original property
+//! order for restored rows.
 //!
-//! Per-kind head order (everything before the common trailer), for the fields
-//! this engine actually emits:
-//! - **user**: `parentUuid, isSidechain, [promptId,] type, message, [isMeta,]
+//! Every chain entry starts with `parentUuid, [logicalParentUuid,]
+//! isSidechain, [teamName,] [agentName,] [promptId,] [agentId]`, followed by
+//! its message envelope. The header positions match the 2.1.321 chain writer.
+//! Per-kind message order (before the common trailer):
+//! - **user**: `type, message, [isMeta,]
 //!   [isVisibleInTranscriptOnly,] [isCompactSummary,] uuid, timestamp` (the
 //!   two compact-summary flags ride between `message` and `uuid`, per real
 //!   2.1.207 summary lines).
-//! - **assistant (normal)**: `parentUuid, isSidechain, message, [requestId,]
+//! - **assistant (normal)**: `message, [requestId,]
 //!   type, uuid, timestamp`
-//! - **assistant (api-error)**: `parentUuid, isSidechain, type, uuid,
+//! - **assistant (api-error)**: `type, uuid,
 //!   timestamp, message, [requestId,] [error,] [errorDetails,]
 //!   [truncatedAfterOutput,] isApiErrorMessage, [apiErrorStatus]`
 //! - **system (compact boundary, `extra.subtype == "compact_boundary"`)**:
-//!   `parentUuid, [logicalParentUuid,] isSidechain, type, subtype, content,
-//!   [isMeta,] level, compactMetadata, uuid, timestamp` — claude's FLATTENED
-//!   boundary envelope (real 2.1.207 transcripts); these lines carry NO inner
-//!   `message`.
-//! - **system (other)**: `parentUuid, [logicalParentUuid,] isSidechain, type,
+//!   `type, subtype, content, [isMeta,] timestamp, uuid, level,
+//!   compactMetadata` — the 2.1.321 boundary factory's flattened envelope;
+//!   these lines carry NO inner `message`. Restored older rows retain their
+//!   original property order.
+//! - **system (other)**: `type,
 //!   message, [isMeta,] uuid, timestamp` (the port emits an inner
 //!   `{role,content}` `message`; claude's flattened `subtype`/`content`
 //!   top-level system envelope is ported only for the compact-boundary
@@ -36,9 +38,9 @@
 //! `tool_result`, claude's TOOL-RESULT HEAD (`toolUseResult, toolDenialKind,
 //! mcpMeta, toolEndsTurn, sourceToolAssistantUUID` — see
 //! [`TOOL_RESULT_HEAD_EXTRA`]) rides between `timestamp` and that trailer. Any
-//! UNRECOGNIZED `extra` key (an unported claude field, e.g. `agentId`) is
-//! appended after the trailer in `extra` iteration order, so read→write
-//! round-trips of unported fields stay byte-faithful.
+//! UNRECOGNIZED `extra` key (an unported future field) is
+//! appended after the trailer in `extra` iteration order. Reader-origin
+//! property order is preserved when restoring a row.
 
 use crate::jsonl::exact_json::{
     message_source_key_order, set_message_source_key_order, PRIVATE_SOURCE_KEY_ORDER_KEY,
@@ -400,8 +402,11 @@ impl<'de> Deserialize<'de> for JsonlMessage {
 
 /// `extra` keys this serializer pulls into their claude-ordered positions.
 /// Anything NOT in this set is appended verbatim after the common trailer
-/// (forward-compat for unported claude fields like `agentId`/`toolUseResult`).
+/// (forward-compat for unported fields).
 const RECOGNIZED_EXTRA: &[&str] = &[
+    "teamName",
+    "agentName",
+    "agentId",
     "attachment",
     "toolUseResult",
     "mcpMeta",
@@ -532,10 +537,9 @@ const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
 ];
 
 /// `extra` keys the `subtype:"compact_boundary"` SYSTEM head consumes —
-/// claude's flattened boundary envelope (`type, subtype, content, level,
-/// compactMetadata, uuid, timestamp`, real 2.1.207 transcripts; boundary lines
-/// carry NO inner `message`). Skipped from the tail only when the boundary
-/// head emitted them.
+/// claude's flattened boundary envelope. The 2.1.321 constructor puts
+/// `timestamp, uuid` before `level, compactMetadata`; reader-origin order
+/// preserves earlier layouts. Boundary lines carry no inner `message`.
 const BOUNDARY_HEAD_EXTRA: &[&str] = &["subtype", "content", "level", "compactMetadata"];
 
 const MODEL_FALLBACK_HEAD: &[&str] = &[
@@ -576,6 +580,7 @@ impl Serialize for JsonlMessage {
         S: Serializer,
     {
         let mut fields = Vec::<(Vec<u16>, Utf16JsonProjection)>::new();
+        let source_order = message_source_key_order(self);
         let is_user = self.message_type == "user";
         let is_assistant = self.message_type == "assistant";
         let is_system = self.message_type == "system";
@@ -604,11 +609,15 @@ impl Serialize for JsonlMessage {
             "isSidechain",
             bool_projection(self.is_sidechain),
         );
+        for key in ["teamName", "agentName"] {
+            push_extra_projection(&mut fields, &self.extra, key);
+        }
+        if let Some(prompt_id) = &self.prompt_id {
+            push_projection(&mut fields, "promptId", string_projection(prompt_id));
+        }
+        push_extra_projection(&mut fields, &self.extra, "agentId");
 
         if is_user {
-            if let Some(prompt_id) = &self.prompt_id {
-                push_projection(&mut fields, "promptId", string_projection(prompt_id));
-            }
             push_projection(&mut fields, "type", string_projection(&self.message_type));
             push_projection(&mut fields, "message", self.message.clone());
             push_extra_projection(&mut fields, &self.extra, "isMeta");
@@ -702,11 +711,14 @@ impl Serialize for JsonlMessage {
             }
         } else if is_compact_boundary {
             push_projection(&mut fields, "type", string_projection(&self.message_type));
-            for key in ["subtype", "content", "isMeta", "level", "compactMetadata"] {
+            for key in ["subtype", "content", "isMeta"] {
                 push_extra_projection(&mut fields, &self.extra, key);
             }
-            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
             push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            for key in ["level", "compactMetadata"] {
+                push_extra_projection(&mut fields, &self.extra, key);
+            }
         } else {
             push_projection(&mut fields, "type", string_projection(&self.message_type));
             push_projection(&mut fields, "message", self.message.clone());
@@ -753,7 +765,18 @@ impl Serialize for JsonlMessage {
             "sessionId",
             string_projection(&self.session_id),
         );
-        push_projection(&mut fields, "version", string_projection(&self.version));
+        // Native yGt preserves an absent version on a restored row carrying
+        // sessionId. The typed reader uses an empty default; do not turn that
+        // absence into a new `version:""` property during replay.
+        if !self.version.is_empty()
+            || source_order.as_ref().is_none_or(|order| {
+                order
+                    .iter()
+                    .any(|key| key.iter().copied().eq("version".encode_utf16()))
+            })
+        {
+            push_projection(&mut fields, "version", string_projection(&self.version));
+        }
         if let Some(value) = &self.git_branch {
             push_projection(&mut fields, "gitBranch", string_projection(value));
         }
@@ -804,7 +827,7 @@ impl Serialize for JsonlMessage {
             push_projection(&mut fields, "turnOrigin", projection.clone());
         }
 
-        if let Some(source_order) = message_source_key_order(self) {
+        if let Some(source_order) = source_order {
             fields.sort_by_cached_key(|(key, _)| {
                 source_order
                     .iter()
@@ -1562,15 +1585,25 @@ mod shutdown_interruption_tests {
         row.message = Utf16JsonProjection::parse(r#"{"role":"assistant","content":[]}"#).unwrap();
         let line = serde_json::to_string(&row).unwrap();
         let message = line.find("\"message\":").unwrap();
-        let subtype = line.find("\"apiError\":\"malformed_tool_use_exhausted\"").unwrap();
+        let subtype = line
+            .find("\"apiError\":\"malformed_tool_use_exhausted\"")
+            .unwrap();
         let category = line.find("\"error\":\"unknown\"").unwrap();
         let marker = line.find("\"isApiErrorMessage\":true").unwrap();
-        assert!(message < subtype && subtype < category && category < marker, "{line}");
+        assert!(
+            message < subtype && subtype < category && category < marker,
+            "{line}"
+        );
         assert_eq!(line.matches("\"apiError\":").count(), 1);
         let cold: JsonlMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(cold.extra.string_at("/apiError"), Some("malformed_tool_use_exhausted"));
+        assert_eq!(
+            cold.extra.string_at("/apiError"),
+            Some("malformed_tool_use_exhausted")
+        );
         row.extra = Utf16JsonProjection::parse(r#"{"isApiErrorMessage":true}"#).unwrap();
-        assert!(!serde_json::to_string(&row).unwrap().contains("\"apiError\":"));
+        assert!(!serde_json::to_string(&row)
+            .unwrap()
+            .contains("\"apiError\":"));
     }
 
     #[test]

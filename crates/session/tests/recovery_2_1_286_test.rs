@@ -37,7 +37,8 @@ fn resume_matches_executed_claude_2_1_286_recovery_fixtures() {
         );
         for row in chain {
             assert_eq!(
-                row.message, loaded.by_uuid[&row.uuid].message,
+                row.message,
+                loaded.message(&row.uuid).unwrap().message,
                 "{name}: recovery must preserve message payload"
             );
         }

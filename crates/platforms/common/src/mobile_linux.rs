@@ -1718,7 +1718,7 @@ mod tests {
         let profile = BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
         let home = temp.path().join("persistent/atlas_guest");
         let workspace = home.join("atlas/projects");
-        let source = home.join(".atlas/.apps/calorie-a1b2c3d4/source");
+        let source = home.join(".atlas-workspaces/apps/calorie-a1b2c3d4/source");
         fs::create_dir_all(&workspace).expect("primary workspace");
         fs::create_dir_all(&source).expect("Project source");
         let mounts = vec![
@@ -1775,7 +1775,7 @@ mod tests {
 
         let foreign_account_command = ProcessCommand {
             cwd: Some(PathBuf::from(format!(
-                "/home/lingxi/{}/.apps/calorie-a1b2c3d4/source",
+                "/home/lingxi/{}-workspaces/apps/calorie-a1b2c3d4/source",
                 branding::DOT_DIR
             ))),
             ..command

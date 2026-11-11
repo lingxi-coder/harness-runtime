@@ -7675,8 +7675,7 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(native);
         assert_eq!(
             loaded
-                .by_uuid
-                .get("native-user")
+                .message("native-user")
                 .unwrap()
                 .message
                 .string_at("/content"),
@@ -8049,17 +8048,12 @@ mod tests {
             "repeated UUID is not appended twice"
         );
         assert_eq!(
-            loaded
-                .by_uuid
-                .get(&rows[2].uuid)
-                .unwrap()
-                .parent_uuid
-                .as_ref(),
+            loaded.message(&rows[2].uuid).unwrap().parent_uuid.as_ref(),
             Some(&rows[1].uuid)
         );
         let stamped = stamp_session_kind(&rows[1]);
         assert_eq!(
-            native_message_bytes(loaded.by_uuid.get(&rows[1].uuid).unwrap()).unwrap(),
+            native_message_bytes(loaded.message(&rows[1].uuid).unwrap()).unwrap(),
             native_message_bytes(stamped.as_ref().unwrap_or(&rows[1])).unwrap()
         );
         writer.append_native_messages_once(&replay).await.unwrap();
@@ -8123,7 +8117,7 @@ mod tests {
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(identities.by_uuid[&row.uuid], index as u64);
             assert_eq!(
-                loaded.by_uuid.get(&row.uuid).unwrap().parent_uuid,
+                loaded.message(&row.uuid).unwrap().parent_uuid,
                 row.parent_uuid
             );
         }
@@ -8262,7 +8256,7 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
         for row in rows {
             assert_eq!(
-                loaded.by_uuid.get(&row.uuid).unwrap().parent_uuid,
+                loaded.message(&row.uuid).unwrap().parent_uuid,
                 row.parent_uuid
             );
         }
@@ -8285,7 +8279,7 @@ mod tests {
         let (prefix, _) = writer.append_batch(&rows).await.unwrap_err();
         assert_eq!(prefix, 1);
         let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
-        assert_eq!(loaded.by_uuid.len(), 1);
+        assert_eq!(loaded.message_count(), 1);
         assert_eq!(loaded.messages_in_order[0].uuid, rows[0].uuid);
         let snapshot = writer
             .read_session_message_identity_snapshot(&path)
@@ -8306,12 +8300,7 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(loaded.messages_in_order.len(), 3, "prefix was not retried");
         assert_eq!(
-            loaded
-                .by_uuid
-                .get(&rows[2].uuid)
-                .unwrap()
-                .parent_uuid
-                .as_ref(),
+            loaded.message(&rows[2].uuid).unwrap().parent_uuid.as_ref(),
             Some(&rows[1].uuid)
         );
     }
@@ -8436,8 +8425,7 @@ mod tests {
         let loaded = crate::jsonl::reader::route_lines(&raw);
         assert_eq!(
             loaded
-                .by_uuid
-                .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .message("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .and_then(|message| message.message.string_at("/content")),
             Some("updated"),
             "the existing loader's duplicate-uuid last-write rule is preserved"

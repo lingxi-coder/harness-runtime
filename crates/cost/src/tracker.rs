@@ -103,7 +103,9 @@ pub struct CostState {
     pub legacy_import_evaluated: bool,
     /// Same settlements as [`Self::per_model_usage`], split by the account
     /// that served each response. These rows are not added into
-    /// [`Self::total_nano_usd`] again.
+    /// [`Self::total_nano_usd`] again. Older snapshots have no account rows;
+    /// loading them preserves the recorded totals without inventing attribution.
+    #[serde(default)]
     pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
 }
 
@@ -714,7 +716,9 @@ impl SessionEntry {
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
             safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-            result_usage: Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())),
+            result_usage: Arc::new(std::sync::Mutex::new(
+                crate::result_usage::ResultUsageLedger::default(),
+            )),
         })
     }
 
@@ -733,7 +737,9 @@ impl SessionEntry {
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
             safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-            result_usage: Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())),
+            result_usage: Arc::new(std::sync::Mutex::new(
+                crate::result_usage::ResultUsageLedger::default(),
+            )),
         })
     }
 }
@@ -754,7 +760,9 @@ impl SessionLedger {
                 attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(Vec::new()),
                 safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-                result_usage: Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())),
+                result_usage: Arc::new(std::sync::Mutex::new(
+                    crate::result_usage::ResultUsageLedger::default(),
+                )),
             }),
         );
         Self {
@@ -882,7 +890,9 @@ pub use retirement::CostSessionRetirement;
 impl CostTracker {
     /// Enable the process-local SDK interval before its first provider request.
     pub fn enable_result_usage(&self) {
-        self.ledger.result_usage_enabled.store(true, std::sync::atomic::Ordering::Release);
+        self.ledger
+            .result_usage_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     /// Observer for model safety events attributed to this tracker's selected
     /// session. Scoped tracker views remain pinned to their origin.
@@ -977,7 +987,9 @@ impl CostTracker {
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(hydration.attempt_outputs),
             safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-            result_usage: Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())),
+            result_usage: Arc::new(std::sync::Mutex::new(
+                crate::result_usage::ResultUsageLedger::default(),
+            )),
         }));
         self.ledger
             .hydrated_sessions
@@ -1438,7 +1450,14 @@ impl CostTracker {
                 attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(hydration.attempt_outputs),
                 safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-                result_usage: existing.as_ref().map_or_else(|| Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())), |entry| entry.result_usage.clone()),
+                result_usage: existing.as_ref().map_or_else(
+                    || {
+                        Arc::new(std::sync::Mutex::new(
+                            crate::result_usage::ResultUsageLedger::default(),
+                        ))
+                    },
+                    |entry| entry.result_usage.clone(),
+                ),
             });
             entries.insert(session_id, replacement.clone());
             replacement
@@ -1578,7 +1597,14 @@ impl CostTracker {
                     attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                     attempt_outputs: Arc::new(hydration.attempt_outputs),
                     safety_stops: Arc::new(crate::safety::SafetyStops::default()),
-                    result_usage: existing.as_ref().map_or_else(|| Arc::new(std::sync::Mutex::new(crate::result_usage::ResultUsageLedger::default())), |entry| entry.result_usage.clone()),
+                    result_usage: existing.as_ref().map_or_else(
+                        || {
+                            Arc::new(std::sync::Mutex::new(
+                                crate::result_usage::ResultUsageLedger::default(),
+                            ))
+                        },
+                        |entry| entry.result_usage.clone(),
+                    ),
                 });
                 entries.insert(session_id, entry.clone());
                 entry
@@ -1991,7 +2017,14 @@ impl CostTracker {
                     mutation_id,
                 ) {
                     Ok((mutation_id, revision, ack_rx)) => {
-                        authority.publish_model_state(&mut state, staged, self.ledger.result_usage_enabled.load(std::sync::atomic::Ordering::Acquire), &self.catalog);
+                        authority.publish_model_state(
+                            &mut state,
+                            staged,
+                            self.ledger
+                                .result_usage_enabled
+                                .load(std::sync::atomic::Ordering::Acquire),
+                            &self.catalog,
+                        );
                         Transfer::Durable {
                             mutation_id,
                             revision,
@@ -2001,7 +2034,14 @@ impl CostTracker {
                     Err(error) => Transfer::Rejected(error),
                 },
                 None => {
-                    authority.publish_model_state(&mut state, staged.clone(), self.ledger.result_usage_enabled.load(std::sync::atomic::Ordering::Acquire), &self.catalog);
+                    authority.publish_model_state(
+                        &mut state,
+                        staged.clone(),
+                        self.ledger
+                            .result_usage_enabled
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        &self.catalog,
+                    );
                     Transfer::Ephemeral(staged)
                 }
             }
@@ -2417,7 +2457,10 @@ impl CostTracker {
                     CostMutationSource::Administrative,
                 ) {
                     Ok(ack) => {
-                        let mut result_usage = authority.result_usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut result_usage = authority
+                            .result_usage
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         *state = snapshot;
                         result_usage.reset();
                         (Some(ack), None)
@@ -2425,9 +2468,12 @@ impl CostTracker {
                     Err(error) => (None, Some(error)),
                 },
                 None => {
-                    let mut result_usage = authority.result_usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        *state = snapshot;
-                        result_usage.reset();
+                    let mut result_usage = authority
+                        .result_usage
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *state = snapshot;
+                    result_usage.reset();
                     (None, None)
                 }
             }
@@ -4014,7 +4060,10 @@ mod tests {
             assert_eq!(rows[0].nano_usd, i128::from(model_sum));
             true
         });
-        assert_eq!(tracker.snapshot().await.per_account_usage, state.per_account_usage);
+        assert_eq!(
+            tracker.snapshot().await.per_account_usage,
+            state.per_account_usage
+        );
         assert_eq!(state.per_account_usage[0].request_count, 2);
         assert_eq!(state.per_account_usage[0].usage.tokens.input, 15);
         assert!(state.per_account_usage.iter().any(|row| {
@@ -4034,41 +4083,92 @@ mod tests {
         use lingxi_core::host::result_usage::{ResultModelUsage, ResultUsageSource};
         let session = SessionId::new();
         let (tx, _rx) = mpsc::channel(16);
-        let tracker = Arc::new(CostTracker::new(session, Arc::new(PricingCatalog::builtin_reference()), tx));
+        let tracker = Arc::new(CostTracker::new(
+            session,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
         tracker.enable_result_usage();
         let scope = tracker.session_scope(session);
         for provider in [ProviderId::Anthropic, ProviderId::OpenAI] {
-            scope.submit_model_response(CostModelResponse {
-                model_ref: ModelRef { provider, model: "shared".into() },
-                usage: Usage { tokens: TokenUsage { input: 3, output: 2, ..Default::default() }, ..Default::default() },
-                duration: Duration::ZERO, retries: 0, cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0, is_batch_request: false, account: None, bus: None,
-            }).settle().await;
+            scope
+                .submit_model_response(CostModelResponse {
+                    model_ref: ModelRef {
+                        provider,
+                        model: "shared".into(),
+                    },
+                    usage: Usage {
+                        tokens: TokenUsage {
+                            input: 3,
+                            output: 2,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    duration: Duration::ZERO,
+                    retries: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    is_batch_request: false,
+                    account: None,
+                    bus: None,
+                })
+                .settle()
+                .await;
         }
         let mut refused = Vec::<ResultModelUsage>::new();
-        tracker.publish_result_usage(session, &mut |rows, _| { refused = rows.to_vec(); false });
+        tracker.publish_result_usage(session, &mut |rows, _| {
+            refused = rows.to_vec();
+            false
+        });
         let mut accepted = Vec::<ResultModelUsage>::new();
-        tracker.publish_result_usage(session, &mut |rows, _| { accepted = rows.to_vec(); true });
+        tracker.publish_result_usage(session, &mut |rows, _| {
+            accepted = rows.to_vec();
+            true
+        });
         assert_eq!(accepted, refused);
         assert_eq!(accepted.len(), 2);
         assert_eq!(accepted[0].provider, "firstParty");
         assert_eq!(accepted[1].provider, "openai");
         assert!(accepted.iter().all(|row| row.input_tokens == 3));
-        tracker.publish_result_usage(session, &mut |rows, _| { assert!(rows.is_empty()); true });
+        tracker.publish_result_usage(session, &mut |rows, _| {
+            assert!(rows.is_empty());
+            true
+        });
         assert_eq!(tracker.snapshot().await.per_model_usage.len(), 2);
         let late = scope.submit_model_response(CostModelResponse {
-            model_ref: ModelRef { provider: ProviderId::Anthropic, model: "shared".into() },
-            usage: Usage { tokens: TokenUsage { input: 7, ..Default::default() }, ..Default::default() },
-            duration: Duration::ZERO, retries: 0, cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0, is_batch_request: false, account: None, bus: None,
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "shared".into(),
+            },
+            usage: Usage {
+                tokens: TokenUsage {
+                    input: 7,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::ZERO,
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            account: None,
+            bus: None,
         });
         let other = SessionId::new();
         tracker.switch_session(other).await.unwrap();
         late.settle().await;
-        tracker.publish_result_usage(other, &mut |rows, _| { assert!(rows.is_empty()); true });
+        tracker.publish_result_usage(other, &mut |rows, _| {
+            assert!(rows.is_empty());
+            true
+        });
         tracker.publish_result_usage(session, &mut |rows, _| {
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].input_tokens, 7, "late work stays in its originating session");
+            assert_eq!(
+                rows[0].input_tokens, 7,
+                "late work stays in its originating session"
+            );
             true
         });
     }

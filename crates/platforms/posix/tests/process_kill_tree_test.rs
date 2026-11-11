@@ -7,17 +7,38 @@
 
 #![cfg(unix)]
 
-use platform_posix::process::kill_tree::kill_tree_with_grace;
+use platform_posix::process::kill_tree::{kill_tree_force, kill_tree_with_grace};
 use platform_posix::process::spawn_unsafe::attach_setsid;
 use std::time::Duration;
 use tokio::process::Command;
 
+struct OwnedTestGroup {
+    child: tokio::process::Child,
+}
+
+impl Drop for OwnedTestGroup {
+    fn drop(&mut self) {
+        // Retain the child identity through failure cleanup. A completed wait
+        // clears it, so success cannot signal a subsequently reused PGID.
+        if let Some(pid) = self.child.id() {
+            let _ = kill_tree_force(pid);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_tree_terminates_grandchildren() {
-    // A marker we can grep for in `ps` without false positives from other
-    // `sleep` calls running on the host. Random-ish but constant so the
-    // assertion below is deterministic.
-    let marker = "lingxi-kt-marker-7d9c";
+    // Concurrent test runs must never satisfy one another's readiness check.
+    let marker_directory = tempfile::Builder::new()
+        .prefix("lingxi-kt-marker-")
+        .tempdir()
+        .unwrap();
+    let marker = marker_directory
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     // POSIX sh accepts a positional $0; dash does not support `exec -a`.
     // Keep both marked shells alive while they wait for their sleep children.
     let script = format!(
@@ -27,16 +48,18 @@ async fn kill_tree_terminates_grandchildren() {
     );
 
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(&script);
+    cmd.arg("-c").arg(&script).kill_on_drop(true);
     attach_setsid(&mut cmd);
 
-    let mut child = cmd.spawn().expect("spawn parent shell");
-    let pid = child.id().expect("pid");
+    let mut group = OwnedTestGroup {
+        child: cmd.spawn().expect("spawn parent shell"),
+    };
+    let pid = group.child.id().expect("pid");
 
     // Wait for both child shells, rather than assuming a fixed fork delay.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if run_ps_filter(marker).len() >= 3 {
+            if run_ps_filter(&marker).len() >= 3 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -51,7 +74,7 @@ async fn kill_tree_terminates_grandchildren() {
         .expect("kill_tree");
 
     // The parent shell must exit promptly.
-    let outcome = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let outcome = tokio::time::timeout(Duration::from_secs(5), group.child.wait())
         .await
         .expect("child exits within 5s after kill_tree")
         .expect("wait");
@@ -62,7 +85,7 @@ async fn kill_tree_terminates_grandchildren() {
     // The grandchildren may take a tick to be reaped — poll briefly.
     let mut leaked: Vec<String> = Vec::new();
     for _ in 0..20 {
-        leaked = run_ps_filter(marker);
+        leaked = run_ps_filter(&marker);
         if leaked.is_empty() {
             return;
         }

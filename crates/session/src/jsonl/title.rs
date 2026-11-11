@@ -25,13 +25,11 @@
 //!    `[Request interrupted…]` markers.
 
 use crate::jsonl::schema::JsonlMessage;
-use lingxi_core::types::utf16_json::JsonValueView;
-use once_cell::sync::Lazy;
-use regex::Regex;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 #[cfg(test)]
 use serde_json::Value;
 
-/// Maximum number of `char`s stored for the title before truncation + ellipsis.
+/// Maximum UTF-16 code units stored for the title before truncation + ellipsis.
 ///
 /// claude-code stores a "reasonably long" version (200 chars) and re-truncates
 /// at display time by terminal width (`sessionStorage.ts:1730-1734`).
@@ -50,33 +48,262 @@ pub const EMPTY_TITLE_FALLBACK: &str = "(session)";
 /// `"(session)"`.
 pub const FORK_NAME_FALLBACK: &str = "Branched conversation";
 
-/// Max `char`s stored for a `/branch` default fork name — the binary's `I2l`
+/// Max UTF-16 code units stored for a `/branch` default fork name — the binary's `I2l`
 /// `.slice(0,100)` (vs the title path's 200).
 pub const FORK_NAME_MAX_CHARS: usize = 100;
 
-/// `SKIP_FIRST_PROMPT_PATTERN` (`sessionStorage.ts:125-126`): leading lowercase
-/// XML-like tag (IDE context, hook output, task notifications, …) or a synthetic
-/// `[Request interrupted by user…]` marker.
-static SKIP_FIRST_PROMPT_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])")
-        .expect("SKIP_FIRST_PROMPT_PATTERN is a valid regex")
-});
-
-/// Title-path command-name regex — the binary's inlined `Lyu`
-/// (`/<command-name>(.*?)<\/command-name>/`, v2.1.193 @199254820): case-SENSITIVE,
-/// NO attribute allowance, `.` (single-line) content. NOT the generic case-
-/// insensitive `extractTag` builder — the title path uses this dedicated literal.
-static COMMAND_NAME_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"<command-name>(.*?)</command-name>").expect("valid"));
-/// Title-path bash-input regex — the binary's inlined
-/// `/<bash-input>([\s\S]*?)<\/bash-input>/` (v2.1.193 @199254560): case-SENSITIVE,
-/// no attrs, `[\s\S]` content.
-static BASH_INPUT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"<bash-input>([\s\S]*?)</bash-input>").expect("valid"));
-
 /// `/\s+/g` — the fork-name whitespace-run collapse in the binary's `I2l`
 /// (`.replace(/\s+/g," ")`).
-static WHITESPACE_RUN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("valid"));
+pub(crate) fn normalize_fork_title(value: &str) -> String {
+    String::from_utf16_lossy(&collapse_js_whitespace(
+        &value.encode_utf16().collect::<Vec<_>>(),
+    ))
+}
+
+fn js_space(unit: u16) -> bool {
+    matches!(unit, 0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 |
+        0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
+}
+
+fn trim_js_units(value: &[u16]) -> &[u16] {
+    let start = value
+        .iter()
+        .position(|unit| !js_space(*unit))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|unit| !js_space(*unit))
+        .map_or(start, |index| index + 1);
+    &value[start..end]
+}
+
+fn collapse_js_whitespace(value: &[u16]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut separated = false;
+    for &unit in trim_js_units(value) {
+        if js_space(unit) {
+            separated = true;
+        } else {
+            if separated && !out.is_empty() {
+                out.push(0x20);
+            }
+            out.push(unit);
+            separated = false;
+        }
+    }
+    out
+}
+
+fn find_units(haystack: &[u16], needle: &[u16]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn tag_body<'a>(value: &'a [u16], name: &str, single_line: bool) -> Option<&'a [u16]> {
+    let open: Vec<_> = format!("<{name}>").encode_utf16().collect();
+    let close: Vec<_> = format!("</{name}>").encode_utf16().collect();
+    let mut rest = value;
+    while let Some(start) = find_units(rest, &open) {
+        let body = &rest[start + open.len()..];
+        let end = find_units(body, &close)?;
+        if !single_line
+            || !body[..end]
+                .iter()
+                .any(|unit| matches!(unit, 0x0a | 0x0d | 0x2028 | 0x2029))
+        {
+            return Some(&body[..end]);
+        }
+        rest = &rest[start + open.len()..];
+    }
+    None
+}
+
+fn skip_first_prompt(value: &[u16]) -> bool {
+    let marker: Vec<_> = "[Request interrupted by user".encode_utf16().collect();
+    if value.starts_with(&marker) && value[marker.len()..].contains(&u16::from(b']')) {
+        return true;
+    }
+    if value.first() != Some(&u16::from(b'<'))
+        || !value.get(1).is_some_and(|unit| (97..=122).contains(unit))
+    {
+        return false;
+    }
+    let end = value[2..]
+        .iter()
+        .position(|unit| !matches!(unit, 48..=57 | 65..=90 | 97..=122 | 95 | 45))
+        .map_or(value.len(), |index| index + 2);
+    value
+        .get(end)
+        .is_some_and(|unit| js_space(*unit) || *unit == u16::from(b'>'))
+}
+
+// Native's pasted-content display reader removes recognized four-hex-digit
+// wrappers, including at most two adjoining newlines, before title extraction.
+fn unwrap_pasted_content(value: &[u16]) -> Vec<u16> {
+    let opener: Vec<_> = "<pasted_content id=\"".encode_utf16().collect();
+    let mut out = Vec::new();
+    let mut emitted = 0;
+    let mut scan = 0;
+    while let Some(relative) = find_units(&value[scan..], &opener) {
+        let start = scan + relative;
+        let id_start = start + opener.len();
+        let Some(id) = value.get(id_start..id_start + 4) else {
+            break;
+        };
+        if !id.iter().all(|unit| matches!(unit, 48..=57 | 97..=102))
+            || value.get(id_start + 4..id_start + 7) != Some(&[34, 62, 10])
+        {
+            scan = id_start;
+            continue;
+        }
+        let body_start = id_start + 7;
+        let mut closer: Vec<_> = "\n</pasted_content id=\"".encode_utf16().collect();
+        closer.extend_from_slice(id);
+        closer.extend([34, 62]);
+        let Some(body_len) = find_units(&value[body_start - 1..], &closer) else {
+            break;
+        };
+        let body_end = body_start - 1 + body_len;
+        let mut before = start;
+        for _ in 0..2 {
+            if before > emitted && value[before - 1] == 10 {
+                before -= 1;
+            }
+        }
+        out.extend_from_slice(&value[emitted..before]);
+        if body_end >= body_start {
+            out.extend_from_slice(&value[body_start..body_end]);
+        }
+        emitted = body_end + closer.len();
+        for _ in 0..2 {
+            if value.get(emitted) == Some(&10) {
+                emitted += 1;
+            }
+        }
+        scan = emitted;
+    }
+    out.extend_from_slice(&value[emitted..]);
+    out
+}
+
+fn shown_plugin_prompt(message: &JsonlMessage, content: &[u16]) -> Option<Vec<u16>> {
+    let text = message.extra.string_units("/pluginPrompt/text")?;
+    if text.is_empty() {
+        return None;
+    }
+    let first_line = content.iter().position(|unit| *unit == 10)? + 1;
+    let prefix = &content[..first_line];
+    let start: Vec<_> = "The ".encode_utf16().collect();
+    let end: Vec<_> = " plugin sent a message:\n".encode_utf16().collect();
+    if prefix.len() <= 28 || !prefix.starts_with(&start) || !prefix.ends_with(&end) {
+        return None;
+    }
+    let suffix: Vec<_> = "\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.".encode_utf16().collect();
+    if content.len() != prefix.len() + text.len() + suffix.len()
+        || content[prefix.len()..prefix.len() + text.len()] != text
+        || !content.ends_with(&suffix)
+    {
+        return None;
+    }
+    let mut shown: Vec<_> = "Prompt from the ".encode_utf16().collect();
+    shown.extend_from_slice(&prefix[4..prefix.len() - 24]);
+    shown.extend(" plugin: ".encode_utf16());
+    shown.extend(text);
+    Some(shown)
+}
+
+/// Exact fork-name value. Native slices at 100 UTF-16 units and can leave a
+/// dangling surrogate; the persisted title must retain that value even though
+/// the Rust display API can expose only its replacement-character rendering.
+fn first_meaningful_user_units(messages: &[JsonlMessage], shown: bool) -> Vec<u16> {
+    let mut fallback = Vec::new();
+    let mut winner = None;
+    'messages: for message in messages {
+        if message.message_type != "user"
+            || extra_flag(message, "isMeta")
+            || extra_flag(message, "isCompactSummary")
+        {
+            continue;
+        }
+        let Some(content) = message.message.get_property("content") else {
+            continue;
+        };
+        let mut plugin = false;
+        let texts = if let Some(units) = content.code_units() {
+            let shown = shown.then(|| shown_plugin_prompt(message, units)).flatten();
+            plugin = shown.is_some();
+            vec![shown.unwrap_or_else(|| units.to_vec())]
+        } else if let Some(length) = content.array_len() {
+            let mut texts = Vec::new();
+            for index in 0..length {
+                let Some(block) = content.get_index(index) else {
+                    continue;
+                };
+                if block.get_property("type").and_then(JsonValueView::as_str) == Some("tool_result")
+                {
+                    continue 'messages;
+                }
+                if block.get_property("type").and_then(JsonValueView::as_str) == Some("text") {
+                    if let Some(units) = block
+                        .get_property("text")
+                        .and_then(JsonValueView::code_units)
+                    {
+                        texts.push(units.to_vec());
+                    }
+                }
+            }
+            texts
+        } else {
+            continue;
+        };
+        for text in texts {
+            let normalized: Vec<_> = unwrap_pasted_content(&text)
+                .into_iter()
+                .map(|unit| if unit == 10 { 32 } else { unit })
+                .collect();
+            let value = trim_js_units(&normalized);
+            if value.is_empty() {
+                continue;
+            }
+            if !plugin {
+                if let Some(command) = tag_body(value, "command-name", true) {
+                    if fallback.is_empty() {
+                        fallback = command.to_vec();
+                    }
+                    continue;
+                }
+                if let Some(bash) = tag_body(value, "bash-input", false) {
+                    let mut prompt = vec![33, 32];
+                    prompt.extend_from_slice(trim_js_units(bash));
+                    winner = Some(prompt);
+                    break 'messages;
+                }
+            }
+            if skip_first_prompt(value) {
+                continue;
+            }
+            winner = Some(truncate_units_with_ellipsis(value));
+            break 'messages;
+        }
+    }
+    winner.unwrap_or(fallback)
+}
+
+/// Exact native fork title, including a possible dangling surrogate at the
+/// 100-unit slice boundary. Only callers displaying it should decode lossily.
+pub(crate) fn derive_fork_name_projection(messages: &[JsonlMessage]) -> Utf16JsonProjection {
+    let mut units = collapse_js_whitespace(&first_meaningful_user_units(messages, true));
+    units.truncate(FORK_NAME_MAX_CHARS);
+    while units.last().is_some_and(|unit| js_space(*unit)) {
+        units.pop();
+    }
+    if units.is_empty() {
+        units = FORK_NAME_FALLBACK.encode_utf16().collect();
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("exact fork title is a JSON string")
+}
 
 /// Returns the session title.
 ///
@@ -113,7 +340,7 @@ pub(crate) fn has_autonomous_tick_prompt(messages: &[JsonlMessage]) -> bool {
         collect_texts(content).is_some_and(|texts| {
             texts
                 .iter()
-                .any(|text| text.replace('\n', " ").trim().starts_with("<tick>"))
+                .any(|text| js_trim(&text.replace('\n', " ")).starts_with("<tick>"))
         })
     })
 }
@@ -133,96 +360,26 @@ pub(crate) fn has_autonomous_tick_prompt(messages: &[JsonlMessage]) -> bool {
 /// differ from the title path's 200-cap + `"(session)"`.
 #[must_use]
 pub fn derive_fork_name(messages: &[JsonlMessage]) -> String {
-    // `n ??= t.commandFallback` is already folded into `first_meaningful_user_text`.
-    let raw = first_meaningful_user_text(messages).unwrap_or_default();
-    // I2l trailing normalize: `.replace(/\s+/g," ").trim().slice(0,100).trimEnd()`.
-    let collapsed = WHITESPACE_RUN.replace_all(&raw, " ");
-    let capped: String = collapsed.trim().chars().take(FORK_NAME_MAX_CHARS).collect();
-    let capped = capped.trim_end();
-    if capped.is_empty() {
-        FORK_NAME_FALLBACK.to_string()
-    } else {
-        capped.to_string()
-    }
+    let exact = derive_fork_name_projection(messages);
+    String::from_utf16_lossy(&exact.string_units("").expect("fork title is a string"))
 }
 
-/// Port of `getFirstMeaningfulUserMessageTextContent`
-/// (`sessionStorage.ts:1746-1812`). Returns the raw selected text (pre
-/// newline-collapse / cap) or `None`.
+/// Native's stored first-prompt path shares exact selection and 200-unit
+/// truncation with fork names, while plugin display substitution is fork-only.
 fn first_meaningful_user_text(messages: &[JsonlMessage]) -> Option<String> {
-    // `commandFallback` (binary `t.commandFallback`): the bare command name of the
-    // FIRST `<command-name>` block seen, returned ONLY if no later message yields
-    // real text. v2.1.193 dropped the old `builtInCommandNames()` skip + the
-    // `<command-args>` formatting — every command now contributes just its bare
-    // name as a last-resort fallback.
-    let mut command_fallback: Option<String> = None;
-    for m in messages {
-        // `if (msg.type !== 'user' || msg.isMeta) continue` (1750).
-        if m.message_type != "user" || extra_flag(m, "isMeta") {
-            continue;
-        }
-        // `if ('isCompactSummary' in msg && msg.isCompactSummary) continue` (1752).
-        if extra_flag(m, "isCompactSummary") {
-            continue;
-        }
+    let units = first_meaningful_user_units(messages, false);
+    (!units.is_empty()).then(|| String::from_utf16_lossy(&units))
+}
 
-        // `const content = msg.message?.content; if (!content) continue` (1754).
-        let Some(content) = m.message.at_pointer("/content") else {
-            continue;
-        };
-
-        // Collect text blocks. `None` = the message carried a `tool_result` block
-        // ⇒ the binary's Jxt `return`s (whole message yields nothing) — skip it.
-        let Some(texts) = collect_texts(content) else {
-            continue;
-        };
-        for raw in texts {
-            // Per-block normalize FIRST (binary `i=s.replaceAll('\n',' ').trim()`),
-            // then run every check against the normalized `i`.
-            let normalized = raw.replace('\n', " ");
-            let i = normalized.trim();
-            // `if (!i) continue` (empty after trim).
-            if i.is_empty() {
-                continue;
-            }
-
-            // Command-name (binary `a=Lyu.exec(i); if(a){if(!t.commandFallback)
-            // t.commandFallback=a[1]; continue}`): capture the bare name as the
-            // fallback (first wins), then CONTINUE — never returns directly, never
-            // reads args.
-            if let Some(command_name) = extract_tag(i, &COMMAND_NAME_RE) {
-                if command_fallback.is_none() {
-                    command_fallback = Some(command_name);
-                }
-                continue;
-            }
-
-            // Bash input → `! <cmd>` (binary `l=...exec(i); if(l)return`!
-            // ${l[1].trim()}``), checked before the XML skip. NOT capped.
-            if let Some(bash) = extract_tag(i, &BASH_INPUT_RE) {
-                return Some(format!("! {}", bash.trim()));
-            }
-
-            // Skip leading-XML / interrupt markers (binary `if(Oyu.test(i))continue`).
-            if SKIP_FIRST_PROMPT_PATTERN.is_match(i) {
-                continue;
-            }
-
-            // Winner: cap to 200 chars (binary `if(i.length>200)i=i.slice(0,200)
-            // .trim()+'…'; return i`).
-            return Some(truncate_with_ellipsis(i));
-        }
-    }
-    // No message yielded real text → the bare command name, if any (binary
-    // `return t.commandFallback`).
-    command_fallback
+fn js_trim(value: &str) -> &str {
+    value.trim_matches(lingxi_core::host::effort::javascript_whitespace)
 }
 
 /// `extractFirstPrompt` post-processing (`sessionStorage.ts:1728-1734`):
 /// `result.replace(/\n/g,' ').trim()`, then cap at 200 chars with `'…'`.
 fn post_process(text: &str) -> String {
     let collapsed = text.replace('\n', " ");
-    truncate_with_ellipsis(collapsed.trim())
+    truncate_with_ellipsis(js_trim(&collapsed))
 }
 
 /// Normalize a SIDE-MAP title (`custom-title` / `ai-title` / `summary`) with the
@@ -275,18 +432,6 @@ fn collect_texts(content: JsonValueView<'_>) -> Option<Vec<String>> {
     }
 }
 
-/// `extractTag` (`messages.ts:633-687`): returns the inner content of the first
-/// `<tag …>…</tag>` match, or `None` when absent or empty (TS returns content
-/// only when truthy).
-fn extract_tag(text: &str, re: &Regex) -> Option<String> {
-    let inner = re.captures(text)?.get(1)?.as_str();
-    if inner.is_empty() {
-        None
-    } else {
-        Some(inner.to_string())
-    }
-}
-
 /// Read a boolean outer field (e.g. `isMeta`, `isCompactSummary`) from
 /// `JsonlMessage::extra`; missing / non-bool ⇒ `false`.
 fn extra_flag(m: &JsonlMessage, key: &str) -> bool {
@@ -296,22 +441,30 @@ fn extra_flag(m: &JsonlMessage, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Truncate `s` to [`TITLE_MAX_CHARS`] `char`s, trimming the slice and appending
+/// Truncate `s` to [`TITLE_MAX_CHARS`] UTF-16 units, trimming the slice and appending
 /// [`TITLE_ELLIPSIS`] when anything was cut — `slice(0,200).trim() + '…'`
 /// (`sessionStorage.ts:1733`).
 #[must_use]
 fn truncate_with_ellipsis(s: &str) -> String {
-    if s.chars().count() <= TITLE_MAX_CHARS {
-        return s.to_string();
+    String::from_utf16_lossy(&truncate_units_with_ellipsis(
+        &s.encode_utf16().collect::<Vec<_>>(),
+    ))
+}
+
+fn truncate_units_with_ellipsis(value: &[u16]) -> Vec<u16> {
+    if value.len() <= TITLE_MAX_CHARS {
+        return value.to_vec();
     }
-    // Byte index of the (TITLE_MAX_CHARS)th char → slice on a valid UTF-8 boundary.
-    let cutoff_byte = s
-        .char_indices()
-        .nth(TITLE_MAX_CHARS)
-        .map_or_else(|| s.len(), |(idx, _)| idx);
-    let mut out = s[..cutoff_byte].trim().to_string();
-    out.push(TITLE_ELLIPSIS);
-    out
+    let mut units = value[..TITLE_MAX_CHARS].to_vec();
+    if units
+        .last()
+        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+    {
+        units.pop();
+    }
+    units = trim_js_units(&units).to_vec();
+    units.push(0x2026);
+    units
 }
 
 #[cfg(test)]
@@ -319,6 +472,59 @@ fn truncate_with_ellipsis(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_321_fork_names_preserve_exact_utf16() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session_fork_2_1_321.json"
+        ))
+        .unwrap();
+        for case in fixture["nameCases"].as_array().unwrap() {
+            let rows = Utf16JsonProjection::parse(case["messagesJson"].as_str().unwrap()).unwrap();
+            let mut lines = Vec::new();
+            for index in 0..rows.at_pointer("").unwrap().array_len().unwrap() {
+                lines.push(
+                    rows.subprojection(&format!("/{index}"))
+                        .unwrap()
+                        .to_json_string()
+                        .unwrap(),
+                );
+            }
+            let messages = crate::jsonl::route_lines(&lines.join("\n")).messages_in_order;
+            let actual = derive_fork_name_projection(&messages)
+                .string_units("")
+                .unwrap();
+            let expected: Vec<u16> = case["expectedUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| unit.as_u64().unwrap() as u16)
+                .collect();
+            assert_eq!(actual, expected, "{}", case["name"]);
+            let stored: Vec<u16> = case["expectedStoredTitleUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| unit.as_u64().unwrap() as u16)
+                .collect();
+            assert_eq!(
+                extract_title(&messages),
+                String::from_utf16_lossy(&stored),
+                "stored {}",
+                case["name"]
+            );
+        }
+        for case in fixture["truncateCases"].as_array().unwrap() {
+            let text: String = serde_json::from_str(case["textJson"].as_str().unwrap()).unwrap();
+            let expected: Vec<u16> = case["expectedUnits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| unit.as_u64().unwrap() as u16)
+                .collect();
+            assert_eq!(truncate_title(&text), String::from_utf16_lossy(&expected));
+        }
+    }
 
     fn read_message(value: Value) -> JsonlMessage {
         let source = serde_json::to_string(&value).unwrap();

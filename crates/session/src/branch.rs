@@ -4,7 +4,8 @@
 //! session's transcript into a NEW `<uuid>.jsonl` under the same project dir,
 //! rewriting `sessionId`, rechaining `parentUuid`, clearing `isSidechain`, and
 //! stamping each entry with a `forkedFrom { sessionId, messageUuid }`
-//! back-reference. Saves a `"<base> (Branch)"` custom title (collision-numbered),
+//! back-reference. Saves the normalized supplied title, or a collision-numbered
+//! `"<base> (Branch)"` automatic title, plus its matching agent name,
 //! then hands the new session id back so the CLI can switch INTO the branch via
 //! the proven in-process re-mount seam (`mount_resumed_tui`).
 //!
@@ -14,7 +15,7 @@
 //! session-level content-replacement carry-over the source cold-load state
 //! exposes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,12 +24,13 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::jsonl::exact_json::{
-    native_message_bytes, parse_exact_json, to_vec_with_overrides, Utf16Overrides,
-};
+use crate::jsonl::exact_json::{parse_exact_json, to_vec_with_overrides, Utf16Overrides};
 use crate::jsonl::re_append::iso_now;
+use crate::jsonl::title::{derive_fork_name_projection, normalize_fork_title};
 use crate::jsonl::JsonlMessage;
-use crate::jsonl::{derive_fork_name, list_recent_sessions, route_lines, session_path};
+use crate::jsonl::{
+    list_recent_sessions_in_scope, route_lines, session_path, SessionDiscoveryScope,
+};
 
 /// Outcome of a successful [`create_branch`].
 #[derive(Debug, Clone)]
@@ -37,7 +39,7 @@ pub struct BranchResult {
     pub new_session_id: Uuid,
     /// The session that was branched (for the "resume the original" hint).
     pub source_session_id: Uuid,
-    /// The effective `"… (Branch[ N])"` title saved for the branch.
+    /// Display-safe rendering of the exact supplied or automatic fork title.
     pub title: String,
     /// Count of conversation messages copied into the branch.
     pub message_count: usize,
@@ -79,8 +81,9 @@ impl std::error::Error for BranchError {}
 
 /// Create a branch of `source_session_id` under the same project dir.
 ///
-/// `custom_title` is the trimmed `/branch [name]` argument (empty / `None` ⇒
-/// derive the base name from the first user message). Returns the new session
+/// `custom_title` is the optional `/branch [name]` argument (`None` derives the
+/// base name from the first user message). An explicitly empty title is retained.
+/// Returns the new session
 /// id + saved title so the caller can switch into the branch. A branch is a
 /// new task: it retains the source's fixed mode and starts a fresh instruction epoch.
 ///
@@ -404,11 +407,13 @@ async fn create_branch_in(
         Err(e) => return Err(BranchError::Io(e)),
     };
 
-    // 2. Route to the linear main-conversation chain. `route_lines` yields only
-    //    transcript chain participants (sidechains + metadata side-maps are
-    //    filtered out), matching claude's `isTranscriptMessage && !isSidechain`.
-    let routed = route_lines(&content);
-    if routed.messages_in_order.is_empty() {
+    // The file-only convenience entrypoint selects source transcript UUIDs.
+    // Nullable legacy envelope scalars do not invalidate Native fork rows.
+    let messages: Vec<_> = crate::jsonl::reader::strip_transcript_bom(&content)
+        .lines()
+        .filter_map(fork_prompt_message)
+        .collect();
+    if messages.is_empty() {
         return Err(BranchError::NoMessages);
     }
     create_branch_from_captured(
@@ -419,7 +424,7 @@ async fn create_branch_in(
             source_session_id,
             target_session_id: Uuid::new_v4(),
             source_content: &content,
-            messages: &routed.messages_in_order,
+            messages: &messages,
             custom_title,
             mode,
         },
@@ -474,6 +479,44 @@ pub async fn render_branch_from_captured(
         Err(error) => return Err(BranchError::Io(error)),
     }
     let routed = route_lines(content);
+    // Native scans the captured source into a last-row-wins UUID map, then
+    // follows the caller's selected order while excluding sidechain rows.
+    let selected_ids: HashSet<_> = messages
+        .iter()
+        .map(|message| message.uuid.as_str())
+        .collect();
+    let mut source_rows = HashMap::new();
+    for line in crate::jsonl::reader::strip_transcript_bom(content).lines() {
+        let Ok(row) = Utf16JsonProjection::parse(line) else {
+            continue;
+        };
+        if !row
+            .string_at("/type")
+            .is_some_and(crate::jsonl::is_transcript_message_type)
+            || row.get_property("isSidechain").is_some_and(native_truthy)
+        {
+            continue;
+        }
+        if let Some(uuid) = row
+            .string_at("/uuid")
+            .filter(|uuid| selected_ids.contains(uuid))
+        {
+            source_rows.insert(uuid.to_owned(), line);
+        }
+    }
+    let selected_rows: Vec<_> = messages
+        .iter()
+        .filter_map(|message| source_rows.get(&message.uuid).copied())
+        .collect();
+    if selected_rows.is_empty() {
+        return Err(BranchError::NoMessages);
+    }
+    // Only prompt-bearing fields enter typed title selection. Disk output
+    // below mutates the exact captured source row instead of these views.
+    let messages: Vec<_> = selected_rows
+        .iter()
+        .filter_map(|line| fork_prompt_message(line))
+        .collect();
     let src_sid = source_session_id.to_string();
     let profile = crate::jsonl::JsonlWriter::fixed_session_profile_from_source(content, &src_sid)
         .map_err(BranchError::InvalidModeMetadata)?;
@@ -483,11 +526,11 @@ pub async fn render_branch_from_captured(
     let mode = profile.mode;
     // A new UUID is a new authorization scope. Copied skill activations must
     // remain historical evidence, never become instructions in the fork.
-    let copied_epoch = messages
+    let copied_epoch = selected_rows
         .iter()
-        .filter_map(|message| message.origin_projection.as_ref())
-        .filter(|origin| origin.string_at("/type") == Some("skill_activation"))
-        .filter_map(|origin| origin.number_at("/context_epoch"))
+        .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+        .filter(|row| row.string_at("/origin/type") == Some("skill_activation"))
+        .filter_map(|row| row.number_at("/origin/context_epoch"))
         .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
         .map(|epoch| epoch as u64)
         .max()
@@ -499,21 +542,24 @@ pub async fn render_branch_from_captured(
         .filter(|epoch| *epoch < (1_u64 << 53))
         .ok_or(BranchError::InstructionEpochExhausted)?;
 
-    // 3. Base name = provided title, else the first-prompt derivation
-    //    (`deriveFirstPrompt`). Then append the collision-numbered "(Branch)".
-    let base = match custom_title {
-        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => derive_fork_name(messages),
+    // A supplied title is normalized and used directly. Only an automatically
+    // derived title receives the collision-numbered native Branch suffix.
+    let title_units = if let Some(title) = custom_title.map(normalize_fork_title) {
+        title.encode_utf16().collect()
+    } else {
+        let base = derive_fork_name_projection(&messages)
+            .string_units("")
+            .expect("fork name is a string");
+        unique_fork_name(lingxi_home, target_cwd, &base, &fs).await
     };
-    // Collision numbering runs against the catalog the fork will LIVE in.
-    let title = unique_fork_name(lingxi_home, target_cwd, &base, &fs).await;
+    let title = String::from_utf16_lossy(&title_units);
 
     // 4. Rewrite each entry: new sessionId, rechained parentUuid, cleared
     //    sidechain flag, plus a `forkedFrom` back-reference to the origin.
     let new_sid = new_session_id.to_string();
     let carried_replacements = carried_content_replacements(content, src_sid.as_str());
     let mut parent: Option<String> = None;
-    let message_count = messages.len();
+    let message_count = selected_rows.len();
     let carries_content_replacements = !carried_replacements.values.is_empty();
     let carries_relocated =
         target_cwd == source_cwd && routed.relocated_cwds.contains_key(src_sid.as_str());
@@ -552,32 +598,66 @@ pub async fn render_branch_from_captured(
             .expect("history-suppression serializes"),
         );
     }
-    for mut entry in messages.iter().cloned() {
-        let original_uuid = entry.uuid.clone();
-        entry.session_id = new_sid.clone();
-        entry.parent_uuid = parent.clone();
-        entry.is_sidechain = false;
+    for line in selected_rows {
+        let mut entry = Utf16JsonProjection::parse(line).map_err(projection_branch_error)?;
+        let original_uuid = entry
+            .string_at("/uuid")
+            .expect("selected source UUID")
+            .to_owned();
+        if entry.string_at("/type") == Some("system")
+            && entry.string_at("/subtype") == Some("model_refusal_fallback")
+        {
+            entry
+                .set_field(
+                    "neutralizedByFork",
+                    Utf16JsonProjection::parse("true").expect("valid bool"),
+                )
+                .map_err(projection_branch_error)?;
+        }
+        entry
+            .set_field("sessionId", Utf16JsonProjection::from(new_sid.as_str()))
+            .map_err(projection_branch_error)?;
+        let parent_value = parent.as_ref().map_or_else(
+            || Utf16JsonProjection::parse("null").expect("valid null"),
+            |parent| Utf16JsonProjection::from(parent.as_str()),
+        );
+        entry
+            .set_field("parentUuid", parent_value)
+            .map_err(projection_branch_error)?;
+        entry
+            .set_field(
+                "isSidechain",
+                Utf16JsonProjection::parse("false").expect("valid bool"),
+            )
+            .map_err(projection_branch_error)?;
+        for field in [
+            "sessionKind",
+            crate::jsonl::exact_json::PRIVATE_UTF16_KEY,
+            crate::jsonl::exact_json::PRIVATE_SOURCE_KEY_ORDER_KEY,
+        ] {
+            entry.remove_field(field).map_err(projection_branch_error)?;
+        }
         // Historical entries can name older workspaces even when the source
         // and target roots match. The independent branch belongs to the
         // target root from its first entry onward.
-        entry.cwd = target_cwd.to_string();
+        if target_cwd != source_cwd
+            || entry
+                .get_property("cwd")
+                .and_then(|value| value.code_units())
+                .is_some()
+        {
+            entry
+                .set_field("cwd", Utf16JsonProjection::from(target_cwd))
+                .map_err(projection_branch_error)?;
+        }
         let forked_from = Utf16JsonProjection::from_serde_value(
             &json!({ "sessionId": src_sid, "messageUuid": original_uuid }),
         )
         .expect("fork metadata is a valid generated JSON value");
         entry
-            .extra
             .set_field("forkedFrom", forked_from)
-            .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?;
-        // JsonlMessage's hand-written Serialize emits claude's per-kind key order
-        // and never fails for a well-formed message.
-        lines.push(
-            String::from_utf8(
-                native_message_bytes(&entry)
-                    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
-            )
-            .expect("native JSON encoder emits UTF-8"),
-        );
+            .map_err(projection_branch_error)?;
+        lines.push(entry.to_json_string().map_err(projection_branch_error)?);
         parent = Some(original_uuid);
     }
 
@@ -593,6 +673,15 @@ pub async fn render_branch_from_captured(
                     .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
             )
             .expect("native JSON encoder emits UTF-8"),
+        );
+    }
+
+    for mut row in source_metadata_rows(content, &src_sid, "memory-mode") {
+        row.set_field("sessionId", Utf16JsonProjection::from(new_sid.as_str()))
+            .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?;
+        lines.push(
+            row.to_json_string()
+                .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
         );
     }
 
@@ -620,17 +709,90 @@ pub async fn render_branch_from_captured(
         );
     }
 
-    // 5. Append the custom-title side-map entry so /resume + /status show
-    //    "<base> (Branch)" (claude `saveCustomTitle`). Shape matches the
-    //    `custom-title` branch of `route_lines`: {type,sessionId,customTitle}.
-    lines.push(
-        serde_json::to_string(&json!({
-            "type": "custom-title",
-            "sessionId": new_sid,
-            "customTitle": title,
-        }))
-        .expect("custom-title serializes"),
-    );
+    // Restore the last valid values before saving the fork. Native Ezt ignores
+    // invalid later snapshots and filters tools to nonempty strings; the fork
+    // saver emits the boolean REPL mode without its restore-only typedEvents.
+    for kind in ["tools-used", "repl-mode"] {
+        let field = if kind == "tools-used" {
+            "tools"
+        } else {
+            "replMode"
+        };
+        if let Some(row) = source_metadata_rows(content, &src_sid, kind)
+            .into_iter()
+            .rev()
+            .find(|row| {
+                let Some(value) = row.get_property(field) else {
+                    return false;
+                };
+                if kind == "tools-used" {
+                    value.array_len().is_some()
+                } else {
+                    value.as_bool().is_some()
+                }
+            })
+        {
+            let value = if kind == "tools-used" {
+                let length = row
+                    .get_property(field)
+                    .and_then(|value| value.array_len())
+                    .expect("validated array");
+                let tools = (0..length)
+                    .filter_map(|index| {
+                        let value = row.subprojection(&format!("/tools/{index}")).ok()?;
+                        value
+                            .string_units("")
+                            .is_some_and(|units| !units.is_empty())
+                            .then_some(value)
+                    })
+                    .collect::<Vec<_>>();
+                if tools.is_empty() {
+                    continue;
+                }
+                Utf16JsonProjection::array(tools).expect("filtered tools form an array")
+            } else {
+                row.subprojection("/replMode").expect("validated boolean")
+            };
+            let row = Utf16JsonProjection::object_units(vec![
+                (
+                    "type".encode_utf16().collect(),
+                    Utf16JsonProjection::from(kind),
+                ),
+                (
+                    "sessionId".encode_utf16().collect(),
+                    Utf16JsonProjection::from(new_sid.as_str()),
+                ),
+                (field.encode_utf16().collect(), value),
+            ])
+            .expect("branch runtime snapshot is an object");
+            lines.push(
+                row.to_json_string()
+                    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
+            );
+        }
+    }
+
+    // Native saves both names after createFork, retaining an exact UTF-16
+    // slice even when the display-safe result contains a replacement glyph.
+    for (kind, field) in [("custom-title", "customTitle"), ("agent-name", "agentName")] {
+        let row = Utf16JsonProjection::object_units(vec![
+            (
+                "type".encode_utf16().collect(),
+                Utf16JsonProjection::from(kind),
+            ),
+            (
+                field.encode_utf16().collect(),
+                Utf16JsonProjection::root_string(title.clone(), title_units.clone())
+                    .expect("exact title is valid JSON"),
+            ),
+            (
+                "sessionId".encode_utf16().collect(),
+                Utf16JsonProjection::from(new_sid.as_str()),
+            ),
+        ])
+        .expect("branch names form a JSON object");
+        lines.push(row.to_json_string().expect("branch name serializes"));
+    }
     Ok(RenderedBranch {
         result: BranchResult {
             new_session_id,
@@ -648,9 +810,80 @@ struct CarriedReplacements {
     utf16_overrides: Utf16Overrides,
 }
 
+fn projection_branch_error(error: impl std::fmt::Display) -> BranchError {
+    BranchError::Io(std::io::Error::other(error.to_string()))
+}
+
+fn native_truthy(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
+    if value.is_null() || value.is_undefined() {
+        return false;
+    }
+    if let Some(value) = value.as_bool() {
+        return value;
+    }
+    if let Some(value) = value.as_number() {
+        return value != 0.0 && !value.is_nan();
+    }
+    if let Some(value) = value.code_units() {
+        return !value.is_empty();
+    }
+    true
+}
+
+fn fork_prompt_message(line: &str) -> Option<JsonlMessage> {
+    let source = Utf16JsonProjection::parse(line).ok()?;
+    let kind = source
+        .string_at("/type")
+        .filter(|kind| crate::jsonl::is_transcript_message_type(kind))?;
+    let uuid = source.string_at("/uuid")?;
+    let mut prompt = Utf16JsonProjection::parse(
+        "{\"parentUuid\":null,\"timestamp\":\"\",\"cwd\":\"\",\"sessionId\":\"\",\"version\":\"\"}",
+    )
+    .ok()?;
+    prompt
+        .set_field("type", Utf16JsonProjection::from(kind))
+        .ok()?;
+    prompt
+        .set_field("uuid", Utf16JsonProjection::from(uuid))
+        .ok()?;
+    prompt
+        .set_field(
+            "isSidechain",
+            Utf16JsonProjection::parse(
+                if source
+                    .get_property("isSidechain")
+                    .is_some_and(native_truthy)
+                {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
+            .ok()?,
+        )
+        .ok()?;
+    for field in ["message", "isMeta", "isCompactSummary", "pluginPrompt"] {
+        if let Ok(value) = source.subprojection(&format!("/{field}")) {
+            prompt.set_field(field, value).ok()?;
+        }
+    }
+    JsonlMessage::from_projection(&prompt).ok()
+}
+
+fn source_metadata_rows(content: &str, source: &str, kind: &str) -> Vec<Utf16JsonProjection> {
+    crate::jsonl::reader::strip_transcript_bom(content)
+        .lines()
+        .filter_map(|line| {
+            let row = Utf16JsonProjection::parse(line).ok()?;
+            (row.string_at("/type") == Some(kind) && row.string_at("/sessionId") == Some(source))
+                .then_some(row)
+        })
+        .collect()
+}
+
 fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacements {
     let mut carried = CarriedReplacements::default();
-    for line in content.lines() {
+    for line in crate::jsonl::reader::strip_transcript_bom(content).lines() {
         let Ok(exact) = parse_exact_json(line) else {
             continue;
         };
@@ -659,20 +892,22 @@ fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacem
             continue;
         }
         let session_id = value.get("sessionId").and_then(serde_json::Value::as_str);
-        let has_agent_id = value
-            .get("agentId")
-            .and_then(serde_json::Value::as_str)
-            .is_some();
-        let belongs_to_source = session_id == Some(src_sid)
-            || (has_agent_id && (session_id.is_none() || session_id == Some(src_sid)));
-        if !belongs_to_source {
+        if session_id != Some(src_sid) {
             continue;
         }
         if let Some(replacements) = value
             .get("replacements")
             .and_then(serde_json::Value::as_array)
         {
-            let offset = carried.values.len();
+            let mut mapped_indices = Vec::with_capacity(replacements.len());
+            for replacement in replacements {
+                if replacement.is_object() {
+                    mapped_indices.push(Some(carried.values.len()));
+                    carried.values.push(replacement.clone());
+                } else {
+                    mapped_indices.push(None);
+                }
+            }
             for (pointer, units) in exact.utf16_overrides {
                 let Some(relative) = pointer.strip_prefix("/replacements/") else {
                     continue;
@@ -683,7 +918,7 @@ fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacem
                 let Ok(index) = index.parse::<usize>() else {
                     continue;
                 };
-                if index < replacements.len() {
+                if let Some(Some(mapped_index)) = mapped_indices.get(index) {
                     let suffix = if tail.is_empty() {
                         String::new()
                     } else {
@@ -691,10 +926,9 @@ fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacem
                     };
                     carried
                         .utf16_overrides
-                        .insert(format!("/replacements/{}{suffix}", offset + index), units);
+                        .insert(format!("/replacements/{mapped_index}{suffix}"), units);
                 }
             }
-            carried.values.extend(replacements.iter().cloned());
         }
     }
     carried
@@ -707,25 +941,173 @@ fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacem
 async fn unique_fork_name(
     lingxi_home: &Path,
     cwd: &str,
-    base: &str,
+    base: &[u16],
     fs: &Arc<dyn FileSystem>,
-) -> String {
-    let plain = format!("{base} (Branch)");
-    let titles: HashSet<String> = list_recent_sessions(lingxi_home, cwd, usize::MAX, fs.clone())
-        .await
-        .map(|rows| rows.into_iter().map(|s| s.title).collect())
-        .unwrap_or_default();
-    if !titles.contains(&plain) {
+) -> Vec<u16> {
+    let mut plain = base.to_vec();
+    plain.extend(" (Branch)".encode_utf16());
+    let rows = list_recent_sessions_in_scope(
+        lingxi_home,
+        cwd,
+        SessionDiscoveryScope::Repository,
+        usize::MAX,
+        fs.clone(),
+    )
+    .await
+    .unwrap_or_default();
+    let display_plain: Vec<_> = String::from_utf16_lossy(&plain).encode_utf16().collect();
+    let display_fold = folded_title_units(&display_plain);
+    let plain_fold = folded_title_units(&plain);
+    let ambiguous_query = display_plain.contains(&0xfffd);
+    let mut cache = HashMap::new();
+    let mut occupied = false;
+    // The catalog already holds the complete untruncated custom-or-AI title.
+    // Ordinary exact matches need no second transcript read. Recover exact
+    // units only when the display projection could conflate a lone surrogate.
+    for row in &rows {
+        let Some(title) = row.custom_or_ai_title.as_deref() else {
+            continue;
+        };
+        if folded_title_units(&title.encode_utf16().collect::<Vec<_>>()) != display_fold {
+            continue;
+        }
+        if !ambiguous_query && !title.contains('\u{fffd}') {
+            occupied = true;
+            break;
+        }
+        let titles = candidate_native_titles(&row.path, &row.uuid.to_string()).await;
+        occupied |= titles
+            .0
+            .as_ref()
+            .or(titles.1.as_ref())
+            .is_some_and(|title| folded_title_units(title) == plain_fold);
+        cache.insert(row.path.clone(), titles);
+    }
+    if !occupied {
         return plain;
     }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{base} (Branch {n})");
-        if !titles.contains(&candidate) {
-            return candidate;
+
+    let mut used = HashSet::from([1_u64]);
+    let mut query = base.to_vec();
+    query.extend(" (Branch".encode_utf16());
+    let display_query: Vec<_> = String::from_utf16_lossy(&query).encode_utf16().collect();
+    let query_fold = folded_title_units(&display_query);
+    let mut prefix = base.to_vec();
+    prefix.extend(" (Branch ".encode_utf16());
+    // Numeric slots are custom-title-only. Read metadata solely for catalog
+    // rows that match the native prefix query; unrelated transcripts are never
+    // reopened. The normal metadata backstop keeps these reads within 64 KiB.
+    for row in rows {
+        let Some(title) = row.custom_or_ai_title.as_deref() else {
+            continue;
+        };
+        let folded = folded_title_units(&title.encode_utf16().collect::<Vec<_>>());
+        if !folded
+            .windows(query_fold.len())
+            .any(|window| window == query_fold)
+        {
+            continue;
         }
+        let (custom, _) = match cache.remove(&row.path) {
+            Some(titles) => titles,
+            None => candidate_native_titles(&row.path, &row.uuid.to_string()).await,
+        };
+        let Some(custom) = custom else {
+            continue;
+        };
+        if custom.starts_with(&prefix) && custom.last() == Some(&u16::from(b')')) {
+            let digits = &custom[prefix.len()..custom.len() - 1];
+            if !digits.is_empty() && digits.iter().all(|unit| (48..=57).contains(unit)) {
+                if let Ok(number) = String::from_utf16_lossy(digits).parse::<u64>() {
+                    used.insert(number);
+                }
+            }
+        }
+    }
+    let mut n = 2;
+    while used.contains(&n) {
         n += 1;
     }
+    let mut title = base.to_vec();
+    title.extend(format!(" (Branch {n})").encode_utf16());
+    title
+}
+
+fn folded_title_units(units: &[u16]) -> Vec<u16> {
+    let whitespace = |unit: u16| {
+        char::from_u32(u32::from(unit))
+            .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+    };
+    let start = units
+        .iter()
+        .position(|unit| !whitespace(*unit))
+        .unwrap_or(units.len());
+    let end = units
+        .iter()
+        .rposition(|unit| !whitespace(*unit))
+        .map_or(start, |index| index + 1);
+    let mut folded = Vec::new();
+    let mut text = String::new();
+    for scalar in char::decode_utf16(units[start..end].iter().copied()) {
+        match scalar {
+            Ok(scalar) => text.push(scalar),
+            Err(surrogate) => {
+                folded.extend(text.to_lowercase().encode_utf16());
+                text.clear();
+                folded.push(surrogate.unpaired_surrogate());
+            }
+        }
+    }
+    folded.extend(text.to_lowercase().encode_utf16());
+    folded
+}
+
+fn capture_catalog_title(line: &str, id: &str, titles: &mut (Option<Vec<u16>>, Option<Vec<u16>>)) {
+    let Ok(row) = Utf16JsonProjection::parse(line) else {
+        return;
+    };
+    if row.string_at("/sessionId") != Some(id) {
+        return;
+    }
+    match row.string_at("/type") {
+        Some("custom-title") => {
+            if let Some(title) = row.string_units("/customTitle") {
+                titles.0 = Some(title);
+            }
+        }
+        Some("ai-title") => {
+            if let Some(title) = row.string_units("/aiTitle") {
+                titles.1 = Some(title);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn candidate_native_titles(path: &Path, id: &str) -> (Option<Vec<u16>>, Option<Vec<u16>>) {
+    let mut titles = (None, None);
+    let tail = crate::jsonl::read_tail(path);
+    for line in tail.lines() {
+        capture_catalog_title(line, id, &mut titles);
+    }
+    let small = tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.len() <= crate::jsonl::LITE_READ_BUF_SIZE as u64);
+    if small || titles.0.is_some() {
+        return titles;
+    }
+    // A legacy file may lack the metadata backstop. Stream only this matching
+    // candidate to distinguish an old custom title from its later AI title.
+    use tokio::io::AsyncBufReadExt;
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return titles;
+    };
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    titles = (None, None);
+    while let Ok(Some(line)) = lines.next_line().await {
+        capture_catalog_title(&line, id, &mut titles);
+    }
+    titles
 }
 
 #[cfg(test)]
@@ -1279,8 +1661,8 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        // 2 conversation lines + custom-title + fresh profile.
-        assert_eq!(lines.len(), 4);
+        // 2 conversation lines + custom-title + agent-name + fresh profile.
+        assert_eq!(lines.len(), 5);
         let first = read_row(lines[1]);
         assert_eq!(first.session_id, new_sid);
         assert_eq!(first.parent_uuid, None, "first entry re-roots the chain");
@@ -1375,7 +1757,7 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 9);
 
         let suppression: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(suppression["type"], "history-suppression");
@@ -1482,7 +1864,7 @@ mod tests {
         let dst = session_path(&home, target_cwd, &new_sid);
         let written = tokio::fs::read_to_string(&dst).await.expect("fork exists");
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
         for line in &lines[1..3] {
             let entry = read_row(line);
             assert_eq!(entry.session_id, new_sid);

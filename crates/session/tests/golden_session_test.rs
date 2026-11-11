@@ -343,7 +343,7 @@ async fn reader_round_trips_multi_turn_fixture() {
 
 #[tokio::test]
 async fn writer_output_equals_compacted_fixture() {
-    let fixture = include_str!("fixtures/golden_sessions/compacted_session.jsonl");
+    let fixture = include_str!("fixtures/golden_sessions/compacted_session_2_1_321.jsonl");
     let expected = substitute(fixture);
 
     let dir = tempdir().expect("tempdir");
@@ -353,9 +353,9 @@ async fn writer_output_equals_compacted_fixture() {
 
     // The boundary line carries claude's FLATTENED system envelope as OUTER
     // fields via `extra` — `subtype`/`content`/`level`/`compactMetadata` (the
-    // serializer's compact-boundary arm emits them at claude's 2.1.207
-    // positions: type, subtype, content, level, compactMetadata, uuid,
-    // timestamp) — plus `parentUuid: null` + `logicalParentUuid` (the chain
+    // serializer's compact-boundary arm emits them at claude's 2.1.321
+    // positions: type, subtype, content, timestamp, uuid, level,
+    // compactMetadata) — plus `parentUuid: null` + `logicalParentUuid` (the chain
     // reset) and NO inner `message`.
     let mut boundary_extra: Map<String, Value> = Map::new();
     boundary_extra.insert("subtype".into(), Value::String("compact_boundary".into()));
