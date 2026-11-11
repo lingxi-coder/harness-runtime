@@ -525,6 +525,29 @@ pub(crate) fn open_rooted_search_file(
     search_root: &Path,
     candidate: &Path,
 ) -> Result<std::fs::File, SearchResolutionError> {
+    let (root, relative) = search_candidate_location(search_root, candidate)?;
+    lingxi_core::host::rooted_fs::open_file_after_permission(root, relative, candidate, candidate)
+        .map_err(|_| SearchResolutionError::SearchRootChanged)
+}
+
+/// Glob needs filename metadata, including for files whose content cannot be
+/// opened. Use the same verified no-follow location as Grep without requesting
+/// data-read access on the candidate.
+pub(crate) fn metadata_rooted_search_file(
+    search_root: &Path,
+    candidate: &Path,
+) -> Result<lingxi_core::host::rooted_fs::RootedFileMetadata, SearchResolutionError> {
+    let (root, relative) = search_candidate_location(search_root, candidate)?;
+    lingxi_core::host::rooted_fs::metadata_file_after_permission(
+        root, relative, candidate, candidate,
+    )
+    .map_err(|_| SearchResolutionError::SearchRootChanged)
+}
+
+fn search_candidate_location<'a>(
+    search_root: &'a Path,
+    candidate: &'a Path,
+) -> Result<(&'a Path, &'a Path), SearchResolutionError> {
     if !candidate.starts_with(search_root) {
         return Err(SearchResolutionError::SearchRootChanged);
     }
@@ -537,24 +560,12 @@ pub(crate) fn open_rooted_search_file(
         let filename = candidate
             .file_name()
             .ok_or(SearchResolutionError::SearchRootChanged)?;
-        return lingxi_core::host::rooted_fs::open_file_after_permission(
-            parent,
-            Path::new(filename),
-            candidate,
-            candidate,
-        )
-        .map_err(|_| SearchResolutionError::SearchRootChanged);
+        return Ok((parent, Path::new(filename)));
     }
     let relative = candidate
         .strip_prefix(search_root)
         .map_err(|_| SearchResolutionError::SearchRootChanged)?;
-    lingxi_core::host::rooted_fs::open_file_after_permission(
-        search_root,
-        relative,
-        candidate,
-        candidate,
-    )
-    .map_err(|_| SearchResolutionError::SearchRootChanged)
+    Ok((search_root, relative))
 }
 
 /// Map an approved canonical path back to a canonical trusted root and a

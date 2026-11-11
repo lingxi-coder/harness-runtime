@@ -68,9 +68,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, translate_model_path,
-};
+use tool_api::util::path_validation::{emit_blocked_event, translate_model_path};
 use tool_api::BuiltinToolContext;
 
 use crate::shared::{
@@ -1469,17 +1467,20 @@ impl Tool for GrepTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let pattern = search_argv_string(input, "pattern");
+        let path = search_argv_string(input, "path");
         let glob = search_argv_string(input, "glob");
         let kind = search_argv_string(input, "type");
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
             &[
                 ("pattern", pattern.as_deref()),
-                ("path", crate::input_string(input, "path")),
+                ("path", path.as_deref()),
                 ("glob", glob.as_deref()),
                 ("type", kind.as_deref()),
             ],
         )?;
+        crate::input_optional_path(input, "path")
+            .map_err(|error| ValidationError(error.model_facing_message()))?;
         validate_whole_number("head_limit", input)?;
         validate_whole_number("offset", input)?;
         // TL-4 (2.1.260): the DISK probe moved to `call` — see the note on
@@ -1532,6 +1533,7 @@ impl Tool for GrepTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        let requested_path = crate::input_optional_path(&input, "path")?;
         // `trusted_dirs` snapshot for this whole call (canonicalize gate). The
         // effective cwd (base fallback + relativize) comes from `cwd_now()`,
         // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
@@ -1545,7 +1547,7 @@ impl Tool for GrepTool {
         // the LIVE cwd (`Ct()`). The no-cell fallback (`cwd_now()`==
         // `ctx.workspace`) equals the former `trusted_dirs.first()` boot cwd, so
         // behavior is byte-identical until a Bash `cd` moves the shared cell.
-        let base = match crate::input_string(&input, "path").filter(|path| !path.is_empty()) {
+        let base = match requested_path.filter(|path| !path.is_empty()) {
             Some(path) => crate::checked_model_file_path(path, &self.cwd_now())?,
             None => self.cwd_now(),
         };
@@ -1618,27 +1620,25 @@ impl Tool for GrepTool {
             Ok(base) => base,
             Err(message) => return Err(ToolError::InvalidInput(message.into())),
         };
-        // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
-        // which runs BEFORE the permission decision, so a missing path was
-        // reported for a path the session may not be allowed to look at. The
-        // oracle's `validateInput` is argument checks only; the probe is `pgs`,
-        // called from `call`.
-        //
-        // It sits AFTER `translate_model_path` on purpose: a mobile guest path
-        // must be probed as the host directory that actually backs it. In
-        // `validate_input` it ran on the UNTRANSLATED path, so guest Grep failed
-        // its own path check on the main dispatch path.
-        if let Some(requested_path) = crate::input_string(&input, "path") {
-            crate::dir_validate::validate_grep_path_at(requested_path, &base, &self.cwd_now())
-                .map_err(|e| ToolError::InvalidInput(e.0))?;
-        }
-        let canon_base = match canonicalize_and_validate(&base, &trusted) {
+        // Default-mode reader permission still requires trusted-root
+        // containment. Gate native path/sibling diagnostics on that authority,
+        // retaining missing tails only after their ancestor is authorized.
+        let canon_base = match crate::dir_validate::authorize_search_path(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
                 return Err(ToolError::PathBlocked { path: base });
             }
         };
+        if let Some(requested_path) = requested_path {
+            crate::dir_validate::validate_grep_path_at(
+                requested_path,
+                &canon_base,
+                &self.cwd_now(),
+                &trusted,
+            )
+            .map_err(|e| ToolError::InvalidInput(e.0))?;
+        }
 
         // Relativize against the (canonicalized) LIVE cwd — mirrors TS
         // `toRelativePath(_, getCwd())`. The walk yields canonicalized paths, so
@@ -2021,6 +2021,90 @@ impl Tool for GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_explicit_search_path_is_rejected_in_validation_and_call() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), "needle").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        for json in [
+            r#"{"pattern":"needle","path":"\ud800"}"#,
+            r#"{"pattern":"needle","path":"\udc00"}"#,
+        ] {
+            let input = Utf16JsonProjection::parse(json).unwrap();
+            let validation = tool.validate_input(&input, &fresh_ctx()).await.unwrap_err();
+            assert_eq!(
+                validation.0.string_at(""),
+                Some("path contains invalid UTF-16")
+            );
+            let error = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(_)));
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                Some("path contains invalid UTF-16")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untrusted_search_paths_do_not_reveal_native_metadata_diagnostics() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("file.txt");
+        std::fs::write(&file, "needle outside").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        for path in [
+            outside.path().to_path_buf(),
+            file,
+            outside.path().join("missing/nested"),
+        ] {
+            let error = tool
+                .call(
+                    crate::generated_result(&json!({"pattern":"needle", "path":path})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ToolError::PathBlocked { .. }), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn authorized_missing_search_paths_keep_native_diagnostics_and_suggestions() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(cwd.join("nope")).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx).with_live_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())));
+        for path in ["missing/nested", "../nope"] {
+            let error = tool
+                .call(
+                    crate::generated_result(&json!({"pattern":"needle", "path":path})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(_)), "{error}");
+            let mut expected = format!(
+                "Path does not exist: {path}. Note: your current working directory is {}.",
+                std::fs::canonicalize(&cwd).unwrap().display()
+            );
+            if path == "../nope" {
+                expected.push_str(&format!(
+                    " Did you mean {}?",
+                    std::fs::canonicalize(cwd.join("nope")).unwrap().display()
+                ));
+            }
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                Some(expected.as_str())
+            );
+        }
+    }
 
     fn optimizer_walk_args(
         path: &Path,

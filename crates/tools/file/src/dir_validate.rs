@@ -54,6 +54,49 @@
 
 use std::path::{Path, PathBuf};
 use tool_api::tool_trait::ValidationError;
+use tool_api::util::path_validation::PathValidationError;
+
+/// Authorize a search root before its existence/type diagnostics run. Keep a
+/// missing tail beneath the nearest existing ancestor so authorized nested
+/// missing paths retain the native error instead of becoming PathBlocked.
+/// Stop at symlinks even when they dangle: skipping an unresolved symlink
+/// could mistake a missing outside target for a path inside a trusted root.
+pub(crate) fn authorize_search_path(
+    path: &Path,
+    trusted_dirs: &[PathBuf],
+) -> Result<PathBuf, PathValidationError> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor
+                    .file_name()
+                    .ok_or_else(|| PathValidationError::Io(error.to_string()))?;
+                missing.push(name.to_owned());
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| PathValidationError::Io(error.to_string()))?;
+            }
+            Err(error) => return Err(PathValidationError::Io(error.to_string())),
+        }
+    }
+    let mut approved = std::fs::canonicalize(ancestor)
+        .map_err(|error| PathValidationError::Io(error.to_string()))?;
+    for component in missing.into_iter().rev() {
+        approved.push(component);
+    }
+    if trusted_dirs
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| approved.starts_with(root))
+    {
+        Ok(approved)
+    } else {
+        Err(PathValidationError::Outside { path: approved })
+    }
+}
 
 /// claude-code `U_e` — the sentence between the missing path and the cwd in
 /// both tools' ENOENT message.
@@ -97,7 +140,8 @@ pub(crate) fn validate_no_null_bytes(
 /// directory, or fails `stat` for a non-ENOENT reason.
 #[cfg(test)]
 pub(crate) fn validate_glob_directory(path: &str, cwd: &Path) -> Result<(), ValidationError> {
-    validate_glob_directory_at(path, Path::new(path), cwd)
+    let root = cwd.ancestors().last().unwrap_or(cwd).to_path_buf();
+    validate_glob_directory_at(path, Path::new(path), cwd, &[root])
 }
 
 /// Probe the normalized/translated path while preserving the caller's spelling
@@ -106,6 +150,7 @@ pub(crate) fn validate_glob_directory_at(
     path: &str,
     probe_path: &Path,
     cwd: &Path,
+    trusted_dirs: &[PathBuf],
 ) -> Result<(), ValidationError> {
     let (cwd, resolved) = match resolve_for_validation(&probe_path.to_string_lossy(), cwd) {
         Some(pair) => pair,
@@ -124,7 +169,14 @@ pub(crate) fn validate_glob_directory_at(
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
-            enoent_message("Directory does not exist", path, &resolved, &cwd).into(),
+            enoent_message(
+                "Directory does not exist",
+                path,
+                &resolved,
+                &cwd,
+                trusted_dirs,
+            )
+            .into(),
         )),
         // claude-code `throw o`; here we defer to the tool's own path guard.
         Err(_) => Ok(()),
@@ -136,7 +188,8 @@ pub(crate) fn validate_glob_directory_at(
 /// `Path does not exist: …` (not Glob's `Directory does not exist: …`).
 #[cfg(test)]
 pub(crate) fn validate_grep_path(path: &str, cwd: &Path) -> Result<(), ValidationError> {
-    validate_grep_path_at(path, Path::new(path), cwd)
+    let root = cwd.ancestors().last().unwrap_or(cwd).to_path_buf();
+    validate_grep_path_at(path, Path::new(path), cwd, &[root])
 }
 
 /// Grep's normalized probe has the same raw-display contract as Glob (`Kar`).
@@ -144,6 +197,7 @@ pub(crate) fn validate_grep_path_at(
     path: &str,
     probe_path: &Path,
     cwd: &Path,
+    trusted_dirs: &[PathBuf],
 ) -> Result<(), ValidationError> {
     let (cwd, resolved) = match resolve_for_validation(&probe_path.to_string_lossy(), cwd) {
         Some(pair) => pair,
@@ -154,7 +208,7 @@ pub(crate) fn validate_grep_path_at(
         // searched directly.
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
-            enoent_message("Path does not exist", path, &resolved, &cwd).into(),
+            enoent_message("Path does not exist", path, &resolved, &cwd, trusted_dirs).into(),
         )),
         Err(_) => Ok(()),
     }
@@ -193,9 +247,15 @@ fn resolve_for_validation(path: &str, cwd: &Path) -> Option<(PathBuf, PathBuf)> 
 /// between the two tools (`Directory does not exist` vs `Path does not exist`).
 /// Note the message uses the RAW input `path`, not the resolved one
 /// (claude-code `${t}`), and the cwd from `er()`.
-fn enoent_message(lead: &str, path: &str, resolved: &Path, cwd: &Path) -> String {
+fn enoent_message(
+    lead: &str,
+    path: &str,
+    resolved: &Path,
+    cwd: &Path,
+    trusted_dirs: &[PathBuf],
+) -> String {
     let mut message = format!("{lead}: {path}. {CWD_NOTE_PREFIX} {}.", cwd.display());
-    if let Some(suggestion) = suggest_sibling_dir(resolved, cwd) {
+    if let Some(suggestion) = suggest_sibling_dir(resolved, cwd, trusted_dirs) {
         message.push_str(&format!(" Did you mean {}?", suggestion.display()));
     }
     message
@@ -217,7 +277,7 @@ fn enoent_message(lead: &str, path: &str, resolved: &Path, cwd: &Path) -> String
 /// }
 /// ```
 /// (the win32 `toLowerCase` case-fold is dropped — posix.)
-fn suggest_sibling_dir(resolved: &Path, cwd: &Path) -> Option<PathBuf> {
+fn suggest_sibling_dir(resolved: &Path, cwd: &Path, trusted_dirs: &[PathBuf]) -> Option<PathBuf> {
     // `n = dirname(t)` — the cwd's parent. No parent (cwd is root) ⇒ no suggestion.
     let cwd_parent = cwd.parent()?;
     // `r = join(realpath(dirname(e)), basename(e))`, falling back to `e` when the
@@ -238,6 +298,9 @@ fn suggest_sibling_dir(resolved: &Path, cwd: &Path) -> Option<PathBuf> {
     // `l = relative(parent, r); c = join(cwd, l)`.
     let l = r.strip_prefix(cwd_parent).ok()?;
     let candidate = cwd.join(l);
+    // A suggestion may itself traverse a symlink. Apply the same authority
+    // boundary before statting it, even when the original missing path passed.
+    authorize_search_path(&candidate, trusted_dirs).ok()?;
     std::fs::metadata(&candidate).ok().map(|_| candidate)
 }
 
@@ -247,17 +310,77 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn missing_search_tail_is_authorized_through_its_existing_ancestor() {
+        let tmp = TempDir::new().unwrap();
+        let trusted = [tmp.path().to_path_buf()];
+        let missing = tmp.path().join("one/two/three");
+        assert_eq!(
+            authorize_search_path(&missing, &trusted).unwrap(),
+            std::fs::canonicalize(tmp.path())
+                .unwrap()
+                .join("one/two/three")
+        );
+        let outside = TempDir::new().unwrap();
+        for path in [outside.path().to_path_buf(), outside.path().join("one/two")] {
+            assert!(matches!(
+                authorize_search_path(&path, &trusted),
+                Err(PathValidationError::Outside { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_search_tail_does_not_skip_an_outside_or_dangling_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let trusted = [tmp.path().to_path_buf()];
+        let link = tmp.path().join("outside-link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        for path in [link.clone(), link.join("one/two")] {
+            assert!(matches!(
+                authorize_search_path(&path, &trusted),
+                Err(PathValidationError::Outside { .. })
+            ));
+        }
+        let dangling = tmp.path().join("dangling");
+        std::os::unix::fs::symlink(outside.path().join("absent"), &dangling).unwrap();
+        assert!(authorize_search_path(&dangling.join("tail"), &trusted).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_path_diagnostic_does_not_stat_an_outside_suggestion() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let trusted = [tmp.path().to_path_buf()];
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        std::os::unix::fs::symlink(outside.path(), cwd.join("nope")).unwrap();
+        let missing = tmp.path().join("nope");
+        let approved = authorize_search_path(&missing, &trusted).unwrap();
+        for result in [
+            validate_glob_directory_at("../nope", &approved, &cwd, &trusted),
+            validate_grep_path_at("../nope", &approved, &cwd, &trusted),
+        ] {
+            let error = result.unwrap_err();
+            assert!(!error.0.string_at("").unwrap().contains("Did you mean"));
+        }
+    }
+
+    #[test]
     fn normalized_probe_keeps_the_raw_error_spelling() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("missing");
+        let trusted = [tmp.path().to_path_buf()];
         for (lead, result) in [
             (
                 "Directory does not exist",
-                validate_glob_directory_at("  missing  ", &missing, tmp.path()),
+                validate_glob_directory_at("  missing  ", &missing, tmp.path(), &trusted),
             ),
             (
                 "Path does not exist",
-                validate_grep_path_at("  missing  ", &missing, tmp.path()),
+                validate_grep_path_at("  missing  ", &missing, tmp.path(), &trusted),
             ),
         ] {
             let expected = format!(
@@ -267,8 +390,8 @@ mod tests {
             assert_eq!(result.unwrap_err().0.string_at(""), Some(expected.as_str()));
         }
         std::fs::create_dir(&missing).unwrap();
-        assert!(validate_glob_directory_at("  missing  ", &missing, tmp.path()).is_ok());
-        assert!(validate_grep_path_at("  missing  ", &missing, tmp.path()).is_ok());
+        assert!(validate_glob_directory_at("  missing  ", &missing, tmp.path(), &trusted).is_ok());
+        assert!(validate_grep_path_at("  missing  ", &missing, tmp.path(), &trusted).is_ok());
     }
 
     #[test]

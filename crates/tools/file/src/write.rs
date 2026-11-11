@@ -66,20 +66,135 @@ pub struct FileWriteTool {
     ctx: BuiltinToolContext,
 }
 
-fn write_rooted_snapshot(
+fn open_write_rooted_file(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<
-    lingxi_core::host::rooted_fs::RootedFileSnapshot,
-    lingxi_core::host::rooted_fs::RootedFsError,
-> {
+) -> Result<std::fs::File, lingxi_core::host::rooted_fs::RootedFsError> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
         return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
             lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+}
+
+/// Read only the length admitted from the opened descriptor. A growing file
+/// cannot keep a preparation worker allocating indefinitely; the checked write
+/// still compares the complete snapshot before changing the file.
+fn read_write_snapshot(
+    mut file: std::fs::File,
+    metadata: std::fs::Metadata,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<
+    lingxi_core::host::rooted_fs::RootedFileSnapshot,
+    lingxi_core::host::rooted_fs::RootedFsError,
+> {
+    use lingxi_core::host::rooted_fs::{RootedFileSnapshot, RootedFsError};
+
+    let size = metadata.len();
+    let bytes = read_write_snapshot_bytes(&mut file, size, cancel)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| RootedFsError::Fs(lingxi_core::host::FsError::Io(error.to_string())))?;
+    if metadata.len() != size {
+        return Err(RootedFsError::ContentChanged);
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        Some(metadata.mode())
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    Ok(RootedFileSnapshot {
+        bytes,
+        size,
+        modified: metadata.modified().ok(),
+        mode,
+    })
+}
+
+fn read_write_snapshot_bytes(
+    file: &mut impl std::io::Read,
+    size: u64,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Vec<u8>, lingxi_core::host::rooted_fs::RootedFsError> {
+    use lingxi_core::host::rooted_fs::RootedFsError;
+
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Err(RootedFsError::Cancelled);
+        }
+        let remaining = size
+            .saturating_add(1)
+            .saturating_sub(bytes.len() as u64)
+            .min(chunk.len() as u64) as usize;
+        if remaining == 0 {
+            return Err(RootedFsError::ContentChanged);
+        }
+        let length = match file.read(&mut chunk[..remaining]) {
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(RootedFsError::Fs(lingxi_core::host::FsError::Io(
+                    error.to_string(),
+                )));
+            }
+        };
+        if length == 0 {
+            break;
+        }
+        bytes.try_reserve(length).map_err(|error| {
+            RootedFsError::Fs(lingxi_core::host::FsError::Io(error.to_string()))
+        })?;
+        bytes.extend_from_slice(&chunk[..length]);
+        if bytes.len() as u64 > size {
+            return Err(RootedFsError::ContentChanged);
+        }
+    }
+    if bytes.len() as u64 != size {
+        return Err(RootedFsError::ContentChanged);
+    }
+    Ok(bytes)
+}
+
+#[derive(Debug)]
+enum WriteSnapshotError {
+    StartOnly(tool_api::read_file_state::StartOnlyWriteBlock),
+    PartialRead,
+    MissingRead,
+    Read(lingxi_core::host::rooted_fs::RootedFsError),
+}
+
+/// Read admission depends only on metadata and model context. Keep it in front
+/// of the only existing-file body reader, including for private memory forks.
+fn admitted_write_snapshot(
+    file: Option<(std::fs::File, std::fs::Metadata)>,
+    state: &tool_api::read_file_state::ReadFileStateWriteContext,
+    requested: &Path,
+    approved: &Path,
+    waived: bool,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Option<lingxi_core::host::rooted_fs::RootedFileSnapshot>, WriteSnapshotError> {
+    if let Some(blocked) = state.start_only_write_guard(requested, approved) {
+        return Err(WriteSnapshotError::StartOnly(blocked));
+    }
+    let Some((file, metadata)) = file else {
+        return Ok(None);
+    };
+    let entry = tool_api::read_file_state::get_metadata(&state.map(), requested);
+    if entry.is_some_and(|entry| entry.is_partial_view) {
+        return Err(WriteSnapshotError::PartialRead);
+    }
+    if entry.is_none() && !waived {
+        return Err(WriteSnapshotError::MissingRead);
+    }
+    read_write_snapshot(file, metadata, cancel)
+        .map(Some)
+        .map_err(WriteSnapshotError::Read)
 }
 
 /// Resolve a write target without materializing any missing parent through its
@@ -434,37 +549,37 @@ impl Tool for FileWriteTool {
             }
         };
 
-        // Determine create-vs-update BEFORE the write. claude-code keys the
-        // result `type` on `if (oldContent)` (`FileWriteTool.ts:359`), a JS
-        // truthiness check on the pre-write file contents: a missing file OR an
-        // existing-but-empty file is `create`; only a pre-existing file with
-        // non-empty content is `update`. We mirror that: read the prior bytes
-        // non-fatally (a read error is treated as "no prior content" so it
-        // falls through to `create`, matching the ENOENT→null path).
-        //
-        // `file_exists` separately tracks whether the file is physically
-        // present on disk: the read-before-write staleness guard (Batch F) keys
-        // on physical existence (TS `meta !== null`, `FileWriteTool.ts:279`),
-        // NOT on the create-vs-update truthiness — an existing-but-empty file
-        // still requires a prior Read.
+        // Admit an opened regular file before reading its body. Existing empty
+        // files still require a Read, although native Write reports their
+        // successful replacement as `create` (`if (oldContent)`). Keep this
+        // descriptor for the snapshot so admission and its length bound refer
+        // to the same file object.
         let snapshot_path = path.clone();
         let snapshot_canon = canon.clone();
         let snapshot_roots = trusted_dirs.clone();
         let snapshot_scope = memory_mutation.clone();
-        let snapshot = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
-            if let Some(scope) = &snapshot_scope {
-                scope.read_file()
+        let opened = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            let file = if let Some(scope) = &snapshot_scope {
+                scope.open_file()
             } else {
-                write_rooted_snapshot(&snapshot_path, &snapshot_canon, &snapshot_roots)
-            }
+                open_write_rooted_file(&snapshot_path, &snapshot_canon, &snapshot_roots)
+            }?;
+            let metadata = file.metadata().map_err(|error| {
+                lingxi_core::host::rooted_fs::RootedFsError::Fs(lingxi_core::host::FsError::Io(
+                    error.to_string(),
+                ))
+            })?;
+            Ok((file, metadata))
         })
         .await?;
-        let prior_snapshot = match snapshot {
-            Ok(snapshot) => Some(snapshot),
+        let prior_file = match opened {
+            Ok(file) => Some(file),
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
                 lingxi_core::host::FsError::NotFound(_),
             )) => None,
-            Err(error @ lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink)
+            Err(error @ lingxi_core::host::rooted_fs::RootedFsError::ContentChanged)
+            | Err(error @ lingxi_core::host::rooted_fs::RootedFsError::Cancelled)
+            | Err(error @ lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink)
             | Err(
                 error @ lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
             )
@@ -486,6 +601,42 @@ impl Tool for FileWriteTool {
             // treat as "no prior content" and let the write operation report
             // its own error, matching the pre-hardening behavior.
             Err(_) => None,
+        };
+
+        let snapshot_state =
+            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
+        let snapshot_requested = requested_path.clone();
+        let snapshot_canon = canon.clone();
+        let snapshot_cancel = ctx.cancel.clone();
+        let waived = crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon);
+        let prior_snapshot = match crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            admitted_write_snapshot(
+                prior_file,
+                &snapshot_state,
+                &snapshot_requested,
+                &snapshot_canon,
+                waived,
+                snapshot_cancel.as_ref(),
+            )
+        })
+        .await?
+        {
+            Ok(snapshot) => snapshot,
+            Err(WriteSnapshotError::StartOnly(blocked)) => {
+                return Err(ToolError::InvalidInput(blocked.message().into()));
+            }
+            Err(WriteSnapshotError::PartialRead) => {
+                self.emit_failed(&invocation_id, "partial_read").await;
+                return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
+            }
+            Err(WriteSnapshotError::MissingRead) => {
+                self.emit_failed(&invocation_id, "stale_read").await;
+                return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
+            }
+            Err(WriteSnapshotError::Read(error)) => {
+                self.emit_failed(&invocation_id, "io_read").await;
+                return Err(write_resolution_error(file_path, error));
+            }
         };
         let prior_mtime_ms = prior_snapshot
             .as_ref()
@@ -520,18 +671,6 @@ impl Tool for FileWriteTool {
                 ),
             })
             .await?;
-
-        let fence_state =
-            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
-        let fence_requested = requested_path.clone();
-        let fence_canon = canon.clone();
-        if let Some(blocked) = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
-            fence_state.start_only_write_guard(&fence_requested, &fence_canon)
-        })
-        .await?
-        {
-            return Err(ToolError::InvalidInput(blocked.message().into()));
-        }
 
         // Read-before-write staleness guard (Batch F): only for an EXISTING
         // file. New-file creation skips it (TS `meta === null` skips the
@@ -569,11 +708,50 @@ impl Tool for FileWriteTool {
                 kind.mutation_refusal_message().into(),
             ));
         }
-        let content_units = crate::file_meta::preserve_bom_units(
-            prior_decoded.as_deref().unwrap_or(&[]),
-            &requested_content,
-        )
-        .into_owned();
+        // Exact line diffing can be quadratic for a small shuffled file. Run
+        // it on a bounded preparation worker, before the backup/commit, so
+        // cancellation or a failed preparation cannot follow a disk mutation.
+        let (
+            prior_decoded,
+            content_units,
+            bytes,
+            published_units,
+            structured_patch,
+            lines_added,
+            lines_removed,
+        ) = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            let content_units = crate::file_meta::preserve_bom_units(
+                prior_decoded.as_deref().unwrap_or(&[]),
+                &requested_content,
+            )
+            .into_owned();
+            let (structured_patch, lines_added, lines_removed) = if is_create {
+                (crate::generated_result(&json!([])), 0, 0)
+            } else {
+                crate::utf16_mutation::patch(
+                    prior_decoded.as_deref().unwrap_or(&[]),
+                    &content_units,
+                )
+            };
+            let bytes = crate::file_meta::encode_units_with_metadata(
+                &content_units,
+                encoding,
+                crate::file_meta::LineEnding::Lf,
+            );
+            let published_units = crate::file_meta::normalize_to_lf_units(
+                crate::utf16_mutation::without_bom(&content_units),
+            );
+            (
+                prior_decoded,
+                content_units,
+                bytes,
+                published_units,
+                structured_patch,
+                lines_added,
+                lines_removed,
+            )
+        })
+        .await?;
         let content_display = String::from_utf16_lossy(&content_units);
         let content = content_display.as_str();
 
@@ -583,11 +761,6 @@ impl Tool for FileWriteTool {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
-        let bytes = crate::file_meta::encode_units_with_metadata(
-            &content_units,
-            encoding,
-            crate::file_meta::LineEnding::Lf,
-        );
         let bytes_written = bytes.len() as u64;
         let commit_path = path.clone();
         let commit_canon = canon.clone();
@@ -596,9 +769,6 @@ impl Tool for FileWriteTool {
         let commit_scope = memory_mutation.clone();
         let state =
             tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
-        let published_units = crate::file_meta::normalize_to_lf_units(
-            crate::utf16_mutation::without_bom(&content_units),
-        );
         let history = ctx.file_history.clone();
         let result = crate::mutation_io::commit(ctx.cancel.as_ref(), move || {
             if let Some(blocked) = state.start_only_write_guard(&commit_requested, &commit_canon) {
@@ -655,11 +825,6 @@ impl Tool for FileWriteTool {
             }
         };
 
-        let (structured_patch, lines_added, lines_removed) = if is_create {
-            (crate::generated_result(&json!([])), 0, 0)
-        } else {
-            crate::utf16_mutation::patch(prior_decoded.as_deref().unwrap_or(&[]), &content_units)
-        };
         if lines_added > 0 || lines_removed > 0 {
             // The oracle records the MODEL that made the change, not the tool.
             otel::record_lines_of_code_change(
@@ -752,6 +917,138 @@ impl Tool for FileWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_admission_rejects_unread_partial_and_start_only_before_reading_body() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("admission.txt");
+        std::fs::write(&target, "unseen content").unwrap();
+        for reason in ["missing", "partial", "start_only", "waived"] {
+            let (ctx, _) = make_ctx(&tmp);
+            let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+            if reason == "partial" {
+                seed_full_read(&ctx, &target);
+                let mut entry =
+                    tool_api::read_file_state::get(&ctx.read_file_state, &route).unwrap();
+                entry.is_partial_view = true;
+                tool_api::read_file_state::set(&ctx.read_file_state, route.clone(), entry);
+            } else if reason == "start_only" {
+                tool_api::read_file_state::mark_start_only(&ctx.read_file_state, route.clone());
+            }
+            // Metadata is available, but this descriptor cannot read bytes.
+            // Any attempt to load the body therefore produces Read(..), making
+            // the admission-before-I/O assertion independent of file size/time.
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .unwrap();
+            let metadata = file.metadata().unwrap();
+            let state =
+                tool_api::read_file_state::capture_read_file_state_write(&ctx.read_file_state);
+            let result = admitted_write_snapshot(
+                Some((file, metadata)),
+                &state,
+                &route,
+                &target,
+                reason != "missing",
+                None,
+            );
+            assert!(
+                match (reason, result) {
+                    ("missing", Err(WriteSnapshotError::MissingRead))
+                    | ("partial", Err(WriteSnapshotError::PartialRead))
+                    | ("start_only", Err(WriteSnapshotError::StartOnly(_)))
+                    | ("waived", Err(WriteSnapshotError::Read(_))) => true,
+                    _ => false,
+                },
+                "unexpected admission for {reason}"
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "unseen content");
+        }
+    }
+
+    #[test]
+    fn write_snapshot_rejects_growth_shrink_and_cancellation() {
+        use lingxi_core::host::rooted_fs::RootedFsError;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("changing.txt");
+        for replacement in [b"growing file".as_slice(), b"".as_slice()] {
+            std::fs::write(&target, "old").unwrap();
+            let file = std::fs::File::open(&target).unwrap();
+            let metadata = file.metadata().unwrap();
+            std::fs::write(&target, replacement).unwrap();
+            assert!(matches!(
+                read_write_snapshot(file, metadata, None),
+                Err(RootedFsError::ContentChanged)
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), replacement);
+        }
+        let file = std::fs::File::open(&target).unwrap();
+        let metadata = file.metadata().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            read_write_snapshot(file, metadata, Some(&cancel)),
+            Err(RootedFsError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn write_snapshot_checks_cancellation_between_bounded_chunks() {
+        struct CancellingReader {
+            cancel: tokio_util::sync::CancellationToken,
+            reads: usize,
+            bytes: usize,
+        }
+        impl std::io::Read for CancellingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                self.bytes += bytes.len();
+                bytes.fill(b'a');
+                self.cancel.cancel();
+                Ok(bytes.len())
+            }
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut reader = CancellingReader {
+            cancel: cancel.clone(),
+            reads: 0,
+            bytes: 0,
+        };
+        assert!(matches!(
+            read_write_snapshot_bytes(&mut reader, 1024 * 1024, Some(&cancel)),
+            Err(lingxi_core::host::rooted_fs::RootedFsError::Cancelled)
+        ));
+        assert_eq!(reader.reads, 1);
+        assert_eq!(reader.bytes, 64 * 1024);
+
+        // Even a reader that never reaches EOF is stopped at the descriptor's
+        // admitted length plus one growth sentinel.
+        let mut growing = std::io::repeat(b'a');
+        assert!(matches!(
+            read_write_snapshot_bytes(&mut growing, 3, None),
+            Err(lingxi_core::host::rooted_fs::RootedFsError::ContentChanged)
+        ));
+    }
+
+    #[test]
+    fn admitted_write_snapshot_retains_eligible_large_files() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("large.txt");
+        let contents = vec![b'a'; 1024 * 1024 + 17];
+        std::fs::write(&target, &contents).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        let file = std::fs::File::open(&target).unwrap();
+        let metadata = file.metadata().unwrap();
+        let state = tool_api::read_file_state::capture_read_file_state_write(&ctx.read_file_state);
+        let snapshot =
+            admitted_write_snapshot(Some((file, metadata)), &state, &route, &target, true, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(snapshot.bytes, contents);
+        assert_eq!(snapshot.size, contents.len() as u64);
+    }
 
     fn native_322_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(

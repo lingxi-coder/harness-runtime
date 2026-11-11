@@ -100,6 +100,62 @@ pub(crate) fn input_string<'a>(input: &'a Utf16JsonProjection, field: &str) -> O
     value.as_str()
 }
 
+/// Keep an omitted optional path distinct from a present string that cannot
+/// cross the filesystem's UTF-8 boundary. An invalid path must never select a
+/// caller's default search directory.
+pub(crate) fn input_optional_path<'a>(
+    input: &'a Utf16JsonProjection,
+    field: &str,
+) -> Result<Option<&'a str>, tool_api::tool_trait::ToolError> {
+    let Some(value) = input.get_property(field) else {
+        return Ok(None);
+    };
+    if value.code_units().is_none() {
+        return Err(tool_api::tool_trait::ToolError::InvalidInput(
+            format!("{field} must be a string").into(),
+        ));
+    }
+    input_string(input, field).map(Some).ok_or_else(|| {
+        tool_api::tool_trait::ToolError::InvalidInput(
+            format!("{field} contains invalid UTF-16").into(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod optional_path_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_omitted_path_selects_the_optional_fallback() {
+        assert_eq!(
+            input_optional_path(&Utf16JsonProjection::parse("{}").unwrap(), "path").unwrap(),
+            None
+        );
+        for (json, expected) in [
+            (r#"{"path":""}"#, ""),
+            (r#"{"path":"folder/file.txt"}"#, "folder/file.txt"),
+            (r#"{"path":"\ud83d\ude00"}"#, "😀"),
+        ] {
+            let input = Utf16JsonProjection::parse(json).unwrap();
+            assert_eq!(input_optional_path(&input, "path").unwrap(), Some(expected));
+        }
+        for json in [
+            r#"{"path":"\ud800"}"#,
+            r#"{"path":"\udc00"}"#,
+            r#"{"path":null}"#,
+            r#"{"path":false}"#,
+            r#"{"path":3}"#,
+        ] {
+            let input = Utf16JsonProjection::parse(json).unwrap();
+            assert!(matches!(
+                input_optional_path(&input, "path"),
+                Err(tool_api::tool_trait::ToolError::InvalidInput(_))
+            ));
+        }
+    }
+}
+
 pub(crate) fn input_bool(input: &Utf16JsonProjection, field: &str) -> Option<bool> {
     input.get_property(field)?.as_bool()
 }

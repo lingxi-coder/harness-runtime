@@ -18,6 +18,44 @@
 
 use crate::tool_trait::{source_text_projection, source_text_projection_units};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::{ContentBlock, ConversationMessage, DocumentSource};
+
+/// Inline Read PDFs already returned as user attachments have one wire owner.
+/// Keep that attachment (and its history row), rather than mapping the same PDF
+/// into the ToolResult too. Other injected media, including extracted pages,
+/// does not suppress the tool's ordinary media projection.
+#[must_use]
+pub fn inline_read_pdf_is_injected(
+    name: &str,
+    data: &Utf16JsonProjection,
+    new_messages: &[ConversationMessage],
+) -> bool {
+    if name != "Read" || data.string_at("/type") != Some("pdf") {
+        return false;
+    }
+    let Some(base64) = data
+        .at_pointer("/file/base64")
+        .and_then(JsonValueView::code_units)
+        .filter(|units| !units.is_empty())
+    else {
+        return false;
+    };
+    new_messages.iter().any(|message| {
+        matches!(message,
+            ConversationMessage::User {
+                content,
+                api_message_override: None,
+                is_visible_in_transcript_only: false,
+                ..
+            } if content.iter().any(|block| matches!(block,
+                ContentBlock::Document {
+                    source: DocumentSource::Base64 { media_type, data }
+                } if media_type == "application/pdf"
+                    && data.encode_utf16().eq(base64.iter().copied())
+            ))
+        )
+    })
+}
 
 /// Tool-aware media projection shared by the main and child loops.
 #[must_use]
@@ -420,6 +458,55 @@ mod tests {
 
     fn source_json_fixture(value: serde_json::Value) -> Utf16JsonProjection {
         generated_builtin_result(&value)
+    }
+
+    #[test]
+    fn injected_inline_pdf_requires_matching_provider_visible_document() {
+        let data = source_json_fixture(json!({
+            "type":"pdf", "file":{"base64":"JVBERi0xLjQK"}
+        }));
+        let message = ConversationMessage::user_with_documents(
+            lingxi_core::types::MessageId::new(),
+            String::new(),
+            vec![DocumentSource::Base64 {
+                media_type: "application/pdf".into(),
+                data: "JVBERi0xLjQK".into(),
+            }],
+        );
+        assert!(inline_read_pdf_is_injected(
+            "Read",
+            &data,
+            std::slice::from_ref(&message)
+        ));
+        assert!(!inline_read_pdf_is_injected("Read", &data, &[]));
+        assert!(!inline_read_pdf_is_injected(
+            "Other",
+            &data,
+            std::slice::from_ref(&message)
+        ));
+        let different = source_json_fixture(json!({
+            "type":"pdf", "file":{"base64":"b3RoZXI="}
+        }));
+        assert!(!inline_read_pdf_is_injected(
+            "Read",
+            &different,
+            std::slice::from_ref(&message)
+        ));
+        let pages = source_json_fixture(json!({"type":"parts", "file":{"count":1}}));
+        assert!(!inline_read_pdf_is_injected(
+            "Read",
+            &pages,
+            std::slice::from_ref(&message)
+        ));
+        let mut hidden = message.clone();
+        if let ConversationMessage::User {
+            is_visible_in_transcript_only,
+            ..
+        } = &mut hidden
+        {
+            *is_visible_in_transcript_only = true;
+        }
+        assert!(!inline_read_pdf_is_injected("Read", &data, &[hidden]));
     }
 
     #[test]

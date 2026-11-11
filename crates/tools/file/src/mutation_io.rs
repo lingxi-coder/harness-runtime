@@ -20,31 +20,35 @@ pub(crate) fn check_cancel(cancel: Option<&CancellationToken>) -> Result<(), Too
     }
 }
 
-async fn permit(
-    cancel: &CancellationToken,
-) -> Result<tokio::sync::OwnedSemaphorePermit, ToolError> {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(ToolError::Aborted),
-        permit = JOBS.clone().acquire_owned() => permit.map_err(|_| ToolError::Aborted),
-    }
-}
-
 /// Read-only preparation may finish off-thread after its waiter is dropped.
 /// It never mutates files or publishes tool state.
 pub(crate) async fn prepare<T: Send + 'static>(
     cancel: Option<&CancellationToken>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ToolError> {
+    prepare_with_semaphore(cancel, work, JOBS.clone()).await
+}
+
+async fn prepare_with_semaphore<T: Send + 'static>(
+    cancel: Option<&CancellationToken>,
+    work: impl FnOnce() -> T + Send + 'static,
+    jobs: Arc<Semaphore>,
+) -> Result<T, ToolError> {
     let cancel = cancel.cloned().unwrap_or_default();
-    let permit = permit(&cancel).await?;
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ToolError::Aborted),
+        permit = jobs.acquire_owned() => permit.map_err(|_| ToolError::Aborted)?,
+    };
     let worker_cancel = cancel.clone();
     let lease = lingxi_core::host::memory_tool_scope::current_memory_settlement()
         .map(|owner| owner.enter());
     let task = tokio::task::spawn_blocking(move || {
         let (_permit, _lease) = (permit, lease);
         check_cancel(Some(&worker_cancel))?;
-        Ok(work())
+        let value = work();
+        check_cancel(Some(&worker_cancel))?;
+        Ok(value)
     });
     tokio::select! {
         biased;
@@ -156,6 +160,94 @@ fn join_error(error: tokio::task::JoinError) -> ToolError {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exact_patch_preparation_keeps_localset_responsive() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let heartbeat = Arc::new(AtomicBool::new(false));
+                let observed = heartbeat.clone();
+                let tick = tokio::task::spawn_local(async move {
+                    started_rx.await.unwrap();
+                    heartbeat.store(true, Ordering::Release);
+                });
+                let (patch, added, removed) = prepare(None, move || {
+                    started_tx.send(()).unwrap();
+                    // The current-thread executor must be able to run the
+                    // heartbeat while the preparation worker owns the input.
+                    while !observed.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    crate::utf16_mutation::patch(&[0xd800, 10], &[0xd801, 10])
+                })
+                .await
+                .unwrap();
+                tick.await.unwrap();
+                assert_eq!((added, removed), (1, 1));
+                assert_eq!(patch.string_units("/0/lines/0").unwrap(), [45, 0xd800]);
+                assert_eq!(patch.string_units("/0/lines/1").unwrap(), [43, 0xd801]);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_preparation_prevents_commit_and_retains_worker_bound() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("owned.txt");
+        std::fs::write(&target, b"ORIGINAL").unwrap();
+        let cancel = CancellationToken::new();
+        let jobs = Arc::new(Semaphore::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let commit_target = target.clone();
+        let first_jobs = jobs.clone();
+        let mut transaction = Box::pin(async {
+            let bytes = prepare_with_semaphore(
+                Some(&cancel),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    b"REPLACEMENT".to_vec()
+                },
+                first_jobs,
+            )
+            .await?;
+            commit(Some(&cancel), move || std::fs::write(commit_target, bytes))
+                .await?
+                .map_err(|error| ToolError::Io(error.to_string().into()))
+        });
+        tokio::select! {
+            result = &mut transaction => panic!("preparation finished before release: {result:?}"),
+            _ = started_rx => {},
+        }
+        cancel.cancel();
+        assert!(matches!(transaction.await, Err(ToolError::Aborted)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"ORIGINAL");
+
+        // The cancelled waiter's worker still owns its slot. Another request
+        // cannot accumulate a second CPU job before that worker has finished.
+        let ran = Arc::new(AtomicBool::new(false));
+        let worker_ran = ran.clone();
+        let mut next = Box::pin(prepare_with_semaphore(
+            None,
+            move || worker_ran.store(true, Ordering::Release),
+            jobs,
+        ));
+        poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(!ran.load(Ordering::Acquire));
+        release_tx.send(()).unwrap();
+        next.await.unwrap();
+        assert!(ran.load(Ordering::Acquire));
+        assert_eq!(std::fs::read(&target).unwrap(), b"ORIGINAL");
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn localset_commit_keeps_runtime_responsive() {

@@ -1533,29 +1533,6 @@ pub struct FileReadTool {
     live_cwd: Option<tool_api::LiveCwdCell>,
 }
 
-fn read_rooted_snapshot(
-    requested: &std::path::Path,
-    approved: &std::path::Path,
-    trusted_dirs: &[std::path::PathBuf],
-    cancel: &CancellationToken,
-) -> Result<
-    lingxi_core::host::rooted_fs::RootedFileSnapshot,
-    lingxi_core::host::rooted_fs::RootedFsError,
-> {
-    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
-            lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
-        ));
-    };
-    lingxi_core::host::rooted_fs::read_file_after_permission_cancellable(
-        &root,
-        &relative,
-        requested,
-        approved,
-        || cancel.is_cancelled(),
-    )
-}
-
 fn open_rooted_file(
     requested: &std::path::Path,
     approved: &std::path::Path,
@@ -1574,61 +1551,161 @@ struct LoadedRead {
     stream_source: Option<std::fs::File>,
 }
 
+// Encoded images need a physical input bound as well as the codec's decoded
+// allocation limits. Keep the source ceiling aligned with notebook/PDF
+// extraction snapshots; ordinary text retains its context-derived native cap.
+#[cfg(feature = "image-read")]
+const MAX_IMAGE_SOURCE_SIZE: u64 = 100 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ReadLoadPolicy {
+    text_limit: u64,
+    ranged: bool,
+    pdf_pages: bool,
+}
+
+/// Read at most the admitted bytes plus one growth sentinel. This also bounds
+/// sources that grow after their same-descriptor metadata was sampled.
+fn read_admitted_bytes(
+    source: &mut impl Read,
+    maximum: u64,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, lingxi_core::host::rooted_fs::RootedFsError> {
+    use lingxi_core::host::{rooted_fs::RootedFsError, FsError};
+    let mut bytes = Vec::new();
+    let mut chunk = [0; STREAMING_READ_CHUNK_BYTES];
+    let ceiling = maximum.saturating_add(1);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(RootedFsError::Cancelled);
+        }
+        let remaining = ceiling.saturating_sub(bytes.len() as u64);
+        if remaining == 0 {
+            return Ok(bytes);
+        }
+        let length = remaining.min(chunk.len() as u64) as usize;
+        match source.read(&mut chunk[..length]) {
+            Ok(0) => return Ok(bytes),
+            Ok(length) => bytes.extend_from_slice(&chunk[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(RootedFsError::Fs(FsError::Io(error.to_string()))),
+        }
+    }
+}
+
 fn load_rooted_read(
     requested: &Path,
     approved: &Path,
     trusted_dirs: &[PathBuf],
-    try_stream: bool,
-    sniff_extensionless_image: bool,
+    policy: ReadLoadPolicy,
     cancel: &CancellationToken,
 ) -> Result<LoadedRead, lingxi_core::host::rooted_fs::RootedFsError> {
-    // This stat is only a hint. Size/mtime and all consumed bytes still come
-    // from the one opened, rooted no-follow descriptor below.
-    if try_stream
-        && std::fs::metadata(approved).is_ok_and(|metadata| metadata.len() > MAX_FILE_READ_SIZE)
-    {
-        if let Ok(file) = open_rooted_file(requested, approved, trusted_dirs) {
-            if let Ok(metadata) = file.metadata() {
-                let extensionless_image = {
-                    #[cfg(feature = "image-read")]
-                    {
-                        if sniff_extensionless_image {
-                            use std::io::{Seek, SeekFrom};
-                            let mut held = &file;
-                            let mut header = [0; 16];
-                            let image = held.read(&mut header).ok().is_some_and(|length| {
-                                crate::image_read::sniff_image_media_type(&header[..length])
-                                    .is_some()
-                            });
-                            let _ = held.seek(SeekFrom::Start(0));
-                            image
-                        } else {
-                            false
-                        }
-                    }
-                    #[cfg(not(feature = "image-read"))]
-                    {
-                        let _ = sniff_extensionless_image;
-                        false
-                    }
-                };
-                if metadata.len() > MAX_FILE_READ_SIZE && !extensionless_image {
-                    return Ok(LoadedRead {
-                        snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot {
-                            bytes: Vec::new(),
-                            size: metadata.len(),
-                            modified: metadata.modified().ok(),
-                            mode: None,
-                        },
-                        stream_source: Some(file),
-                    });
-                }
-            }
+    use lingxi_core::host::{rooted_fs::RootedFsError, FsError};
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = open_rooted_file(requested, approved, trusted_dirs)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| RootedFsError::Fs(FsError::Io(error.to_string())))?;
+    // The prefix is sufficient for extensionless image routing and bad-magic
+    // diagnostics. Oversized inputs never need their complete body to reject.
+    let mut prefix = [0; 16];
+    let mut prefix_length = 0;
+    while prefix_length < prefix.len() {
+        if cancel.is_cancelled() {
+            return Err(RootedFsError::Cancelled);
+        }
+        match file.read(&mut prefix[prefix_length..]) {
+            Ok(0) => break,
+            Ok(length) => prefix_length += length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(RootedFsError::Fs(FsError::Io(error.to_string()))),
         }
     }
-    read_rooted_snapshot(requested, approved, trusted_dirs, cancel).map(|snapshot| LoadedRead {
-        snapshot,
-        stream_source: None,
+    #[cfg(feature = "image-read")]
+    let image = is_image_path(requested)
+        || (requested
+            .extension()
+            .is_none_or(|extension| extension.is_empty())
+            && crate::image_read::sniff_image_media_type(&prefix[..prefix_length]).is_some());
+    #[cfg(not(feature = "image-read"))]
+    let image = false;
+    let pdf = cfg!(feature = "pdf-read") && is_pdf_path(requested);
+    let notebook = requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"));
+    let rejected_binary =
+        has_binary_extension(requested) && !is_image_path(requested) && !is_pdf_path(requested);
+    let maximum = if rejected_binary {
+        16
+    } else if notebook {
+        crate::notebook_read::MAX_NOTEBOOK_READ_SIZE
+    } else if image {
+        #[cfg(feature = "image-read")]
+        {
+            MAX_IMAGE_SOURCE_SIZE
+        }
+        #[cfg(not(feature = "image-read"))]
+        {
+            unreachable!()
+        }
+    } else if pdf {
+        #[cfg(feature = "pdf-read")]
+        {
+            if policy.pdf_pages {
+                crate::pdf_read::PDF_MAX_EXTRACT_SIZE
+            } else {
+                crate::pdf_read::PDF_TARGET_RAW_SIZE
+            }
+        }
+        #[cfg(not(feature = "pdf-read"))]
+        {
+            unreachable!()
+        }
+    } else if policy.ranged {
+        MAX_FILE_READ_SIZE
+    } else {
+        policy.text_limit
+    };
+    let _ = policy.pdf_pages;
+    let stream = policy.ranged && !image && !pdf && !notebook && !rejected_binary;
+    let mut size = metadata.len();
+    let mut bytes = prefix[..prefix_length].to_vec();
+    if size <= maximum {
+        file.rewind()
+            .map_err(|error| RootedFsError::Fs(FsError::Io(error.to_string())))?;
+        bytes = read_admitted_bytes(&mut file, maximum, cancel)?;
+        if bytes.len() as u64 > maximum {
+            size = size
+                .max(bytes.len() as u64)
+                .max(file.metadata().map_or(0, |metadata| metadata.len()));
+        }
+    }
+    let stream_source = if size > maximum && stream {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| RootedFsError::Fs(FsError::Io(error.to_string())))?;
+        bytes.clear();
+        Some(file)
+    } else {
+        if size > maximum {
+            // Later type-specific gates use the same metadata and this prefix
+            // to retain their existing error messages and precedence.
+            bytes.truncate(16);
+        }
+        None
+    };
+    Ok(LoadedRead {
+        snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot {
+            bytes,
+            size,
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            mode: Some(std::os::unix::fs::MetadataExt::mode(&metadata)),
+            #[cfg(not(unix))]
+            mode: None,
+        },
+        stream_source,
     })
 }
 
@@ -1949,6 +2026,16 @@ impl FileReadTool {
                 crate::image_read::format_image_bad_magic(canon, &bytes).into(),
             ));
         }
+        if original_size > MAX_IMAGE_SOURCE_SIZE {
+            self.emit_failed(invocation_id, "image_too_large").await;
+            return Err(ToolError::Io(
+                format!(
+                    "Image file exceeds maximum allowed source size of {}.",
+                    format_file_size(MAX_IMAGE_SOURCE_SIZE)
+                )
+                .into(),
+            ));
+        }
 
         let processed = match run_read_job(cancel, move |cancel| {
             crate::image_read::process_image_with_cancellation(bytes, || cancel.is_cancelled())
@@ -2207,6 +2294,20 @@ impl FileReadTool {
             }
         }
 
+        // Reject the physical snapshot before parsing or base64 allocation.
+        // Oversized snapshots retain only their header for the earlier magic
+        // and range diagnostics, never a partial document for delivery.
+        if original_size > crate::pdf_read::PDF_TARGET_RAW_SIZE {
+            self.emit_failed(invocation_id, "pdf_too_large").await;
+            return Err(ToolError::Io(
+                format!(
+                    "PDF file exceeds maximum allowed size of {}.",
+                    format_file_size(crate::pdf_read::PDF_TARGET_RAW_SIZE)
+                )
+                .into(),
+            ));
+        }
+
         // No `pages` ⇒ inline read. A parseable page count > 10 is too many to
         // read inline (TS: pdfinfo page-count gate; `None` skips the gate,
         // mirroring pdfinfo returning null).
@@ -2233,19 +2334,6 @@ impl FileReadTool {
                 "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu.".to_string().into(),
             ));
         }
-        // Supported model: inline up to PDF_TARGET_RAW_SIZE (20 MB), else
-        // too_large (claude-code readPDF, utils/pdf.ts:60-68).
-        if original_size > crate::pdf_read::PDF_TARGET_RAW_SIZE {
-            self.emit_failed(invocation_id, "pdf_too_large").await;
-            return Err(ToolError::Io(
-                format!(
-                    "PDF file exceeds maximum allowed size of {}.",
-                    format_file_size(crate::pdf_read::PDF_TARGET_RAW_SIZE)
-                )
-                .into(),
-            ));
-        }
-
         let data = run_read_job(cancel, move |_| {
             Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
         })
@@ -2531,13 +2619,11 @@ impl Tool for FileReadTool {
         //
         // A ranged read retains the rooted descriptor and scans off-runtime;
         // all other reads load a fresh same-handle snapshot in the worker.
-        let try_stream = input_limit.is_some()
-            && !is_image_path(Path::new(file_path))
-            && !is_pdf_path(Path::new(file_path))
-            && !is_notebook;
-        let sniff_extensionless_image = Path::new(file_path)
-            .extension()
-            .is_none_or(|ext| ext.is_empty());
+        let load_policy = ReadLoadPolicy {
+            text_limit: limits.max_size_bytes,
+            ranged: input_limit.is_some(),
+            pdf_pages: crate::input_string(&input, "pages").is_some(),
+        };
         let loaded = run_read_job(&read_cancel, {
             let path = path.clone();
             let canon = canon.clone();
@@ -2547,8 +2633,7 @@ impl Tool for FileReadTool {
                     &path,
                     &canon,
                     &trusted_dirs,
-                    try_stream,
-                    sniff_extensionless_image,
+                    load_policy,
                     cancel,
                 ))
             }
@@ -2573,10 +2658,11 @@ impl Tool for FileReadTool {
                         move |cancel| {
                             Ok(canonicalize_and_validate(&alt, &trusted_dirs).ok().map(
                                 |alt_canon| {
-                                    let snapshot = read_rooted_snapshot(
+                                    let snapshot = load_rooted_read(
                                         &alt,
                                         &alt_canon,
                                         &trusted_dirs,
+                                        load_policy,
                                         cancel,
                                     );
                                     (alt_canon, snapshot)
@@ -2587,9 +2673,10 @@ impl Tool for FileReadTool {
                     .await?;
                     if let Some((alt_canon, snapshot)) = alternate {
                         match snapshot {
-                            Ok(snapshot) => {
+                            Ok(loaded) => {
                                 canon = alt_canon;
-                                snapshot
+                                stream_source = loaded.stream_source;
+                                loaded.snapshot
                             }
                             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
                                 lingxi_core::host::FsError::NotFound(_),
@@ -3322,6 +3409,143 @@ fn escape_attachment_banner(banner: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sparse_admission_snapshot(name: &str, header: &[u8], size: u64, ranged: bool) -> LoadedRead {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(header).unwrap();
+        file.set_len(size).unwrap();
+        drop(file);
+        load_rooted_read(
+            &path,
+            &path,
+            &[root],
+            ReadLoadPolicy {
+                text_limit: MAX_FILE_READ_SIZE,
+                ranged,
+                pdf_pages: false,
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn admission_rejects_oversized_text_and_binary_without_loading_the_body() {
+        for name in ["large.txt", "large.zip"] {
+            let loaded =
+                sparse_admission_snapshot(name, b"a text header\n", 8 * 1024 * 1024, false);
+            assert_eq!(loaded.snapshot.size, 8 * 1024 * 1024);
+            assert!(loaded.snapshot.bytes.len() <= 16);
+            assert!(loaded.stream_source.is_none());
+        }
+    }
+
+    #[test]
+    fn admission_retains_large_ranged_text_as_a_rewound_descriptor() {
+        let loaded = sparse_admission_snapshot("large.txt", b"first line\n", 8 * 1024 * 1024, true);
+        assert!(loaded.snapshot.bytes.is_empty());
+        let mut file = loaded.stream_source.unwrap();
+        let mut prefix = [0; 11];
+        file.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"first line\n");
+    }
+
+    #[test]
+    fn admission_stops_growing_sources_at_the_cap_plus_one() {
+        let mut source = std::io::Cursor::new(vec![b'x'; 128]);
+        let bytes = read_admitted_bytes(&mut source, 32, &CancellationToken::new()).unwrap();
+        assert_eq!(bytes, vec![b'x'; 33]);
+        assert_eq!(
+            source.position(),
+            33,
+            "must not consume the rest of a growing source"
+        );
+    }
+
+    #[test]
+    fn admission_observes_cancellation_between_bounded_chunks() {
+        struct CancelAfterChunk(CancellationToken);
+        impl Read for CancelAfterChunk {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                bytes.fill(b'x');
+                self.0.cancel();
+                Ok(bytes.len())
+            }
+        }
+        let cancel = CancellationToken::new();
+        let result = read_admitted_bytes(&mut CancelAfterChunk(cancel.clone()), 1_000_000, &cancel);
+        assert!(matches!(
+            result,
+            Err(lingxi_core::host::rooted_fs::RootedFsError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_oversized_notebook_before_json_loading() {
+        let size = crate::notebook_read::MAX_NOTEBOOK_READ_SIZE + 1;
+        let loaded = sparse_admission_snapshot("large.ipynb", b"{\"cells\":[]}", size, false);
+        assert_eq!(loaded.snapshot.size, size);
+        assert!(loaded.snapshot.bytes.len() <= 16);
+    }
+
+    #[cfg(not(feature = "image-read"))]
+    #[tokio::test]
+    async fn admission_retains_alternate_screenshot_stream_for_binary_detection() {
+        use std::io::Write;
+        let tmp = TempDir::new().unwrap();
+        let requested = tmp.path().join("Screenshot 2024-01-01 at 3.04.05 PM.png");
+        let alternate = get_alternate_screenshot_path(&requested).unwrap();
+        let mut file = std::fs::File::create(alternate).unwrap();
+        file.write_all(b"\x89PNG\r\n\x1a\n\0").unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        drop(file);
+        let (builtin, _) = make_ctx(&tmp);
+        let result = FileReadTool::new(builtin)
+            .call(
+                crate::generated_result(&json!({"file_path":requested,"limit":1})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(crate::test_data(&result.data)["file"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("PNG"));
+        assert!(result
+            .model_content
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .contains("NUL bytes"));
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[test]
+    fn admission_rejects_oversized_pdf_before_parser_loading() {
+        let size = crate::pdf_read::PDF_TARGET_RAW_SIZE + 1;
+        let loaded = sparse_admission_snapshot("large.pdf", b"%PDF-1.4\n", size, false);
+        assert_eq!(loaded.snapshot.size, size);
+        assert!(loaded.snapshot.bytes.starts_with(b"%PDF-"));
+        assert!(loaded.snapshot.bytes.len() <= 16);
+    }
+
+    #[cfg(feature = "image-read")]
+    #[test]
+    fn admission_bounds_image_sources_including_extensionless_images() {
+        let size = MAX_IMAGE_SOURCE_SIZE + 1;
+        for name in ["large.png", "large"] {
+            let loaded = sparse_admission_snapshot(name, b"\x89PNG\r\n\x1a\n", size, true);
+            assert_eq!(loaded.snapshot.size, size);
+            assert!(loaded.snapshot.bytes.len() <= 16);
+            assert!(loaded.stream_source.is_none());
+        }
+    }
+
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {

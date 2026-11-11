@@ -49,16 +49,14 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, translate_model_path,
-};
+use tool_api::util::path_validation::{emit_blocked_event, translate_model_path};
 use tool_api::BuiltinToolContext;
 
 use crate::grep::{
     is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG, SEARCH_INCOMPLETE_NOTE,
 };
 use crate::shared::{
-    acquire_search_job, open_rooted_search_file, prepare_search_read_policy,
+    acquire_search_job, metadata_rooted_search_file, prepare_search_read_policy,
     run_search_candidate_hook, run_search_preparation_hook, search_argv_string,
     search_path_is_read_denied, ReadDenyPolicy, SearchControl, SearchResolutionError,
     SearchResolutionSnapshot, SearchStop, SearchWalkError, StableTopK,
@@ -470,13 +468,13 @@ impl Tool for GlobTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let pattern = search_argv_string(input, "pattern");
+        let path = search_argv_string(input, "path");
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
-            &[
-                ("pattern", pattern.as_deref()),
-                ("path", crate::input_string(input, "path")),
-            ],
+            &[("pattern", pattern.as_deref()), ("path", path.as_deref())],
         )?;
+        crate::input_optional_path(input, "path")
+            .map_err(|error| ValidationError(error.model_facing_message()))?;
         // TL-4 (2.1.260): the DISK probe does NOT belong here. `validate_input`
         // runs before the permission decision, so probing here reported "that
         // directory does not exist" for a path the session was never allowed to
@@ -530,6 +528,7 @@ impl Tool for GlobTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        let requested_path = crate::input_optional_path(&input, "path")?;
         // `trusted_dirs` snapshot for this whole call (canonicalize gate). The
         // effective cwd (base fallback + relativize) comes from `cwd_now()`,
         // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
@@ -549,7 +548,7 @@ impl Tool for GlobTool {
         let base = if absolute_pattern {
             self.cwd_now()
         } else {
-            match crate::input_string(&input, "path").filter(|path| !path.is_empty()) {
+            match requested_path.filter(|path| !path.is_empty()) {
                 Some(path) => crate::checked_model_file_path(path, &self.cwd_now())?,
                 None => self.cwd_now(),
             }
@@ -582,27 +581,25 @@ impl Tool for GlobTool {
             Ok(base) => base,
             Err(message) => return Err(ToolError::InvalidInput(message.into())),
         };
-        // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
-        // which runs BEFORE the permission decision, so a missing directory was
-        // reported for a path the session may not be allowed to look at. The
-        // oracle's `validateInput` is argument checks only; the probe is `pgs`,
-        // called from `call`.
-        //
-        // It sits AFTER `translate_model_path` on purpose: a mobile guest path
-        // must be probed as the host directory that actually backs it. In
-        // `validate_input` it ran on the UNTRANSLATED path, so guest Glob failed
-        // its own directory check on the main dispatch path.
-        if let Some(requested_path) = crate::input_string(&input, "path") {
-            crate::dir_validate::validate_glob_directory_at(requested_path, &base, &self.cwd_now())
-                .map_err(|e| ToolError::InvalidInput(e.0))?;
-        }
-        let canon_base = match canonicalize_and_validate(&base, &trusted) {
+        // The gate's default-mode reader allowance does not grant arbitrary
+        // filesystem roots. Authorize the translated target before revealing
+        // native existence/type or sibling-suggestion diagnostics.
+        let canon_base = match crate::dir_validate::authorize_search_path(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
                 return Err(ToolError::PathBlocked { path: base });
             }
         };
+        if let Some(requested_path) = requested_path {
+            crate::dir_validate::validate_glob_directory_at(
+                requested_path,
+                &canon_base,
+                &self.cwd_now(),
+                &trusted,
+            )
+            .map_err(|e| ToolError::InvalidInput(e.0))?;
+        }
 
         if !absolute_pattern {
             let stripped = repeated_root_pattern(&pattern, &base.to_string_lossy());
@@ -831,11 +828,11 @@ fn glob_walk(
             // the sort position internally to reproduce the native floor.
             entry.metadata().ok().and_then(|m| m.modified().ok())
         } else {
-            // Pin metadata to a rooted no-follow handle after the walker's
-            // classification; never reopen a possibly swapped candidate path.
+            // Pin metadata without requiring file-content read permission.
+            // Keep the rooted no-follow and candidate identity checks used by
+            // content searches after the walker's classification.
             run_search_candidate_hook(path);
-            let file = open_rooted_search_file(&canon_base, path)?;
-            file.metadata().ok().and_then(|m| m.modified().ok())
+            metadata_rooted_search_file(&canon_base, path)?.modified
         }
         .unwrap_or(SystemTime::UNIX_EPOCH);
         let rank = (mtime, candidate_count);
@@ -895,6 +892,122 @@ fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_explicit_search_path_is_rejected_in_validation_and_call() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), "visible").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        for json in [
+            r#"{"pattern":"*.txt","path":"\ud800"}"#,
+            r#"{"pattern":"*.txt","path":"\udc00"}"#,
+        ] {
+            let input = Utf16JsonProjection::parse(json).unwrap();
+            let validation = tool.validate_input(&input, &fresh_ctx()).await.unwrap_err();
+            assert_eq!(
+                validation.0.string_at(""),
+                Some("path contains invalid UTF-16")
+            );
+            let error = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(_)));
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                Some("path contains invalid UTF-16")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untrusted_search_paths_do_not_reveal_native_metadata_diagnostics() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("file.txt");
+        std::fs::write(&file, "outside").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        for path in [
+            outside.path().to_path_buf(),
+            file,
+            outside.path().join("missing/nested"),
+        ] {
+            let error = tool
+                .call(
+                    crate::generated_result(&json!({"pattern":"*", "path":path})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ToolError::PathBlocked { .. }), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn authorized_missing_search_paths_keep_native_diagnostics_and_suggestions() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(cwd.join("nope")).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx).with_live_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())));
+        for path in ["missing/nested", "../nope"] {
+            let error = tool
+                .call(
+                    crate::generated_result(&json!({"pattern":"*", "path":path})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(_)), "{error}");
+            let mut expected = format!(
+                "Directory does not exist: {path}. Note: your current working directory is {}.",
+                std::fs::canonicalize(&cwd).unwrap().display()
+            );
+            if path == "../nope" {
+                expected.push_str(&format!(
+                    " Did you mean {}?",
+                    std::fs::canonicalize(cwd.join("nope")).unwrap().display()
+                ));
+            }
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                Some(expected.as_str())
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn glob_lists_unreadable_regular_files_using_metadata_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let unreadable = tmp.path().join("unreadable.txt");
+        std::fs::write(&unreadable, "private contents").unwrap();
+        std::fs::write(tmp.path().join("public.txt"), "public").unwrap();
+        let original = std::fs::metadata(&unreadable).unwrap().permissions();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0)).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let outcome = GlobTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"pattern":"*.txt"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        std::fs::set_permissions(&unreadable, original).unwrap();
+        let result = outcome.unwrap();
+        let mut names: Vec<_> = crate::test_data(&result.data)["filenames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["public.txt", "unreadable.txt"]);
+        assert_eq!(result.data.number_at("/numFiles"), Some(2.0));
+    }
 
     #[tokio::test]
     async fn malformed_utf16_glob_pattern_coerces_at_native_argv_boundary() {
@@ -1715,6 +1828,41 @@ mod tests {
             .unwrap_err();
         assert!(source_text(&error.model_facing_message()).contains("symlink resolution changed"));
         assert!(!source_text(&error.model_facing_message()).contains("victim.rs"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn candidate_ancestor_swap_is_refused_before_glob_records_hit() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let victim = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let candidate = nested.join("candidate.rs");
+        std::fs::write(&candidate, "approved").unwrap();
+        std::fs::write(victim.path().join("candidate.rs"), "victim").unwrap();
+
+        crate::shared::install_search_candidate_hook(&candidate, {
+            let nested = nested.clone();
+            let retained = root.join("retained");
+            let victim_path = victim.path().to_path_buf();
+            move || {
+                std::fs::rename(&nested, retained).unwrap();
+                std::os::unix::fs::symlink(victim_path, nested).unwrap();
+            }
+        });
+
+        let (ctx, _) = make_ctx(&tmp);
+        let error = GlobTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"pattern":"*.rs"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(source_text(&error.model_facing_message()).contains("symlink resolution changed"));
     }
 
     #[cfg(unix)]

@@ -1221,12 +1221,19 @@ fn successful_live_tool_result_block(
             tool_api::tool_trait::source_text_projection(&serialized)
         }
     });
-    let content_blocks =
+    let content_blocks = if tool_api::tool_result_media::inline_read_pdf_is_injected(
+        name,
+        data,
+        &invocation.new_messages,
+    ) {
+        None
+    } else {
         tool_api::tool_result_media::media_content_blocks_for_tool(name, data, &mapped_text).map(
             |blocks| {
                 Utf16JsonProjection::array(blocks).expect("tool result blocks form a JSON array")
             },
-        );
+        )
+    };
     let content = supplied_content.unwrap_or_else(|| {
         content_blocks
             .as_ref()

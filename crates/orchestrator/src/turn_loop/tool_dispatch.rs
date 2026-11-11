@@ -5290,6 +5290,34 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
     })
 }
 
+pub(super) fn main_tool_result_content_blocks(
+    name: &str,
+    data: &Utf16JsonProjection,
+    model_text: &Utf16JsonProjection,
+    is_mcp: bool,
+    output_replaced: bool,
+    inline_pdf_is_injected: bool,
+) -> Option<Utf16JsonProjection> {
+    if output_replaced {
+        return None;
+    }
+    if is_mcp {
+        return data.array_len("").map(|_| data.clone());
+    }
+    let blocks = match name {
+        "ToolSearch" => source_tool_search_reference_blocks(data),
+        "Read" if inline_pdf_is_injected => None,
+        "Read" | "computer" => {
+            tool_api::tool_result_media::media_content_blocks_for_tool(name, data, model_text)
+        }
+        _ => tool_api::tool_result_media::image_content_blocks(data)
+            .or_else(|| tool_api::tool_result_media::bash_image_content_blocks(data)),
+    };
+    blocks.map(|blocks| {
+        Utf16JsonProjection::array(blocks).expect("tool result media blocks form an array")
+    })
+}
+
 fn map_mod_result_for_model(
     orch: &ConversationOrchestrator,
     name: &str,
@@ -7932,6 +7960,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             _ => None,
         };
 
+        let inline_pdf_is_injected = tool_outcome.as_ref().is_ok_and(|result| {
+            tool_api::tool_result_media::inline_read_pdf_is_injected(
+                name,
+                &result.data,
+                &result.new_messages,
+            )
+        });
         let (content, is_error, emit_payload, is_abort, tool_use_result, mcp_meta, turn_end): (
             Utf16JsonProjection,
             bool,
@@ -8627,38 +8662,23 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // is an ARRAY it IS that wire form; a bare-string `data` (or large-output
         // file replacement) is not. Gated to MCP tools so non-MCP tools whose
         // `data` happens to be an array (e.g. the Agent tool's transcript blocks)
-        // are unaffected. A hook-mutated result (output replaced or
-        // additionalContext appended) drops to the text-only `final_content`.
+        // are unaffected. A hook-replaced output drops to text-only
+        // `final_content`; additionalContext keeps its separate injected row.
         //
-        // Non-MCP `{type:"image"}` results (Read on an image file, rendered PDF
-        // pages) get the binary result-mapper's `case "image"` form: the image
-        // block INSIDE the tool_result content (`image_tool_result_blocks`).
+        // Read uses its tool-aware mapper so notebook outputs retain their
+        // images. An inline PDF already injected as a user document keeps that
+        // attachment as its sole wire owner. Standalone image results remain
+        // images INSIDE the tool_result content.
         // Bash `{isImage:true}` results get the binary's `hKn` form — the image
         // block derived from the stdout data-URI (`bash_image_tool_result_blocks`).
-        let content_blocks = if mutated {
-            None
-        } else if tool_handle.is_mcp() {
-            emit_payload.array_len("").map(|_| emit_payload.clone())
-        } else if name == "ToolSearch" {
-            source_tool_search_reference_blocks(&emit_payload).map(|blocks| {
-                Utf16JsonProjection::array(blocks).expect("ToolSearch results form an array")
-            })
-        } else if name == "computer" {
-            tool_api::tool_result_media::media_content_blocks_for_tool(
-                name,
-                &emit_payload,
-                &final_content,
-            )
-            .map(|blocks| {
-                Utf16JsonProjection::array(blocks).expect("computer media blocks form an array")
-            })
-        } else {
-            tool_api::tool_result_media::image_content_blocks(&emit_payload)
-                .or_else(|| tool_api::tool_result_media::bash_image_content_blocks(&emit_payload))
-                .map(|blocks| {
-                    Utf16JsonProjection::array(blocks).expect("tool media blocks form an array")
-                })
-        };
+        let content_blocks = main_tool_result_content_blocks(
+            name,
+            &emit_payload,
+            &final_content,
+            tool_handle.is_mcp(),
+            mutated,
+            inline_pdf_is_injected,
+        );
         // A1: the LAST thing that touches a successful `tool_result` before it
         // is handed to the model — claude-code's `yor` wrapper around the
         // result mapper (BIN off **235420440**:
