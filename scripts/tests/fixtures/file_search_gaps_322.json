@@ -1,0 +1,2014 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "Glob ordered Read-deny postfilter",
+      "start": 272415401,
+      "end": 272416874,
+      "sha256": "f6e8af575abf6131b0515de5cdda2e282d72abd060c3617d8e4b2b34302e8c51"
+    },
+    {
+      "name": "incomplete search notice",
+      "start": 272417437,
+      "end": 272417614,
+      "sha256": "21928496d807844d29e6eb75c3b1e411e24bdb21b458cab5499edbf428438c45"
+    },
+    {
+      "name": "head limit and pagination",
+      "start": 272427250,
+      "end": 272427522,
+      "sha256": "0337a4210ad22846f5c46af9f41ce9d3ec777503a9900e12b422055c2ede252b"
+    },
+    {
+      "name": "grep result mapper",
+      "start": 272428949,
+      "end": 272429990,
+      "sha256": "2c63bf54f1d41f3e58fde102d9737f726528c0471db6d6a4c249d56fcba9d52c"
+    },
+    {
+      "name": "ripgrep JSON event parser and line offset",
+      "start": 272437708,
+      "end": 272439143,
+      "sha256": "065088479b8a096cd28db5a129e287697c9ac6ada984f48a1b310065e745c40b"
+    },
+    {
+      "name": "grep call result and search arguments",
+      "start": 272431723,
+      "end": 272437053,
+      "sha256": "9439a554d7f647124784fff88f1a0d46fe12b83d7c7b2041d5c96cd352a042ad"
+    },
+    {
+      "name": "grep lexical result paths",
+      "start": 272437053,
+      "end": 272437415,
+      "sha256": "a4693203413cda874aba360e9752a0391524fab185749c920d3987e2abdb2b35"
+    },
+    {
+      "name": "one suffix removal",
+      "start": 260463926,
+      "end": 260463995,
+      "sha256": "ebc95b8712d8d2875533b7d0885bc7cf4386ef983718267912d7e3fc42955774"
+    }
+  ],
+  "postfilters": [
+    {
+      "input": {
+        "name": "inactive exact total",
+        "active": false,
+        "files": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "truncated": true,
+        "totalMatches": 4,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "active floor",
+        "active": true,
+        "files": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "truncated": true,
+        "totalMatches": 3,
+        "countIsComplete": false,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "active exact page fills at end",
+        "active": true,
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "truncated": false,
+        "totalMatches": 3,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "active trailing denied still incomplete",
+        "active": true,
+        "files": [
+          "a",
+          "b",
+          "c",
+          "deny"
+        ],
+        "denied": [
+          "deny"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "truncated": true,
+        "totalMatches": 3,
+        "countIsComplete": false,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "active leading denied exhausts stream",
+        "active": true,
+        "files": [
+          "deny",
+          "a",
+          "b",
+          "c"
+        ],
+        "denied": [
+          "deny"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a",
+          "b",
+          "c"
+        ],
+        "truncated": false,
+        "totalMatches": 3,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "active permitted page shorter than limit",
+        "active": true,
+        "files": [
+          "a",
+          "deny"
+        ],
+        "denied": [
+          "deny"
+        ],
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "a"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "input": {
+        "name": "offset contributes to permitted floor",
+        "active": true,
+        "files": [
+          "a",
+          "b",
+          "c",
+          "d",
+          "e"
+        ],
+        "offset": 1,
+        "limit": 3
+      },
+      "expected": {
+        "files": [
+          "b",
+          "c",
+          "d"
+        ],
+        "truncated": true,
+        "totalMatches": 4,
+        "countIsComplete": false,
+        "timedOut": false
+      }
+    }
+  ],
+  "typesSha256": "cb8ac4f2684e43e79caa02dfc6b1e19439c540062f6564804be24de10ed2abee",
+  "types": [
+    {
+      "name": "ada",
+      "globs": [
+        "*.adb",
+        "*.ads"
+      ]
+    },
+    {
+      "name": "agda",
+      "globs": [
+        "*.agda",
+        "*.lagda"
+      ]
+    },
+    {
+      "name": "aidl",
+      "globs": [
+        "*.aidl"
+      ]
+    },
+    {
+      "name": "alire",
+      "globs": [
+        "alire.toml"
+      ]
+    },
+    {
+      "name": "amake",
+      "globs": [
+        "*.bp",
+        "*.mk"
+      ]
+    },
+    {
+      "name": "asciidoc",
+      "globs": [
+        "*.adoc",
+        "*.asc",
+        "*.asciidoc"
+      ]
+    },
+    {
+      "name": "asm",
+      "globs": [
+        "*.S",
+        "*.asm",
+        "*.s"
+      ]
+    },
+    {
+      "name": "asp",
+      "globs": [
+        "*.ascx",
+        "*.ascx.cs",
+        "*.ascx.vb",
+        "*.asp",
+        "*.aspx",
+        "*.aspx.cs",
+        "*.aspx.vb"
+      ]
+    },
+    {
+      "name": "ats",
+      "globs": [
+        "*.ats",
+        "*.dats",
+        "*.hats",
+        "*.sats"
+      ]
+    },
+    {
+      "name": "avro",
+      "globs": [
+        "*.avdl",
+        "*.avpr",
+        "*.avsc"
+      ]
+    },
+    {
+      "name": "awk",
+      "globs": [
+        "*.awk"
+      ]
+    },
+    {
+      "name": "bat",
+      "globs": [
+        "*.bat"
+      ]
+    },
+    {
+      "name": "batch",
+      "globs": [
+        "*.bat"
+      ]
+    },
+    {
+      "name": "bazel",
+      "globs": [
+        "*.BUILD",
+        "*.bazel",
+        "*.bazelrc",
+        "*.bzl",
+        "BUILD",
+        "MODULE.bazel",
+        "WORKSPACE",
+        "WORKSPACE.bazel"
+      ]
+    },
+    {
+      "name": "bitbake",
+      "globs": [
+        "*.bb",
+        "*.bbappend",
+        "*.bbclass",
+        "*.conf",
+        "*.inc"
+      ]
+    },
+    {
+      "name": "brotli",
+      "globs": [
+        "*.br"
+      ]
+    },
+    {
+      "name": "buildstream",
+      "globs": [
+        "*.bst"
+      ]
+    },
+    {
+      "name": "bzip2",
+      "globs": [
+        "*.bz2",
+        "*.tbz2"
+      ]
+    },
+    {
+      "name": "c",
+      "globs": [
+        "*.[chH]",
+        "*.[chH].in",
+        "*.cats"
+      ]
+    },
+    {
+      "name": "cabal",
+      "globs": [
+        "*.cabal"
+      ]
+    },
+    {
+      "name": "candid",
+      "globs": [
+        "*.did"
+      ]
+    },
+    {
+      "name": "carp",
+      "globs": [
+        "*.carp"
+      ]
+    },
+    {
+      "name": "cbor",
+      "globs": [
+        "*.cbor"
+      ]
+    },
+    {
+      "name": "ceylon",
+      "globs": [
+        "*.ceylon"
+      ]
+    },
+    {
+      "name": "clojure",
+      "globs": [
+        "*.clj",
+        "*.cljc",
+        "*.cljs",
+        "*.cljx"
+      ]
+    },
+    {
+      "name": "cmake",
+      "globs": [
+        "*.cmake",
+        "CMakeLists.txt"
+      ]
+    },
+    {
+      "name": "cmd",
+      "globs": [
+        "*.bat",
+        "*.cmd"
+      ]
+    },
+    {
+      "name": "cml",
+      "globs": [
+        "*.cml"
+      ]
+    },
+    {
+      "name": "coffeescript",
+      "globs": [
+        "*.coffee"
+      ]
+    },
+    {
+      "name": "config",
+      "globs": [
+        "*.cfg",
+        "*.conf",
+        "*.config",
+        "*.ini"
+      ]
+    },
+    {
+      "name": "coq",
+      "globs": [
+        "*.v"
+      ]
+    },
+    {
+      "name": "cpp",
+      "globs": [
+        "*.[ChH]",
+        "*.[ChH].in",
+        "*.[ch]pp",
+        "*.[ch]pp.in",
+        "*.[ch]xx",
+        "*.[ch]xx.in",
+        "*.cc",
+        "*.cc.in",
+        "*.hh",
+        "*.hh.in",
+        "*.inl"
+      ]
+    },
+    {
+      "name": "creole",
+      "globs": [
+        "*.creole"
+      ]
+    },
+    {
+      "name": "crystal",
+      "globs": [
+        "*.cr",
+        "*.ecr",
+        "Projectfile",
+        "shard.yml"
+      ]
+    },
+    {
+      "name": "cs",
+      "globs": [
+        "*.cs"
+      ]
+    },
+    {
+      "name": "csharp",
+      "globs": [
+        "*.cs"
+      ]
+    },
+    {
+      "name": "cshtml",
+      "globs": [
+        "*.cshtml"
+      ]
+    },
+    {
+      "name": "csproj",
+      "globs": [
+        "*.csproj"
+      ]
+    },
+    {
+      "name": "css",
+      "globs": [
+        "*.css",
+        "*.scss"
+      ]
+    },
+    {
+      "name": "csv",
+      "globs": [
+        "*.csv"
+      ]
+    },
+    {
+      "name": "cuda",
+      "globs": [
+        "*.cu",
+        "*.cuh"
+      ]
+    },
+    {
+      "name": "cython",
+      "globs": [
+        "*.pxd",
+        "*.pxi",
+        "*.pyx"
+      ]
+    },
+    {
+      "name": "d",
+      "globs": [
+        "*.d"
+      ]
+    },
+    {
+      "name": "dart",
+      "globs": [
+        "*.dart"
+      ]
+    },
+    {
+      "name": "devicetree",
+      "globs": [
+        "*.dts",
+        "*.dtsi"
+      ]
+    },
+    {
+      "name": "dhall",
+      "globs": [
+        "*.dhall"
+      ]
+    },
+    {
+      "name": "diff",
+      "globs": [
+        "*.diff",
+        "*.patch"
+      ]
+    },
+    {
+      "name": "dita",
+      "globs": [
+        "*.dita",
+        "*.ditamap",
+        "*.ditaval"
+      ]
+    },
+    {
+      "name": "docker",
+      "globs": [
+        "*Dockerfile*"
+      ]
+    },
+    {
+      "name": "dockercompose",
+      "globs": [
+        "docker-compose.*.yml",
+        "docker-compose.yml"
+      ]
+    },
+    {
+      "name": "dts",
+      "globs": [
+        "*.dts",
+        "*.dtsi"
+      ]
+    },
+    {
+      "name": "dvc",
+      "globs": [
+        "*.dvc",
+        "Dvcfile"
+      ]
+    },
+    {
+      "name": "ebuild",
+      "globs": [
+        "*.ebuild",
+        "*.eclass"
+      ]
+    },
+    {
+      "name": "edn",
+      "globs": [
+        "*.edn"
+      ]
+    },
+    {
+      "name": "elisp",
+      "globs": [
+        "*.el"
+      ]
+    },
+    {
+      "name": "elixir",
+      "globs": [
+        "*.eex",
+        "*.ex",
+        "*.exs",
+        "*.heex",
+        "*.leex",
+        "*.livemd"
+      ]
+    },
+    {
+      "name": "elm",
+      "globs": [
+        "*.elm"
+      ]
+    },
+    {
+      "name": "erb",
+      "globs": [
+        "*.erb"
+      ]
+    },
+    {
+      "name": "erlang",
+      "globs": [
+        "*.erl",
+        "*.hrl"
+      ]
+    },
+    {
+      "name": "fennel",
+      "globs": [
+        "*.fnl"
+      ]
+    },
+    {
+      "name": "fidl",
+      "globs": [
+        "*.fidl"
+      ]
+    },
+    {
+      "name": "fish",
+      "globs": [
+        "*.fish"
+      ]
+    },
+    {
+      "name": "flatbuffers",
+      "globs": [
+        "*.fbs"
+      ]
+    },
+    {
+      "name": "fortran",
+      "globs": [
+        "*.F",
+        "*.F77",
+        "*.F90",
+        "*.F95",
+        "*.f",
+        "*.f77",
+        "*.f90",
+        "*.f95",
+        "*.pfo"
+      ]
+    },
+    {
+      "name": "fsharp",
+      "globs": [
+        "*.fs",
+        "*.fsi",
+        "*.fsx"
+      ]
+    },
+    {
+      "name": "fut",
+      "globs": [
+        "*.fut"
+      ]
+    },
+    {
+      "name": "gap",
+      "globs": [
+        "*.g",
+        "*.gap",
+        "*.gd",
+        "*.gi",
+        "*.tst"
+      ]
+    },
+    {
+      "name": "gn",
+      "globs": [
+        "*.gn",
+        "*.gni"
+      ]
+    },
+    {
+      "name": "go",
+      "globs": [
+        "*.go"
+      ]
+    },
+    {
+      "name": "gprbuild",
+      "globs": [
+        "*.gpr"
+      ]
+    },
+    {
+      "name": "gradle",
+      "globs": [
+        "*.gradle",
+        "*.gradle.kts",
+        "gradle-wrapper.*",
+        "gradle.properties",
+        "gradlew",
+        "gradlew.bat"
+      ]
+    },
+    {
+      "name": "graphql",
+      "globs": [
+        "*.graphql",
+        "*.graphqls"
+      ]
+    },
+    {
+      "name": "groovy",
+      "globs": [
+        "*.gradle",
+        "*.groovy"
+      ]
+    },
+    {
+      "name": "gzip",
+      "globs": [
+        "*.gz",
+        "*.tgz"
+      ]
+    },
+    {
+      "name": "h",
+      "globs": [
+        "*.h",
+        "*.hh",
+        "*.hpp"
+      ]
+    },
+    {
+      "name": "haml",
+      "globs": [
+        "*.haml"
+      ]
+    },
+    {
+      "name": "hare",
+      "globs": [
+        "*.ha"
+      ]
+    },
+    {
+      "name": "haskell",
+      "globs": [
+        "*.c2hs",
+        "*.cpphs",
+        "*.hs",
+        "*.hsc",
+        "*.lhs"
+      ]
+    },
+    {
+      "name": "hbs",
+      "globs": [
+        "*.hbs"
+      ]
+    },
+    {
+      "name": "hs",
+      "globs": [
+        "*.hs",
+        "*.lhs"
+      ]
+    },
+    {
+      "name": "html",
+      "globs": [
+        "*.ejs",
+        "*.htm",
+        "*.html"
+      ]
+    },
+    {
+      "name": "hy",
+      "globs": [
+        "*.hy"
+      ]
+    },
+    {
+      "name": "idris",
+      "globs": [
+        "*.idr",
+        "*.lidr"
+      ]
+    },
+    {
+      "name": "janet",
+      "globs": [
+        "*.janet"
+      ]
+    },
+    {
+      "name": "java",
+      "globs": [
+        "*.java",
+        "*.jsp",
+        "*.jspx",
+        "*.properties"
+      ]
+    },
+    {
+      "name": "jinja",
+      "globs": [
+        "*.j2",
+        "*.jinja",
+        "*.jinja2"
+      ]
+    },
+    {
+      "name": "jl",
+      "globs": [
+        "*.jl"
+      ]
+    },
+    {
+      "name": "js",
+      "globs": [
+        "*.cjs",
+        "*.js",
+        "*.jsx",
+        "*.mjs",
+        "*.vue"
+      ]
+    },
+    {
+      "name": "json",
+      "globs": [
+        "*.json",
+        "*.sarif",
+        "composer.lock"
+      ]
+    },
+    {
+      "name": "jsonl",
+      "globs": [
+        "*.jsonl"
+      ]
+    },
+    {
+      "name": "julia",
+      "globs": [
+        "*.jl"
+      ]
+    },
+    {
+      "name": "jupyter",
+      "globs": [
+        "*.ipynb",
+        "*.jpynb"
+      ]
+    },
+    {
+      "name": "k",
+      "globs": [
+        "*.k"
+      ]
+    },
+    {
+      "name": "kotlin",
+      "globs": [
+        "*.kt",
+        "*.kts"
+      ]
+    },
+    {
+      "name": "lean",
+      "globs": [
+        "*.lean"
+      ]
+    },
+    {
+      "name": "less",
+      "globs": [
+        "*.less"
+      ]
+    },
+    {
+      "name": "license",
+      "globs": [
+        "*[.-]LICEN[CS]E*",
+        "AGPL-*[0-9]*",
+        "APACHE-*[0-9]*",
+        "BSD-*[0-9]*",
+        "CC-BY-*",
+        "COPYING",
+        "COPYING[.-]*",
+        "COPYRIGHT",
+        "COPYRIGHT[.-]*",
+        "EULA",
+        "EULA[.-]*",
+        "GFDL-*[0-9]*",
+        "GNU-*[0-9]*",
+        "GPL-*[0-9]*",
+        "LGPL-*[0-9]*",
+        "LICEN[CS]E",
+        "LICEN[CS]E[.-]*",
+        "MIT-*[0-9]*",
+        "MPL-*[0-9]*",
+        "NOTICE",
+        "NOTICE[.-]*",
+        "OFL-*[0-9]*",
+        "PATENTS",
+        "PATENTS[.-]*",
+        "UNLICEN[CS]E",
+        "UNLICEN[CS]E[.-]*",
+        "agpl[.-]*",
+        "gpl[.-]*",
+        "lgpl[.-]*",
+        "licen[cs]e",
+        "licen[cs]e.*"
+      ]
+    },
+    {
+      "name": "lilypond",
+      "globs": [
+        "*.ily",
+        "*.ly"
+      ]
+    },
+    {
+      "name": "lisp",
+      "globs": [
+        "*.el",
+        "*.jl",
+        "*.lisp",
+        "*.lsp",
+        "*.sc",
+        "*.scm"
+      ]
+    },
+    {
+      "name": "lock",
+      "globs": [
+        "*.lock",
+        "package-lock.json"
+      ]
+    },
+    {
+      "name": "log",
+      "globs": [
+        "*.log"
+      ]
+    },
+    {
+      "name": "lua",
+      "globs": [
+        "*.lua"
+      ]
+    },
+    {
+      "name": "lz4",
+      "globs": [
+        "*.lz4"
+      ]
+    },
+    {
+      "name": "lzma",
+      "globs": [
+        "*.lzma"
+      ]
+    },
+    {
+      "name": "m4",
+      "globs": [
+        "*.ac",
+        "*.m4"
+      ]
+    },
+    {
+      "name": "make",
+      "globs": [
+        "*.mak",
+        "*.mk",
+        "[Gg][Nn][Uu]makefile",
+        "[Gg][Nn][Uu]makefile.am",
+        "[Gg][Nn][Uu]makefile.in",
+        "[Mm]akefile",
+        "[Mm]akefile.am",
+        "[Mm]akefile.in"
+      ]
+    },
+    {
+      "name": "mako",
+      "globs": [
+        "*.mako",
+        "*.mao"
+      ]
+    },
+    {
+      "name": "man",
+      "globs": [
+        "*.[0-9][cEFMmpSx]",
+        "*.[0-9lnpx]"
+      ]
+    },
+    {
+      "name": "markdown",
+      "globs": [
+        "*.markdown",
+        "*.md",
+        "*.mdown",
+        "*.mdwn",
+        "*.mdx",
+        "*.mkd",
+        "*.mkdn"
+      ]
+    },
+    {
+      "name": "matlab",
+      "globs": [
+        "*.m"
+      ]
+    },
+    {
+      "name": "md",
+      "globs": [
+        "*.markdown",
+        "*.md",
+        "*.mdown",
+        "*.mdwn",
+        "*.mdx",
+        "*.mkd",
+        "*.mkdn"
+      ]
+    },
+    {
+      "name": "meson",
+      "globs": [
+        "meson.build",
+        "meson.options",
+        "meson_options.txt"
+      ]
+    },
+    {
+      "name": "minified",
+      "globs": [
+        "*.min.css",
+        "*.min.html",
+        "*.min.js"
+      ]
+    },
+    {
+      "name": "mint",
+      "globs": [
+        "*.mint"
+      ]
+    },
+    {
+      "name": "mk",
+      "globs": [
+        "mkfile"
+      ]
+    },
+    {
+      "name": "ml",
+      "globs": [
+        "*.ml"
+      ]
+    },
+    {
+      "name": "motoko",
+      "globs": [
+        "*.mo"
+      ]
+    },
+    {
+      "name": "msbuild",
+      "globs": [
+        "*.csproj",
+        "*.fsproj",
+        "*.proj",
+        "*.props",
+        "*.sln",
+        "*.targets",
+        "*.vcxproj"
+      ]
+    },
+    {
+      "name": "nim",
+      "globs": [
+        "*.nim",
+        "*.nimble",
+        "*.nimf",
+        "*.nims"
+      ]
+    },
+    {
+      "name": "nix",
+      "globs": [
+        "*.nix"
+      ]
+    },
+    {
+      "name": "objc",
+      "globs": [
+        "*.h",
+        "*.m"
+      ]
+    },
+    {
+      "name": "objcpp",
+      "globs": [
+        "*.h",
+        "*.mm"
+      ]
+    },
+    {
+      "name": "ocaml",
+      "globs": [
+        "*.ml",
+        "*.mli",
+        "*.mll",
+        "*.mly"
+      ]
+    },
+    {
+      "name": "org",
+      "globs": [
+        "*.org",
+        "*.org_archive"
+      ]
+    },
+    {
+      "name": "pants",
+      "globs": [
+        "BUILD"
+      ]
+    },
+    {
+      "name": "pascal",
+      "globs": [
+        "*.dpr",
+        "*.inc",
+        "*.lpr",
+        "*.pas",
+        "*.pp"
+      ]
+    },
+    {
+      "name": "pdf",
+      "globs": [
+        "*.pdf"
+      ]
+    },
+    {
+      "name": "perl",
+      "globs": [
+        "*.PL",
+        "*.perl",
+        "*.pl",
+        "*.plh",
+        "*.plx",
+        "*.pm",
+        "*.t"
+      ]
+    },
+    {
+      "name": "php",
+      "globs": [
+        "*.php",
+        "*.php3",
+        "*.php4",
+        "*.php5",
+        "*.php7",
+        "*.php8",
+        "*.pht",
+        "*.phtml"
+      ]
+    },
+    {
+      "name": "po",
+      "globs": [
+        "*.po"
+      ]
+    },
+    {
+      "name": "pod",
+      "globs": [
+        "*.pod"
+      ]
+    },
+    {
+      "name": "postscript",
+      "globs": [
+        "*.eps",
+        "*.ps"
+      ]
+    },
+    {
+      "name": "prolog",
+      "globs": [
+        "*.P",
+        "*.pl",
+        "*.pro",
+        "*.prolog"
+      ]
+    },
+    {
+      "name": "protobuf",
+      "globs": [
+        "*.proto"
+      ]
+    },
+    {
+      "name": "ps",
+      "globs": [
+        "*.cdxml",
+        "*.ps1",
+        "*.ps1xml",
+        "*.psd1",
+        "*.psm1"
+      ]
+    },
+    {
+      "name": "puppet",
+      "globs": [
+        "*.epp",
+        "*.erb",
+        "*.pp",
+        "*.rb"
+      ]
+    },
+    {
+      "name": "purs",
+      "globs": [
+        "*.purs"
+      ]
+    },
+    {
+      "name": "py",
+      "globs": [
+        "*.py",
+        "*.pyi"
+      ]
+    },
+    {
+      "name": "python",
+      "globs": [
+        "*.py",
+        "*.pyi"
+      ]
+    },
+    {
+      "name": "qmake",
+      "globs": [
+        "*.prf",
+        "*.pri",
+        "*.pro"
+      ]
+    },
+    {
+      "name": "qml",
+      "globs": [
+        "*.qml"
+      ]
+    },
+    {
+      "name": "r",
+      "globs": [
+        "*.R",
+        "*.Rmd",
+        "*.Rnw",
+        "*.r"
+      ]
+    },
+    {
+      "name": "racket",
+      "globs": [
+        "*.rkt"
+      ]
+    },
+    {
+      "name": "raku",
+      "globs": [
+        "*.p6",
+        "*.pl6",
+        "*.pm6",
+        "*.raku",
+        "*.rakudoc",
+        "*.rakumod",
+        "*.rakutest"
+      ]
+    },
+    {
+      "name": "rdoc",
+      "globs": [
+        "*.rdoc"
+      ]
+    },
+    {
+      "name": "readme",
+      "globs": [
+        "*README",
+        "README*"
+      ]
+    },
+    {
+      "name": "reasonml",
+      "globs": [
+        "*.re",
+        "*.rei"
+      ]
+    },
+    {
+      "name": "red",
+      "globs": [
+        "*.r",
+        "*.red",
+        "*.reds"
+      ]
+    },
+    {
+      "name": "rescript",
+      "globs": [
+        "*.res",
+        "*.resi"
+      ]
+    },
+    {
+      "name": "robot",
+      "globs": [
+        "*.robot"
+      ]
+    },
+    {
+      "name": "rst",
+      "globs": [
+        "*.rst"
+      ]
+    },
+    {
+      "name": "ruby",
+      "globs": [
+        "*.gemspec",
+        "*.rb",
+        "*.rbw",
+        ".irbrc",
+        "Gemfile",
+        "Rakefile",
+        "config.ru"
+      ]
+    },
+    {
+      "name": "rust",
+      "globs": [
+        "*.rs"
+      ]
+    },
+    {
+      "name": "sass",
+      "globs": [
+        "*.sass",
+        "*.scss"
+      ]
+    },
+    {
+      "name": "scala",
+      "globs": [
+        "*.sbt",
+        "*.scala"
+      ]
+    },
+    {
+      "name": "sh",
+      "globs": [
+        "*.bash",
+        "*.bashrc",
+        "*.csh",
+        "*.cshrc",
+        "*.ksh",
+        "*.kshrc",
+        "*.sh",
+        "*.tcsh",
+        "*.zsh",
+        ".bash_login",
+        ".bash_logout",
+        ".bash_profile",
+        ".bashrc",
+        ".cshrc",
+        ".kshrc",
+        ".login",
+        ".logout",
+        ".profile",
+        ".tcshrc",
+        ".zlogin",
+        ".zlogout",
+        ".zprofile",
+        ".zshenv",
+        ".zshrc",
+        "bash_login",
+        "bash_logout",
+        "bash_profile",
+        "bashrc",
+        "profile",
+        "zlogin",
+        "zlogout",
+        "zprofile",
+        "zshenv",
+        "zshrc"
+      ]
+    },
+    {
+      "name": "slim",
+      "globs": [
+        "*.skim",
+        "*.slim",
+        "*.slime"
+      ]
+    },
+    {
+      "name": "smarty",
+      "globs": [
+        "*.tpl"
+      ]
+    },
+    {
+      "name": "sml",
+      "globs": [
+        "*.sig",
+        "*.sml"
+      ]
+    },
+    {
+      "name": "solidity",
+      "globs": [
+        "*.sol"
+      ]
+    },
+    {
+      "name": "soy",
+      "globs": [
+        "*.soy"
+      ]
+    },
+    {
+      "name": "spark",
+      "globs": [
+        "*.spark"
+      ]
+    },
+    {
+      "name": "spec",
+      "globs": [
+        "*.spec"
+      ]
+    },
+    {
+      "name": "sql",
+      "globs": [
+        "*.psql",
+        "*.sql"
+      ]
+    },
+    {
+      "name": "stylus",
+      "globs": [
+        "*.styl"
+      ]
+    },
+    {
+      "name": "sv",
+      "globs": [
+        "*.h",
+        "*.sv",
+        "*.svh",
+        "*.v",
+        "*.vg"
+      ]
+    },
+    {
+      "name": "svelte",
+      "globs": [
+        "*.svelte"
+      ]
+    },
+    {
+      "name": "svg",
+      "globs": [
+        "*.svg"
+      ]
+    },
+    {
+      "name": "swift",
+      "globs": [
+        "*.swift"
+      ]
+    },
+    {
+      "name": "swig",
+      "globs": [
+        "*.def",
+        "*.i"
+      ]
+    },
+    {
+      "name": "systemd",
+      "globs": [
+        "*.automount",
+        "*.conf",
+        "*.device",
+        "*.link",
+        "*.mount",
+        "*.path",
+        "*.scope",
+        "*.service",
+        "*.slice",
+        "*.socket",
+        "*.swap",
+        "*.target",
+        "*.timer"
+      ]
+    },
+    {
+      "name": "taskpaper",
+      "globs": [
+        "*.taskpaper"
+      ]
+    },
+    {
+      "name": "tcl",
+      "globs": [
+        "*.tcl"
+      ]
+    },
+    {
+      "name": "tex",
+      "globs": [
+        "*.bib",
+        "*.cls",
+        "*.dtx",
+        "*.ins",
+        "*.ltx",
+        "*.sty",
+        "*.tex"
+      ]
+    },
+    {
+      "name": "texinfo",
+      "globs": [
+        "*.texi"
+      ]
+    },
+    {
+      "name": "textile",
+      "globs": [
+        "*.textile"
+      ]
+    },
+    {
+      "name": "tf",
+      "globs": [
+        "*.auto.tfvars",
+        "*.auto.tfvars.json",
+        "*.terraform.lock.hcl",
+        "*.terraformrc",
+        "*.tf",
+        "*.tf.json",
+        "*.tfrc",
+        "terraform.rc",
+        "terraform.tfvars",
+        "terraform.tfvars.json"
+      ]
+    },
+    {
+      "name": "thrift",
+      "globs": [
+        "*.thrift"
+      ]
+    },
+    {
+      "name": "toml",
+      "globs": [
+        "*.toml",
+        "Cargo.lock"
+      ]
+    },
+    {
+      "name": "ts",
+      "globs": [
+        "*.cts",
+        "*.mts",
+        "*.ts",
+        "*.tsx"
+      ]
+    },
+    {
+      "name": "twig",
+      "globs": [
+        "*.twig"
+      ]
+    },
+    {
+      "name": "txt",
+      "globs": [
+        "*.txt"
+      ]
+    },
+    {
+      "name": "typescript",
+      "globs": [
+        "*.cts",
+        "*.mts",
+        "*.ts",
+        "*.tsx"
+      ]
+    },
+    {
+      "name": "typoscript",
+      "globs": [
+        "*.ts",
+        "*.typoscript"
+      ]
+    },
+    {
+      "name": "usd",
+      "globs": [
+        "*.usd",
+        "*.usda",
+        "*.usdc"
+      ]
+    },
+    {
+      "name": "v",
+      "globs": [
+        "*.v",
+        "*.vsh"
+      ]
+    },
+    {
+      "name": "vala",
+      "globs": [
+        "*.vala"
+      ]
+    },
+    {
+      "name": "vb",
+      "globs": [
+        "*.vb"
+      ]
+    },
+    {
+      "name": "vcl",
+      "globs": [
+        "*.vcl"
+      ]
+    },
+    {
+      "name": "verilog",
+      "globs": [
+        "*.sv",
+        "*.svh",
+        "*.v",
+        "*.vh"
+      ]
+    },
+    {
+      "name": "vhdl",
+      "globs": [
+        "*.vhd",
+        "*.vhdl"
+      ]
+    },
+    {
+      "name": "vim",
+      "globs": [
+        "*.vim",
+        ".gvimrc",
+        ".vimrc",
+        "_gvimrc",
+        "_vimrc",
+        "gvimrc",
+        "vimrc"
+      ]
+    },
+    {
+      "name": "vimscript",
+      "globs": [
+        "*.vim",
+        ".gvimrc",
+        ".vimrc",
+        "_gvimrc",
+        "_vimrc",
+        "gvimrc",
+        "vimrc"
+      ]
+    },
+    {
+      "name": "vue",
+      "globs": [
+        "*.vue"
+      ]
+    },
+    {
+      "name": "webidl",
+      "globs": [
+        "*.idl",
+        "*.webidl",
+        "*.widl"
+      ]
+    },
+    {
+      "name": "wgsl",
+      "globs": [
+        "*.wgsl"
+      ]
+    },
+    {
+      "name": "wiki",
+      "globs": [
+        "*.mediawiki",
+        "*.wiki"
+      ]
+    },
+    {
+      "name": "xml",
+      "globs": [
+        "*.dtd",
+        "*.rng",
+        "*.sch",
+        "*.xhtml",
+        "*.xjb",
+        "*.xml",
+        "*.xml.dist",
+        "*.xsd",
+        "*.xsl",
+        "*.xslt"
+      ]
+    },
+    {
+      "name": "xz",
+      "globs": [
+        "*.txz",
+        "*.xz"
+      ]
+    },
+    {
+      "name": "yacc",
+      "globs": [
+        "*.y"
+      ]
+    },
+    {
+      "name": "yaml",
+      "globs": [
+        "*.yaml",
+        "*.yml"
+      ]
+    },
+    {
+      "name": "yang",
+      "globs": [
+        "*.yang"
+      ]
+    },
+    {
+      "name": "z",
+      "globs": [
+        "*.Z"
+      ]
+    },
+    {
+      "name": "zig",
+      "globs": [
+        "*.zig"
+      ]
+    },
+    {
+      "name": "zsh",
+      "globs": [
+        "*.zsh",
+        ".zlogin",
+        ".zlogout",
+        ".zprofile",
+        ".zshenv",
+        ".zshrc",
+        "zlogin",
+        "zlogout",
+        "zprofile",
+        "zshenv",
+        "zshrc"
+      ]
+    },
+    {
+      "name": "zstd",
+      "globs": [
+        "*.zst",
+        "*.zstd"
+      ]
+    }
+  ],
+  "largePage": {
+    "total": 10005,
+    "offset": 10001,
+    "limit": 3,
+    "page": [
+      "10002:hit10001",
+      "10003:hit10002",
+      "10004:hit10003"
+    ],
+    "last": "10005:hit10004"
+  },
+  "collation": {
+    "runtime": "Bun 1.4.3",
+    "input": [
+      "file2",
+      "file10",
+      "foo-2",
+      "foo_2",
+      "ä",
+      "ae",
+      "a",
+      "A",
+      "é",
+      "é",
+      "i",
+      "İ",
+      "ı",
+      "😀",
+      "skill-🧪-probe",
+      "skill.alpha+beta"
+    ],
+    "locale": "en-US",
+    "en": [
+      "😀",
+      "a",
+      "A",
+      "ä",
+      "ae",
+      "é",
+      "é",
+      "file10",
+      "file2",
+      "foo_2",
+      "foo-2",
+      "i",
+      "İ",
+      "ı",
+      "skill-🧪-probe",
+      "skill.alpha+beta"
+    ],
+    "sv": [
+      "😀",
+      "a",
+      "A",
+      "ae",
+      "é",
+      "é",
+      "file10",
+      "file2",
+      "foo_2",
+      "foo-2",
+      "i",
+      "İ",
+      "ı",
+      "skill-🧪-probe",
+      "skill.alpha+beta",
+      "ä"
+    ]
+  },
+  "surrogateSearches": [
+    {
+      "name": "high surrogate regex becomes replacement",
+      "contents": "�\n",
+      "inputJson": "{\"output_mode\":\"content\",\"pattern\":\"\\ud800\"}",
+      "singleFile": true,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "1:�",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "1:�"
+    },
+    {
+      "name": "low surrogate regex becomes replacement",
+      "contents": "�\n",
+      "inputJson": "{\"output_mode\":\"content\",\"pattern\":\"\\udfff\"}",
+      "singleFile": true,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "1:�",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "1:�"
+    },
+    {
+      "name": "high surrogate glob is retained",
+      "contents": "hit\n",
+      "inputJson": "{\"output_mode\":\"content\",\"pattern\":\"hit\",\"glob\":\"\\ud800\"}",
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "",
+        "numLines": 0,
+        "totalLines": 0
+      },
+      "modelText": "No matches found"
+    },
+    {
+      "name": "wildcard surrogate glob is retained",
+      "contents": "hit\n",
+      "inputJson": "{\"output_mode\":\"content\",\"pattern\":\"hit\",\"glob\":\"*\\ud800*\"}",
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "",
+        "numLines": 0,
+        "totalLines": 0
+      },
+      "modelText": "No matches found"
+    }
+  ],
+  "surrogateGlobs": [
+    {
+      "inputJson": "{\"pattern\":\"\\ud800.txt\"}",
+      "expected": {
+        "files": [
+          "/fixture/�.txt"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "inputJson": "{\"pattern\":\"*\\ud800*\"}",
+      "expected": {
+        "files": [
+          "/fixture/�.txt"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    },
+    {
+      "inputJson": "{\"pattern\":\"\\udc00.txt\"}",
+      "expected": {
+        "files": [
+          "/fixture/�.txt"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true,
+        "timedOut": false
+      }
+    }
+  ],
+  "surrogateType": {
+    "inputJson": "{\"pattern\":\"hit\",\"type\":\"\\ud800\",\"output_mode\":\"content\"}",
+    "status": 2,
+    "stderr": "rg: unrecognized file type: �\n"
+  }
+}

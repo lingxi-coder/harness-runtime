@@ -7,7 +7,6 @@
 //! - Patch preview truncation suffix template: `"\n\n... [{N} lines truncated] ..."`
 //!   (spec §7; `{N}` is the literal placeholder substituted via `replace`).
 
-use crate::structured_patch::count_patch_lines;
 use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -221,6 +220,32 @@ fn find_stale_edit_match(
     Some(ResolvedEditMatch { actual_old, count })
 }
 
+struct ResolvedUnitEditMatch {
+    actual_old: Vec<u16>,
+    count: Option<usize>,
+}
+
+fn find_stale_edit_match_units(
+    content: &[u16],
+    old_string: &[u16],
+    replace_all: bool,
+) -> Option<ResolvedUnitEditMatch> {
+    if old_string.is_empty() {
+        return None;
+    }
+    let actual_old = crate::quotes::find_actual_string_units(content, old_string)?;
+    let count = if replace_all {
+        None
+    } else {
+        let count = crate::utf16_mutation::count(content, &actual_old);
+        if count > 1 {
+            return None;
+        }
+        Some(count)
+    };
+    Some(ResolvedUnitEditMatch { actual_old, count })
+}
+
 /// Normalize claude-code's accepted Edit input aliases to the canonical keys
 /// (claude-code coerces these — the `tengu_tool_input_coerced` path): `path` →
 /// `file_path`, `old_str` → `old_string`, `new_str` → `new_string`,
@@ -257,6 +282,9 @@ fn edit_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
+    max_bytes: Option<u64>,
+    need_body: bool,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<
     lingxi_core::host::rooted_fs::RootedFileSnapshot,
     lingxi_core::host::rooted_fs::RootedFsError,
@@ -266,7 +294,55 @@ fn edit_rooted_snapshot(
             lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    use lingxi_core::host::rooted_fs::{RootedFileSnapshot, RootedFsError};
+    use std::io::Read;
+    let mut file = lingxi_core::host::rooted_fs::open_file_after_permission(
+        &root, &relative, requested, approved,
+    )?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| RootedFsError::Fs(lingxi_core::host::FsError::Io(error.to_string())))?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        Some(metadata.mode())
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    let mut snapshot = RootedFileSnapshot {
+        bytes: Vec::new(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+        mode,
+    };
+    // Validate the native 1 GiB cap from this same handle before allocating
+    // the body. A sparse oversized file must not be loaded just to reject it.
+    if !need_body || max_bytes.is_some_and(|max| snapshot.size > max) {
+        return Ok(snapshot);
+    }
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Err(RootedFsError::Cancelled);
+        }
+        let remaining = max_bytes.map_or(chunk.len(), |max| {
+            max.saturating_add(1)
+                .saturating_sub(snapshot.bytes.len() as u64)
+                .min(chunk.len() as u64) as usize
+        });
+        if remaining == 0 {
+            break;
+        }
+        let length = file.read(&mut chunk[..remaining]).map_err(|error| {
+            RootedFsError::Fs(lingxi_core::host::FsError::Io(error.to_string()))
+        })?;
+        if length == 0 {
+            break;
+        }
+        snapshot.bytes.extend_from_slice(&chunk[..length]);
+    }
+    snapshot.size = snapshot.size.max(snapshot.bytes.len() as u64);
+    Ok(snapshot)
 }
 
 fn edit_resolution_error(
@@ -274,6 +350,7 @@ fn edit_resolution_error(
     error: lingxi_core::host::rooted_fs::RootedFsError,
 ) -> ToolError {
     match error {
+        lingxi_core::host::rooted_fs::RootedFsError::ContentChanged => ToolError::InvalidInput(crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE.into()),
         lingxi_core::host::rooted_fs::RootedFsError::Cancelled => ToolError::Aborted,
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
@@ -413,17 +490,10 @@ impl FileEditTool {
 }
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["file_path", "old_string", "new_string"],
-        "properties": {
-            "file_path":   { "type": "string", "description": "The absolute path to the file to modify" },
-            "old_string":  { "type": "string", "description": "The text to replace" },
-            "new_string":  { "type": "string", "description": "The text to replace it with (must be different from old_string)" },
-            "replace_all": { "type": "boolean", "default": false, "description": "Replace all occurrences of old_string (default false)" }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/edit-input-schema.json"
+    ))
+    .expect("pinned edit input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -532,6 +602,7 @@ impl Tool for FileEditTool {
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        crate::mutation_io::check_cancel(ctx.cancel.as_ref())?;
         // Coerce claude-code's input aliases (path/old_str/new_str/replace_name)
         // to canonical keys before reading them.
         let mut input = input;
@@ -539,10 +610,14 @@ impl Tool for FileEditTool {
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
-        let old_string = crate::input_string(&input, "old_string")
+        let old_units = input
+            .string_units("/old_string")
             .ok_or_else(|| ToolError::InvalidInput("old_string is required".into()))?;
-        let new_string = crate::input_string(&input, "new_string")
+        let new_units = input
+            .string_units("/new_string")
             .ok_or_else(|| ToolError::InvalidInput("new_string is required".into()))?;
+        let old_string = old_units.as_slice();
+        let new_string = new_units.as_slice();
         let replace_all = crate::input_bool(&input, "replace_all").unwrap_or(false);
 
         // No-op edit: identical strings (claude-code validateInput, errorCode 1).
@@ -622,7 +697,13 @@ impl Tool for FileEditTool {
         let canon = if let Some(scope) = &memory_mutation {
             scope.target()
         } else {
-            match canonicalize_and_validate(&path, &trusted_dirs) {
+            let requested = path.clone();
+            let roots = trusted_dirs.clone();
+            match crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+                canonicalize_and_validate(&requested, &roots)
+            })
+            .await?
+            {
                 Ok(p) => p,
                 Err(_) => {
                     emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -635,11 +716,30 @@ impl Tool for FileEditTool {
         // Read the approved target once through a fixed rooted handle. The
         // resulting bytes, size, mtime, and mode feed both validation gates and
         // the edit itself; no later pathname reopen can cross a symlink swap.
-        let snapshot = if let Some(scope) = &memory_mutation {
-            scope.read_file()
-        } else {
-            edit_rooted_snapshot(&path, &canon, &trusted_dirs)
-        };
+        let snapshot_needs_body = old_string.is_empty()
+            || tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
+                .is_some()
+            || crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon);
+        let snapshot_path = path.clone();
+        let snapshot_canon = canon.clone();
+        let snapshot_roots = trusted_dirs.clone();
+        let snapshot_scope = memory_mutation.clone();
+        let snapshot_cancel = ctx.cancel.clone();
+        let snapshot = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            if let Some(scope) = &snapshot_scope {
+                scope.read_file()
+            } else {
+                edit_rooted_snapshot(
+                    &snapshot_path,
+                    &snapshot_canon,
+                    &snapshot_roots,
+                    (!is_unc).then_some(MAX_EDIT_FILE_SIZE),
+                    snapshot_needs_body,
+                    snapshot_cancel.as_ref(),
+                )
+            }
+        })
+        .await?;
         let initial_snapshot = match snapshot {
             Ok(snapshot) => Some(snapshot),
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
@@ -675,6 +775,13 @@ impl Tool for FileEditTool {
             }
         }
 
+        // Stat/type/permission gates retain precedence, but a never-read file
+        // needs no body allocation solely to return the known read requirement.
+        if initial_snapshot.is_some() && !snapshot_needs_body {
+            self.emit_failed(&invocation_id, "stale_read").await;
+            return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
+        }
+
         // Distinguish "does not exist" from a real read error so an empty
         // `old_string` can mean new-file creation (claude-code FileEditTool).
         //
@@ -689,38 +796,32 @@ impl Tool for FileEditTool {
         // ms) and a raw-UTF-8 decode that matches how the `Read` tool stores
         // its content, so the read-before-write staleness guard (Batch F) can
         // compare like with like.
-        #[allow(clippy::type_complexity)]
-        let mut not_text = None;
-        let existing: Option<(
-            String,
-            crate::file_meta::Encoding,
-            crate::file_meta::LineEnding,
-            i64,
-            String,
-        )> = match initial_snapshot {
-            Some(snapshot) => {
-                let bytes = snapshot.bytes;
-                not_text = crate::file_meta::classify_not_text(&bytes);
-                // Current mtime (floored ms) comes from the same opened handle
-                // as the bytes; `None` falls back to epoch `0`.
-                let mtime_ms = snapshot
-                    .modified
-                    .map(tool_api::read_file_state::mtime_ms_floor)
-                    .unwrap_or(0);
-                // Raw (non-LF-normalized) UTF-8 decode — the exact form the
-                // `Read` tool records into `read_file_state`. Used only for the
-                // content-equality fallback; falls back to the LF view if the
-                // file is not strict UTF-8 (e.g. UTF-16LE), in which case the
-                // mtime check alone governs.
-                let (content, enc, ending) = crate::file_meta::read_with_metadata(&bytes);
-                let raw_for_cmp = content
-                    .strip_prefix('\u{feff}')
-                    .unwrap_or(&content)
-                    .to_owned();
-                Some((content, enc, ending, mtime_ms, raw_for_cmp))
-            }
-            None => None,
-        };
+        let (existing, not_text, write_expectation) =
+            crate::mutation_io::prepare(ctx.cancel.as_ref(), move || match initial_snapshot {
+                Some(snapshot) => {
+                    let bytes = snapshot.bytes;
+                    let expectation =
+                        lingxi_core::host::rooted_fs::RootedWriteExpectation::from_bytes(&bytes);
+                    let not_text = crate::file_meta::classify_not_text(&bytes);
+                    let mtime_ms = snapshot
+                        .modified
+                        .map(tool_api::read_file_state::mtime_ms_floor)
+                        .unwrap_or(0);
+                    let (content, enc, ending) = crate::file_meta::read_with_metadata_units(&bytes);
+                    let raw_for_cmp = crate::utf16_mutation::without_bom(&content).to_owned();
+                    (
+                        Some((content, enc, ending, mtime_ms, raw_for_cmp)),
+                        not_text,
+                        expectation,
+                    )
+                }
+                None => (
+                    None,
+                    None,
+                    lingxi_core::host::rooted_fs::RootedWriteExpectation::Missing,
+                ),
+            })
+            .await?;
 
         // New files are created as UTF-8/LF (TS `readFileForEdit` ENOENT
         // branch returns encoding `utf8`, lineEndings `LF`). `existing` carries
@@ -732,7 +833,7 @@ impl Tool for FileEditTool {
                 crate::file_meta::Encoding::Utf8,
                 crate::file_meta::LineEnding::Lf,
                 0i64,
-                String::new(),
+                Vec::new(),
             ),
             Some((content, enc, ending, mtime_ms, raw_for_cmp)) => {
                 (Some(content), enc, ending, mtime_ms, raw_for_cmp)
@@ -745,7 +846,7 @@ impl Tool for FileEditTool {
         let prior_partial_view = existing.is_some()
             && tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
                 .is_some_and(|entry| entry.is_partial_view);
-        let (before, after, replacements): (String, String, u32) = match existing {
+        let (before, after, replacements): (Vec<u16>, Vec<u16>, u32) = match existing {
             // File does not exist.
             None => {
                 if !old_string.is_empty() {
@@ -761,12 +862,15 @@ impl Tool for FileEditTool {
                     ));
                 }
                 // Empty `old_string` on a nonexistent file → create it.
-                (String::new(), new_string.to_string(), 1)
+                (Vec::new(), new_string.to_vec(), 1)
             }
             // File exists.
             Some(before) => {
                 if old_string.is_empty()
-                    && !lingxi_core::host::effort::trim_js_whitespace(&before).is_empty()
+                    && !lingxi_core::host::effort::trim_js_whitespace(&String::from_utf16_lossy(
+                        &before,
+                    ))
+                    .is_empty()
                 {
                     self.emit_failed(&invocation_id, "file_exists").await;
                     return Err(ToolError::InvalidInput(
@@ -797,7 +901,7 @@ impl Tool for FileEditTool {
                 if let Err(e) = if old_string.is_empty() {
                     Ok(())
                 } else {
-                    crate::check_read_before_write(
+                    crate::check_read_before_write_units(
                         &self.ctx.read_file_state,
                         &requested_path,
                         guard_mtime_ms,
@@ -835,7 +939,7 @@ impl Tool for FileEditTool {
                         && lingxi_core::host::read_auto_allow::read_auto_allowed(
                             &canon.to_string_lossy(),
                         ) {
-                        find_stale_edit_match(&before, old_string, replace_all)
+                        find_stale_edit_match_units(&before, old_string, replace_all)
                     } else {
                         None
                     };
@@ -860,7 +964,7 @@ impl Tool for FileEditTool {
                     // Empty `old_string` is only valid for an (effectively) empty
                     // file — otherwise it's a creation attempt on existing content.
                     let replacement =
-                        crate::file_meta::preserve_bom(&before, new_string).into_owned();
+                        crate::file_meta::preserve_bom_units(&before, new_string).into_owned();
                     (before, replacement, 1)
                 } else {
                     // Edit must not corrupt notebooks — route to NotebookEdit.
@@ -893,19 +997,25 @@ impl Tool for FileEditTool {
                     // `before` does NOT contain `old_string`) yields `count == 0`
                     // and routes to the not-found branch, exactly as the binary's
                     // `if(!f){…errorCode 8…}` does.
-                    let ResolvedEditMatch { actual_old, count } =
-                        recovered_match.unwrap_or_else(|| ResolvedEditMatch {
-                            actual_old: crate::quotes::find_actual_string(&before, old_string)
-                                .unwrap_or_else(|| old_string.to_string()),
+                    let ResolvedUnitEditMatch { actual_old, count } = recovered_match
+                        .unwrap_or_else(|| ResolvedUnitEditMatch {
+                            actual_old: crate::quotes::find_actual_string_units(
+                                &before, old_string,
+                            )
+                            .unwrap_or_else(|| old_string.to_vec()),
                             count: None,
                         });
-                    let actual_new = crate::quotes::preserve_escape_style(
+                    let actual_new = crate::quotes::preserve_escape_style_units(
                         old_string,
                         &actual_old,
-                        &crate::quotes::preserve_quote_style(old_string, &actual_old, new_string),
+                        &crate::quotes::preserve_quote_style_units(
+                            old_string,
+                            &actual_old,
+                            new_string,
+                        ),
                     );
                     let count =
-                        count.unwrap_or_else(|| before.matches(actual_old.as_str()).count());
+                        count.unwrap_or_else(|| crate::utf16_mutation::count(&before, &actual_old));
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
                         // Byte-locked string-to-replace-not-found message
@@ -919,16 +1029,15 @@ impl Tool for FileEditTool {
                         //   g = pUa(r) ? "\n(note: ...)" : "";
                         //   message: `String to replace not found in file.
                         //   String: ${r}${g}`
-                        let note = if crate::quotes::has_escape_or_non_ascii(old_string) {
+                        let note = if crate::quotes::has_escape_or_non_ascii_units(old_string) {
                             ESCAPE_SWAP_NOTE
                         } else {
                             ""
                         };
-                        return Err(ToolError::InvalidInput(
-                            format!(
-                                "String to replace not found in file.\nString: {old_string}{note}"
-                            )
-                            .into(),
+                        return Err(crate::utf16_mutation::input_error(
+                            "String to replace not found in file.\nString: ",
+                            old_string,
+                            note,
                         ));
                     }
                     if !replace_all && count > 1 {
@@ -936,9 +1045,9 @@ impl Tool for FileEditTool {
                         // Byte-locked multiple-match message (FileEditTool.ts:336).
                         // `count` == TS `matches`; trailing `String:` echoes the
                         // ORIGINAL `old_string` input (TS `${old_string}`).
-                        return Err(ToolError::InvalidInput(format!(
-                            "Found {count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: {old_string}"
-                        ).into()));
+                        return Err(crate::utf16_mutation::input_error(&format!(
+                            "Found {count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: "
+                        ), old_string, ""));
                     }
                     // Apply the replacement, byte-faithful to claude-code
                     // `AUa` (binary offset 201328322):
@@ -949,19 +1058,22 @@ impl Tool for FileEditTool {
                     //   also consumes its trailing newline and leaves no blank
                     //   line behind. The +\n logic runs on the curly-normalized
                     //   `actual_old`/`actual_new` (== TS `D`/`N` post-`vIe`).
+                    let mut old_with_newline = actual_old.clone();
+                    old_with_newline.push(10);
                     let search_target = if actual_new.is_empty()
-                        && !actual_old.ends_with('\n')
-                        && before.contains(&format!("{actual_old}\n"))
+                        && !actual_old.ends_with(&[10])
+                        && crate::utf16_mutation::find(&before, &old_with_newline).is_some()
                     {
-                        format!("{actual_old}\n")
+                        old_with_newline
                     } else {
-                        actual_old.clone()
+                        actual_old
                     };
-                    let after = if replace_all {
-                        before.replace(search_target.as_str(), &actual_new)
-                    } else {
-                        before.replacen(search_target.as_str(), &actual_new, 1)
-                    };
+                    let after = crate::utf16_mutation::replace(
+                        &before,
+                        &search_target,
+                        &actual_new,
+                        replace_all,
+                    );
                     let replacements = if replace_all { count as u32 } else { 1 };
                     (before, after, replacements)
                 }
@@ -977,63 +1089,75 @@ impl Tool for FileEditTool {
         // Re-apply the original encoding + line endings on write so a CRLF or
         // UTF-16LE file round-trips byte-for-byte (claude-code
         // `writeTextContent`, file.ts:84-98). `after` is LF-normalized.
-        let bytes = crate::file_meta::encode_with_metadata(&after, enc, ending);
-        let result = if let Some(scope) = &memory_mutation {
-            scope.write_file(&bytes)
-        } else {
-            let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs)
-            else {
-                self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::PathBlocked { path });
+        let bytes = crate::file_meta::encode_units_with_metadata(&after, enc, ending);
+        let commit_path = path.clone();
+        let commit_canon = canon.clone();
+        let commit_requested = requested_path.clone();
+        let commit_file_path = file_path.to_owned();
+        let commit_scope = memory_mutation.clone();
+        let state =
+            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
+        let published_units = crate::utf16_mutation::without_bom(&after).to_vec();
+        let history = ctx.file_history.clone();
+        let result = crate::mutation_io::commit(ctx.cancel.as_ref(), move || {
+            let result = if let Some(scope) = &commit_scope {
+                scope.write_file_checked(&bytes, &write_expectation)
+            } else {
+                let Some((root, relative)) =
+                    crate::shared::rooted_location(&commit_canon, &trusted_dirs)
+                else {
+                    return Err(ToolError::PathBlocked { path: commit_path });
+                };
+                lingxi_core::host::rooted_fs::write_file_after_permission_checked(
+                    &root,
+                    &relative,
+                    &commit_path,
+                    &commit_canon,
+                    &bytes,
+                    &write_expectation,
+                )
             };
-            lingxi_core::host::rooted_fs::write_file_after_permission(
-                &root, &relative, &path, &canon, &bytes,
-            )
-        };
-        let write_result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                self.emit_failed(&invocation_id, "io_write").await;
-                return Err(edit_resolution_error(file_path, error));
+            let mut result =
+                result.map_err(|error| edit_resolution_error(&commit_file_path, error))?;
+            if let (Some(history), Some(parent)) = (history.as_ref(), result.parent.take()) {
+                history.track_completed_write(&commit_canon.to_string_lossy(), parent);
             }
-        };
-
-        // Post-write: update the read-state registry so an immediate second
-        // Edit/Write succeeds and Read-dedup sees the new mtime (TS
-        // `FileEditTool.ts:519-525` `readFileState.set({content: updatedFile,
-        // timestamp: <new mtime>, offset: undefined, limit: undefined})`).
-        // `after` is the LF-normalized written content (TS stores the same
-        // LF-normalized `updatedFile`); offset/limit cleared so the next read
-        // counts as a full read.
-        let new_mtime_ms = write_result
-            .modified
-            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set_after_write_with_requested_aliases(
-            &self.ctx.read_file_state,
-            requested_path.clone(),
-            tool_api::read_file_state::ReadFileEntry {
-                content: after.strip_prefix('\u{feff}').unwrap_or(&after).to_owned(),
-                mtime_ms: new_mtime_ms,
-                offset: None,
-                limit: None,
-                // Post-edit entry — not a Read; the dedup gate skips it.
-                from_read: false,
-                seeded_from_context: false,
-                // Editing a known slice does not expose the rest of the file.
-                is_partial_view: prior_partial_view,
-            },
-            true,
-            vec![requested_path.clone(), path.clone()],
-        );
+            let new_mtime_ms = result
+                .modified
+                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            state.set_after_write_with_requested_aliases_and_units(
+                commit_requested.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: String::from_utf16_lossy(&published_units),
+                    mtime_ms: new_mtime_ms,
+                    offset: None,
+                    limit: None,
+                    from_read: false,
+                    seeded_from_context: false,
+                    is_partial_view: prior_partial_view,
+                },
+                true,
+                vec![commit_requested, commit_path],
+                Some(published_units),
+            );
+            Ok(result)
+        })
+        .await?;
+        if let Err(error) = result {
+            self.emit_failed(&invocation_id, "io_write").await;
+            return Err(error);
+        }
 
         // Keep an installed language server synchronized immediately after a
         // successful edit so passive diagnostics can arrive before the next
         // model turn. Missing/unhealthy servers are best-effort and never turn
         // a completed file edit into a failure.
-        self.ctx.sync_lsp_after_file_write(&canon, &after).await;
+        self.ctx
+            .sync_lsp_after_file_write(&canon, &String::from_utf16_lossy(&after))
+            .await;
 
-        let structured_patch = crate::structured_patch::build_structured_patch(&before, &after);
-        let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
+        let (structured_patch, lines_added, lines_removed) =
+            crate::utf16_mutation::patch(&before, &after);
         if lines_added > 0 || lines_removed > 0 {
             // The oracle records the MODEL that made the change, not the tool.
             otel::record_lines_of_code_change(
@@ -1071,10 +1195,10 @@ impl Tool for FileEditTool {
         // spread `...x&&{staleRecovered:!0}` — present only when true.
         let mut data = json!({
             "filePath": file_path,
-            "oldString": old_string,
-            "newString": new_string,
-            "originalFile": before,
-            "structuredPatch": structured_patch,
+            "oldString": "",
+            "newString": "",
+            "originalFile": "",
+            "structuredPatch": [],
             "userModified": false,
             "replaceAll": replace_all,
         });
@@ -1084,8 +1208,17 @@ impl Tool for FileEditTool {
         if prior_partial_view {
             data["contentNotInModelContext"] = json!(true);
         }
+        let mut data = crate::generated_result(&data);
+        data.set_field("oldString", crate::utf16_mutation::string(old_string))
+            .expect("result field");
+        data.set_field("newString", crate::utf16_mutation::string(new_string))
+            .expect("result field");
+        data.set_field("originalFile", crate::utf16_mutation::string(&before))
+            .expect("result field");
+        data.set_field("structuredPatch", structured_patch)
+            .expect("result field");
         Ok(ToolCallResult {
-            data: crate::generated_result(&data),
+            data,
             model_content: Some(content.into()),
             new_messages: vec![],
             context_modifier: None,

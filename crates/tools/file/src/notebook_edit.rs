@@ -11,7 +11,8 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -119,29 +120,10 @@ impl NotebookEditTool {
 }
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    // Requiredness mirrors the TS `inputSchema` strictObject
-    // (`NotebookEditTool.ts:30-57`): only `notebook_path` + `new_source` are
-    // required; `cell_id`, `cell_type`, and `edit_mode` are optional.
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["notebook_path", "new_source"],
-        "properties": {
-            "notebook_path": { "type": "string", "description": "The absolute path to the Jupyter notebook file to edit (must be absolute, not relative)" },
-            "cell_id":       { "type": "string", "description": "The ID of the cell to edit. When inserting a new cell, the new cell will be inserted after the cell with this ID, or at the beginning if not specified." },
-            "new_source":    { "type": "string", "description": "The new source for the cell" },
-            "cell_type":     {
-                "type": "string",
-                "enum": ["code", "markdown"],
-                "description": "The type of the cell (code or markdown). If not specified, it defaults to the current cell type. If using edit_mode=insert, this is required."
-            },
-            "edit_mode":     {
-                "type": "string",
-                "enum": ["replace", "insert", "delete"],
-                "description": "The type of edit to make (replace, insert, delete). Defaults to replace."
-            }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/notebookedit-input-schema.json"
+    ))
+    .expect("pinned notebookedit input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -168,7 +150,7 @@ struct NotebookMutation {
     new_source: Utf16JsonProjection,
     old_source: Option<Utf16JsonProjection>,
     language: Utf16JsonProjection,
-    cell_id: Option<String>,
+    cell_id: Option<Utf16JsonProjection>,
     model_content: Utf16JsonProjection,
 }
 
@@ -245,25 +227,32 @@ fn mutate_notebook(
         }
         validate_cell_source(cell)?;
     }
-    let cell_id = cell_id.filter(|id| !id.is_empty());
-    let index = match cell_id {
+    let cell_id = input
+        .string_units("/cell_id")
+        .or_else(|| cell_id.map(|id| id.encode_utf16().collect()))
+        .filter(|id| !id.is_empty());
+    let index = match cell_id.as_deref() {
         None if edit_mode == EDIT_MODE_INSERT => 0,
         None => {
             return Err(notebook_error(
                 "Cell ID must be specified when not inserting a new cell.",
-            ))
+            ));
         }
         Some(id) => {
             let found = (0..count).find(|index| {
                 cells
                     .get_index(*index)
                     .and_then(|cell| cell.get_property("id"))
-                    .and_then(JsonValueView::as_str)
+                    .and_then(JsonValueView::code_units)
                     == Some(id)
             });
             let index = if let Some(index) = found {
                 index
-            } else if let Some(index) = parse_cell_id(id) {
+            } else if let Some(index) = String::from_utf16(id)
+                .ok()
+                .as_deref()
+                .and_then(parse_cell_id)
+            {
                 if index >= count {
                     return Err(notebook_error(format!(
                         "Cell with index {index} does not exist in notebook."
@@ -271,9 +260,11 @@ fn mutate_notebook(
                 }
                 index
             } else {
-                return Err(notebook_error(format!(
-                    "Cell with ID \"{id}\" not found in notebook."
-                )));
+                return Err(crate::utf16_mutation::input_error(
+                    "Cell with ID \"",
+                    id,
+                    "\" not found in notebook.",
+                ));
             };
             index + usize::from(edit_mode == EDIT_MODE_INSERT)
         }
@@ -296,9 +287,9 @@ fn mutate_notebook(
                     .is_some_and(|minor| minor >= 5.0))
     });
     let result_id = if edit_mode == EDIT_MODE_INSERT {
-        supports_ids.then(|| insert_id().chars().take(8).collect::<String>())
+        supports_ids.then(|| insert_id().chars().take(8).collect::<String>().into())
     } else {
-        cell_id.map(str::to_owned)
+        cell_id.as_deref().map(crate::utf16_mutation::string)
     };
     let (old_source, changed_cell) = match edit_mode {
         EDIT_MODE_DELETE => (
@@ -311,7 +302,7 @@ fn mutate_notebook(
             let kind = cell_type.unwrap_or("code");
             let mut fields = vec![("cell_type".into(), kind.into())];
             if let Some(id) = &result_id {
-                fields.push(("id".into(), id.as_str().into()));
+                fields.push(("id".into(), id.clone()));
             }
             fields.extend([
                 ("source".into(), new_source.clone()),
@@ -391,14 +382,25 @@ fn mutate_notebook(
     notebook
         .set_field("cells", updated_cells)
         .map_err(|error| notebook_error(error.to_string()))?;
-    let display_id = result_id.as_deref().unwrap_or("undefined");
-    let prefix = match edit_mode {
-        EDIT_MODE_DELETE => format!("Deleted cell {display_id}"),
-        EDIT_MODE_INSERT if result_id.is_none() => "Inserted a new cell with ".into(),
-        EDIT_MODE_INSERT => format!("Inserted cell {display_id} with "),
-        _ => format!("Updated cell {display_id} with "),
-    };
-    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    let mut units: Vec<u16> = match edit_mode {
+        EDIT_MODE_DELETE => "Deleted cell ",
+        EDIT_MODE_INSERT if result_id.is_none() => "Inserted a new cell with ",
+        EDIT_MODE_INSERT => "Inserted cell ",
+        _ => "Updated cell ",
+    }
+    .encode_utf16()
+    .collect();
+    if edit_mode != EDIT_MODE_INSERT || result_id.is_some() {
+        units.extend(
+            result_id
+                .as_ref()
+                .and_then(|id| id.string_units(""))
+                .unwrap_or_else(|| "undefined".encode_utf16().collect()),
+        );
+        if edit_mode != EDIT_MODE_DELETE {
+            units.extend(" with ".encode_utf16());
+        }
+    }
     if edit_mode != EDIT_MODE_DELETE {
         units.extend_from_slice(
             new_source
@@ -430,6 +432,82 @@ fn serialize_notebook(notebook: &Utf16JsonProjection) -> Result<String, ToolErro
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn notebook_result(
+    mutation: NotebookMutation,
+    cell_type: Option<&str>,
+    edit_mode: &str,
+    requested_path: &Path,
+    raw: Vec<u16>,
+    serialized: &str,
+) -> Result<ToolCallResult, ToolError> {
+    let mut fields = vec![("new_source".to_string(), mutation.new_source.clone())];
+    if let Some(old_source) = mutation.old_source {
+        fields.push(("old_source".into(), old_source));
+    }
+    fields.extend([
+        ("cell_type".into(), cell_type.unwrap_or("code").into()),
+        ("language".into(), mutation.language),
+        ("edit_mode".into(), edit_mode.into()),
+    ]);
+    if let Some(id) = mutation.cell_id {
+        fields.push(("cell_id".into(), id.into()));
+    }
+    fields.extend([
+        ("error".into(), "".into()),
+        (
+            "notebook_path".into(),
+            requested_path.to_string_lossy().as_ref().into(),
+        ),
+        (
+            "original_file".into(),
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&raw), raw)
+                .expect("matching source display"),
+        ),
+        ("updated_file".into(), serialized.into()),
+    ]);
+    let data = Utf16JsonProjection::object(fields)
+        .map_err(|error| ToolError::Io(error.to_string().into()))?;
+    Ok(ToolCallResult {
+        data,
+        model_content: Some(mutation.model_content),
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
+        subagent_hooks_fired: false,
+    })
+}
+
+fn notebook_resolution_error(
+    path: &str,
+    error: lingxi_core::host::rooted_fs::RootedFsError,
+) -> ToolError {
+    use lingxi_core::host::{rooted_fs::RootedFsError, FsError};
+    match error {
+        RootedFsError::Cancelled => ToolError::Aborted,
+        RootedFsError::ContentChanged => ToolError::InvalidInput(crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE.into()),
+        RootedFsError::Fs(FsError::NotFound(_)) => ToolError::InvalidInput("Notebook file does not exist.".into()),
+        RootedFsError::LeafSymlink => ToolError::InvalidInput(format!("Refusing to write {path}: it is a symbolic link. Write to the link's target path instead.").into()),
+        RootedFsError::SymlinkResolutionChanged | RootedFsError::ParentSymlinkResolutionChanged => ToolError::InvalidInput(format!("Refusing to write {path}: its symlink resolution changed after permission was checked.").into()),
+        RootedFsError::NotRegularFile => ToolError::Io(format!("File {path} is not a regular file").into()),
+        RootedFsError::Fs(error) => ToolError::Io(error.to_string().into()),
+    }
+}
+
+fn notebook_open_source(
+    requested: &Path,
+    approved: &Path,
+    trusted_dirs: &[PathBuf],
+) -> Result<std::fs::File, ToolError> {
+    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
+        return Err(ToolError::PathBlocked {
+            path: requested.to_owned(),
+        });
+    };
+    lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+        .map_err(|error| notebook_resolution_error(&requested.to_string_lossy(), error))
 }
 
 #[async_trait]
@@ -529,6 +607,7 @@ Usage:\n\
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        crate::mutation_io::check_cancel(ctx.cancel.as_ref())?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let notebook_path = crate::input_string(&input, "notebook_path")
             .ok_or_else(|| ToolError::InvalidInput("notebook_path is required".into()))?;
@@ -589,7 +668,19 @@ Usage:\n\
                 return Err(ToolError::InvalidInput(message.into()));
             }
         };
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
+        // NotebookEdit has no implicit memory mutation grant. An executing
+        // restricted memory scope must fail closed rather than falling back to
+        // the ordinary foreground workspace authority.
+        lingxi_core::host::memory_tool_scope::memory_file_mutation(TOOL_NAME, &input)
+            .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
+        let trusted_dirs = self.ctx.trusted_dirs_for_tool(TOOL_NAME, &input);
+        let canonical_request = path.clone();
+        let canonical_roots = trusted_dirs.clone();
+        let canon = match crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            canonicalize_and_validate(&canonical_request, &canonical_roots)
+        })
+        .await?
+        {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -598,151 +689,128 @@ Usage:\n\
             }
         };
 
-        let current_mtime_ms = tokio::fs::metadata(&canon)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        // NotebookEdit's guard has no full-content equality fallback. Even a
-        // byte-identical file with an advanced mtime must be read again.
+        // Capture the executing model's registry before entering the blocking
+        // pool; task-local memory-fork views do not propagate to OS threads.
         let entry =
             tool_api::read_file_state::get_metadata(&self.ctx.read_file_state, &requested_path)
                 .ok_or_else(|| ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()))?;
-        if current_mtime_ms > entry.mtime_ms {
-            return Err(ToolError::InvalidInput(
-                crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
-            ));
-        }
-
-        if tokio::fs::metadata(&canon)
-            .await
-            .is_ok_and(|metadata| metadata.len() > MAX_NOTEBOOK_BYTES as u64)
-        {
-            return Err(ToolError::InvalidInput(
-                crate::notebook_read::notebook_too_large_message().into(),
-            ));
-        }
-        let bytes = match tokio::fs::read(&canon).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ToolError::InvalidInput(
-                    "Notebook file does not exist.".into(),
-                ));
+        let prepare_path = path.clone();
+        let prepare_canon = canon.clone();
+        let prepare_roots = trusted_dirs.clone();
+        let prepare_input = input.clone();
+        let prepare_cell_id = cell_id.map(str::to_owned);
+        let prepare_mode = edit_mode.to_owned();
+        let prepare_type = cell_type.clone();
+        let prepare_cancel = ctx.cancel.clone();
+        let prepare_result_path = requested_path.clone();
+        let prepared = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            let mut source = notebook_open_source(&prepare_path, &prepare_canon, &prepare_roots)?;
+            let metadata = source.metadata().map_err(|error| ToolError::Io(error.to_string().into()))?;
+            let current_mtime_ms = metadata.modified().ok()
+                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            // Native NotebookEdit has no full-content equality fallback. Even
+            // identical bytes with a newer mtime require another Read.
+            if current_mtime_ms > entry.mtime_ms {
+                return Err(ToolError::InvalidInput(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR.into()));
             }
-            Err(error) => return Err(ToolError::Io(error.to_string().into())),
-        };
-        if bytes.len() > MAX_NOTEBOOK_BYTES {
-            return Err(ToolError::InvalidInput(
-                crate::notebook_read::notebook_too_large_message().into(),
-            ));
-        }
-        if let Some(kind) = crate::file_meta::classify_not_text(&bytes) {
-            return Err(ToolError::InvalidInput(
-                kind.mutation_refusal_message().into(),
-            ));
-        }
-        let (raw, encoding, line_ending) = crate::file_meta::read_with_metadata(&bytes);
-        let mut notebook = Utf16JsonProjection::parse(&raw)
-            .map_err(|_| ToolError::InvalidInput("Notebook is not valid JSON.".into()))?;
-        let root = notebook.at_pointer("").expect("parsed JSON has a root");
-        if root.is_null()
-            || root.as_bool() == Some(false)
-            || root.as_number() == Some(0.0)
-            || root.code_units().is_some_and(<[u16]>::is_empty)
-        {
-            return Err(notebook_error("Notebook is not valid JSON."));
-        }
-        let mutation = mutate_notebook(
-            &mut notebook,
-            &input,
-            cell_id,
-            edit_mode,
-            cell_type.as_deref(),
-            || uuid::Uuid::new_v4().to_string(),
-        )?;
-        // The flat JSON stringifier preserves ECMAScript key order, numeric
-        // spelling, and lone UTF-16 surrogates. Halving its structural indent
-        // implements JSON.stringify(notebook, null, 1).
-        let serialized = serialize_notebook(&notebook)?;
-        let output = crate::file_meta::encode_with_metadata(&serialized, encoding, line_ending);
-        if output.len() > MAX_NOTEBOOK_BYTES {
-            return Err(ToolError::InvalidInput(
-                "Edit rejected: the updated notebook would exceed the maximum size this tool can read (100MB). The file was left unchanged.".into(),
-            ));
-        }
+            if metadata.len() > MAX_NOTEBOOK_BYTES as u64 {
+                return Err(ToolError::InvalidInput(crate::notebook_read::notebook_too_large_message().into()));
+            }
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 64 * 1024];
+            loop {
+                crate::mutation_io::check_cancel(prepare_cancel.as_ref())?;
+                let length = source.read(&mut chunk).map_err(|error| ToolError::Io(error.to_string().into()))?;
+                if length == 0 { break; }
+                if bytes.len().saturating_add(length) > MAX_NOTEBOOK_BYTES {
+                    return Err(ToolError::InvalidInput(crate::notebook_read::notebook_too_large_message().into()));
+                }
+                bytes.extend_from_slice(&chunk[..length]);
+            }
+            if let Some(kind) = crate::file_meta::classify_not_text(&bytes) {
+                return Err(ToolError::InvalidInput(kind.mutation_refusal_message().into()));
+            }
+            let expectation = lingxi_core::host::rooted_fs::RootedWriteExpectation::from_bytes(&bytes);
+            let (raw, encoding, line_ending) = crate::file_meta::read_with_metadata_units(&bytes);
+            let mut notebook = Utf16JsonProjection::parse_utf16_json(&raw)
+                .map_err(|_| ToolError::InvalidInput("Notebook is not valid JSON.".into()))?;
+            let root = notebook.at_pointer("").expect("parsed JSON has a root");
+            if root.is_null() || root.as_bool() == Some(false) || root.as_number() == Some(0.0)
+                || root.code_units().is_some_and(<[u16]>::is_empty)
+            {
+                return Err(notebook_error("Notebook is not valid JSON."));
+            }
+            crate::mutation_io::check_cancel(prepare_cancel.as_ref())?;
+            let mutation = mutate_notebook(&mut notebook, &prepare_input, prepare_cell_id.as_deref(),
+                &prepare_mode, prepare_type.as_deref(), || uuid::Uuid::new_v4().to_string())?;
+            // JSON's own source carrier retains lone surrogates and key order.
+            let serialized = serialize_notebook(&notebook)?;
+            let output = crate::file_meta::encode_with_metadata(&serialized, encoding, line_ending);
+            if output.len() > MAX_NOTEBOOK_BYTES {
+                return Err(ToolError::InvalidInput("Edit rejected: the updated notebook would exceed the maximum size this tool can read (100MB). The file was left unchanged.".into()));
+            }
+            crate::mutation_io::check_cancel(prepare_cancel.as_ref())?;
+            let result = notebook_result(mutation, prepare_type.as_deref(), &prepare_mode,
+                &prepare_result_path, raw, &serialized)?;
+            Ok((serialized, output, result, expectation))
+        }).await??;
+        let (serialized, output, result, expectation) = prepared;
         if let Some(history) = ctx.file_history.as_ref() {
             history.track_edit(&canon.to_string_lossy()).await;
         }
-        tokio::fs::write(&canon, output)
-            .await
-            .map_err(|error| ToolError::Io(error.to_string().into()))?;
-
-        // Post-write: update the read-state registry so an immediate second
-        // NotebookEdit succeeds and the staleness guard sees the new mtime (TS
-        // `NotebookEditTool.ts:437-442` `readFileState.set({content:
-        // updatedContent, timestamp: <new mtime>, offset: undefined, limit:
-        // undefined})`). `serialized` is the just-written notebook JSON;
-        // offset/limit cleared so it counts as a full read.
-        let new_mtime_ms = tokio::fs::metadata(&canon)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set_with_requested_aliases(
-            &self.ctx.read_file_state,
-            requested_path.clone(),
-            tool_api::read_file_state::ReadFileEntry {
-                content: serialized.clone(),
-                mtime_ms: new_mtime_ms,
-                offset: None,
-                limit: None,
-                // Post-edit entry — not a Read.
-                from_read: false,
-                seeded_from_context: false,
-                is_partial_view: false,
-            },
-            true,
-            vec![requested_path.clone(), path.clone()],
-        );
+        let commit_path = path.clone();
+        let commit_canon = canon.clone();
+        let commit_requested = requested_path.clone();
+        let commit_notebook_path = notebook_path.to_owned();
+        let published = serialized;
+        let state =
+            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
+        let history = ctx.file_history.clone();
+        crate::mutation_io::commit(ctx.cancel.as_ref(), move || {
+            let Some((root, relative)) =
+                crate::shared::rooted_location(&commit_canon, &trusted_dirs)
+            else {
+                return Err(ToolError::PathBlocked { path: commit_path });
+            };
+            let mut receipt = lingxi_core::host::rooted_fs::write_file_after_permission_checked(
+                &root,
+                &relative,
+                &commit_path,
+                &commit_canon,
+                &output,
+                &expectation,
+            )
+            .map_err(|error| notebook_resolution_error(&commit_notebook_path, error))?;
+            if let (Some(history), Some(parent)) = (history.as_ref(), receipt.parent.take()) {
+                history.track_completed_write(&commit_canon.to_string_lossy(), parent);
+            }
+            let new_mtime_ms = receipt
+                .modified
+                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            let published_units = published.encode_utf16().collect();
+            state.set_after_write_with_requested_aliases_and_units(
+                commit_requested.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: published,
+                    mtime_ms: new_mtime_ms,
+                    offset: None,
+                    limit: None,
+                    from_read: false,
+                    seeded_from_context: false,
+                    is_partial_view: false,
+                },
+                true,
+                vec![commit_requested, commit_path],
+                Some(published_units),
+            );
+            Ok::<_, ToolError>(())
+        })
+        .await??;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, 1, duration_ms).await;
 
-        let mut fields = vec![("new_source".to_string(), mutation.new_source.clone())];
-        if let Some(old_source) = mutation.old_source {
-            fields.push(("old_source".into(), old_source));
-        }
-        fields.extend([
-            (
-                "cell_type".into(),
-                cell_type.as_deref().unwrap_or("code").into(),
-            ),
-            ("language".into(), mutation.language),
-            ("edit_mode".into(), edit_mode.into()),
-        ]);
-        if let Some(id) = mutation.cell_id {
-            fields.push(("cell_id".into(), id.into()));
-        }
-        fields.extend([
-            ("error".into(), "".into()),
-            (
-                "notebook_path".into(),
-                requested_path.to_string_lossy().as_ref().into(),
-            ),
-            ("original_file".into(), raw.into()),
-            ("updated_file".into(), serialized.into()),
-        ]);
-        let data = Utf16JsonProjection::object(fields)
-            .map_err(|error| ToolError::Io(error.to_string().into()))?;
-        Ok(ToolCallResult {
-            data,
-            model_content: Some(mutation.model_content),
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-            subagent_hooks_fired: false,
-        })
+        Ok(result)
     }
 }
 
@@ -831,6 +899,295 @@ mod tests {
             "nbformat": 4,
             "nbformat_minor": 5
         })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn notebook_precancelled_call_preserves_file_and_read_state() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        let before = sample_notebook();
+        std::fs::write(&target, &before).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let state = ctx.read_file_state.clone();
+        let error = NotebookEditTool::new(ctx)
+            .call(
+                crate::generated_result(
+                    &json!({"notebook_path":target,"cell_id":"c1","new_source":"changed"}),
+                ),
+                tool_api::test_support::fresh_ctx_cancelled(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Aborted));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
+        assert!(
+            tool_api::read_file_state::get_metadata(&state, &target)
+                .unwrap()
+                .from_read
+        );
+    }
+
+    struct CancelAtCheckpoint(tokio_util::sync::CancellationToken);
+    #[async_trait]
+    impl lingxi_core::host::FileHistorySink for CancelAtCheckpoint {
+        async fn track_edit(&self, _: &str) {
+            self.0.cancel();
+        }
+        fn track_completed_write(
+            &self,
+            _: &str,
+            _: lingxi_core::host::rooted_fs::RootedWriteParent,
+        ) {
+            panic!("a cancelled transaction must not publish a write receipt");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notebook_cancel_after_preparation_never_commits_or_publishes_state() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        let before = sample_notebook();
+        std::fs::write(&target, &before).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let state = ctx.read_file_state.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut invocation = fresh_ctx();
+        invocation.cancel = Some(cancel.clone());
+        invocation.file_history = Some(Arc::new(CancelAtCheckpoint(cancel)));
+        let error = NotebookEditTool::new(ctx)
+            .call(
+                crate::generated_result(
+                    &json!({"notebook_path":target,"cell_id":"c1","new_source":"changed"}),
+                ),
+                invocation,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Aborted));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
+        assert!(
+            tool_api::read_file_state::get_metadata(&state, &target)
+                .unwrap()
+                .from_read
+        );
+    }
+
+    struct ChangeAtCheckpoint(PathBuf);
+    #[async_trait]
+    impl lingxi_core::host::FileHistorySink for ChangeAtCheckpoint {
+        async fn track_edit(&self, _: &str) {
+            std::fs::write(&self.0, "external writer's newer content").unwrap();
+        }
+        fn track_completed_write(
+            &self,
+            _: &str,
+            _: lingxi_core::host::rooted_fs::RootedWriteParent,
+        ) {
+            panic!("a stale transaction must not publish a write receipt");
+        }
+    }
+
+    #[tokio::test]
+    async fn notebook_rejects_content_changed_after_preparation() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let state = ctx.read_file_state.clone();
+        let mut invocation = fresh_ctx();
+        invocation.file_history = Some(Arc::new(ChangeAtCheckpoint(target.clone())));
+        let error = NotebookEditTool::new(ctx)
+            .call(
+                crate::generated_result(
+                    &json!({"notebook_path":target,"cell_id":"c1","new_source":"changed"}),
+                ),
+                invocation,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some(crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "external writer's newer content"
+        );
+        assert!(
+            tool_api::read_file_state::get_metadata(&state, &target)
+                .unwrap()
+                .from_read
+        );
+    }
+
+    #[cfg(unix)]
+    struct SwapAtCheckpoint {
+        path: PathBuf,
+        saved: PathBuf,
+        outside: PathBuf,
+    }
+    #[cfg(unix)]
+    #[async_trait]
+    impl lingxi_core::host::FileHistorySink for SwapAtCheckpoint {
+        async fn track_edit(&self, _: &str) {
+            std::fs::rename(&self.path, &self.saved).unwrap();
+            std::os::unix::fs::symlink(&self.outside, &self.path).unwrap();
+        }
+        fn track_completed_write(
+            &self,
+            _: &str,
+            _: lingxi_core::host::rooted_fs::RootedWriteParent,
+        ) {
+            panic!("a redirected transaction must not publish a write receipt");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn notebook_rejects_symlink_swap_between_preparation_and_commit() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        let saved = tmp.path().join("saved.ipynb");
+        let protected = outside.path().join("outside.ipynb");
+        let before = sample_notebook();
+        std::fs::write(&target, &before).unwrap();
+        std::fs::write(&protected, "protected outside data").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let state = ctx.read_file_state.clone();
+        let mut invocation = fresh_ctx();
+        invocation.file_history = Some(Arc::new(SwapAtCheckpoint {
+            path: target.clone(),
+            saved: saved.clone(),
+            outside: protected.clone(),
+        }));
+        let error = NotebookEditTool::new(ctx)
+            .call(
+                crate::generated_result(
+                    &json!({"notebook_path":target,"cell_id":"c1","new_source":"changed"}),
+                ),
+                invocation,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .contains("Refusing to write"));
+        assert_eq!(
+            std::fs::read_to_string(&protected).unwrap(),
+            "protected outside data"
+        );
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), before);
+        assert!(
+            tool_api::read_file_state::get_metadata(&state, &target)
+                .unwrap()
+                .from_read
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn notebook_fifo_rejection_does_not_wait_for_a_writer() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("pipe.ipynb");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&target)
+            .status()
+            .unwrap()
+            .success());
+        let (ctx, _) = make_ctx(&tmp);
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            target.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: i64::MAX,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            NotebookEditTool::new(ctx).call(
+                crate::generated_result(
+                    &json!({"notebook_path":target,"cell_id":"c1","new_source":"changed"}),
+                ),
+                fresh_ctx(),
+                fresh_tx(),
+            ),
+        )
+        .await
+        .expect("FIFO validation must not block the runtime");
+        assert!(result
+            .unwrap_err()
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .contains("not a regular file"));
+    }
+
+    #[test]
+    fn native_322_notebook_selector_preserves_exact_surrogate_ids() {
+        let fixture =
+            Utf16JsonProjection::parse(include_str!("fixtures/notebook_utf16_native_322.json"))
+                .unwrap();
+        for index in 0..fixture.array_len("/notebooks").unwrap() {
+            let prefix = format!("/notebooks/{index}");
+            let mut notebook = Utf16JsonProjection::parse(
+                fixture
+                    .string_at(&format!("{prefix}/notebookJson"))
+                    .unwrap(),
+            )
+            .unwrap();
+            let input = fixture.subprojection(&format!("{prefix}/input")).unwrap();
+            let mode = crate::input_string(&input, "edit_mode").unwrap_or("replace");
+            let mutation = mutate_notebook(&mut notebook, &input, None, mode, None, || {
+                "native123456".into()
+            });
+            if let Some(expected) = fixture.string_units(&format!("{prefix}/expected/error")) {
+                assert_eq!(
+                    mutation
+                        .err()
+                        .unwrap()
+                        .model_facing_message()
+                        .string_units(""),
+                    Some(expected)
+                );
+            } else {
+                let mutation = mutation.unwrap();
+                assert_eq!(
+                    mutation.cell_id.unwrap().string_units(""),
+                    fixture.string_units(&format!("{prefix}/expected/data/cell_id"))
+                );
+                assert_eq!(
+                    mutation.new_source.string_units(""),
+                    fixture.string_units(&format!("{prefix}/expected/data/new_source"))
+                );
+                assert_eq!(
+                    mutation.model_content.string_units(""),
+                    fixture.string_units(&format!("{prefix}/expected/model"))
+                );
+                assert_eq!(
+                    serialize_notebook(&notebook).unwrap(),
+                    fixture
+                        .string_at(&format!("{prefix}/expected/updatedFile"))
+                        .unwrap()
+                );
+            }
+        }
     }
 
     #[test]

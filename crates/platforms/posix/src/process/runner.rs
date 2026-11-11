@@ -383,6 +383,88 @@ async fn publish_background_output(
     }
 }
 
+/// Observe exit while retaining Darwin's direct-child identity anchor until
+/// every live member of the owned group has stopped. Other targets keep their
+/// existing Tokio wait path and process-group confirmation semantics.
+async fn wait_inline_leader_exit(
+    child: &mut tokio::process::Child,
+    pid: u32,
+) -> Result<Option<std::process::ExitStatus>, ProcessError> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = child;
+        loop {
+            match super::spawn_unsafe::team_child_exited_unreaped(pid) {
+                Ok(true) => return Ok(None),
+                Ok(false) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+                Err(error) => return Err(ProcessError::Io(error.to_string())),
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        child
+            .wait()
+            .await
+            .map(Some)
+            .map_err(|error| ProcessError::Io(error.to_string()))
+    }
+}
+
+/// Confirm SIGKILL's effect before releasing Darwin's unreaped leader anchor.
+/// An uninspectable or persistently live group never counts as completed.
+async fn confirm_inline_group_stopped(pid: u32) -> Result<(), ProcessError> {
+    let pgid =
+        nix::unistd::Pid::from_raw(i32::try_from(pid).map_err(|_| ProcessError::Unsupported)?);
+    #[allow(unused_mut)]
+    let mut last_denial: Option<nix::errno::Errno> = None;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            #[cfg(target_os = "macos")]
+            match super::spawn_unsafe::team_group_has_live_members(pid) {
+                Ok(false) => return Ok::<(), ProcessError>(()),
+                Ok(true) => {}
+                Err(error) => {
+                    return Err(ProcessError::Io(format!(
+                        "{} process group {pid} cleanup cannot be confirmed: {error}",
+                        lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+                    )))
+                }
+            }
+            match nix::sys::signal::killpg(pgid, None) {
+                Err(nix::errno::Errno::ESRCH) => return Ok(()),
+                Ok(()) => {}
+                // Darwin can deny kill(0) while the last killed descendant is
+                // turning into a zombie. Keep waiting for positive no-live
+                // evidence; the denial itself is never treated as success.
+                #[cfg(target_os = "macos")]
+                Err(error @ nix::errno::Errno::EPERM) => last_denial = Some(error),
+                Err(error) => {
+                    return Err(ProcessError::Io(format!(
+                        "{} process group {pid} cleanup cannot be confirmed: {error}",
+                        lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+                    )))
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        ProcessError::Io(match last_denial {
+            Some(error) => format!(
+                "{} process group {pid} cleanup cannot be confirmed: {error}",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+            ),
+            None => format!(
+                "{} process group {pid} did not settle",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+            ),
+        })
+    })?
+}
+
 fn stop_held_foreground(pid: u32) -> Result<(), ProcessError> {
     #[cfg(test)]
     if matches!(
@@ -1036,11 +1118,12 @@ impl ProcessRunner for PosixProcess {
         let mut out_done = false;
         let mut err_done = false;
         let mut status = None;
+        let mut leader_exited = false;
         let mut truncated = false;
         let deadline = tokio::time::sleep(cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT));
         tokio::pin!(deadline);
         let timed_out = loop {
-            if out_done && err_done && status.is_some() {
+            if out_done && err_done && leader_exited {
                 break false;
             }
             tokio::select! {
@@ -1066,13 +1149,48 @@ impl ProcessRunner for PosixProcess {
                         }
                     }
                 }
-                waited = child.wait(), if status.is_none() => {
-                    status = Some(waited.map_err(|error| ProcessError::Io(error.to_string()))?);
+                waited = wait_inline_leader_exit(&mut child, pid), if !leader_exited => {
+                    status = waited?;
+                    leader_exited = true;
                 }
             }
         };
         if timed_out {
             let _ = kill_tree_force(pid);
+            #[cfg(not(target_os = "macos"))]
+            {
+                status = Some(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                        .await
+                        .map_err(|_| {
+                            ProcessError::Io(format!(
+                                "{} process {pid} did not reap",
+                                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                            ))
+                        })?
+                        .map_err(|error| {
+                            ProcessError::Io(format!(
+                                "{} {error}",
+                                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                            ))
+                        })?,
+                );
+            }
+        }
+        // A shell may exit after a child closes its pipes and keeps running.
+        // Foreground completion must settle that owned group too.
+        kill_tree_force(pid).map_err(|error| {
+            ProcessError::Io(format!(
+                "{} {error}",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+            ))
+        })?;
+        confirm_inline_group_stopped(pid).await?;
+        // The group has no live members. Disarm numeric-PGID signalling
+        // before the authoritative wait can release/recycle the leader PID.
+        group_guard.0 = None;
+        #[cfg(target_os = "macos")]
+        {
             status = Some(
                 tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
                     .await
@@ -1090,39 +1208,6 @@ impl ProcessRunner for PosixProcess {
                     })?,
             );
         }
-        // A shell may exit after a child closes its pipes and keeps running.
-        // Foreground completion must settle that owned group too.
-        kill_tree_force(pid).map_err(|error| {
-            ProcessError::Io(format!(
-                "{} {error}",
-                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
-            ))
-        })?;
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let pgid = nix::unistd::Pid::from_raw(
-                i32::try_from(pid).map_err(|_| ProcessError::Unsupported)?,
-            );
-            loop {
-                match nix::sys::signal::killpg(pgid, None) {
-                    Err(nix::errno::Errno::ESRCH) => return Ok::<(), ProcessError>(()),
-                    Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-                    Err(error) => {
-                        return Err(ProcessError::Io(format!(
-                            "{} process group {pid} cleanup cannot be confirmed: {error}",
-                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
-                        )))
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            ProcessError::Io(format!(
-                "{} process group {pid} did not settle",
-                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
-            ))
-        })??;
-        group_guard.0 = None;
         let mut stdout = String::from_utf8_lossy(&out).into_owned();
         if truncated {
             stdout.push_str("\n[Local App Chat shell output truncated at the inline limit]");
@@ -3070,6 +3155,35 @@ mod async_hook_tests {
         assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn inline_foreground_confirms_zombie_group_before_reaping_its_leader() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 7"]).kill_on_drop(true);
+        attach_setsid(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_inline_leader_exit(&mut child, pid),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            status.is_none(),
+            "Darwin observer must not consume the child's exit status"
+        );
+        assert!(super::super::spawn_unsafe::team_child_exited_unreaped(pid).unwrap());
+        kill_tree_force(pid).unwrap();
+        confirm_inline_group_stopped(pid).await.unwrap();
+        assert!(
+            super::super::spawn_unsafe::team_child_exited_unreaped(pid).unwrap(),
+            "group confirmation must retain the identity anchor"
+        );
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
+    }
+
     #[tokio::test]
     async fn local_app_inline_foreground_reaps_children_that_closed_their_pipes() {
         let parent = tempfile::tempdir().unwrap();
@@ -3081,10 +3195,27 @@ mod async_hook_tests {
             panic!("inline process detached")
         };
         let pgid = nix::unistd::Pid::from_raw(output.stdout.parse().unwrap());
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             nix::sys::signal::killpg(pgid, None),
             Err(nix::errno::Errno::ESRCH)
         );
+        #[cfg(target_os = "macos")]
+        {
+            // An orphaned grandchild is reaped by launchd, not by this runner.
+            // It may retain the old group briefly as a zombie. This is only a
+            // read-only postcondition check: no signal is sent after reap.
+            let absent = nix::sys::signal::killpg(pgid, None) == Err(nix::errno::Errno::ESRCH);
+            assert!(
+                absent
+                    || matches!(
+                        super::super::spawn_unsafe::team_group_has_live_members(
+                            pgid.as_raw() as u32
+                        ),
+                        Ok(false)
+                    )
+            );
+        }
         assert!(!parent.path().join("tasks").exists());
     }
 

@@ -1086,6 +1086,8 @@ pub struct MessagesCreateOptions {
     /// append using Native attachment merge semantics instead of ordinary
     /// adjacent-user text joining.
     pub typed_attachment_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+    /// User source rows whose original content root was a JSON string.
+    pub scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     /// Captured Native task deliveries indexed by transcript message identity.
     /// These snapshots are request-only and never rewritten into durable history.
     pub task_deliveries: std::collections::HashMap<
@@ -6869,6 +6871,7 @@ impl ApiService {
             protocol: prepared.route.protocol,
             request_kind: prepared.anthropic_request_kind,
             plain_text_message_content: prepared.plain_text_message_content,
+            plain_text_message_content_indices: prepared.plain_text_message_content_indices.clone(),
             explicit_empty_tools: prepared.anthropic_request_kind
                 == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
             extra_body,
@@ -6901,13 +6904,14 @@ impl ApiService {
             policy.request_kind,
         )
         .map_err(crate::upstream::error)?;
-        policy.apply(
-            &mut prepared.provider_request.body_json,
-            &mut prepared.provider_request.headers,
-            &mut prepared.provider_request.json_string_overrides,
-            &mut prepared.provider_request.url,
-        )
-        .map_err(crate::upstream::error)?;
+        policy
+            .apply(
+                &mut prepared.provider_request.body_json,
+                &mut prepared.provider_request.headers,
+                &mut prepared.provider_request.json_string_overrides,
+                &mut prepared.provider_request.url,
+            )
+            .map_err(crate::upstream::error)?;
         if prepared.stream_fallback
             && prepared.route.protocol == crate::ProtocolFamily::AnthropicMessages
         {
@@ -10175,6 +10179,101 @@ impl ApiService {
         .await
     }
 
+    /// Count exactly one Read source string on its selected route. This
+    /// auxiliary request intentionally starts from model input rather than
+    /// normal conversation preparation, which may inject effort/cache rows.
+    pub async fn count_read_text_tokens_exact(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<Option<u64>, LlmError> {
+        let units = source
+            .string_units("")
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "Read token counting requires source text".into(),
+            })?;
+        if units.is_empty() {
+            return Ok(Some(0));
+        }
+        let mut request = LlmRequest::new(model).with_user_text(String::from_utf16_lossy(&units));
+        request.profile = profile.map(str::to_owned);
+        request.execution.read_token_count = true;
+        request.execution.anthropic_request_kind =
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        request
+            .execution
+            .message_json_string_overrides
+            .insert("/messages/0/content/0/text".into(), units);
+        // Generation selects a named account before credential admission. The
+        // visible provider binding cannot authenticate directly in that host.
+        // Freeze the same live account catalog for this auxiliary operation.
+        let runtime = self.client.account_call_snapshot().await?;
+        let owner = Arc::as_ptr(&self.client) as usize;
+        ACCOUNT_CALL_CLIENT
+            .scope((owner, runtime), async move {
+                let runtime = self.client();
+                if runtime.protocol_for_model(model, profile)?
+                    != crate::ProtocolFamily::AnthropicMessages
+                {
+                    return Ok(None);
+                }
+                let route = runtime.resolve_media_route(model, profile)?.main;
+                let mut coordinator = if let Some(mut auxiliary) =
+                    runtime.account_coordinator(model, profile)?
+                {
+                    auxiliary.retain_supported(|candidate| {
+                        (!route.profile_name.starts_with("account.")
+                            || candidate.profile_name == route.profile_name)
+                            && runtime.account_supports_request(&request, candidate)
+                            && runtime
+                                .protocol_for_model(
+                                    &candidate.request_model,
+                                    Some(&candidate.profile_name),
+                                )
+                                .is_ok_and(|protocol| {
+                                    protocol == crate::ProtocolFamily::AnthropicMessages
+                                })
+                    });
+                    // Keep the model-authorized candidates, including
+                    // model billing overrides. Only health's operation key
+                    // differs from the generation call's model identity.
+                    auxiliary
+                        .map_candidate_models(|_| format!("tokens/count/{}", route.request_model));
+                    let selected = auxiliary.select().await?;
+                    request.profile = Some(selected.profile_name);
+                    request.input.model = route.request_model;
+                    request.execution.selected_account = auxiliary.active_scope();
+                    request.execution.account_scope = request
+                        .execution
+                        .selected_account
+                        .as_ref()
+                        .map(|scope| serde_json::to_string(scope).expect("account scope"));
+                    request.execution.request_credentials = Some(Default::default());
+                    Some(auxiliary)
+                } else {
+                    None
+                };
+                let result = crate::model::count_tokens::try_count_tokens_exact(
+                    runtime.as_ref(),
+                    self.transport.clone(),
+                    &request,
+                )
+                .await;
+                if let Some(coordinator) = coordinator.as_mut() {
+                    match &result {
+                        Ok(_) => coordinator.succeeded().await,
+                        Err(error) => {
+                            self.record_pool_failure(&request, coordinator, error, None)
+                                .await?;
+                        }
+                    }
+                }
+                result
+            })
+            .await
+    }
+
     fn client(&self) -> Arc<ModelRuntime> {
         let owner = Arc::as_ptr(&self.client) as usize;
         ACCOUNT_CALL_CLIENT
@@ -10705,7 +10804,8 @@ impl ApiService {
             // WebSocket send is metered exactly like an HTTP one.
             let native_stream_capture = (retain_native_stream_frames
                 && prepared.route.protocol == crate::ProtocolFamily::AnthropicMessages
-                && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty)
+                && prepared.route.resolved_route.provider_id
+                    == crate::ProviderId::AnthropicFirstParty)
                 .then(crate::native_stream_capture::AttemptCapture::default);
             let opened = crate::native_stream_capture::AttemptCapture::scope(native_stream_capture.as_ref(), async {
                 let responses_ws_session = conversation_lease.as_mut().expect("conversation lease").session();
@@ -11595,7 +11695,10 @@ impl ApiService {
                                         let wall = std::time::SystemTime::now();
                                         match tokio::time::timeout(
                                             t,
-                                            crate::execution::next_batch_with_capture(&mut frames, native_stream_capture.as_ref()),
+                                            crate::execution::next_batch_with_capture(
+                                                &mut frames,
+                                                native_stream_capture.as_ref(),
+                                            ),
                                         )
                                         .await
                                         {
@@ -11608,7 +11711,13 @@ impl ApiService {
                                             ),
                                         }
                                     }
-                                    None => crate::execution::next_batch_with_capture(&mut frames, native_stream_capture.as_ref()).await,
+                                    None => {
+                                        crate::execution::next_batch_with_capture(
+                                            &mut frames,
+                                            native_stream_capture.as_ref(),
+                                        )
+                                        .await
+                                    }
                                 }
                             },
                         )
@@ -13198,6 +13307,7 @@ impl ApiService {
             &opts.typed_attachment_ids,
             &opts.task_deliveries,
         )?;
+        req.execution.scalar_user_content_ids = opts.scalar_user_content_ids;
         req.input.controls.anthropic.context_hint = opts
             .context_hint
             .as_ref()
@@ -13294,6 +13404,7 @@ impl ApiService {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_main_request(
             model,
@@ -13310,6 +13421,7 @@ impl ApiService {
             &typed_attachment_ids,
             &task_deliveries,
         )?;
+        req.execution.scalar_user_content_ids = scalar_user_content_ids;
         req.input.model_source = model_source
             .as_ref()
             .map(|source| {
@@ -13644,6 +13756,10 @@ fn new_telemetry_id() -> String {
 #[cfg(test)]
 #[path = "service_test.rs"]
 mod service_test;
+
+#[cfg(test)]
+#[path = "service_read_token_count_test.rs"]
+mod read_token_count_test;
 
 #[cfg(test)]
 #[path = "service_hosted_retry_test.rs"]

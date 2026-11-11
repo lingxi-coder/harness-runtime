@@ -340,6 +340,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
     );
     request.opts.typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&request.messages);
     request.opts.task_deliveries = orch.task_deliveries_for_snapshot(&request.messages).await;
+    request.opts.scalar_user_content_ids = orch
+        .session
+        .lock()
+        .await
+        .native_request_history
+        .scalar_user_content_ids
+        .clone();
     request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
         &request.messages,
         guarded_async_hook_reminders,
@@ -478,6 +485,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         orch.typed_attachment_ids_for_snapshot(&request.messages);
                     request.opts.task_deliveries =
                         orch.task_deliveries_for_snapshot(&request.messages).await;
+                    request.opts.scalar_user_content_ids = orch
+                        .session
+                        .lock()
+                        .await
+                        .native_request_history
+                        .scalar_user_content_ids
+                        .clone();
                     request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
                         &request.messages,
                         guarded_async_hook_reminders,
@@ -582,6 +596,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     orch.typed_attachment_ids_for_snapshot(&request.messages);
                 request.opts.task_deliveries =
                     orch.task_deliveries_for_snapshot(&request.messages).await;
+                request.opts.scalar_user_content_ids = orch
+                    .session
+                    .lock()
+                    .await
+                    .native_request_history
+                    .scalar_user_content_ids
+                    .clone();
                 request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
                     &request.messages,
                     guarded_async_hook_reminders,
@@ -885,6 +906,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     orch.typed_attachment_ids_for_snapshot(&request.messages);
                 request.opts.task_deliveries =
                     orch.task_deliveries_for_snapshot(&request.messages).await;
+                request.opts.scalar_user_content_ids = orch
+                    .session
+                    .lock()
+                    .await
+                    .native_request_history
+                    .scalar_user_content_ids
+                    .clone();
                 request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
                     &request.messages,
                     guarded_async_hook_reminders,
@@ -924,4 +952,70 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // Keep a local policy failure actionable if summarization cannot help;
     // it is not evidence that the provider rejected the context.
     context_recovery_exhausted(input_budget_error)
+}
+
+#[cfg(test)]
+mod scalar_user_content_tests {
+    use super::*;
+    use crate::test_support::{
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+
+    #[tokio::test]
+    async fn ordinary_nonstream_turn_carries_restored_scalar_user_sources() {
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_runtime::ContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+                citations: None,
+            }],
+            Some("end_turn"),
+        )]));
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        ));
+        let scalar_id = MessageId::new();
+        {
+            let mut state = orch.session.lock().await;
+            state
+                .history
+                .push(ConversationMessage::user(scalar_id, "older prompt".into()));
+            state.history.push(ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "older response".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+            });
+            state
+                .native_request_history
+                .scalar_user_content_ids
+                .insert(scalar_id);
+        }
+        orch.run_turn("next prompt").await.expect("nonstream turn");
+        let requests = api.captured_requests().await;
+        assert_eq!(requests.len(), 1);
+        let crate::OrchestratorApiRequest::Main(request) = &requests[0] else {
+            panic!("expected the ordinary main request");
+        };
+        assert!(request
+            .messages
+            .iter()
+            .any(|message| message.id() == scalar_id));
+        assert_eq!(
+            request.opts.scalar_user_content_ids,
+            std::collections::HashSet::from([scalar_id])
+        );
+    }
 }

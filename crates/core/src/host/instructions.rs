@@ -95,6 +95,15 @@ pub struct InstructionFile {
         deserialize_with = "deserialize_instruction_string"
     )]
     pub content: crate::types::utf16_json::Utf16JsonProjection,
+    /// Explicit acquisition clipping marker. It is independent of content
+    /// transformations and remains optional in durable native attachments.
+    #[serde(
+        rename = "startOnly",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "instruction_optional_bool"
+    )]
+    pub start_only: Option<bool>,
 }
 
 impl InstructionFile {
@@ -109,6 +118,7 @@ impl InstructionFile {
             path: path.into(),
             kind,
             content: content.into(),
+            start_only: None,
         }
     }
 
@@ -155,6 +165,12 @@ impl InstructionFile {
 
 fn user_instruction_type() -> InstructionFileType {
     InstructionFileType::User
+}
+
+fn instruction_optional_bool<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool())
 }
 
 fn instruction_type<'de, D: Deserializer<'de>>(

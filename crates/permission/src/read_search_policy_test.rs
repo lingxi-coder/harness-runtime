@@ -203,3 +203,107 @@ fn search_preparation_preserves_guest_translation_and_fenced_unavailability() {
         .is_none());
     assert_eq!(cwd_calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn search_compilation_plan_preserves_source_order_and_negated_denies() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let mut patterns = (0..273)
+        .map(|index| format!("unrelated-{index}/**"))
+        .collect::<Vec<_>>();
+    patterns.extend([
+        "src/**".to_owned(),
+        "!src/allowed/**".to_owned(),
+        "src/allowed/private/**".to_owned(),
+    ]);
+    let rules = patterns.into_iter().map(|pattern| PermissionRule {
+        value: PermissionRuleValue {
+            tool_name: "Read".into(),
+            rule_content: Some(pattern.into()),
+            original_rule: None,
+        },
+        behavior: PermissionBehavior::Deny,
+        source: PermissionRuleSource::Session,
+    });
+    let policy = Arc::new(
+        PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false).with_roots(
+            FsRoots {
+                cwd: cwd.clone(),
+                home: None,
+                lingxi_home: cwd.join("config"),
+            },
+        ),
+    );
+    let snapshot = crate::read_deny_globs::read_deny_search_snapshot(Arc::clone(&policy), None);
+    for (relative, expected) in [
+        ("src/file", ReadPathPolicyMatch::Match),
+        ("src/allowed/file", ReadPathPolicyMatch::NoMatch),
+        ("src/allowed/private/file", ReadPathPolicyMatch::Match),
+        ("other/file", ReadPathPolicyMatch::NoMatch),
+        ("unrelated-272/file", ReadPathPolicyMatch::Match),
+    ] {
+        let path = cwd.join(relative);
+        assert_eq!(snapshot.denied_search_path(&path), expected, "{relative}");
+        assert_eq!(
+            core_permission::ReadPathPolicySnapshot::denied_search_path(policy.as_ref(), &path),
+            expected,
+            "direct {relative}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn search_compilation_plan_keeps_live_and_historical_symlink_restrictions() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let first = cwd.join("first");
+    let second = cwd.join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let alias = cwd.join("alias");
+    symlink(&first, &alias).unwrap();
+    let policy = Arc::new(
+        PermissionPolicy::from_rules_confined(
+            PermissionMode::Default,
+            [PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Read".into(),
+                    // A single slash roots this rule at the session cwd.
+                    // Native physical-twin history applies to rooted rules;
+                    // `./alias/**` would be an unrooted lexical glob.
+                    rule_content: Some("/alias/**".into()),
+                    original_rule: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Session,
+            }],
+            false,
+        )
+        .with_roots(FsRoots {
+            cwd: cwd.clone(),
+            home: None,
+            lingxi_home: cwd.join("config"),
+        }),
+    );
+    let snapshot = crate::read_deny_globs::read_deny_search_snapshot(Arc::clone(&policy), None);
+    assert_eq!(
+        snapshot.denied_search_path(&first.join("file")),
+        ReadPathPolicyMatch::Match
+    );
+    std::fs::remove_file(&alias).unwrap();
+    symlink(&second, &alias).unwrap();
+    for path in [first.join("file"), second.join("file"), alias.join("file")] {
+        assert_eq!(
+            snapshot.denied_search_path(&path),
+            ReadPathPolicyMatch::Match,
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        snapshot.denied_search_path(&cwd.join("public/file")),
+        ReadPathPolicyMatch::NoMatch
+    );
+}

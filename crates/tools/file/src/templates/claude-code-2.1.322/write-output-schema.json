@@ -1,13 +1,6 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "type",
-    "filePath",
-    "content",
-    "structuredPatch",
-    "originalFile"
-  ],
   "properties": {
     "type": {
       "type": "string",
@@ -29,14 +22,6 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "oldStart",
-          "oldLines",
-          "newStart",
-          "newLines",
-          "lines"
-        ],
         "properties": {
           "oldStart": {
             "type": "number"
@@ -56,28 +41,27 @@
               "type": "string"
             }
           }
-        }
+        },
+        "required": [
+          "oldStart",
+          "oldLines",
+          "newStart",
+          "newLines",
+          "lines"
+        ],
+        "additionalProperties": false
       },
       "description": "Diff patch showing the changes (empty when nothing changed, the diff timed out, or — with originalFile null on an update — the previous content was too large to diff)"
     },
     "originalFile": {
+      "description": "The original file content before the write (null for new files, or when the previous content was too large to include)",
       "type": [
         "string",
         "null"
-      ],
-      "description": "The original file content before the write (null for new files, or when the previous content was too large to include)"
+      ]
     },
     "gitDiff": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "filename",
-        "status",
-        "additions",
-        "deletions",
-        "changes",
-        "patch"
-      ],
       "properties": {
         "filename": {
           "type": "string"
@@ -102,23 +86,33 @@
           "type": "string"
         },
         "repository": {
+          "description": "GitHub owner/repo when available",
           "type": [
             "string",
             "null"
-          ],
-          "description": "GitHub owner/repo when available"
+          ]
         }
-      }
+      },
+      "required": [
+        "filename",
+        "status",
+        "additions",
+        "deletions",
+        "changes",
+        "patch"
+      ],
+      "additionalProperties": false
     },
     "userModified": {
-      "type": "boolean",
-      "description": "True when the user edited the proposed content in the permission dialog before accepting"
+      "description": "True when the user edited the proposed content in the permission dialog before accepting",
+      "type": "boolean"
     },
     "staged": {
-      "type": "boolean",
-      "description": "True when the write was held for the machine owner to review instead of written; the file is unchanged"
+      "description": "True when the write was held for the machine owner to review instead of written; the file is unchanged",
+      "type": "boolean"
     },
     "stagedWording": {
+      "description": "@internal Which message a staged result gave (see stagedResultWording); absent unless staged",
       "type": "string",
       "enum": [
         "review",
@@ -126,8 +120,7 @@
         "cloud",
         "linked",
         "policy"
-      ],
-      "description": "@internal Which message a staged result gave (see stagedResultWording); absent unless staged"
+      ]
     },
     "memdirStamped": {
       "type": "boolean",
@@ -144,5 +137,13 @@
       ],
       "description": "LingXi retained native across-process metadata"
     }
-  }
+  },
+  "required": [
+    "type",
+    "filePath",
+    "content",
+    "structuredPatch",
+    "originalFile"
+  ],
+  "additionalProperties": false
 }

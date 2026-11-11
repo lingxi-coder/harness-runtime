@@ -64,6 +64,7 @@ pub mod glob;
 pub mod grep;
 #[cfg(feature = "image-read")]
 pub mod image_read;
+mod mutation_io;
 pub mod notebook_edit;
 pub mod notebook_read;
 mod output_contract;
@@ -78,6 +79,7 @@ pub mod shared;
 pub mod structured_patch;
 #[cfg(test)]
 pub(crate) mod test_env;
+mod utf16_mutation;
 pub mod write;
 
 pub use edit::FileEditTool;
@@ -478,42 +480,46 @@ pub fn check_read_before_write(
     current_full_content: &str,
     waived: bool,
 ) -> Result<(), tool_api::tool_trait::ToolError> {
+    check_read_before_write_units(
+        map,
+        read_state_key,
+        current_mtime_ms,
+        &current_full_content.encode_utf16().collect::<Vec<_>>(),
+        waived,
+    )
+}
+
+pub(crate) fn check_read_before_write_units(
+    map: &tool_api::read_file_state::ReadFileStateMap,
+    read_state_key: &std::path::Path,
+    current_mtime_ms: i64,
+    current_full_content: &[u16],
+    waived: bool,
+) -> Result<(), tool_api::tool_trait::ToolError> {
     use tool_api::tool_trait::ToolError;
-
-    let entry = match tool_api::read_file_state::get(map, read_state_key) {
-        Some(e) => e,
-        // No recorded read at all → refuse. (claude-code `FOg`: `if(!r) throw
-        // PWn`.) A ranged / offset read still HAS an entry, so it is NOT
-        // rejected here — it falls through to the mtime / content checks below.
-        None => {
-            // Oracle `if(!me) return errorCode 2`. The waiver applies ONLY to
-            // the never-read case; a stale or partial read still falls through
-            // to the checks below.
-            if waived {
-                return Ok(());
-            }
-            return Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into()));
-        }
+    let Some(entry) = tool_api::read_file_state::get_metadata(map, read_state_key) else {
+        return if waived {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into()))
+        };
     };
-
-    // mtime not advanced past the recorded read → not stale. (claude-code:
-    // `if(bY(e) <= r.timestamp) return false` — an equal floored mtime proceeds.)
     if current_mtime_ms <= entry.mtime_ms {
         return Ok(());
     }
-
-    // mtime advanced: a full-file read (`wMe`) whose recorded content still
-    // equals the current on-disk content is safe to proceed despite the bumped
-    // mtime (cloud sync / antivirus can touch mtime without changing bytes).
-    // (claude-code: `if(wMe(r) && RMe(r,t)) return false`.)
-    if read_covers_full_file(&entry) && current_full_content == entry.content {
-        return Ok(());
+    // Fetch the text only when the mtime actually advanced. Exact units keep
+    // distinct malformed UTF-16 sequences from comparing equal as U+FFFD.
+    if entry.offset.unwrap_or(1) <= 1 && !entry.is_partial_view {
+        if let Some(content) = tool_api::read_file_state::get_content_units(map, read_state_key) {
+            let full = entry.limit.is_none_or(|limit| {
+                !content.is_empty()
+                    && content.iter().filter(|unit| **unit == 10).count() as u64 + 1 < limit
+            });
+            if full && current_full_content == content {
+                return Ok(());
+            }
+        }
     }
-
-    // The file changed on disk since the read → stale. FT-07: the oracle's
-    // `validateInput` arm (Edit errorCode 7 / Write 3 / NotebookEdit 10) is the
-    // branch a model normally hits, so emit ITS literal — not the call-phase
-    // race sentence `WVo` ([`FILE_CONTENT_CHANGED_LINTER_MESSAGE`]).
     Err(ToolError::InvalidInput(
         FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
     ))

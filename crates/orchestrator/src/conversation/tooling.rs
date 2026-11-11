@@ -610,6 +610,15 @@ impl ConversationOrchestrator {
         &self,
         f: &crate::prompt::MemoryFile,
     ) -> bool {
+        self.seed_nested_memory_read_state_with_clipping(f, false)
+            .await
+    }
+
+    pub(super) async fn seed_nested_memory_read_state_with_clipping(
+        &self,
+        f: &crate::prompt::MemoryFile,
+        clipped: bool,
+    ) -> bool {
         // Native nested-memory seeding preserves the current lexical path as
         // its read-state key, aligned with `seedMemoryFile` and `VE(file_path)`.
         let key = normalize_absolute_lexical_read_path(&f.path);
@@ -653,7 +662,7 @@ impl ConversationOrchestrator {
                 limit: None,
                 from_read: false,
                 seeded_from_context: true,
-                is_partial_view: f.content_differs_from_disk,
+                is_partial_view: clipped || f.content_differs_from_disk,
             },
             // ALWAYS false, for the reason spelled out on
             // `seed_memory_read_state`, plus one specific to this site: the
@@ -663,6 +672,9 @@ impl ConversationOrchestrator {
             false,
             Some(key.clone()),
         );
+        if clipped {
+            state.mark_start_only(key);
+        }
         true
     }
     /// Build the wire `tools` array for a turn from the registry's enabled tool

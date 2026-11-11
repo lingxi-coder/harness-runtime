@@ -10,6 +10,9 @@ use crate::progress::{progress_channel, ToolProgressSender};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// Construct test input with the builtin result projection helper.
+pub use crate::tool_trait::generated_builtin_result;
+
 /// A stub `FileSystem` that panics on general-purpose methods.
 ///
 /// Security-sensitive root-confined methods use the production on-disk helper

@@ -42,6 +42,14 @@ pub fn read_deny_search_snapshot(
     policy: Arc<PermissionPolicy>,
     fallback_cwd: Option<&Path>,
 ) -> Arc<dyn ReadPathPolicySnapshot> {
+    read_deny_search_snapshot_with_cache(policy, fallback_cwd, None)
+}
+
+pub(crate) fn read_deny_search_snapshot_with_cache(
+    policy: Arc<PermissionPolicy>,
+    fallback_cwd: Option<&Path>,
+    cache: Option<&crate::filesystem::PatternCompilationPlanCache>,
+) -> Arc<dyn ReadPathPolicySnapshot> {
     let policy = if policy.roots.is_none() {
         if let Some(cwd) = fallback_cwd {
             Arc::new(
@@ -81,12 +89,48 @@ pub fn read_deny_search_snapshot(
             }
         }
     }
-    Arc::new(ReadDenySearchSnapshot { policy, aliases })
+    let mut compilation_plan = crate::filesystem::PatternCompilationPlan::default();
+    if let Some(roots) = policy.roots.as_ref() {
+        for rule in policy.deny_rules.values().flatten() {
+            if rule.value.tool_name != "Read" {
+                continue;
+            }
+            let Some(pattern) = rule.value.rule_content_units() else {
+                continue;
+            };
+            compilation_plan.prepare_rule(&pattern, rule.source, rule.behavior, roots);
+            if let Some(pattern) = rule.value.rule_content_text() {
+                let (pattern, root) = pattern_with_root(pattern, rule.source, roots);
+                if let (Some(pattern), Some(root)) =
+                    (prepare_permission_pattern(&pattern, rule.behavior), root)
+                {
+                    for twin in policy.historical_permission_patterns(&root, &pattern) {
+                        compilation_plan.prepare_rule(
+                            &format!("/{twin}").encode_utf16().collect::<Vec<_>>(),
+                            rule.source,
+                            rule.behavior,
+                            roots,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let compilation_plan = match cache {
+        Some(cache) => cache.reuse(compilation_plan),
+        None => Arc::new(compilation_plan),
+    };
+    Arc::new(ReadDenySearchSnapshot {
+        policy,
+        aliases,
+        compilation_plan,
+    })
 }
 
 struct ReadDenySearchSnapshot {
     policy: Arc<PermissionPolicy>,
     aliases: Vec<(PathBuf, PathBuf)>,
+    compilation_plan: Arc<crate::filesystem::PatternCompilationPlan>,
 }
 
 impl ReadPathPolicySnapshot for ReadDenySearchSnapshot {
@@ -97,13 +141,18 @@ impl ReadPathPolicySnapshot for ReadDenySearchSnapshot {
         self.policy.check_path(path)
     }
     fn denied_search_path(&self, path: &Path) -> ReadPathPolicyMatch {
-        let mut result = self.policy.denied_search_path(path);
+        let mut result = self
+            .policy
+            .denied_search_path_with_plan(path, Some(&self.compilation_plan));
         if result == ReadPathPolicyMatch::Match {
             return result;
         }
         for (physical, lexical) in &self.aliases {
             if let Ok(relative) = path.strip_prefix(physical) {
-                match self.policy.denied_search_path(&lexical.join(relative)) {
+                match self.policy.denied_search_path_with_plan(
+                    &lexical.join(relative),
+                    Some(&self.compilation_plan),
+                ) {
                     ReadPathPolicyMatch::Match => return ReadPathPolicyMatch::Match,
                     ReadPathPolicyMatch::Unavailable => result = ReadPathPolicyMatch::Unavailable,
                     ReadPathPolicyMatch::NoMatch => {}

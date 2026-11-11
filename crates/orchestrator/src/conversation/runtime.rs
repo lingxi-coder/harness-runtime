@@ -1087,6 +1087,9 @@ pub(crate) struct PromptRuntime {
     /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
     /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
+    /// Read snapshots and persistent clipping fences belong to one admitted
+    /// session. Rebuilding that session preserves fences across compaction.
+    read_state_session: std::sync::Mutex<Option<SessionId>>,
     pub(crate) nested_memory_triggers: Arc<tool_api::nested_memory_triggers::NestedMemoryTriggers>,
     /// SKILLLIST.1: supplies the model-invocable skill entries for the per-turn
     /// `skill_listing` reminder (TS `getSkillToolCommands` →
@@ -1332,6 +1335,7 @@ impl PromptRuntime {
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
+            read_state_session: std::sync::Mutex::new(None),
             nested_memory_triggers: Arc::default(),
             skill_listing: None,
             async_hook_responses: None,
@@ -1421,8 +1425,33 @@ impl PromptRuntime {
         self.read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain()
-            .for_each(drop);
+            .reset_for_session();
+    }
+
+    pub(crate) fn bind_read_state_session(&self, session_id: SessionId) {
+        *self
+            .read_state_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+    }
+
+    /// A hot reconstruction of the same session invalidates cached reads but
+    /// cannot erase its clipping fence. A different identity starts fresh.
+    pub(crate) fn prepare_read_state_restore(&self, session_id: SessionId) {
+        let mut owner = self
+            .read_state_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.is_some_and(|owner| owner != session_id) {
+            state.reset_for_session();
+        } else {
+            state.drain().for_each(drop);
+        }
+        *owner = Some(session_id);
     }
 
     /// Prepare prompt-owned conversation state before session activation.

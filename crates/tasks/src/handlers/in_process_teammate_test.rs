@@ -3703,6 +3703,134 @@ async fn post_switch_teammate_hooks_and_transcript_use_the_captured_spawn_owner(
 }
 
 #[tokio::test]
+async fn captured_spawn_transcript_directory_uses_session_and_cwd() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let boot = lingxi_core::types::SessionId::new();
+    let boot_cwd = PathBuf::from("/boot");
+    let boot_directory = boot_cwd.join("subagents");
+    let calls = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let handler = model_test_handler(None)
+        .with_hook_context(boot, boot_cwd)
+        .with_transcript(fs.clone(), boot_directory.clone())
+        .with_subagents_dir_for_session_provider(Arc::new(move |session_id, cwd| {
+            recorded
+                .lock()
+                .unwrap()
+                .push((session_id, cwd.to_path_buf()));
+            Ok(cwd.join(session_id.to_string()).join("subagents"))
+        }));
+    let mut expected_calls = Vec::new();
+    for cwd in [
+        PathBuf::from("/owner/first"),
+        PathBuf::from("/owner/second"),
+    ] {
+        let owner = lingxi_core::types::SessionId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
+        let definition = DefaultTeammateDefinition
+            .resolve(&agent_id, "worker")
+            .await
+            .unwrap();
+        let mut context = handler
+            .build_context(agent_id, "worker", "team", "work", definition)
+            .await
+            .unwrap();
+        assert_eq!(context.transcript_subdir, boot_directory);
+        handler
+            .apply_spawn_context(
+                &mut context,
+                lingxi_core::host::SubagentSpawnRequest {
+                    origin_session_id: Some(owner),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(context.origin_session_id, Some(owner));
+        assert_eq!(context.hook_session_id, owner);
+        assert_eq!(context.hook_cwd, cwd);
+        assert_eq!(
+            context.transcript_subdir,
+            cwd.join(owner.to_string()).join("subagents")
+        );
+        assert!(Arc::ptr_eq(context.transcript_fs.as_ref().unwrap(), &fs));
+        expected_calls.push((owner, cwd));
+    }
+    assert_eq!(*calls.lock().unwrap(), expected_calls);
+}
+
+#[tokio::test]
+async fn captured_spawn_transcript_directory_failure_aborts_before_model_work() {
+    let api = ScriptedApiClient::new(vec!["must never run"]);
+    let (_dir, fs, runtime, handler) = make_handler(api.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded = calls.clone();
+    let handler = handler
+        .with_transcript(fs.clone(), PathBuf::from("/boot/subagents"))
+        .with_subagents_dir_for_session_provider(Arc::new(move |_, _| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            Err(TaskError::Io("owned session directory unavailable".into()))
+        }));
+    let result = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    origin_session_id: Some(lingxi_core::types::SessionId::new()),
+                    cwd: Some("/owner/current".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
+                agent_id: lingxi_core::types::AgentId::new(),
+                name: "worker".into(),
+                team_name: "team".into(),
+                description: "work".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(TaskError::Io(ref message)) if message == "owned session directory unavailable")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        api.call_count(),
+        0,
+        "an owner-resolution failure must not run the model in the boot session"
+    );
+    assert!(handler.entries.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn captured_spawn_transcript_directory_keeps_fallback_without_owner() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let boot = lingxi_core::types::SessionId::new();
+    let boot_cwd = PathBuf::from("/boot");
+    let directory = boot_cwd.join("subagents");
+    let handler = model_test_handler(None)
+        .with_hook_context(boot, boot_cwd.clone())
+        .with_transcript(fs.clone(), directory.clone())
+        .with_subagents_dir_for_session_provider(Arc::new(|_, _| {
+            panic!("no captured session means no session-specific lookup")
+        }));
+    let agent_id = lingxi_core::types::AgentId::new();
+    let definition = DefaultTeammateDefinition
+        .resolve(&agent_id, "worker")
+        .await
+        .unwrap();
+    let mut context = handler
+        .build_context(agent_id, "worker", "team", "work", definition)
+        .await
+        .unwrap();
+    handler
+        .apply_spawn_context(&mut context, Default::default())
+        .unwrap();
+    assert_eq!(context.hook_session_id, boot);
+    assert_eq!(context.hook_cwd, boot_cwd);
+    assert_eq!(context.transcript_subdir, directory);
+    assert!(Arc::ptr_eq(context.transcript_fs.as_ref().unwrap(), &fs));
+}
+
+#[tokio::test]
 async fn assigned_teammate_color_reaches_actual_agent_context() {
     let handler = model_test_handler(None);
     let def = DefaultTeammateDefinition

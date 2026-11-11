@@ -54,6 +54,10 @@ impl TaskDeliveryHistoryEnvelope {
 /// provider request after resume or a background-session fork.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeRequestHistoryMetadata {
+    /// User rows whose original JSONL `message.content` was a JSON string.
+    /// A single text block alone does not establish this source root shape.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub scalar_user_content_ids: HashSet<MessageId>,
     /// Outer attachment-row UUIDs with Native's
     /// `placement:"before_closing_line"` marker.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
@@ -90,7 +94,8 @@ impl NativeRequestHistoryMetadata {
     /// admitted request or its policy-relevant provenance.
     #[must_use]
     pub fn request_shape_matches(&self, other: &Self) -> bool {
-        self.before_closing_line_ids == other.before_closing_line_ids
+        self.scalar_user_content_ids == other.scalar_user_content_ids
+            && self.before_closing_line_ids == other.before_closing_line_ids
             && self.synthetic_closing_ids == other.synthetic_closing_ids
             && self.task_deliveries == other.task_deliveries
             && self.task_delivery_envelopes == other.task_delivery_envelopes
@@ -99,7 +104,8 @@ impl NativeRequestHistoryMetadata {
     /// True when there is no request-history metadata to persist or transfer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.before_closing_line_ids.is_empty()
+        self.scalar_user_content_ids.is_empty()
+            && self.before_closing_line_ids.is_empty()
             && self.synthetic_closing_ids.is_empty()
             && self.task_deliveries.is_empty()
             && self.task_delivery_envelopes.is_empty()
@@ -129,6 +135,9 @@ mod tests {
             "full metadata equality still includes accounting"
         );
 
+        let mut changed = derived.clone();
+        changed.scalar_user_content_ids.insert(id);
+        assert!(!base.request_shape_matches(&changed));
         let mut changed = derived.clone();
         changed.before_closing_line_ids.insert(id);
         assert!(!base.request_shape_matches(&changed));
@@ -195,5 +204,19 @@ mod tests {
         assert!(!decoded
             .task_delivery_envelopes
             .contains_key(&MessageId::new()));
+    }
+
+    #[test]
+    fn scalar_user_source_shape_survives_fork_metadata_round_trip() {
+        let id = MessageId::new();
+        let mut metadata = NativeRequestHistoryMetadata::default();
+        metadata.scalar_user_content_ids.insert(id);
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        let restored: NativeRequestHistoryMetadata = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.scalar_user_content_ids, HashSet::from([id]));
+        assert!(metadata.request_shape_matches(&restored));
+        assert!(!restored.is_empty());
+        let legacy: NativeRequestHistoryMetadata = serde_json::from_str("{}").unwrap();
+        assert!(legacy.scalar_user_content_ids.is_empty());
     }
 }

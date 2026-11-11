@@ -83,37 +83,12 @@ Each runner accepts one explicit path to the pinned executable when it is
 installed elsewhere. The search runner invokes only `ARGV0=rg` on disposable
 fixture paths; it does not launch an assistant session.
 
-## Boundaries
+## Follow-up closure and boundaries
 
-These are helper replays and Rust filesystem regressions, not a full native
-CLI end-to-end acceptance or cross-platform equivalence claim. POSIX path
-fixtures do not establish Windows drive/UNC semantics. LingXi's rooted I/O,
-permission checks, guest-path translation and provider support remain product
-adaptations.
+The November 10 follow-up implements lossless malformed UTF-16LE Read/Edit/Write and notebook identifiers, persistent memory `startOnly` fences and physical aliases, owned blocking mutation transactions with same-descriptor content revalidation, native Glob postfilter totals, the bundled ripgrep type catalogue, locale collation, and streaming Grep result projection without the former 10,000-record loss. Permission matcher plans retain the active rule set and coalesce concurrent compilation without caching authorization decisions.
 
-Schema receipts compare ordered field metadata, descriptions, requiredness,
-enums and defaults from native factories using controlled constructors. They
-do not establish native Zod JSON-schema serializer bytes or exact aggregate
-diagnostic paths for malformed outputs. Optional attached-machine transport
-and disabled edit-anchor/prefix feature gates are recorded but not enabled.
+Schema coverage now executes the actual bundled Zod validator and serializer. It includes aggregate nested diagnostics and the six input schemas captured from a real native CLI provider request. Model-free native CLI fixtures exercise all six tools, process resume, and the actual Read token-count request. LingXi's host counter pins the provider route and counts the exact Read source; unsupported counters retain the native local fallback. The current-source validation ledger is in [the follow-up report](../performance/filesystem-gaps-2026-11-10.md).
 
-Large Read uses LingXi's authoritative live context accounting and existing
-provider routing. Equivalence with Claude Code's separate history estimator
-and live `count_tokens` service is not established. A default-size read can
-still proceed after contextual room shrinks: that is the native fallback,
-not a guarantee that all results fit a hard context quota. Remote calls and
-hosts without budget state do not receive a larger allowance.
+Native optional attached-machine transport and dormant edit-anchor/prefix gates remain disabled. LingXi's rooted I/O, permission checks, guest-path translation, and multi-provider context accounting remain product adaptations. A default-size Read may still proceed after contextual room shrinks; this matches the native fallback and is not a hard context quota. Remote hosts without trusted budget state receive no lifted allowance.
 
-Native memory `startOnly` tracking is a separate persistent fence, including
-file-identity alias checks. LingXi does not currently model its memory-clipping
-producer; this patch does not infer it from transformed memory content.
-Explicit partial Read views are protected. Malformed UTF-16LE disk text with
-unpaired surrogates still has Rust replacement-character decoding; exact
-preservation of such disk text is outside the accepted mutation cases.
-
-Native Glob may return a lower-bound total after postfiltering active Read-deny
-rules, whereas LingXi reports the exact permitted count. Search deadlines are
-enforced between files; interrupting a pathological match within one file and
-full ripgrep type/collation equivalence are not established. Image/PDF codecs,
-OCR, native filesystem transactions, platform adapters and full CLI resume
-receive no new acceptance claim from these finite text/search cases.
+Finite fixture replay and local CLI acceptance do not establish live provider tokenizer equivalence, arbitrary remote-host behavior, production soak, signed Desktop package acceptance, physical-device acceptance, or Windows runtime parity. The available Windows cross compiler can establish compilation only. Individual OS calls, codec stages, and in-process regex operations are not preemptible; checks run between bounded stages/chunks. Multiline matching retains a file-sized search buffer, and explicitly unlimited results retain requested output storage. The explicit desktop Unix system-ripgrep backend owns its process group and deadline; unsupported platform configurations report an error.

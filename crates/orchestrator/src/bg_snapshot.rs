@@ -92,6 +92,30 @@ fn source_api_system_content(content: &[ContentBlock]) -> Source {
     .expect("API system content blocks form a JSON array")
 }
 
+fn source_user_content(content: &[ContentBlock], source_was_scalar: bool) -> Source {
+    if source_was_scalar {
+        match content {
+            [ContentBlock::Text {
+                text,
+                citations: None,
+            }] => {
+                return Source::root_string(text.clone(), text.encode_utf16().collect())
+                    .expect("plain text is a source JSON string");
+            }
+            [ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations: None,
+            }] => {
+                return Source::root_string(text.clone(), utf16_code_units.clone())
+                    .expect("exact plain text is a source JSON string");
+            }
+            _ => {}
+        }
+    }
+    source_content_blocks(content)
+}
+
 fn object(fields: Vec<(&str, Source)>) -> Source {
     Source::object(
         fields
@@ -145,6 +169,7 @@ pub fn history_to_jsonl_lines(
         let mut resets_chain = false;
         let (mut kind, mut inner) = match msg {
             ConversationMessage::User {
+                id,
                 content,
                 is_meta,
                 is_compact_summary,
@@ -166,7 +191,17 @@ pub fn history_to_jsonl_lines(
                     "user",
                     object(vec![
                         ("role", "user".into()),
-                        ("content", source_content_blocks(content)),
+                        (
+                            "content",
+                            source_user_content(
+                                content,
+                                conversation
+                                    .native_request_history
+                                    .scalar_user_content_ids
+                                    .contains(id)
+                                    && !attachments.contains_key(id),
+                            ),
+                        ),
                     ]),
                 )
             }
@@ -561,6 +596,76 @@ mod tests {
         );
         let restored = crate::resume::state_from_messages(uuid::Uuid::nil(), &lines);
         assert_eq!(restored.history[1], control);
+    }
+
+    #[test]
+    fn background_fork_round_trip_preserves_proven_scalar_and_array_roots() {
+        use lingxi_core::types::MessageId;
+        use std::collections::HashSet;
+
+        let units = vec![0xd800, 65, 0xdc00];
+        let scalar_id = MessageId::new();
+        let array_id = MessageId::new();
+        let cited_id = MessageId::new();
+        let exact_user = |id| {
+            let mut message = ConversationMessage::user_meta_js_utf16(
+                id,
+                String::from_utf16_lossy(&units),
+                units.clone(),
+            );
+            if let ConversationMessage::User { is_meta, .. } = &mut message {
+                *is_meta = false;
+            }
+            message
+        };
+        let mut cited = exact_user(cited_id);
+        if let ConversationMessage::User { content, .. } = &mut cited {
+            if let ContentBlock::TextJsUtf16 { citations, .. } = &mut content[0] {
+                *citations = Some(None);
+            }
+        }
+        let mut conversation = snapshot(&[exact_user(scalar_id), exact_user(array_id), cited]);
+        conversation.native_request_history.scalar_user_content_ids =
+            HashSet::from([scalar_id, cited_id]);
+        let session_uuid = uuid::Uuid::new_v4();
+        let rows = history_to_jsonl_lines(
+            &conversation,
+            &session_uuid.to_string(),
+            "/fixture",
+            "test",
+            "claude-sonnet-4-6",
+        );
+        assert_eq!(
+            rows[0].message.string_units("/content"),
+            Some(units.clone())
+        );
+        assert_eq!(rows[1].message.array_len("/content"), Some(1));
+        assert_eq!(rows[2].message.array_len("/content"), Some(1));
+        let encoded = rows
+            .iter()
+            .map(|row| {
+                String::from_utf8(session::jsonl::exact_json::native_message_bytes(row).unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let loaded = session::jsonl::route_lines(&encoded);
+        assert_eq!(loaded.malformed_line_count, 0);
+        let restored = crate::state_from_messages(session_uuid, &loaded.messages_in_order);
+        assert_eq!(
+            restored.native_request_history.scalar_user_content_ids,
+            HashSet::from([scalar_id])
+        );
+        assert_eq!(restored.history.len(), 3);
+        for message in restored.history {
+            let ConversationMessage::User { content, .. } = message else {
+                panic!("expected forked user history");
+            };
+            assert!(
+                matches!(content.as_slice(), [ContentBlock::TextJsUtf16 { utf16_code_units, .. }]
+                if utf16_code_units == &units)
+            );
+        }
     }
 
     #[test]

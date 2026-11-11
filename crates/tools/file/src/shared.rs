@@ -1,6 +1,7 @@
 //! Shared search guards, bounded result collection and cooperative stop
 //! controls, alongside binary detection, BOM stripping and UTF-8 decoding.
 
+use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::{self, Read};
@@ -8,7 +9,24 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
+
+/// JavaScript strings become well-formed UTF-8 at the regex/argv boundary.
+/// Keep ordinary input borrowed and repair only unpaired UTF-16 units there;
+/// callers must not use this coercion for filesystem authority/path resolution.
+pub(crate) fn search_argv_string<'a>(
+    input: &'a crate::Utf16JsonProjection,
+    field: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
+    crate::input_string(input, field)
+        .map(std::borrow::Cow::Borrowed)
+        .or_else(|| {
+            input
+                .string_units(&format!("/{field}"))
+                .map(|units| std::borrow::Cow::Owned(String::from_utf16_lossy(&units)))
+        })
+}
 
 /// Keep the first `limit` values in the comparator's stable sorted order.
 /// Encounter order breaks ties exactly as a stable sort would. A missing
@@ -189,6 +207,41 @@ impl SearchControl {
     }
 }
 
+/// Share the blocking-file search budget across Glob and Grep. The permit is
+/// moved into the actual worker, so dropping an async waiter cannot admit
+/// replacement work while its previous worker is still unwinding.
+const MAX_BLOCKING_SEARCH_JOBS: usize = 4;
+static BLOCKING_SEARCH_JOBS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::new(MAX_BLOCKING_SEARCH_JOBS)));
+
+pub(crate) async fn acquire_search_job(
+    control: &SearchControl,
+) -> Result<OwnedSemaphorePermit, SearchStop> {
+    acquire_search_job_from(control, BLOCKING_SEARCH_JOBS.clone()).await
+}
+
+async fn acquire_search_job_from(
+    control: &SearchControl,
+    jobs: Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, SearchStop> {
+    control.check()?;
+    let cancelled = async {
+        if let Some(cancel) = &control.cancel {
+            cancel.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let permit = tokio::select! {
+        biased;
+        _ = cancelled => return Err(SearchStop::Cancelled),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(control.deadline)) => return Err(SearchStop::TimedOut),
+        permit = jobs.acquire_owned() => permit.map_err(|_| SearchStop::Cancelled)?,
+    };
+    control.check()?;
+    Ok(permit)
+}
+
 /// Bound even read_to_end's growing requests to one check per 64 KiB. A
 /// blocked OS read itself cannot be interrupted by this cooperative adapter.
 pub(crate) struct SearchReader<'a, R> {
@@ -206,8 +259,10 @@ impl<R: Read> Read for SearchReader<'_, R> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SearchWalkError {
+    Engine(String),
+    InvalidInput(String),
     Resolution(SearchResolutionError),
     Cancelled,
 }
@@ -670,6 +725,39 @@ mod tests {
         assert_ne!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(input.calls, 1);
         assert_eq!(control.check(), Err(SearchStop::Cancelled));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_job_admission_preserves_queued_deadline_and_cancellation() {
+        let jobs = Arc::new(Semaphore::new(MAX_BLOCKING_SEARCH_JOBS));
+        let mut held = Vec::new();
+        for _ in 0..MAX_BLOCKING_SEARCH_JOBS {
+            held.push(jobs.clone().acquire_owned().await.unwrap());
+        }
+        let (control, _owner) =
+            SearchControl::new(Instant::now() + std::time::Duration::from_millis(20), None);
+        let heartbeat = async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            1
+        };
+        let (waited, beat) =
+            tokio::join!(acquire_search_job_from(&control, jobs.clone()), heartbeat);
+        assert!(matches!(waited, Err(SearchStop::TimedOut)));
+        assert_eq!(beat, 1);
+        let token = CancellationToken::new();
+        let (control, _owner) = SearchControl::new(
+            Instant::now() + std::time::Duration::from_secs(30),
+            Some(token.clone()),
+        );
+        let cancel = async {
+            tokio::task::yield_now().await;
+            token.cancel();
+        };
+        let (waited, ()) = tokio::join!(acquire_search_job_from(&control, jobs.clone()), cancel);
+        assert!(matches!(waited, Err(SearchStop::Cancelled)));
+        assert_eq!(jobs.available_permits(), 0);
+        drop(held);
+        assert_eq!(jobs.available_permits(), MAX_BLOCKING_SEARCH_JOBS);
     }
 
     #[test]

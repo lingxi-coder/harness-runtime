@@ -414,6 +414,7 @@ fn mod_turn_step_stream(
         lingxi_core::types::MessageId,
         lingxi_core::host::task_delivery::TaskDeliveryRequest,
     >,
+    scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
 ) -> (
     futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
     Arc<StdMutex<Option<CapturedModRequest>>>,
@@ -453,6 +454,7 @@ fn mod_turn_step_stream(
                 native_anthropic_request_context.clone();
             let fallback_typed_attachment_ids = typed_attachment_ids.clone();
             let fallback_task_deliveries = task_deliveries.clone();
+            let fallback_scalar_user_content_ids = scalar_user_content_ids.clone();
             let fallback_publication_guards = publication_guards.clone();
             let fallback_query_source = query_source.clone();
             let fallback_observation = observation.clone();
@@ -465,13 +467,14 @@ fn mod_turn_step_stream(
             let source_native_anthropic_request_context = native_anthropic_request_context.clone();
             let source_typed_attachment_ids = typed_attachment_ids;
             let source_task_deliveries = task_deliveries;
+            let source_scalar_user_content_ids = scalar_user_content_ids;
             let source_dispatch_observer = request_dispatch_observer.clone();
             let source_chat_dispatch_check = chat_dispatch_check.clone();
             let source_output = output.clone();
             let source_model_source = configured_model_source.clone();
-            let fallback_main_api = main_api.clone();
             let source_components = captured_components.clone();
             let fallback_components = captured_components.clone();
+            let fallback_main_api = main_api.clone();
             let fallback_model_state = worker_model.clone();
             let source = move |forwarded: Utf16JsonProjection| {
                 let owner = Arc::clone(&owner);
@@ -504,6 +507,7 @@ fn mod_turn_step_stream(
                     source_native_anthropic_request_context.clone();
                 let mut typed_attachment_ids = source_typed_attachment_ids.clone();
                 let task_deliveries = source_task_deliveries.clone();
+                let scalar_user_content_ids = source_scalar_user_content_ids.clone();
                 let configured_model_source = source_model_source.clone();
                 let chat_dispatch_check = source_chat_dispatch_check.clone();
                 async move {
@@ -701,6 +705,7 @@ fn mod_turn_step_stream(
                                             typed_attachment_ids,
                                             task_deliveries,
                                             model_source,
+                                            scalar_user_content_ids.clone(),
                                         ),
                                     ),
                                 )),
@@ -885,6 +890,7 @@ fn mod_turn_step_stream(
                                         fallback_typed_attachment_ids,
                                         fallback_task_deliveries,
                                         fallback_model_source,
+                                        fallback_scalar_user_content_ids,
                                     ),
                                 ),
                             ))
@@ -1059,8 +1065,8 @@ impl StreamingTurnDriver<'_> {
                 duration,
                 retries: orch.streaming_api.last_retry_count(),
                 cache_read_input_tokens: usage.map_or(0, |usage| usage.counts().cache_read_tokens),
-                cache_creation_input_tokens:
-                    usage.map_or(0, |usage| usage.counts().cache_write_tokens),
+                cache_creation_input_tokens: usage
+                    .map_or(0, |usage| usage.counts().cache_write_tokens),
                 is_batch_request: false,
                 account: usage.and_then(|usage| usage.account_usage.clone()),
                 bus: orch.model_runtime.analytics_bus.clone(),
@@ -1557,6 +1563,13 @@ impl StreamingTurnDriver<'_> {
         let mut query_history = snapshot.clone();
         let typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&snapshot);
         let task_deliveries = orch.task_deliveries_for_snapshot(&snapshot).await;
+        let scalar_user_content_ids = orch
+            .session
+            .lock()
+            .await
+            .native_request_history
+            .scalar_user_content_ids
+            .clone();
         let turn_step_hook_active = mod_host.is_some();
         if turn_step_hook_active || !retry_generation_allowed {
             loop_state.recovery.last_generation = None;
@@ -1654,6 +1667,7 @@ impl StreamingTurnDriver<'_> {
                 native_anthropic_request_context.clone(),
                 typed_attachment_ids.clone(),
                 task_deliveries.clone(),
+                scalar_user_content_ids.clone(),
             );
             mod_model_state = Some(effective_model.clone());
             // Poll one item before returning so connect-phase provider errors
@@ -1723,35 +1737,34 @@ impl StreamingTurnDriver<'_> {
             open_cancelable_stream(
                 user_cancel,
                 Box::pin(
-                    retry_scope.run(
-                        orch.model_runtime.prompt_cache_capture.scope(
-                            llm_runtime::native_stream_capture::scope_requested(
-                                orch.output.wants_partial_stream_events(),
-                                orch.streaming_api.stream_with_effort_override(
+                    retry_scope.run(orch.model_runtime.prompt_cache_capture.scope(
+                        llm_runtime::native_stream_capture::scope_requested(
+                            orch.output.wants_partial_stream_events(),
+                            orch.streaming_api.stream_with_effort_override(
+                                &model,
+                                model_profile.as_deref(),
+                                system_prompt.as_ref(),
+                                snapshot,
+                                tool_declarations.clone(),
+                                max_output_budget,
+                                None,
+                                tool_result_reminder_suffixes.clone(),
+                                crate::config::sanitize_query_source(&orch.config.query_source),
+                                skip_global_cache_for_system_prompt,
+                                request_dispatch_admission,
+                                request_dispatch_observer,
+                                native_anthropic_request_context.clone(),
+                                typed_attachment_ids,
+                                task_deliveries,
+                                native_model_source.for_route(
+                                    orch,
                                     &model,
                                     model_profile.as_deref(),
-                                    system_prompt.as_ref(),
-                                    snapshot,
-                                    tool_declarations.clone(),
-                                    max_output_budget,
-                                    None,
-                                    tool_result_reminder_suffixes.clone(),
-                                    crate::config::sanitize_query_source(&orch.config.query_source),
-                                    skip_global_cache_for_system_prompt,
-                                    request_dispatch_admission,
-                                    request_dispatch_observer,
-                                    native_anthropic_request_context.clone(),
-                                    typed_attachment_ids,
-                                    task_deliveries,
-                                    native_model_source.for_route(
-                                        orch,
-                                        &model,
-                                        model_profile.as_deref(),
-                                    ),
                                 ),
+                                scalar_user_content_ids.clone(),
                             ),
                         ),
-                    ),
+                    )),
                 ),
             )
             .await
@@ -2318,6 +2331,13 @@ impl StreamingTurnDriver<'_> {
                                     orch.typed_attachment_ids_for_snapshot(&request.messages);
                                 request.opts.task_deliveries =
                                     orch.task_deliveries_for_snapshot(&request.messages).await;
+                                request.opts.scalar_user_content_ids = orch
+                                    .session
+                                    .lock()
+                                    .await
+                                    .native_request_history
+                                    .scalar_user_content_ids
+                                    .clone();
                                 request.opts.request_dispatch_admission =
                                     request_dispatch_admission;
                                 request.opts.request_dispatch_observer =
@@ -2928,6 +2948,13 @@ impl StreamingTurnDriver<'_> {
                                 orch.typed_attachment_ids_for_snapshot(&re_snapshot);
                             let task_deliveries =
                                 orch.task_deliveries_for_snapshot(&re_snapshot).await;
+                            let scalar_user_content_ids = orch
+                                .session
+                                .lock()
+                                .await
+                                .native_request_history
+                                .scalar_user_content_ids
+                                .clone();
                             let request_dispatch_observer = observe_main_dispatch(
                                 orch.turn_request_dispatch_observer(),
                                 &orch.output,
@@ -2966,6 +2993,7 @@ impl StreamingTurnDriver<'_> {
                                                         &re_model,
                                                         re_profile.as_deref(),
                                                     ),
+                                                    scalar_user_content_ids.clone(),
                                                 ),
                                             ),
                                         ),

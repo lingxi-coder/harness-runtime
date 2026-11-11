@@ -43,15 +43,24 @@ pub enum NotText {
 impl NotText {
     fn description(self) -> &'static str {
         match self {
-            Self::NotUtf8 => "is not valid UTF-8: it uses a legacy encoding such as Windows-1252, Shift-JIS or GBK, or it is binary",
-            Self::Nul => "has NUL bytes in its first 8 KB: binary data, UTF-16/UTF-32 without a byte-order mark, or text with embedded NULs",
-            Self::Utf16Be => "is UTF-16 big-endian (it starts FE FF), which these tools cannot write",
+            Self::NotUtf8 => {
+                "is not valid UTF-8: it uses a legacy encoding such as Windows-1252, Shift-JIS or GBK, or it is binary"
+            }
+            Self::Nul => {
+                "has NUL bytes in its first 8 KB: binary data, UTF-16/UTF-32 without a byte-order mark, or text with embedded NULs"
+            }
+            Self::Utf16Be => {
+                "is UTF-16 big-endian (it starts FE FF), which these tools cannot write"
+            }
         }
     }
 
     #[must_use]
     pub fn mutation_refusal_message(self) -> String {
-        format!("File {}. These tools write UTF-8 (or UTF-16LE behind its byte-order mark) and never convert a file's encoding on their own, so nothing was written. If the file is text, make the change with a shell command that reads and writes it in its own encoding (iconv, or PowerShell Get-Content/Set-Content -Encoding), or ask the user whether to convert it to UTF-8 first. To replace the whole file with new UTF-8 text anyway, delete it first, then Write it.", self.description())
+        format!(
+            "File {}. These tools write UTF-8 (or UTF-16LE behind its byte-order mark) and never convert a file's encoding on their own, so nothing was written. If the file is text, make the change with a shell command that reads and writes it in its own encoding (iconv, or PowerShell Get-Content/Set-Content -Encoding), or ask the user whether to convert it to UTF-8 first. To replace the whole file with new UTF-8 text anyway, delete it first, then Write it.",
+            self.description()
+        )
     }
 
     #[must_use]
@@ -61,7 +70,10 @@ impl NotText {
         } else {
             ""
         };
-        format!("[This file {}.{undecodable} Edit and Write will refuse it: change it with a shell command that keeps its encoding, or ask the user whether to convert it to UTF-8.]", self.description())
+        format!(
+            "[This file {}.{undecodable} Edit and Write will refuse it: change it with a shell command that keeps its encoding, or ask the user whether to convert it to UTF-8.]",
+            self.description()
+        )
     }
 }
 
@@ -126,16 +138,78 @@ impl LineEnding {
 fn decode(bytes: &[u8], encoding: Encoding) -> String {
     match encoding {
         Encoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
-        Encoding::Utf16Le => {
-            // Read little-endian u16 code units; a trailing odd byte is
-            // dropped (Node would also be unable to form a code unit from it).
-            let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            // Lossy UTF-16 decode: unpaired surrogates become U+FFFD.
-            String::from_utf16_lossy(&units)
+        Encoding::Utf16Le => String::from_utf16_lossy(&decode_units(bytes, encoding)),
+    }
+}
+
+/// Decode with the native JavaScript string representation. Unlike a Rust
+/// `String`, these units retain unpaired surrogates in UTF-16LE files. Node
+/// drops an incomplete final byte rather than inventing a code unit for it.
+fn decode_units(bytes: &[u8], encoding: Encoding) -> Vec<u16> {
+    match encoding {
+        Encoding::Utf8 => String::from_utf8_lossy(bytes).encode_utf16().collect(),
+        Encoding::Utf16Le => bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect(),
+    }
+}
+
+/// Normalize only CRLF, retaining lone CRs and every other UTF-16 unit.
+#[must_use]
+pub fn normalize_to_lf_units(content: &[u16]) -> Vec<u16> {
+    let mut output = Vec::with_capacity(content.len());
+    let mut index = 0;
+    while index < content.len() {
+        if content[index] == 13 && content.get(index + 1) == Some(&10) {
+            index += 1;
         }
+        output.push(content[index]);
+        index += 1;
+    }
+    output
+}
+
+/// Native line-ending classification samples exactly 4096 UTF-16 units,
+/// including unpaired surrogates and half of a pair at the sample boundary.
+#[must_use]
+pub fn detect_line_ending_units(content: &[u16]) -> LineEnding {
+    let sample = &content[..content.len().min(4096)];
+    let mut crlf = 0;
+    let mut lf = 0;
+    for (index, unit) in sample.iter().enumerate() {
+        if *unit == 10 {
+            if index > 0 && sample[index - 1] == 13 {
+                crlf += 1;
+            } else {
+                lf += 1;
+            }
+        }
+    }
+    if crlf > lf {
+        LineEnding::Crlf
+    } else {
+        LineEnding::Lf
+    }
+}
+
+/// Retain an existing BOM for a nonempty whole-file replacement. Empty
+/// replacement deliberately removes it, matching native `gjr`.
+#[must_use]
+pub fn preserve_bom_units<'a>(
+    previous: &[u16],
+    replacement: &'a [u16],
+) -> std::borrow::Cow<'a, [u16]> {
+    if !replacement.is_empty()
+        && previous.first() == Some(&0xfeff)
+        && replacement.first() != Some(&0xfeff)
+    {
+        let mut output = Vec::with_capacity(replacement.len() + 1);
+        output.push(0xfeff);
+        output.extend_from_slice(replacement);
+        output.into()
+    } else {
+        replacement.into()
     }
 }
 
@@ -220,6 +294,59 @@ pub fn decode_native_text(bytes: &[u8]) -> String {
     decode(bytes, detect_encoding(bytes))
 }
 
+/// Lossless Node-selected decoding for source-preserving Read and mutations.
+#[must_use]
+pub fn decode_native_text_units(bytes: &[u8]) -> Vec<u16> {
+    decode_units(bytes, detect_encoding(bytes))
+}
+
+/// LF-normalized exact text plus its original encoding and ending style.
+#[must_use]
+pub fn read_with_metadata_units(bytes: &[u8]) -> (Vec<u16>, Encoding, LineEnding) {
+    let encoding = detect_encoding(bytes);
+    let decoded = decode_units(bytes, encoding);
+    let ending = detect_line_ending_units(&decoded);
+    (normalize_to_lf_units(&decoded), encoding, ending)
+}
+
+/// Encode a JavaScript string without dropping or repairing UTF-16LE
+/// surrogates. UTF-8 uses Node's U+FFFD replacement for unpaired surrogates.
+#[must_use]
+pub fn encode_units_with_metadata(
+    content_lf: &[u16],
+    enc: Encoding,
+    ending: LineEnding,
+) -> Vec<u8> {
+    let with_endings = match ending {
+        LineEnding::Lf => std::borrow::Cow::Borrowed(content_lf),
+        LineEnding::Crlf | LineEnding::Cr => {
+            let normalized = normalize_to_lf_units(content_lf);
+            let mut output = Vec::with_capacity(normalized.len());
+            for unit in normalized {
+                if unit == 10 {
+                    if ending == LineEnding::Crlf {
+                        output.push(13);
+                    }
+                    output.push(if ending == LineEnding::Cr { 13 } else { 10 });
+                } else {
+                    output.push(unit);
+                }
+            }
+            std::borrow::Cow::Owned(output)
+        }
+    };
+    match enc {
+        Encoding::Utf8 => String::from_utf16_lossy(&with_endings).into_bytes(),
+        Encoding::Utf16Le => {
+            let mut output = Vec::with_capacity(with_endings.len().saturating_mul(2));
+            for unit in with_endings.iter() {
+                output.extend_from_slice(&unit.to_le_bytes());
+            }
+            output
+        }
+    }
+}
+
 /// Read raw `bytes` into an LF-normalized content string plus the detected
 /// encoding and line-ending style — the Rust analogue of TS
 /// `readFileSyncWithMetadata` (`fileRead.ts:75-98`).
@@ -284,6 +411,72 @@ pub fn write_with_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_322_lossless_utf16_metadata_and_write_bytes() {
+        let fixture =
+            crate::Utf16JsonProjection::parse(include_str!("fixtures/utf16_native_322.json"))
+                .unwrap();
+        for index in 0..fixture.array_len("/metadata").unwrap() {
+            let prefix = format!("/metadata/{index}");
+            let bytes = hex_bytes(fixture.string_at(&format!("{prefix}/inputHex")).unwrap());
+            let (units, encoding, ending) = read_with_metadata_units(&bytes);
+            assert_eq!(
+                units,
+                fixture
+                    .string_units(&format!("{prefix}/expected/content"))
+                    .unwrap()
+            );
+            assert_eq!(
+                match encoding {
+                    Encoding::Utf8 => "utf8",
+                    Encoding::Utf16Le => "utf16le",
+                },
+                fixture
+                    .string_at(&format!("{prefix}/expected/encoding"))
+                    .unwrap()
+            );
+            assert_eq!(
+                match ending {
+                    LineEnding::Crlf => "CRLF",
+                    LineEnding::Lf => "LF",
+                    LineEnding::Cr => "CR",
+                },
+                fixture
+                    .string_at(&format!("{prefix}/expected/lineEndings"))
+                    .unwrap()
+            );
+        }
+        for index in 0..fixture.array_len("/writes").unwrap() {
+            let prefix = format!("/writes/{index}");
+            let original = hex_bytes(fixture.string_at(&format!("{prefix}/originalHex")).unwrap());
+            let replacement = fixture
+                .string_units(&format!("{prefix}/replacement"))
+                .unwrap();
+            let (previous, encoding, _) = read_with_metadata_units(&original);
+            assert_eq!(
+                previous,
+                fixture
+                    .string_units(&format!("{prefix}/expected/originalFile"))
+                    .unwrap()
+            );
+            let content = preserve_bom_units(&previous, &replacement);
+            assert_eq!(
+                content.as_ref(),
+                fixture
+                    .string_units(&format!("{prefix}/expected/content"))
+                    .unwrap()
+            );
+            assert_eq!(
+                encode_units_with_metadata(&content, encoding, LineEnding::Lf),
+                hex_bytes(
+                    fixture
+                        .string_at(&format!("{prefix}/expected/bytesHex"))
+                        .unwrap()
+                )
+            );
+        }
+    }
 
     fn oracle() -> serde_json::Value {
         serde_json::from_str(include_str!(

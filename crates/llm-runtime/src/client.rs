@@ -146,7 +146,7 @@ fn selected_auth(entry: &RouteEntry, credential: Option<&Credential>) -> AuthStr
         match credential {
             Some(Credential::ApiKey(_)) => return AuthStrategy::ApiKey,
             Some(Credential::AnthropicOAuth { .. } | Credential::BearerToken(_)) => {
-                return AuthStrategy::OAuthBearer
+                return AuthStrategy::OAuthBearer;
             }
             _ => {}
         }
@@ -161,6 +161,64 @@ fn plain_text_message_content_for_execution(execution: &crate::ExecutionContext)
         || (execution.anthropic_request_kind == AnthropicRequestKind::SideQuery
             && execution.query_source.as_deref() == Some("insights")
             && execution.enable_prompt_caching == Some(false))
+}
+
+fn source_scalar_user_content_indices(request: &LlmRequest) -> std::collections::BTreeSet<usize> {
+    // Anthropic's codec emits input.messages one-for-one, including native
+    // in-conversation system rows; input.system is a separate top-level field.
+    let sources = &request.execution.request_content_source_ids;
+    if sources.len() != request.input.messages.len() {
+        return Default::default();
+    }
+    request
+        .input
+        .messages
+        .iter()
+        .zip(sources)
+        .enumerate()
+        .filter_map(|(index, (message, blocks))| {
+            if message.role != lingxi_llm_client::protocol::MessageRole::User
+                || message.content.len() != 1
+                || blocks.len() != 1
+                || blocks[0].len() != 1
+            {
+                return None;
+            }
+            blocks[0]
+                .iter()
+                .next()
+                .filter(|id| request.execution.scalar_user_content_ids.contains(id))
+                .map(|_| index)
+        })
+        .collect()
+}
+
+fn append_native_per_turn_effort_marker(
+    request: &mut LlmRequest,
+    effort: lingxi_llm_client::providers::anthropic::types::AnthropicMessageEffort,
+) {
+    use lingxi_llm_client::protocol::{ConversationMessage, MessageRole};
+    use lingxi_llm_client::providers::anthropic::types::AnthropicMessageOptions;
+
+    if request.execution.request_content_source_ids.len() == request.input.messages.len() {
+        request
+            .execution
+            .request_content_source_ids
+            .push(Vec::new());
+    } else {
+        request.execution.request_content_source_ids.clear();
+    }
+    request.input.messages.push(
+        ConversationMessage {
+            role: MessageRole::System,
+            content: Vec::new(),
+            native_options: Vec::new(),
+        }
+        .with_anthropic_options(AnthropicMessageOptions {
+            effort: Some(effort),
+            ..AnthropicMessageOptions::default()
+        }),
+    );
 }
 
 fn native_message_effort(
@@ -2299,18 +2357,7 @@ impl ModelRuntime {
                         })
                 });
             if has_unfinished_user_turn && !has_existing_per_turn_effort {
-                use lingxi_llm_client::providers::anthropic::types::AnthropicMessageOptions;
-                request_for_encoding.input.messages.push(
-                    lingxi_llm_client::protocol::ConversationMessage {
-                        role: lingxi_llm_client::protocol::MessageRole::System,
-                        content: Vec::new(),
-                        native_options: Vec::new(),
-                    }
-                    .with_anthropic_options(AnthropicMessageOptions {
-                        effort: Some(effort),
-                        ..AnthropicMessageOptions::default()
-                    }),
-                );
+                append_native_per_turn_effort_marker(request_for_encoding, effort);
             }
         }
         let request = owned.as_ref().unwrap_or(request);
@@ -2460,6 +2507,7 @@ impl ModelRuntime {
             plain_text_message_content: plain_text_message_content_for_execution(
                 &request.execution,
             ),
+            plain_text_message_content_indices: source_scalar_user_content_indices(&request),
             stream_fallback: request.execution.stream_fallback,
             extra_body,
             effort_policy,
@@ -2855,12 +2903,15 @@ impl ModelRuntime {
             });
         }
         let failure = Arc::new(Mutex::new(None));
-        let auth = Arc::new(crate::execution::HostAuthenticator::for_request(
-            self.clone(),
-            route.profile_name.clone(),
-            None,
-            failure.clone(),
-        ));
+        let auth = Arc::new(
+            crate::execution::HostAuthenticator::for_request(
+                self.clone(),
+                route.profile_name.clone(),
+                None,
+                failure.clone(),
+            )
+            .with_request_credentials(request.execution.request_credentials.as_ref()),
+        );
         let captured = auth.captured_credential().await?;
         let request_auth = selected_auth(entry, captured.as_ref());
         let mut profile = entry.profile.clone();
@@ -2876,6 +2927,27 @@ impl ModelRuntime {
             (lingxi_llm_client::RequestMode::CountTokens, None),
         )
         .await?;
+        if request.execution.read_token_count {
+            // Native322 d8t counts one scalar user string with an explicitly
+            // empty tool list. Keep exact text coordinates synchronized when
+            // converting the canonical SDK block array to that source shape.
+            use lingxi_llm_client::providers::anthropic::request_policy::{
+                AnthropicRequestKind, AnthropicRequestPolicy,
+            };
+            AnthropicRequestPolicy {
+                request_kind: AnthropicRequestKind::SideQuery,
+                explicit_empty_tools: true,
+                plain_text_message_content: true,
+                ..Default::default()
+            }
+            .apply(
+                &mut host.body_json,
+                &mut host.headers,
+                &mut host.json_string_overrides,
+                &mut host.url,
+            )
+            .map_err(crate::upstream::error)?;
+        }
         let betas = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
@@ -3279,6 +3351,7 @@ pub struct PreparedLlmCall {
     /// Preserve source plain-string content only for the explicitly uncached
     /// Native Insights side query, while retaining classifier behavior.
     pub(crate) plain_text_message_content: bool,
+    pub(crate) plain_text_message_content_indices: std::collections::BTreeSet<usize>,
     pub(crate) anthropic_request_kind:
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
     pub(crate) native_anthropic_request_context:
@@ -3295,7 +3368,10 @@ pub struct PreparedLlmCall {
 
 #[cfg(test)]
 mod plain_text_message_content_tests {
-    use super::plain_text_message_content_for_execution;
+    use super::{
+        append_native_per_turn_effort_marker, plain_text_message_content_for_execution,
+        source_scalar_user_content_indices,
+    };
     use crate::ExecutionContext;
     use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind;
 
@@ -3312,6 +3388,83 @@ mod plain_text_message_content_tests {
             classifier_system_blocks,
             ..ExecutionContext::default()
         }
+    }
+
+    #[test]
+    fn scalar_user_projection_requires_one_unambiguous_original_source() {
+        use lingxi_core::types::MessageId;
+        use lingxi_llm_client::protocol::{ConversationMessage, MessageRole};
+        use std::collections::{BTreeSet, HashSet};
+
+        let scalar = MessageId::new();
+        let array = MessageId::new();
+        let other_scalar = MessageId::new();
+        let mut request = crate::LlmRequest::new("claude-sonnet-4-6");
+        request.input.messages = (0..5)
+            .map(|_| ConversationMessage::user_text("same text"))
+            .collect();
+        request.input.messages[4].role = MessageRole::Assistant;
+        request.execution.scalar_user_content_ids = HashSet::from([scalar, other_scalar]);
+        request.execution.request_content_source_ids = vec![
+            vec![HashSet::from([scalar])],
+            vec![HashSet::from([array])],
+            vec![HashSet::from([scalar, array])],
+            vec![HashSet::new()],
+            vec![HashSet::from([scalar])],
+        ];
+        assert_eq!(
+            source_scalar_user_content_indices(&request),
+            BTreeSet::from([0])
+        );
+        request
+            .input
+            .messages
+            .insert(0, ConversationMessage::system_text("system row"));
+        request
+            .execution
+            .request_content_source_ids
+            .insert(0, vec![HashSet::new()]);
+        assert_eq!(
+            source_scalar_user_content_indices(&request),
+            BTreeSet::from([1])
+        );
+        request.execution.request_content_source_ids.pop();
+        assert!(source_scalar_user_content_indices(&request).is_empty());
+    }
+
+    #[test]
+    fn synthetic_effort_tail_preserves_scalar_source_indices() {
+        use lingxi_core::types::MessageId;
+        use lingxi_llm_client::protocol::MessageRole;
+        use lingxi_llm_client::providers::anthropic::types::AnthropicMessageEffort;
+        use std::collections::{BTreeSet, HashSet};
+
+        let scalar = MessageId::new();
+        let mut request = crate::LlmRequest::new("claude-sonnet-4-6").with_user_text("history");
+        request.execution.scalar_user_content_ids.insert(scalar);
+        request.execution.request_content_source_ids = vec![vec![HashSet::from([scalar])]];
+        append_native_per_turn_effort_marker(&mut request, AnthropicMessageEffort::High);
+        assert_eq!(request.input.messages.len(), 2);
+        assert_eq!(request.input.messages[1].role, MessageRole::System);
+        assert!(request.execution.request_content_source_ids[1].is_empty());
+        assert_eq!(
+            source_scalar_user_content_indices(&request),
+            BTreeSet::from([0])
+        );
+
+        request.execution.request_content_source_ids.clear();
+        append_native_per_turn_effort_marker(&mut request, AnthropicMessageEffort::Low);
+        assert!(request.execution.request_content_source_ids.is_empty());
+        assert!(source_scalar_user_content_indices(&request).is_empty());
+
+        let mut too_long = crate::LlmRequest::new("claude-sonnet-4-6").with_user_text("history");
+        too_long.execution.scalar_user_content_ids.insert(scalar);
+        too_long.execution.request_content_source_ids =
+            vec![vec![HashSet::from([scalar])], vec![HashSet::from([scalar])]];
+        assert!(source_scalar_user_content_indices(&too_long).is_empty());
+        append_native_per_turn_effort_marker(&mut too_long, AnthropicMessageEffort::High);
+        assert!(too_long.execution.request_content_source_ids.is_empty());
+        assert!(source_scalar_user_content_indices(&too_long).is_empty());
     }
 
     #[test]

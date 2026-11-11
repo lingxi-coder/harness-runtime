@@ -15,7 +15,11 @@
 //! uses (`processOutputText` → `formatOutput`), so a runaway cell output is
 //! elided with the byte-locked `\n\n... [{N} lines truncated] ...` suffix.
 
-use serde_json::{json, Map, Value};
+use crate::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::JsonValueView;
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 
 /// Bash output cap reused by `processOutputText` (TS `formatOutput` →
 /// `getMaxOutputLength()` default). Mirrors `tool-shell`'s
@@ -33,234 +37,229 @@ const LARGE_OUTPUT_THRESHOLD: usize = 10_000;
 /// claude-code's `BASH_TOOL_NAME` so the hint matches.
 const BASH_TOOL_NAME: &str = "Bash";
 
-/// Count newline characters in `s` starting at byte index `from`.
-// A plain byte filter mirrors `read.rs`'s newline count; the `bytecount` crate
-// is not a dependency of this crate (and adding one is out of scope).
-#[allow(clippy::naive_bytecount)]
-fn count_newlines_from(s: &str, from: usize) -> usize {
-    s.as_bytes()[from.min(s.len())..]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
+fn exact_string(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text comes from the same source units")
 }
 
-/// `formatOutput`'s text branch (TS `BashTool/utils.ts:133-165`), limited to
-/// the non-image path (notebook output text is never an image data-URI). When
-/// `content` fits under the cap it is returned verbatim; otherwise it is
-/// sliced to `NOTEBOOK_OUTPUT_MAX_LENGTH` bytes and the byte-locked
-/// `\n\n... [{N} lines truncated] ...` suffix is appended, where `{N}` is the
-/// newline count in the elided tail plus one (TS
-/// `countCharInString(content, '\n', maxOutputLength) + 1`).
-///
-/// The slice is taken on a UTF-8 char boundary at or below the cap so the
-/// result is always valid UTF-8 (TS slices by UTF-16 code unit; for the ASCII-
-/// dominant cell outputs this matches, and a boundary-safe truncation can only
-/// keep fewer bytes — never more — which is the conservative direction).
-fn format_output_text(content: &str) -> String {
+fn source_value(view: JsonValueView<'_>) -> Utf16JsonProjection {
+    view.to_projection()
+        .expect("a parsed JSON view is a valid source")
+}
+
+/// Native String.slice counts UTF-16 units and can end on an unpaired unit.
+/// Count omitted newlines from that same unit boundary before adding the hint.
+fn format_output_units(mut content: Vec<u16>) -> Vec<u16> {
     if content.len() <= NOTEBOOK_OUTPUT_MAX_LENGTH {
-        return content.to_string();
+        return content;
     }
-    // Largest char boundary <= the cap.
-    let mut cut = NOTEBOOK_OUTPUT_MAX_LENGTH;
-    while cut > 0 && !content.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let remaining_lines = count_newlines_from(content, cut) + 1;
-    format!(
-        "{}\n\n... [{remaining_lines} lines truncated] ...",
-        &content[..cut]
-    )
+    let remaining_lines = content[NOTEBOOK_OUTPUT_MAX_LENGTH..]
+        .iter()
+        .filter(|unit| **unit == 10)
+        .count()
+        + 1;
+    content.truncate(NOTEBOOK_OUTPUT_MAX_LENGTH);
+    content.extend(format!("\n\n... [{remaining_lines} lines truncated] ...").encode_utf16());
+    content
 }
 
-/// `processOutputText` (TS `notebook.ts:34-39`): a `string | string[] |
-/// undefined` source is joined (arrays concatenated with no separator), then
-/// passed through [`format_output_text`]. An absent/`null` source yields `""`.
-fn process_output_text(text: Option<&Value>) -> String {
-    // Only a string or an array-of-strings carries text; every other JSON
-    // shape (absent / null / number / object) is empty per TS's `!text` falsy
-    // guard (numbers/objects never appear in nbformat output text).
-    let raw = match text {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .concat(),
-        _ => return String::new(),
+#[cfg(test)]
+fn format_output_text(content: &str) -> String {
+    String::from_utf16_lossy(&format_output_units(content.encode_utf16().collect()))
+}
+
+fn joined_text_units(text: Option<JsonValueView<'_>>) -> Vec<u16> {
+    let Some(text) = text else {
+        return Vec::new();
     };
-    if raw.is_empty() {
-        return String::new();
+    if let Some(units) = text.code_units() {
+        return units.to_vec();
     }
-    format_output_text(&raw)
+    let mut units = Vec::new();
+    for index in 0..text.array_len().unwrap_or(0) {
+        if let Some(part) = text.get_index(index).and_then(JsonValueView::code_units) {
+            units.extend_from_slice(part);
+        }
+    }
+    units
 }
 
-/// `extractImage` (TS `notebook.ts:41-57`): pull a base64 PNG or JPEG out of an
-/// output's `data` bag, stripping all whitespace from the payload (TS
-/// `.replace(/\s/g, '')`). PNG takes precedence over JPEG. Returns the
-/// `{ image_data, media_type }` object, or `None` when neither key is a string.
-fn extract_image(data: &Map<String, Value>) -> Option<Value> {
-    for (key, media) in [("image/png", "image/png"), ("image/jpeg", "image/jpeg")] {
-        if let Some(s) = data.get(key).and_then(Value::as_str) {
-            let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-            return Some(json!({ "image_data": cleaned, "media_type": media }));
+fn process_output_text_source(text: Option<JsonValueView<'_>>) -> Utf16JsonProjection {
+    exact_string(format_output_units(joined_text_units(text)))
+}
+
+fn extract_image_source(data: JsonValueView<'_>) -> Option<Utf16JsonProjection> {
+    for media_type in ["image/png", "image/jpeg"] {
+        if let Some(units) = data
+            .get_property(media_type)
+            .and_then(JsonValueView::code_units)
+        {
+            let units = units
+                .iter()
+                .copied()
+                .filter(|unit| {
+                    !char::from_u32(u32::from(*unit))
+                        .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+                })
+                .collect();
+            return Some(
+                Utf16JsonProjection::object(vec![
+                    ("image_data".into(), exact_string(units)),
+                    ("media_type".into(), media_type.into()),
+                ])
+                .expect("notebook image output"),
+            );
         }
     }
     None
 }
 
-/// Approximate byte size of a processed output for the large-output guard,
-/// mirroring TS `isLargeOutputs` (`notebook.ts:22-32`): `text.length +
-/// image.image_data.length` summed across outputs.
-fn output_size(processed: &Value) -> usize {
-    let text_len = processed
-        .get("text")
-        .and_then(Value::as_str)
-        .map_or(0, str::len);
-    let image_len = processed
-        .get("image")
-        .and_then(|i| i.get("image_data"))
-        .and_then(Value::as_str)
-        .map_or(0, str::len);
-    text_len + image_len
+fn output_size_source(output: &Utf16JsonProjection) -> usize {
+    output
+        .at_pointer("/text")
+        .and_then(JsonValueView::code_units)
+        .map_or(0, <[u16]>::len)
+        .saturating_add(
+            output
+                .at_pointer("/image/image_data")
+                .and_then(JsonValueView::code_units)
+                .map_or(0, <[u16]>::len),
+        )
 }
 
-/// `processOutput` (TS `notebook.ts:59-81`): map one raw nbformat output to the
-/// structured `{ output_type, text, image? }` shape. Unknown `output_type`s
-/// yield `None` (TS's switch has no default → `undefined`, dropped downstream).
-/// Field ordering matches the TS object literals.
-fn process_output(output: &Value) -> Option<Value> {
-    let output_type = output.get("output_type").and_then(Value::as_str)?;
+fn process_output_source(output: JsonValueView<'_>) -> Option<Utf16JsonProjection> {
+    let output_type = output
+        .get_property("output_type")
+        .and_then(JsonValueView::as_str)?;
+    let mut fields = vec![("output_type".into(), output_type.into())];
     match output_type {
-        "stream" => {
-            let mut m = Map::new();
-            m.insert("output_type".into(), json!(output_type));
-            m.insert(
-                "text".into(),
-                json!(process_output_text(output.get("text"))),
-            );
-            Some(Value::Object(m))
-        }
+        "stream" => fields.push((
+            "text".into(),
+            process_output_text_source(output.get_property("text")),
+        )),
         "execute_result" | "display_data" => {
-            let data = output.get("data");
-            let text = data
-                .and_then(|d| d.get("text/plain"))
-                .map_or_else(String::new, |t| process_output_text(Some(t)));
-            let mut m = Map::new();
-            m.insert("output_type".into(), json!(output_type));
-            m.insert("text".into(), json!(text));
-            // TS always sets the `image` key (`output.data && extractImage(...)`);
-            // it is `undefined` (dropped by JSON.stringify) when there is no
-            // image. We only insert the key when an image is present so the
-            // serialized shape matches (an absent image => no `image` key).
-            if let Some(obj) = data.and_then(Value::as_object) {
-                if let Some(img) = extract_image(obj) {
-                    m.insert("image".into(), img);
-                }
+            let data = output.get_property("data");
+            fields.push((
+                "text".into(),
+                process_output_text_source(data.and_then(|data| data.get_property("text/plain"))),
+            ));
+            if let Some(image) = data.and_then(extract_image_source) {
+                fields.push(("image".into(), image));
             }
-            Some(Value::Object(m))
         }
         "error" => {
-            let ename = output.get("ename").and_then(Value::as_str).unwrap_or("");
-            let evalue = output.get("evalue").and_then(Value::as_str).unwrap_or("");
-            let traceback = output
-                .get("traceback")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
-            let combined = format!("{ename}: {evalue}\n{traceback}");
-            let mut m = Map::new();
-            m.insert("output_type".into(), json!(output_type));
-            m.insert("text".into(), json!(format_output_text(&combined)));
-            Some(Value::Object(m))
+            let mut combined = output
+                .get_property("ename")
+                .and_then(JsonValueView::code_units)
+                .unwrap_or_default()
+                .to_vec();
+            combined.extend(": ".encode_utf16());
+            combined.extend_from_slice(
+                output
+                    .get_property("evalue")
+                    .and_then(JsonValueView::code_units)
+                    .unwrap_or_default(),
+            );
+            combined.push(10);
+            if let Some(traceback) = output.get_property("traceback") {
+                let mut has_line = false;
+                for index in 0..traceback.array_len().unwrap_or(0) {
+                    if let Some(line) = traceback
+                        .get_index(index)
+                        .and_then(JsonValueView::code_units)
+                    {
+                        if has_line {
+                            combined.push(10);
+                        }
+                        combined.extend_from_slice(line);
+                        has_line = true;
+                    }
+                }
+            }
+            fields.push(("text".into(), exact_string(format_output_units(combined))));
         }
-        _ => None,
+        _ => return None,
     }
+    Some(Utf16JsonProjection::object(fields).expect("processed notebook output"))
 }
 
-/// `processCell` (TS `notebook.ts:83-117`): map one raw notebook cell to the
-/// structured `NotebookCellSource` shape. `index` is the 0-based cell position
-/// (for the `cell-N` id fallback + the large-output hint), `code_language` is
-/// the notebook's `metadata.language_info.name` (default `"python"`).
-///
-/// Field insertion order matches the TS literal: `cellType`, `source`,
-/// `execution_count`, `cell_id`, then `language` (code only), then `outputs`
-/// (code with outputs only). `execution_count` is only emitted for code cells
-/// with a truthy count (TS `cell.execution_count || undefined`), so a `null` or
-/// `0` count is dropped.
-fn process_cell(cell: &Value, index: usize, code_language: &str) -> Value {
-    let cell_type = cell.get("cell_type").and_then(Value::as_str).unwrap_or("");
-    let is_code = cell_type == "code";
-
-    // `source` join (TS `Array.isArray ? join('') : source`).
-    let source = match cell.get("source") {
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .concat(),
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
+fn valid_cell_source(cell: JsonValueView<'_>) -> bool {
+    if cell.object_entries().is_none() {
+        return false;
+    }
+    let Some(source) = cell.get_property("source") else {
+        return false;
     };
+    source.code_units().is_some()
+        || source.array_len().is_some_and(|count| {
+            (0..count).all(|index| {
+                source
+                    .get_index(index)
+                    .and_then(JsonValueView::code_units)
+                    .is_some()
+            })
+        })
+}
 
-    let cell_id = cell
-        .get("id")
-        .and_then(Value::as_str)
-        .map_or_else(|| format!("cell-{index}"), str::to_string);
-
-    let mut m = Map::new();
-    m.insert("cellType".into(), json!(cell_type));
-    m.insert("source".into(), json!(source));
-
-    // `execution_count: cell.execution_count || undefined` for code cells only;
-    // `undefined` for non-code. Emit the key only for a code cell with a truthy
-    // integer count (matches TS, where `undefined` is dropped by stringify).
+fn process_cell_source(
+    cell: JsonValueView<'_>,
+    index: usize,
+    language: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let cell_type = cell
+        .get_property("cell_type")
+        .filter(|value| value.code_units().is_some());
+    let is_code = cell_type.and_then(JsonValueView::as_str) == Some("code");
+    let mut fields = vec![
+        (
+            "cellType".into(),
+            cell_type.map_or_else(|| "".into(), source_value),
+        ),
+        (
+            "source".into(),
+            exact_string(joined_text_units(cell.get_property("source"))),
+        ),
+    ];
     if is_code {
-        if let Some(n) = cell.get("execution_count").and_then(Value::as_i64) {
-            if n != 0 {
-                m.insert("execution_count".into(), json!(n));
-            }
+        if let Some(count) = cell
+            .get_property("execution_count")
+            .filter(|count| count.as_number().is_some_and(|value| value != 0.0))
+        {
+            fields.push(("execution_count".into(), source_value(count)));
         }
     }
-
-    m.insert("cell_id".into(), json!(cell_id));
-
-    // `language` only on code cells (TS skips it for text cells so they don't
-    // inherit the code language).
+    let id = cell
+        .get_property("id")
+        .filter(|value| value.code_units().is_some())
+        .map_or_else(|| format!("cell-{index}").into(), source_value);
+    fields.push(("cell_id".into(), id));
     if is_code {
-        m.insert("language".into(), json!(code_language));
-    }
-
-    // `outputs` only when a code cell has a non-empty `outputs` array.
-    if is_code {
-        if let Some(raw_outputs) = cell.get("outputs").and_then(Value::as_array) {
-            if !raw_outputs.is_empty() {
-                let processed: Vec<Value> = raw_outputs.iter().filter_map(process_output).collect();
-                // Large-output guard (TS `processCell:104-113` `!includeLargeOutputs
-                // && isLargeOutputs(outputs)`): the non-cellId read path passes
-                // `includeLargeOutputs = false`, so over-threshold combined outputs
-                // collapse to a single stream stub pointing at jq.
-                let total: usize = processed.iter().map(output_size).sum();
-                let outputs = if total > LARGE_OUTPUT_THRESHOLD {
-                    json!([{
-                        "output_type": "stream",
-                        "text": format!(
-                            "Outputs are too large to include. Use {BASH_TOOL_NAME} with: cat <notebook_path> | jq '.cells[{index}].outputs'"
-                        ),
-                    }])
-                } else {
-                    Value::Array(processed)
-                };
-                m.insert("outputs".into(), outputs);
+        fields.push(("language".into(), language.clone()));
+        if let Some(outputs) = cell
+            .get_property("outputs")
+            .filter(|value| value.array_len().is_some_and(|count| count > 0))
+        {
+            let mut processed = Vec::new();
+            let mut total = 0usize;
+            for index in 0..outputs.array_len().unwrap_or(0) {
+                if let Some(output) = outputs.get_index(index).and_then(process_output_source) {
+                    total = total.saturating_add(output_size_source(&output));
+                    processed.push(output);
+                }
             }
+            if total > LARGE_OUTPUT_THRESHOLD {
+                processed = vec![Utf16JsonProjection::object(vec![
+                    ("output_type".into(), "stream".into()),
+                    ("text".into(), format!("Outputs are too large to include. Use {BASH_TOOL_NAME} with: cat <notebook_path> | jq '.cells[{index}].outputs'").into()),
+                ]).expect("large output stub")];
+            }
+            fields.push((
+                "outputs".into(),
+                Utf16JsonProjection::array(processed).expect("processed notebook outputs"),
+            ));
         }
     }
-
-    Value::Object(m)
+    Utf16JsonProjection::object(fields).expect("processed notebook cell")
 }
 
 /// `aV` (cc-238.js @289991xxx, `var aV=104857600`) — the hard byte cap `K0f`
@@ -353,29 +352,64 @@ pub fn is_valid_notebook_shape(notebook: &Value) -> bool {
 /// `raw` is the file's UTF-8 text (already decoded by the caller). The language
 /// is read from `metadata.language_info.name`, defaulting to `"python"`.
 pub fn read_notebook(raw: &str) -> Result<Vec<Value>, String> {
-    // Binary `readNotebook` (atl): byte-locked invalid-JSON error.
-    let notebook: Value = serde_json::from_str(raw).map_err(|e| {
-        format!("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written): {e}")
+    // Compatibility display view. Production Read uses the exact source API.
+    let source = read_notebook_source(raw)?;
+    let Value::Array(mut cells) = source
+        .try_to_serde_value_with_array_budget(usize::MAX)
+        .map_err(|error| error.to_string())?
+    else {
+        unreachable!("processed cells are an array");
+    };
+    // Keep the compatibility view's integer representation without sending
+    // source strings through serde. The only numeric projected field is count.
+    for (index, cell) in cells.iter_mut().enumerate() {
+        if let Some(count) = cell.get_mut("execution_count") {
+            let number = source
+                .at_pointer(&format!("/{index}/execution_count"))
+                .expect("processed execution count")
+                .to_projection()
+                .map_err(|error| error.to_string())?
+                .to_json_string()
+                .map_err(|error| error.to_string())?;
+            *count = serde_json::from_str(&number).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(cells)
+}
+
+/// Parse ECMAScript JSON and project notebook cells without a serde string
+/// boundary. Literal and escaped lone surrogate units survive every mapped
+/// string; unknown source metadata stays in the parsed carrier until projection.
+pub fn read_notebook_source(raw: &str) -> Result<Utf16JsonProjection, String> {
+    let notebook = Utf16JsonProjection::parse(raw).map_err(|error| {
+        // Preserve prior malformed-syntax diagnostics. Valid ECMAScript JSON,
+        // including lone surrogate escapes, never enters this fallback.
+        let diagnostic = serde_json::from_str::<Value>(raw).err()
+            .map_or_else(|| error.to_string(), |error| error.to_string());
+        format!("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written): {diagnostic}")
     })?;
-    let language = notebook
-        .get("metadata")
-        .and_then(|m| m.get("language_info"))
-        .and_then(|li| li.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("python")
-        .to_string();
-    // Binary `readNotebook` (`K0f`): `if(!X2t(s))throw new Wur($0i)` — the
-    // shape gate is [`is_valid_notebook_shape`], NOT merely "cells is an array".
     let cells = notebook
-        .get("cells")
-        .and_then(Value::as_array)
-        .filter(|cells| cells.iter().all(is_valid_cell))
+        .at_pointer("/cells")
+        .filter(|cells| cells.array_len().is_some())
         .ok_or_else(|| INVALID_NOTEBOOK_SHAPE.to_string())?;
-    Ok(cells
-        .iter()
-        .enumerate()
-        .map(|(i, c)| process_cell(c, i, &language))
-        .collect())
+    let count = cells.array_len().expect("checked cell array");
+    if !(0..count).all(|index| cells.get_index(index).is_some_and(valid_cell_source)) {
+        return Err(INVALID_NOTEBOOK_SHAPE.to_string());
+    }
+    let language = notebook
+        .at_pointer("/metadata/language_info/name")
+        .filter(|value| value.code_units().is_some())
+        .map_or_else(|| "python".into(), source_value);
+    let processed = (0..count)
+        .map(|index| {
+            process_cell_source(
+                cells.get_index(index).expect("validated notebook cell"),
+                index,
+                &language,
+            )
+        })
+        .collect();
+    Utf16JsonProjection::array(processed).map_err(|error| error.to_string())
 }
 
 /// Render the processed cells into the model-facing text — the text-block
@@ -510,6 +544,105 @@ pub(crate) fn render_cells_model_text_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_notebook_read_retains_exact_ids_source_language_and_output_strings() {
+        let raw = r#"{"cells":[{"cell_type":"code","id":"c\ud800","source":["a\ud801","x\udc01"],"execution_count":1,"outputs":[{"output_type":"stream","text":["o\ud802","z\udc02"]},{"output_type":"display_data","data":{"text/plain":"d\ud803","image/png":"AA AA\nBB"}},{"output_type":"error","ename":"E\ud804","evalue":"v\udc04","traceback":["t\ud805","u\udc05"]}]}],"metadata":{"language_info":{"name":"julia\ud806"},"unknown\ud807":{"value":"keep\udc07"}}}"#;
+        let cells = read_notebook_source(raw).unwrap();
+        assert_eq!(cells.string_units("/0/cell_id"), Some(vec![99, 0xd800]));
+        assert_eq!(
+            cells.string_units("/0/source"),
+            Some(vec![97, 0xd801, 120, 0xdc01])
+        );
+        assert_eq!(
+            cells.string_units("/0/language"),
+            Some("julia".encode_utf16().chain([0xd806]).collect())
+        );
+        assert_eq!(
+            cells.string_units("/0/outputs/0/text"),
+            Some(vec![111, 0xd802, 122, 0xdc02])
+        );
+        assert_eq!(
+            cells.string_units("/0/outputs/1/text"),
+            Some(vec![100, 0xd803])
+        );
+        assert_eq!(
+            cells.string_at("/0/outputs/1/image/image_data"),
+            Some("AAAABB")
+        );
+        assert_eq!(
+            cells.string_units("/0/outputs/2/text"),
+            Some(vec![
+                69, 0xd804, 58, 32, 118, 0xdc04, 10, 116, 0xd805, 10, 117, 0xdc05
+            ])
+        );
+        let model = render_cells_model_text_source(&cells)
+            .unwrap()
+            .string_units("")
+            .unwrap();
+        for unit in [
+            0xd800, 0xd801, 0xdc01, 0xd802, 0xdc02, 0xd803, 0xd804, 0xdc04, 0xd805, 0xdc05, 0xd806,
+        ] {
+            assert!(model.contains(&unit), "model output lost {unit:04x}");
+        }
+        let serialized = cells.to_json_string().unwrap();
+        let reparsed = Utf16JsonProjection::parse(&serialized).unwrap();
+        assert_eq!(
+            cells.string_units("/0/source"),
+            reparsed.string_units("/0/source")
+        );
+    }
+
+    #[test]
+    fn source_notebook_output_limits_count_native_utf16_units() {
+        let raw = nb(
+            json!([{"cell_type":"code","source":"x","outputs":[{"output_type":"stream","text":"中".repeat(6000)}]}]),
+            None,
+        );
+        let cells = read_notebook_source(&raw).unwrap();
+        assert_eq!(cells.string_units("/0/outputs/0/text").unwrap().len(), 6000);
+        let raw = nb(
+            json!([{"cell_type":"code","source":"x","outputs":[{"output_type":"stream","text":"中".repeat(10001)}]}]),
+            None,
+        );
+        assert!(read_notebook_source(&raw)
+            .unwrap()
+            .string_at("/0/outputs/0/text")
+            .unwrap()
+            .starts_with("Outputs are too large"));
+        let mut units = vec![0xd800; NOTEBOOK_OUTPUT_MAX_LENGTH + 2];
+        units.push(10);
+        let formatted = format_output_units(units);
+        assert_eq!(
+            &formatted[..NOTEBOOK_OUTPUT_MAX_LENGTH],
+            vec![0xd800; NOTEBOOK_OUTPUT_MAX_LENGTH].as_slice()
+        );
+        assert_eq!(
+            String::from_utf16_lossy(&formatted[NOTEBOOK_OUTPUT_MAX_LENGTH..]),
+            "\n\n... [2 lines truncated] ..."
+        );
+    }
+
+    #[test]
+    fn source_notebook_read_rejects_malformed_json_and_source_shapes() {
+        for raw in [
+            r#"{"cells":[{"source":"\ud800"}]"#,
+            r#"{"cells":[{"source":"\uD80"}]}"#,
+        ] {
+            assert!(read_notebook_source(raw)
+                .unwrap_err()
+                .starts_with("Notebook file is not valid JSON"));
+        }
+        for raw in [
+            r#"{"cells":[{"source":["\ud800",1]}]}"#,
+            r#"{"cells":[{"metadata":{"unknown":"\ud800"}}]}"#,
+        ] {
+            assert_eq!(
+                read_notebook_source(raw).unwrap_err(),
+                INVALID_NOTEBOOK_SHAPE
+            );
+        }
+    }
 
     fn nb(cells: Value, language: Option<&str>) -> String {
         let metadata = match language {

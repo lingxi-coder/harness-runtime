@@ -328,6 +328,31 @@ impl MemoryMutation {
         )
     }
 
+    pub fn write_file_checked(
+        &self,
+        bytes: &[u8],
+        expectation: &rooted_fs::RootedWriteExpectation,
+    ) -> Result<rooted_fs::RootedWriteResult, rooted_fs::RootedFsError> {
+        let target = &self.targets[0];
+        let (parent, pin) = self
+            .parent(target, true)
+            .map_err(rooted_fs::RootedFsError::Fs)?;
+        let path = self.target();
+        self.check_active().map_err(rooted_fs::RootedFsError::Fs)?;
+        rooted_fs::write_file_after_permission_pinned_checked(
+            &parent,
+            Path::new(target.relative.file_name().expect("admitted leaf")),
+            &path,
+            &path,
+            bytes,
+            &rooted_fs::FileMutationIdentity {
+                root: pin,
+                file: target.file_identity,
+            },
+            expectation,
+        )
+    }
+
     pub fn remove_files(&self, is_cancelled: impl Fn() -> bool) -> Result<(), FsError> {
         for target in &self.targets {
             self.check_active()?;

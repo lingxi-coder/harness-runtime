@@ -191,6 +191,7 @@ impl StreamingApiClient for MockStreamingApiClient {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         _model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = tool_result_reminder_suffixes;
         let _ = request_dispatch_observer;
@@ -562,6 +563,7 @@ mod tests {
                     Default::default(),
                     Default::default(),
                     None,
+                    Default::default(),
                 )
                 .await
                 .unwrap()

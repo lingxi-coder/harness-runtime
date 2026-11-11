@@ -155,7 +155,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -166,7 +166,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -203,7 +203,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -1607,7 +1607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3042,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=54cf6b7b96e36c16593e43e170d80767099fbe7d#54cf6b7b96e36c16593e43e170d80767099fbe7d"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3061,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=54cf6b7b96e36c16593e43e170d80767099fbe7d#54cf6b7b96e36c16593e43e170d80767099fbe7d"
 dependencies = [
  "futures-util",
  "http",
@@ -3078,7 +3078,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.21"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=54cf6b7b96e36c16593e43e170d80767099fbe7d#54cf6b7b96e36c16593e43e170d80767099fbe7d"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3100,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=54cf6b7b96e36c16593e43e170d80767099fbe7d#54cf6b7b96e36c16593e43e170d80767099fbe7d"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3128,7 +3128,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.29"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ca1689ee1a9108bf86a0ff0629b1d109b5517fee#ca1689ee1a9108bf86a0ff0629b1d109b5517fee"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=54cf6b7b96e36c16593e43e170d80767099fbe7d#54cf6b7b96e36c16593e43e170d80767099fbe7d"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3733,7 +3733,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5184,7 +5184,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5501,6 +5501,7 @@ dependencies = [
  "fs2",
  "rustix 0.38.44",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
@@ -5604,7 +5605,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6198,7 +6199,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7000,14 +7001,19 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "icu_collator",
+ "icu_locale",
  "ignore",
  "image 0.24.9",
  "lopdf",
  "once_cell",
  "permission",
+ "platform-posix",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "similar",
+ "sys-locale",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",

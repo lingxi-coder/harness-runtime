@@ -1,0 +1,384 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "native Zod utility module",
+      "start": 260913877,
+      "end": 260925569,
+      "sha256": "b5a04d327a1f168024f6bb78466824994dcbadcdf984986ed08f4dcdb76ad9d9"
+    },
+    {
+      "name": "native Zod core and classic module",
+      "start": 260925570,
+      "end": 261020487,
+      "sha256": "d010acd51e312f3506c5c811c020d0cf7b970a48524aaf2a8691861061e900ad"
+    },
+    {
+      "name": "staged result wording factory",
+      "start": 272341539,
+      "end": 272341872,
+      "sha256": "6f6e672aedbe0eb9879ffefebb8f2a563bf958d3aaf83c4da64c896a3d965dae"
+    },
+    {
+      "name": "Edit output factory and nested shapes",
+      "start": 272387043,
+      "end": 272388322,
+      "sha256": "a585dc10f041197f7f16d43f87c5da9ff23a059d43c5e83b2b89ca742c77ece6"
+    },
+    {
+      "name": "Write output factory",
+      "start": 272389573,
+      "end": 272390687,
+      "sha256": "848433aba128c136e7c4cad5f2e4c5115049171acc738e98fed1a9f446daaeab"
+    },
+    {
+      "name": "NotebookEdit output factory",
+      "start": 275882048,
+      "end": 275883558,
+      "sha256": "f9659ae0555838d56b858af982e101f388ca586ec20e1e2e4284e729c4e2d4c9"
+    },
+    {
+      "name": "Glob output factory",
+      "start": 272419354,
+      "end": 272420656,
+      "sha256": "135ec795a02a3eb53ebcf419147b84834f5444d1156c9300784dbc7e2b2255b9"
+    },
+    {
+      "name": "Grep output factory",
+      "start": 272427522,
+      "end": 272427837,
+      "sha256": "9573c419a5ec8aa1dd067bd5536a23aa90993574841e8e2d27d8d9a2cddbcb7f"
+    }
+  ],
+  "controls": {
+    "parserAndSerializer": "Actual shipped Zod modules and native output factories execute in an isolated Node VM; no type, enum, array, object, error, or JSON-schema implementation is substituted.",
+    "memoization": "Factory p is an identity wrapper. Attached-machine input fields are unavailable; only output factories are used.",
+    "serializer": "schema.toJSONSchema() with native defaults. This does not claim a different caller-selected draft or transport schema transform."
+  },
+  "schemaSerializations": [
+    {
+      "tool": "Edit",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\",\"description\":\"The file path that was edited\"},\"oldString\":{\"type\":\"string\",\"description\":\"The original string that was replaced\"},\"newString\":{\"type\":\"string\",\"description\":\"The new string that replaced it\"},\"originalFile\":{\"description\":\"The original file contents before editing\",\"type\":[\"string\",\"null\"]},\"structuredPatch\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldStart\":{\"type\":\"number\"},\"oldLines\":{\"type\":\"number\"},\"newStart\":{\"type\":\"number\"},\"newLines\":{\"type\":\"number\"},\"lines\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"oldStart\",\"oldLines\",\"newStart\",\"newLines\",\"lines\"],\"additionalProperties\":false},\"description\":\"Diff patch showing the changes\"},\"userModified\":{\"type\":\"boolean\",\"description\":\"Whether the user modified the proposed changes\"},\"replaceAll\":{\"type\":\"boolean\",\"description\":\"Whether all occurrences were replaced\"},\"gitDiff\":{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"modified\",\"added\"]},\"additions\":{\"type\":\"number\"},\"deletions\":{\"type\":\"number\"},\"changes\":{\"type\":\"number\"},\"patch\":{\"type\":\"string\"},\"repository\":{\"description\":\"GitHub owner/repo when available\",\"type\":[\"string\",\"null\"]}},\"required\":[\"filename\",\"status\",\"additions\",\"deletions\",\"changes\",\"patch\"],\"additionalProperties\":false},\"staged\":{\"description\":\"True when the edit was held for the machine owner to review instead of written; the file is unchanged\",\"type\":\"boolean\"},\"stagedWording\":{\"description\":\"@internal Which message a staged result gave (see stagedResultWording); absent unless staged\",\"type\":\"string\",\"enum\":[\"review\",\"card\",\"cloud\",\"linked\",\"policy\"]}},\"required\":[\"filePath\",\"oldString\",\"newString\",\"originalFile\",\"structuredPatch\",\"userModified\",\"replaceAll\"],\"additionalProperties\":false}"
+    },
+    {
+      "tool": "Write",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"create\",\"update\"],\"description\":\"Whether a new file was created or an existing file was updated\"},\"filePath\":{\"type\":\"string\",\"description\":\"The path to the file that was written\"},\"content\":{\"type\":\"string\",\"description\":\"The content that was written to the file\"},\"structuredPatch\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldStart\":{\"type\":\"number\"},\"oldLines\":{\"type\":\"number\"},\"newStart\":{\"type\":\"number\"},\"newLines\":{\"type\":\"number\"},\"lines\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"oldStart\",\"oldLines\",\"newStart\",\"newLines\",\"lines\"],\"additionalProperties\":false},\"description\":\"Diff patch showing the changes (empty when nothing changed, the diff timed out, or — with originalFile null on an update — the previous content was too large to diff)\"},\"originalFile\":{\"description\":\"The original file content before the write (null for new files, or when the previous content was too large to include)\",\"type\":[\"string\",\"null\"]},\"gitDiff\":{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"modified\",\"added\"]},\"additions\":{\"type\":\"number\"},\"deletions\":{\"type\":\"number\"},\"changes\":{\"type\":\"number\"},\"patch\":{\"type\":\"string\"},\"repository\":{\"description\":\"GitHub owner/repo when available\",\"type\":[\"string\",\"null\"]}},\"required\":[\"filename\",\"status\",\"additions\",\"deletions\",\"changes\",\"patch\"],\"additionalProperties\":false},\"userModified\":{\"description\":\"True when the user edited the proposed content in the permission dialog before accepting\",\"type\":\"boolean\"},\"staged\":{\"description\":\"True when the write was held for the machine owner to review instead of written; the file is unchanged\",\"type\":\"boolean\"},\"stagedWording\":{\"description\":\"@internal Which message a staged result gave (see stagedResultWording); absent unless staged\",\"type\":\"string\",\"enum\":[\"review\",\"card\",\"cloud\",\"linked\",\"policy\"]}},\"required\":[\"type\",\"filePath\",\"content\",\"structuredPatch\",\"originalFile\"],\"additionalProperties\":false}"
+    },
+    {
+      "tool": "NotebookEdit",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"new_source\":{\"type\":\"string\",\"description\":\"The new source code that was written to the cell\"},\"old_source\":{\"description\":\"The previous cell source (replace/delete only). Enables cell-relative diff rendering without re-reading the notebook.\",\"type\":\"string\"},\"cell_id\":{\"description\":\"The ID of the cell that was edited\",\"type\":\"string\"},\"cell_type\":{\"type\":\"string\",\"enum\":[\"code\",\"markdown\"],\"description\":\"The type of the cell\"},\"language\":{\"type\":\"string\",\"description\":\"The programming language of the notebook\"},\"edit_mode\":{\"type\":\"string\",\"description\":\"The edit mode that was used\"},\"error\":{\"description\":\"Error message if the operation failed\",\"type\":\"string\"},\"notebook_path\":{\"type\":\"string\",\"description\":\"The path to the notebook file\"},\"original_file\":{\"type\":\"string\",\"description\":\"The original notebook content before modification\"},\"updated_file\":{\"type\":\"string\",\"description\":\"The updated notebook content after modification\"}},\"required\":[\"new_source\",\"cell_type\",\"language\",\"edit_mode\",\"notebook_path\",\"original_file\",\"updated_file\"],\"additionalProperties\":false}"
+    },
+    {
+      "tool": "Glob",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"durationMs\":{\"type\":\"number\",\"description\":\"Time taken to execute the search in milliseconds\"},\"numFiles\":{\"type\":\"number\",\"description\":\"Number of file paths returned (after any truncation)\"},\"filenames\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Array of file paths that match the pattern\"},\"truncated\":{\"type\":\"boolean\",\"description\":\"Whether results were truncated (limited to 100 files)\"},\"totalMatches\":{\"description\":\"Total number of matching files before truncation. A lower bound when countIsComplete is false. Absent on results persisted by CLI versions predating this field.\",\"type\":\"number\"},\"countIsComplete\":{\"description\":\"Whether totalMatches is the exact total (true) or a floor because the underlying search truncated its own output (false). Absent on results persisted by CLI versions predating this field.\",\"type\":\"boolean\"},\"timedOut\":{\"description\":\"True when the time limit stopped the search after these paths were read, so more matches may exist. Absent otherwise.\",\"type\":\"boolean\"}},\"required\":[\"durationMs\",\"numFiles\",\"filenames\",\"truncated\"],\"additionalProperties\":false}"
+    },
+    {
+      "tool": "Grep",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"content\",\"files_with_matches\",\"count\"]},\"numFiles\":{\"type\":\"number\"},\"filenames\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"content\":{\"type\":\"string\"},\"numLines\":{\"type\":\"number\"},\"numMatches\":{\"type\":\"number\"},\"totalFiles\":{\"type\":\"number\"},\"totalLines\":{\"type\":\"number\"},\"appliedLimit\":{\"type\":\"number\"},\"appliedOffset\":{\"type\":\"number\"},\"timedOut\":{\"type\":\"boolean\"}},\"required\":[\"numFiles\",\"filenames\"],\"additionalProperties\":false}"
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}"
+    },
+    {
+      "name": "missing-all",
+      "tool": "Edit",
+      "inputJson": "{}",
+      "issuesJson": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filePath\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"oldString\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"newString\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"originalFile\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"userModified\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"replaceAll\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
+    },
+    {
+      "name": "wrong-root",
+      "tool": "Edit",
+      "inputJson": "[]",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+    },
+    {
+      "name": "nullable-root",
+      "tool": "Edit",
+      "inputJson": "null",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+    },
+    {
+      "name": "unknown-properties-and-exact-utf16",
+      "tool": "Edit",
+      "inputJson": "{\"extra\":\"\\ud800\",\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"\\ud800x\\udfff\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"\\ud800x\\udfff\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}"
+    },
+    {
+      "name": "valid",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\"}"
+    },
+    {
+      "name": "missing-all",
+      "tool": "Write",
+      "inputJson": "{}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"create\",\n      \"update\"\n    ],\n    \"path\": [\n      \"type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"create\\\"|\\\"update\\\"\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filePath\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"content\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"originalFile\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]"
+    },
+    {
+      "name": "wrong-root",
+      "tool": "Write",
+      "inputJson": "[]",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+    },
+    {
+      "name": "nullable-root",
+      "tool": "Write",
+      "inputJson": "null",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+    },
+    {
+      "name": "unknown-properties-and-exact-utf16",
+      "tool": "Write",
+      "inputJson": "{\"extra\":\"\\ud800\",\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"\\ud800x\\udfff\",\"structuredPatch\":[],\"originalFile\":\"a\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"\\ud800x\\udfff\",\"structuredPatch\":[],\"originalFile\":\"a\"}"
+    },
+    {
+      "name": "valid",
+      "tool": "NotebookEdit",
+      "inputJson": "{\"new_source\":\"b\",\"cell_type\":\"code\",\"language\":\"python\",\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":\"{}\",\"updated_file\":\"{}\"}",
+      "outputJson": "{\"new_source\":\"b\",\"cell_type\":\"code\",\"language\":\"python\",\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":\"{}\",\"updated_file\":\"{}\"}"
+    },
+    {
+      "name": "missing-all",
+      "tool": "NotebookEdit",
+      "inputJson": "{}",
+      "issuesJson": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"new_source\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"code\",\n      \"markdown\"\n    ],\n    \"path\": [\n      \"cell_type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"code\\\"|\\\"markdown\\\"\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"language\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"edit_mode\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"notebook_path\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"original_file\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"updated_file\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]"
+    },
+    {
+      "name": "wrong-root",
+      "tool": "NotebookEdit",
+      "inputJson": "[]",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+    },
+    {
+      "name": "nullable-root",
+      "tool": "NotebookEdit",
+      "inputJson": "null",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+    },
+    {
+      "name": "unknown-properties-and-exact-utf16",
+      "tool": "NotebookEdit",
+      "inputJson": "{\"extra\":\"\\ud800\",\"new_source\":\"\\ud800x\\udfff\",\"cell_type\":\"code\",\"language\":\"python\",\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":\"{}\",\"updated_file\":\"{}\"}",
+      "outputJson": "{\"new_source\":\"\\ud800x\\udfff\",\"cell_type\":\"code\",\"language\":\"python\",\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":\"{}\",\"updated_file\":\"{}\"}"
+    },
+    {
+      "name": "valid",
+      "tool": "Glob",
+      "inputJson": "{\"durationMs\":1,\"numFiles\":1,\"filenames\":[\"/file\"],\"truncated\":false}",
+      "outputJson": "{\"durationMs\":1,\"numFiles\":1,\"filenames\":[\"/file\"],\"truncated\":false}"
+    },
+    {
+      "name": "missing-all",
+      "tool": "Glob",
+      "inputJson": "{}",
+      "issuesJson": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"numFiles\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"truncated\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
+    },
+    {
+      "name": "wrong-root",
+      "tool": "Glob",
+      "inputJson": "[]",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+    },
+    {
+      "name": "nullable-root",
+      "tool": "Glob",
+      "inputJson": "null",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+    },
+    {
+      "name": "unknown-properties-and-exact-utf16",
+      "tool": "Glob",
+      "inputJson": "{\"extra\":\"\\ud800\",\"durationMs\":1,\"numFiles\":1,\"filenames\":[\"\\ud800x\\udfff\"],\"truncated\":false}",
+      "outputJson": "{\"durationMs\":1,\"numFiles\":1,\"filenames\":[\"\\ud800x\\udfff\"],\"truncated\":false}"
+    },
+    {
+      "name": "valid",
+      "tool": "Grep",
+      "inputJson": "{\"mode\":\"files_with_matches\",\"numFiles\":1,\"filenames\":[\"/file\"]}",
+      "outputJson": "{\"mode\":\"files_with_matches\",\"numFiles\":1,\"filenames\":[\"/file\"]}"
+    },
+    {
+      "name": "missing-all",
+      "tool": "Grep",
+      "inputJson": "{}",
+      "issuesJson": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"numFiles\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  }\n]"
+    },
+    {
+      "name": "wrong-root",
+      "tool": "Grep",
+      "inputJson": "[]",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+    },
+    {
+      "name": "nullable-root",
+      "tool": "Grep",
+      "inputJson": "null",
+      "issuesJson": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+    },
+    {
+      "name": "unknown-properties-and-exact-utf16",
+      "tool": "Grep",
+      "inputJson": "{\"extra\":\"\\ud800\",\"mode\":\"files_with_matches\",\"numFiles\":1,\"filenames\":[\"\\ud800x\\udfff\"]}",
+      "outputJson": "{\"mode\":\"files_with_matches\",\"numFiles\":1,\"filenames\":[\"\\ud800x\\udfff\"]}"
+    },
+    {
+      "name": "nested-aggregate",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":7,\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[{\"oldStart\":\"x\",\"oldLines\":null,\"newStart\":false,\"lines\":[1,\"ok\",{}]},false,{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[false,null]}],\"userModified\":false,\"replaceAll\":false,\"gitDiff\":{\"filename\":0,\"status\":\"deleted\",\"additions\":\"x\",\"changes\":false,\"patch\":9}}",
+      "issuesJson": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filePath\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"oldStart\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"oldLines\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"newStart\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"newLines\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"lines\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"lines\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      1\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      2,\n      \"lines\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      2,\n      \"lines\",\n      1\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"filename\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"modified\",\n      \"added\"\n    ],\n    \"path\": [\n      \"gitDiff\",\n      \"status\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"modified\\\"|\\\"added\\\"\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"additions\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"deletions\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"changes\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"patch\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+    },
+    {
+      "name": "nested-stripping-and-optional-catch",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"\\ud800\",\"-a\",\"+b\"],\"extra\":true}],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":42,\"gitDiff\":{\"filename\":\"/file\",\"status\":\"modified\",\"additions\":1,\"deletions\":1,\"changes\":2,\"patch\":\"\\udfff\",\"repository\":null,\"extra\":true}}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"\\ud800\",\"-a\",\"+b\"]}],\"userModified\":false,\"replaceAll\":false,\"gitDiff\":{\"filename\":\"/file\",\"status\":\"modified\",\"additions\":1,\"deletions\":1,\"changes\":2,\"patch\":\"\\udfff\",\"repository\":null}}"
+    },
+    {
+      "name": "staged-wording-review",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"review\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"review\"}"
+    },
+    {
+      "name": "staged-wording-card",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"card\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"card\"}"
+    },
+    {
+      "name": "staged-wording-cloud",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"cloud\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"cloud\"}"
+    },
+    {
+      "name": "staged-wording-linked",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"linked\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"linked\"}"
+    },
+    {
+      "name": "staged-wording-policy",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"policy\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"policy\"}"
+    },
+    {
+      "name": "staged-wording-invalid",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":\"invalid\"}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}"
+    },
+    {
+      "name": "staged-wording-null",
+      "tool": "Edit",
+      "inputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false,\"stagedWording\":null}",
+      "outputJson": "{\"filePath\":\"/file\",\"oldString\":\"a\",\"newString\":\"b\",\"originalFile\":\"a\",\"structuredPatch\":[],\"userModified\":false,\"replaceAll\":false}"
+    },
+    {
+      "name": "nested-aggregate",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":7,\"content\":\"b\",\"structuredPatch\":[{\"oldStart\":\"x\",\"oldLines\":null,\"newStart\":false,\"lines\":[1,\"ok\",{}]},false,{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[false,null]}],\"originalFile\":\"a\",\"gitDiff\":{\"filename\":0,\"status\":\"deleted\",\"additions\":\"x\",\"changes\":false,\"patch\":9}}",
+      "issuesJson": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filePath\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"oldStart\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"oldLines\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"newStart\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"newLines\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"lines\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      0,\n      \"lines\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      1\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      2,\n      \"lines\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"structuredPatch\",\n      2,\n      \"lines\",\n      1\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"filename\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"modified\",\n      \"added\"\n    ],\n    \"path\": [\n      \"gitDiff\",\n      \"status\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"modified\\\"|\\\"added\\\"\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"additions\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"deletions\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"changes\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"gitDiff\",\n      \"patch\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+    },
+    {
+      "name": "nested-stripping-and-optional-catch",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"\\ud800\",\"-a\",\"+b\"],\"extra\":true}],\"originalFile\":\"a\",\"stagedWording\":42,\"gitDiff\":{\"filename\":\"/file\",\"status\":\"modified\",\"additions\":1,\"deletions\":1,\"changes\":2,\"patch\":\"\\udfff\",\"repository\":null,\"extra\":true}}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"\\ud800\",\"-a\",\"+b\"]}],\"originalFile\":\"a\",\"gitDiff\":{\"filename\":\"/file\",\"status\":\"modified\",\"additions\":1,\"deletions\":1,\"changes\":2,\"patch\":\"\\udfff\",\"repository\":null}}"
+    },
+    {
+      "name": "staged-wording-review",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"review\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"review\"}"
+    },
+    {
+      "name": "staged-wording-card",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"card\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"card\"}"
+    },
+    {
+      "name": "staged-wording-cloud",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"cloud\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"cloud\"}"
+    },
+    {
+      "name": "staged-wording-linked",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"linked\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"linked\"}"
+    },
+    {
+      "name": "staged-wording-policy",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"policy\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"policy\"}"
+    },
+    {
+      "name": "staged-wording-invalid",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":\"invalid\"}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\"}"
+    },
+    {
+      "name": "staged-wording-null",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\",\"stagedWording\":null}",
+      "outputJson": "{\"type\":\"update\",\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\"}"
+    },
+    {
+      "name": "enum-aggregate",
+      "tool": "Write",
+      "inputJson": "{\"type\":\"delete\",\"filePath\":false,\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":3}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"create\",\n      \"update\"\n    ],\n    \"path\": [\n      \"type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"create\\\"|\\\"update\\\"\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filePath\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"originalFile\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+    },
+    {
+      "name": "enum-non-string",
+      "tool": "Write",
+      "inputJson": "{\"type\":3,\"filePath\":\"/file\",\"content\":\"b\",\"structuredPatch\":[],\"originalFile\":\"a\"}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"create\",\n      \"update\"\n    ],\n    \"path\": [\n      \"type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"create\\\"|\\\"update\\\"\"\n  }\n]"
+    },
+    {
+      "name": "enum-aggregate",
+      "tool": "NotebookEdit",
+      "inputJson": "{\"new_source\":\"b\",\"cell_type\":\"raw\",\"language\":null,\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":true,\"updated_file\":7}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"code\",\n      \"markdown\"\n    ],\n    \"path\": [\n      \"cell_type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"code\\\"|\\\"markdown\\\"\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"language\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"original_file\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"updated_file\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+    },
+    {
+      "name": "enum-non-string",
+      "tool": "NotebookEdit",
+      "inputJson": "{\"new_source\":\"b\",\"cell_type\":3,\"language\":\"python\",\"edit_mode\":\"replace\",\"notebook_path\":\"/book.ipynb\",\"original_file\":\"{}\",\"updated_file\":\"{}\"}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"code\",\n      \"markdown\"\n    ],\n    \"path\": [\n      \"cell_type\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"code\\\"|\\\"markdown\\\"\"\n  }\n]"
+    },
+    {
+      "name": "array-and-scalar-aggregate",
+      "tool": "Glob",
+      "inputJson": "{\"durationMs\":null,\"numFiles\":\"x\",\"filenames\":[1,\"\\ud800\",false,{}],\"truncated\":7,\"totalMatches\":\"x\",\"countIsComplete\":1}",
+      "issuesJson": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"numFiles\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      3\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"truncated\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"totalMatches\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"countIsComplete\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]"
+    },
+    {
+      "name": "array-enum-and-scalar-aggregate",
+      "tool": "Grep",
+      "inputJson": "{\"mode\":\"invalid\",\"numFiles\":null,\"filenames\":[1,\"\\ud800\",false,{}],\"content\":7,\"numLines\":\"x\",\"timedOut\":1}",
+      "issuesJson": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"content\",\n      \"files_with_matches\",\n      \"count\"\n    ],\n    \"path\": [\n      \"mode\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"content\\\"|\\\"files_with_matches\\\"|\\\"count\\\"\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"numFiles\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"filenames\",\n      3\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"content\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"numLines\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timedOut\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]"
+    },
+    {
+      "name": "non-finite-numbers",
+      "tool": "Glob",
+      "inputJson": "{\"durationMs\":1e400,\"numFiles\":-1e400,\"filenames\":[],\"truncated\":false}",
+      "issuesJson": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"Infinity\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received Infinity\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"-Infinity\",\n    \"path\": [\n      \"numFiles\"\n    ],\n    \"message\": \"Invalid input: expected number, received -Infinity\"\n  }\n]"
+    }
+  ]
+}

@@ -224,6 +224,79 @@ async fn initial_memory(
     (messages, tail)
 }
 
+#[tokio::test]
+async fn native_322_clipping_fence_survives_compacted_history_cold_hot_and_new_session() {
+    for cold in [false, true] {
+        let body = format!("prefix\n{}\nHIDDEN-SUFFIX", "x".repeat(50_000));
+        let fixture = Fixture::new(&body);
+        let root = fixture.root();
+        let (original, _) = initial_memory(&root, &fixture).await;
+        assert!(original[0]
+            .text_content()
+            .contains("> Only the start of this file is shown."));
+        assert!(tool_api::read_file_state::holds_only_start_of(
+            &root.prompt_runtime.read_state_map,
+            &fixture.memory
+        ));
+        compact(&root, Vec::new()).await;
+        persist_user(&root, "continue after compacting away the clipped row").await;
+        assert!(!root
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|message| message.id() == original[0].id()));
+        root.restore_file_read_state().await;
+        assert!(
+            tool_api::read_file_state::holds_only_start_of(
+                &root.prompt_runtime.read_state_map,
+                &fixture.memory
+            ),
+            "same-session reconstruction preserves a fence whose attachment was compacted away"
+        );
+        let replayed = fixture.replay().await;
+        assert!(!replayed
+            .messages
+            .iter()
+            .any(|row| row.uuid == original[0].id().as_uuid().to_string()));
+        assert!(
+            replayed
+                .runtime_metadata
+                .historical_read_fence_attachments
+                .iter()
+                .any(|(id, _)| *id == original[0].id()),
+            "full transcript logical ancestry retains explicit fence provenance"
+        );
+        let resumed = if cold {
+            fixture.cold().await
+        } else {
+            fixture.hot(&root).await;
+            root.clone()
+        };
+        assert!(
+            tool_api::read_file_state::holds_only_start_of(
+                &resumed.prompt_runtime.read_state_map,
+                &fixture.memory
+            ),
+            "{cold}: discarded clipping fence survives resume"
+        );
+        {
+            let mut session = resumed.session.lock().await;
+            session.session_id = SessionId::new();
+            session.history.clear();
+        }
+        resumed.restore_file_read_state().await;
+        assert!(
+            !tool_api::read_file_state::holds_only_start_of(
+                &resumed.prompt_runtime.read_state_map,
+                &fixture.memory
+            ),
+            "a different session cannot import stale sidecar authority"
+        );
+    }
+}
+
 fn nested_rows(rows: &[session::JsonlMessage]) -> Vec<&session::JsonlMessage> {
     rows.iter()
         .filter(|row| {

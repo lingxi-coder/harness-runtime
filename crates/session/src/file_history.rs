@@ -1095,7 +1095,7 @@ impl lingxi_core::host::FileHistorySink for FileHistory {
         FileHistory::track_edit(self, file_path).await;
     }
 
-    async fn track_completed_write(&self, file_path: &str, parent: rooted_fs::RootedWriteParent) {
+    fn track_completed_write(&self, file_path: &str, parent: rooted_fs::RootedWriteParent) {
         FileHistory::track_completed_write(self, file_path, parent);
     }
 }

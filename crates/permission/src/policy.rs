@@ -762,33 +762,7 @@ impl lingxi_core::host::permission_gate::ReadPathPolicySnapshot for PermissionPo
         &self,
         path: &Path,
     ) -> lingxi_core::host::permission_gate::ReadPathPolicyMatch {
-        use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
-        // Search tools inherit path restrictions, not a tool-wide Read deny.
-        // In particular, an independently allowed Grep/Glob remains usable.
-        if !self
-            .deny_rules
-            .values()
-            .flatten()
-            .any(|rule| rule.value.tool_name == "Read" && rule.value.rule_content.is_some())
-        {
-            return ReadPathPolicyMatch::NoMatch;
-        }
-        let Some(path) = path.to_str() else {
-            return ReadPathPolicyMatch::Unavailable;
-        };
-        let empty = Utf16JsonProjection::parse("{}").expect("generated empty Read input");
-        let input = crate::source_input::with_generated_string_field(&empty, "file_path", path)
-            .expect("generated Read path");
-        if self
-            .first_read_deny_match(&SOURCES_BY_PRIORITY, "Read", &input)
-            .is_some()
-        {
-            ReadPathPolicyMatch::Match
-        } else if self.roots.is_none() {
-            ReadPathPolicyMatch::Unavailable
-        } else {
-            ReadPathPolicyMatch::NoMatch
-        }
+        self.denied_search_path_with_plan(path, None)
     }
 }
 
@@ -3574,6 +3548,40 @@ impl PermissionPolicy {
         false
     }
 
+    pub(crate) fn denied_search_path_with_plan(
+        &self,
+        path: &Path,
+        plan: Option<&crate::filesystem::PatternCompilationPlan>,
+    ) -> lingxi_core::host::permission_gate::ReadPathPolicyMatch {
+        use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+        // Search tools inherit path restrictions, not a tool-wide Read deny.
+        // In particular, an independently allowed Grep/Glob remains usable.
+        if !self
+            .deny_rules
+            .values()
+            .flatten()
+            .any(|rule| rule.value.tool_name == "Read" && rule.value.rule_content.is_some())
+        {
+            return ReadPathPolicyMatch::NoMatch;
+        }
+        let Some(path) = path.to_str() else {
+            return ReadPathPolicyMatch::Unavailable;
+        };
+        let empty = Utf16JsonProjection::parse("{}").expect("generated empty Read input");
+        let input = crate::source_input::with_generated_string_field(&empty, "file_path", path)
+            .expect("generated Read path");
+        if self
+            .first_read_deny_match_with_plan(&SOURCES_BY_PRIORITY, "Read", &input, plan)
+            .is_some()
+        {
+            ReadPathPolicyMatch::Match
+        } else if self.roots.is_none() {
+            ReadPathPolicyMatch::Unavailable
+        } else {
+            ReadPathPolicyMatch::NoMatch
+        }
+    }
+
     /// Update Native's session-scoped `physicalTwinsByPattern` history.
     pub(crate) fn historical_permission_patterns(&self, root: &Path, pattern: &str) -> Vec<String> {
         let current = crate::filesystem::physical_permission_pattern(root, pattern);
@@ -3600,6 +3608,18 @@ impl PermissionPolicy {
         behavior: PermissionBehavior,
         roots: &FsRoots,
     ) -> RulePatternMatch {
+        self.test_file_rule_pattern_units_with_plan(path, pattern, source, behavior, roots, None)
+    }
+
+    fn test_file_rule_pattern_units_with_plan(
+        &self,
+        path: &[u16],
+        pattern: &[u16],
+        source: PermissionRuleSource,
+        behavior: PermissionBehavior,
+        roots: &FsRoots,
+        plan: Option<&crate::filesystem::PatternCompilationPlan>,
+    ) -> RulePatternMatch {
         let twins = if behavior == PermissionBehavior::Allow {
             Vec::new()
         } else if let Ok(pattern) = String::from_utf16(pattern) {
@@ -3614,8 +3634,9 @@ impl PermissionPolicy {
         } else {
             Vec::new()
         };
-        let direct =
-            crate::filesystem::test_rule_pattern_units(path, pattern, source, behavior, roots);
+        let direct = crate::filesystem::test_rule_pattern_units_with_plan(
+            path, pattern, source, behavior, roots, plan,
+        );
         if direct != RulePatternMatch::NoMatch {
             return direct;
         }
@@ -3623,8 +3644,8 @@ impl PermissionPolicy {
             .into_iter()
             .find_map(|twin| {
                 let twin = format!("/{twin}").encode_utf16().collect::<Vec<_>>();
-                let matched = crate::filesystem::test_rule_pattern_units(
-                    path, &twin, source, behavior, roots,
+                let matched = crate::filesystem::test_rule_pattern_units_with_plan(
+                    path, &twin, source, behavior, roots, plan,
                 );
                 (matched != RulePatternMatch::NoMatch).then_some(matched)
             })
@@ -3640,6 +3661,16 @@ impl PermissionPolicy {
         sources: &[PermissionRuleSource],
         tool_name: &str,
         input: &Utf16JsonProjection,
+    ) -> Option<&'a PermissionRule> {
+        self.first_read_deny_match_with_plan(sources, tool_name, input, None)
+    }
+
+    fn first_read_deny_match_with_plan<'a>(
+        &'a self,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+        input: &Utf16JsonProjection,
+        plan: Option<&crate::filesystem::PatternCompilationPlan>,
     ) -> Option<&'a PermissionRule> {
         let roots = self.roots.as_ref()?;
         let raw_path = input_path_for_tool(tool_name, input, roots);
@@ -3671,12 +3702,13 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content_units() else {
                         return RulePatternMatch::NoMatch;
                     };
-                    self.test_file_rule_pattern_units(
+                    self.test_file_rule_pattern_units_with_plan(
                         &raw_path_units,
                         &pattern,
                         rule.source,
                         rule.behavior,
                         roots,
+                        plan,
                     )
                 }) {
                     return Some(rule);
@@ -3703,12 +3735,13 @@ impl PermissionPolicy {
                     let Some(spelling) = spelling.to_str() else {
                         return RulePatternMatch::NoMatch;
                     };
-                    self.test_file_rule_pattern_units(
+                    self.test_file_rule_pattern_units_with_plan(
                         &spelling.encode_utf16().collect::<Vec<_>>(),
                         &pattern,
                         rule.source,
                         rule.behavior,
                         roots,
+                        plan,
                     )
                 }) {
                     return Some(rule);

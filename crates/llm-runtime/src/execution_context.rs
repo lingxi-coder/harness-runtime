@@ -477,6 +477,9 @@ pub struct ExecutionContext {
     /// Native main/side-query body policy, independent of dispatch category.
     pub anthropic_request_kind:
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+    /// Trusted Read auxiliary count of one scalar source string. Generation
+    /// history, cache, effort and tool-catalog preparation do not own this call.
+    pub read_token_count: bool,
     /// Wire family used to prepare canonical history. Route changes adapt a
     /// clone through the SDK; absent for inputs authored directly for a route.
     pub input_protocol: Option<lingxi_llm_client::protocol::ProtocolFamily>,
@@ -496,6 +499,9 @@ pub struct ExecutionContext {
     /// Host message sources whose content contributes to the canonical request.
     /// Used to project row-scoped admission only after all normalization passes.
     pub request_message_source_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
+    /// Original user rows whose content root was a JSON string. Final wire
+    /// projection requires an unambiguous source after all message merges.
+    pub scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     /// Canonical indices after host normalization, used to retain an isolated
     /// fork's parent breakpoint through consecutive-message merges.
     pub request_message_source_indices:

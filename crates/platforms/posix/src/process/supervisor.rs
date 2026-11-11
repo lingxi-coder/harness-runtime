@@ -1408,21 +1408,21 @@ mod tests {
                 &std::fs::read(directory.path().join("handoff.json")).unwrap(),
             )
             .unwrap();
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while !directory.path().join("child.pid").exists() {
+            // Shell redirection creates the file before echo writes its PID.
+            // Wait for a complete value, not merely the directory entry.
+            let child_pid = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(directory.path().join("child.pid")) {
+                        if let Ok(pid) = text.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
             .unwrap();
-            assert_eq!(
-                handoff.pid,
-                std::fs::read_to_string(directory.path().join("child.pid"))
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap()
-            );
+            assert_eq!(handoff.pid, child_pid);
             let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
             adopt(&handoff, sink.clone()).await.unwrap();
             tokio::time::timeout(Duration::from_secs(10), sink.done.notified())

@@ -2,6 +2,72 @@ use super::*;
 use crate::host::instruction_memory_sanitize::{js_trim, sanitize_memory_body};
 use serde_json::Value;
 
+#[test]
+fn native_322_instruction_clipping_matches_pinned_helper_cases() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../scripts/tests/fixtures/file_memory_fence_322.json"
+    ))
+    .unwrap();
+    for case in fixture["clipCases"].as_array().unwrap() {
+        let input = &case["input"];
+        let units = input["contentUnits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        let content = root_string_units(units);
+        let path = input["path"].as_str().map(Utf16JsonProjection::from);
+        let actual = clip_instruction_start(
+            &content,
+            path.as_ref(),
+            usize::try_from(input["limit"].as_u64().unwrap()).unwrap(),
+        );
+        let expected = case["expectedUnits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| u16::try_from(unit.as_u64().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual.string_units("").unwrap(), expected, "{input:?}");
+    }
+    for case in fixture["limitCases"].as_array().unwrap() {
+        let input = &case["input"];
+        assert_eq!(
+            nested_instruction_character_limit(
+                input["model"].as_str().unwrap(),
+                input["contextTokens"].as_u64()
+            ),
+            usize::try_from(case["expected"].as_u64().unwrap()).unwrap(),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn native_322_instruction_start_only_metadata_survives_announcement_round_trip() {
+    let mut file =
+        InstructionFile::new("/project/LINGXI.md", InstructionFileType::Project, "prefix");
+    file.start_only = Some(true);
+    let attachment = instructions_delta(std::slice::from_ref(&file), None, None).unwrap();
+    assert_eq!(
+        attachment
+            .at_pointer("/files/0/startOnly")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        recover_instruction_files(&[attachment]).unwrap(),
+        vec![file.clone()]
+    );
+    let serialized = serde_json::to_string(&file).unwrap();
+    assert!(serialized.contains("\"startOnly\":true"));
+    assert_eq!(
+        serde_json::from_str::<InstructionFile>(&serialized).unwrap(),
+        file
+    );
+}
+
 fn oracle() -> Value {
     // Keep the captured 2.1.286 asset immutable; only adapt its historical
     // internal context key for this current-contract behavior regression.

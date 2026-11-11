@@ -5,10 +5,9 @@
 //! compare its content with the current file even if the mtime went backwards.
 //! This replay never reads the filesystem or treats present-day bytes as read.
 
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use lingxi_core::SessionState;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tool_api::read_file_state::{ReadFileEntry, ReadFileStateMap};
@@ -17,15 +16,98 @@ use tool_api::read_file_state::{ReadFileEntry, ReadFileStateMap};
 struct FileCall {
     name: String,
     path: PathBuf,
-    input: Value,
+    input: Utf16JsonProjection,
 }
 
-fn projection_value(
-    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
-) -> Option<Value> {
-    // Reject strings that cannot be represented exactly as UTF-8, rather than
-    // allowing a lossy projection to become a trusted file snapshot.
-    serde_json::from_str(&projection.to_json_string().ok()?).ok()
+#[derive(Clone)]
+struct RecoveredFile {
+    entry: ReadFileEntry,
+    /// This is authoritative text. `entry.content` is only its display form.
+    units: Vec<u16>,
+}
+
+impl RecoveredFile {
+    fn publish(self, cache: &mut tool_api::read_file_state::ReadFileStateLru, path: PathBuf) {
+        cache.set_with_requested_aliases_and_units(
+            path,
+            self.entry,
+            true,
+            vec![],
+            Some(self.units),
+        );
+    }
+}
+
+/// Explicit acquisition metadata only. Paths cross the OS boundary losslessly
+/// on Windows; invalid UTF-16 paths are unavailable on Unicode-only hosts.
+pub(super) fn start_only_paths(attachment: &Utf16JsonProjection) -> Vec<PathBuf> {
+    let pointers = match attachment.string_at("/type") {
+        Some("instructions")
+            if lingxi_core::host::instruction_announcements::is_valid_context_attachment(
+                attachment,
+            ) =>
+        {
+            (0..attachment.array_len("/files").unwrap_or_default())
+                .filter_map(|index| {
+                    let prefix = format!("/files/{index}");
+                    (attachment
+                        .at_pointer(&format!("{prefix}/startOnly"))
+                        .and_then(|value| value.as_bool())
+                        == Some(true))
+                    .then(|| format!("{prefix}/path"))
+                })
+                .collect::<Vec<_>>()
+        }
+        Some("nested_memory")
+            if attachment
+                .at_pointer("/content/startOnly")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+                && attachment.string_units("/content/path") == attachment.string_units("/path")
+                && attachment.string_units("/content/content").is_some() =>
+        {
+            vec!["/path".to_owned()]
+        }
+        _ => Vec::new(),
+    };
+    pointers
+        .into_iter()
+        .filter_map(|pointer| {
+            let units = attachment.string_units(&pointer)?;
+            #[cfg(windows)]
+            let path = {
+                use std::os::windows::ffi::OsStringExt;
+                PathBuf::from(std::ffi::OsString::from_wide(&units))
+            };
+            #[cfg(not(windows))]
+            let path = PathBuf::from(String::from_utf16(&units).ok()?);
+            path.is_absolute()
+                .then(|| crate::turn_loop::normalize_lexically(&path))
+        })
+        .collect()
+}
+
+fn exact_path(source: &Utf16JsonProjection, pointer: &str, cwd: &Path) -> Option<PathBuf> {
+    // Keep the existing path admission boundary strict. Text may contain lone
+    // UTF-16 units; a path must never be repaired into another file's name.
+    let raw_path = String::from_utf16(&source.string_units(pointer)?).ok()?;
+    Path::new(&raw_path)
+        .is_absolute()
+        .then(|| tool_file::normalize_model_file_path(&raw_path, cwd))
+}
+
+fn unsigned(value: JsonValueView<'_>) -> Option<u64> {
+    let value = value.as_number()?;
+    // JavaScript file/line indices cannot supply exact evidence beyond the
+    // safe-integer range. Reject fractional, negative and nonfinite counts.
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= 9_007_199_254_740_991.0)
+        .then(|| value as u64)
+}
+
+fn is_ascii(value: JsonValueView<'_>, expected: &str) -> bool {
+    value
+        .code_units()
+        .is_some_and(|units| units.iter().copied().eq(expected.encode_utf16()))
 }
 
 fn file_call(block: &ContentBlock, cwd: &Path) -> Option<(ToolUseId, FileCall)> {
@@ -38,22 +120,20 @@ fn file_call(block: &ContentBlock, cwd: &Path) -> Option<(ToolUseId, FileCall)> 
     if !matches!(name.as_str(), "Read" | "Write" | "Edit" | "NotebookEdit") {
         return None;
     }
-    let input = projection_value(input)?;
-    let raw_path = input
-        .get("file_path")
-        .or_else(|| input.get("notebook_path"))?
-        .as_str()?;
     // A transcript can span cwd/worktree changes but lacks a cwd per tool row.
     // Only absolute model routes are unambiguous during historical replay.
-    if !Path::new(raw_path).is_absolute() {
-        return None;
-    }
+    let pointer = if input.contains_property("file_path") {
+        "/file_path"
+    } else {
+        "/notebook_path"
+    };
+    let path = exact_path(input, pointer, cwd)?;
     Some((
         id.clone(),
         FileCall {
             name: name.clone(),
-            path: tool_file::normalize_model_file_path(raw_path, cwd),
-            input,
+            path,
+            input: input.clone(),
         },
     ))
 }
@@ -102,10 +182,20 @@ pub(super) fn restore_file_state(
     let mut cache = map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Clipping is session authority, including instructions which preceded a
+    // compact boundary. Rebuild only explicit producer metadata; a reminder
+    // containing the same prose cannot manufacture a clipping fence.
+    for message in &session.history {
+        if let Some(attachment) = attachments.get(&message.id()) {
+            for path in start_only_paths(attachment) {
+                cache.mark_start_only(path);
+            }
+        }
+    }
     for message in &history {
         if let Some((path, entry)) = attachment_snapshot(message, attachments, cwd) {
             if let Some(entry) = entry {
-                cache.set(path, entry);
+                entry.publish(&mut cache, path);
             } else {
                 cache.remove(&path);
             }
@@ -156,21 +246,24 @@ pub(super) fn restore_file_state(
                         }
                         continue;
                     }
-                    let data = raw.and_then(projection_value);
-                    let prior = cache.peek(&call.path);
-                    let snapshot = match data.as_ref() {
+                    let prior = cache.peek(&call.path).and_then(|entry| {
+                        Some(RecoveredFile {
+                            entry,
+                            units: cache.get_content_units(&call.path)?,
+                        })
+                    });
+                    let snapshot = match raw {
                         Some(data) => recover_snapshot(&call, data, prior.as_ref(), cwd),
                         // Writer-less in-memory histories have no raw envelope.
                         // A successful Write still proves its exact input bytes.
-                        None if raw.is_none() && call.name == "Write" => call
+                        None if call.name == "Write" => call
                             .input
-                            .get("content")
-                            .and_then(Value::as_str)
-                            .and_then(write_snapshot),
+                            .string_units("/content")
+                            .map(|units| write_snapshot(&units)),
                         _ => None,
                     };
                     if let Some(entry) = snapshot {
-                        cache.set(call.path, entry);
+                        entry.publish(&mut cache, call.path);
                     } else {
                         // A later successful unsupported or malformed operation
                         // must not leave an older snapshot appearing current.
@@ -187,219 +280,286 @@ fn attachment_snapshot(
     message: &ConversationMessage,
     attachments: &HashMap<MessageId, Utf16JsonProjection>,
     cwd: &Path,
-) -> Option<(PathBuf, Option<ReadFileEntry>)> {
-    let attachment = attachments.get(&message.id())?;
-    if attachment.string_at("/type")? != "file"
+) -> Option<(PathBuf, Option<RecoveredFile>)> {
+    let source = attachments.get(&message.id())?;
+    if source.string_at("/type")? != "file"
         || crate::conversation::ConversationOrchestrator::file_attachment_projection(
             message.id(),
-            attachment,
+            source,
         )
         .as_ref()
             != Some(message)
     {
         return None;
     }
-    let data = projection_value(attachment)?;
-    let filename = data.get("filename")?.as_str()?;
-    if !Path::new(filename).is_absolute() {
-        return None;
-    }
-    let path = tool_file::normalize_model_file_path(filename, cwd);
+    let path = exact_path(source, "/filename", cwd)?;
     let entry = (|| {
-        let file = data.pointer("/content/file")?;
-        let result_path = file.get("filePath")?.as_str()?;
-        if !Path::new(result_path).is_absolute()
-            || tool_file::normalize_model_file_path(result_path, cwd) != path
-            || file
-                .get("truncatedByTokenCap")
-                .is_some_and(|value| value != &Value::Bool(false))
+        if exact_path(source, "/content/file/filePath", cwd)? != path
+            || source
+                .at_pointer("/content/file/truncatedByTokenCap")
+                .is_some_and(|value| value.as_bool() != Some(false))
         {
             return None;
         }
-        let content = file.get("content")?.as_str()?;
-        // Post-compact file attachments count the final empty fragment even
-        // for empty files, unlike ordinary Read's numLines/empty-file fields.
-        let lines = content.bytes().filter(|byte| *byte == b'\n').count() as u64 + 1;
-        if file.get("startLine")?.as_u64()? != 1
-            || file.get("numLines")?.as_u64()? != lines
-            || file.get("totalLines")?.as_u64()? != lines
+        let units = source.string_units("/content/file/content")?;
+        // Attachments count the final empty fragment, even for empty files.
+        let lines = units.iter().filter(|unit| **unit == 10).count() as u64 + 1;
+        if unsigned(source.at_pointer("/content/file/startLine")?)? != 1
+            || unsigned(source.at_pointer("/content/file/numLines")?)? != lines
+            || unsigned(source.at_pointer("/content/file/totalLines")?)? != lines
         {
             return None;
         }
-        Some(snapshot(content.to_owned(), true))
+        Some(snapshot(units, true))
     })();
     Some((path, entry))
 }
 
-fn snapshot(content: String, from_read: bool) -> ReadFileEntry {
-    ReadFileEntry {
-        content,
-        mtime_ms: i64::MIN,
-        offset: None,
-        limit: None,
-        from_read,
-        seeded_from_context: false,
-        is_partial_view: false,
+fn snapshot(units: Vec<u16>, from_read: bool) -> RecoveredFile {
+    RecoveredFile {
+        entry: ReadFileEntry {
+            content: String::from_utf16_lossy(&units),
+            mtime_ms: i64::MIN,
+            offset: None,
+            limit: None,
+            from_read,
+            seeded_from_context: false,
+            is_partial_view: false,
+        },
+        units,
     }
 }
 
-fn write_snapshot(content: &str) -> Option<ReadFileEntry> {
-    // The guard compares the same BOM-aware decoded form as Read, while Write
-    // records the exact input bytes (which may include a leading UTF-8 BOM).
-    Some(snapshot(
-        tool_file::shared::decode_utf8_strict(content.as_bytes()).ok()?,
-        false,
-    ))
+fn without_bom(units: &[u16]) -> &[u16] {
+    units.strip_prefix(&[0xfeff]).unwrap_or(units)
+}
+
+fn write_snapshot(units: &[u16]) -> RecoveredFile {
+    // Write's output contains exact source text, including its optional BOM.
+    // This is historical seen state, not a guess at the original disk codec.
+    snapshot(without_bom(units).to_vec(), false)
 }
 
 fn recover_snapshot(
     call: &FileCall,
-    data: &Value,
-    prior: Option<&ReadFileEntry>,
+    data: &Utf16JsonProjection,
+    prior: Option<&RecoveredFile>,
     cwd: &Path,
-) -> Option<ReadFileEntry> {
-    let result_path = if call.name == "Read" {
-        data.pointer("/file/filePath")
-    } else {
-        data.get("filePath")
-    }?
-    .as_str()?;
-    if !Path::new(result_path).is_absolute()
-        || tool_file::normalize_model_file_path(result_path, cwd) != call.path
-    {
+) -> Option<RecoveredFile> {
+    let result_path = match call.name.as_str() {
+        "Read" => "/file/filePath",
+        "NotebookEdit" => "/notebook_path",
+        _ => "/filePath",
+    };
+    if exact_path(data, result_path, cwd)? != call.path {
         return None;
     }
     match call.name.as_str() {
-        "Read" if data.get("type")?.as_str()? == "file_unchanged" => prior.cloned(),
+        "Read" if data.string_at("/type")? == "file_unchanged" => prior.cloned(),
         "Read" => {
-            if data.get("type")?.as_str()? != "text" {
-                return None;
-            }
-            let file = data.get("file")?;
-            if file
-                .get("truncatedByTokenCap")
-                .is_some_and(|value| value != &Value::Bool(false))
+            if data.string_at("/type")? != "text"
+                || data
+                    .at_pointer("/file/truncatedByTokenCap")
+                    .is_some_and(|value| value.as_bool() != Some(false))
             {
                 return None;
             }
-            let content = file.get("content")?.as_str()?;
-            let start = file.get("startLine")?.as_u64()?;
-            let count = file.get("numLines")?.as_u64()?;
-            let total = file.get("totalLines")?.as_u64()?;
-            if count != content.split_inclusive('\n').count() as u64 || start == 0 {
+            let units = data.string_units("/file/content")?;
+            let start = unsigned(data.at_pointer("/file/startLine")?)?;
+            let count = unsigned(data.at_pointer("/file/numLines")?)?;
+            let total = unsigned(data.at_pointer("/file/totalLines")?)?;
+            // Native joins selected line fragments with LF and includes the
+            // terminal empty fragment. Earlier histories kept the delimiter
+            // on each selected line instead; validate each shape separately.
+            let native_count = units.split(|unit| *unit == 10).count() as u64;
+            let native_view = count == native_count;
+            let delimited_view = count == units.split_inclusive(|unit| *unit == 10).count() as u64;
+            if start == 0 || count > total || (!native_view && !delimited_view) {
                 return None;
             }
-            // A capped prefix ending in '\n' has the same apparent total as a
-            // whole trailing-newline file: Read(limit=1) of "one\ntwo" returns
-            // "one\n", numLines=1,totalLines=2. Require evidence of reaching
-            // EOF as well as matching the source's phantom-final-line count.
-            let reached_eof = match call.input.get("limit") {
-                None | Some(Value::Null) => true,
-                Some(limit) => limit
-                    .as_u64()
+            // A capped prefix can mimic a trailing-newline whole file. Only
+            // explicit EOF evidence authorizes a complete restored snapshot.
+            let reached_eof = match call.input.at_pointer("/limit") {
+                None => true,
+                Some(limit) if limit.is_null() => true,
+                Some(limit) => unsigned(limit)
                     .is_some_and(|limit| count < limit || (count == limit && count == total)),
             };
-            if start == 1 && total == total_lines(content) && reached_eof {
-                return Some(snapshot(content.to_owned(), true));
+            if start == 1
+                && reached_eof
+                && ((native_view && total == native_count)
+                    || (delimited_view && total == total_lines_units(&units)))
+            {
+                return Some(snapshot(units, true));
             }
-            // Ranged reads cannot manufacture unseen bytes. Retain a previous
-            // full snapshot only if both the slice and whole-file size agree.
+            // A partial observation must agree with the exact prior whole
+            // snapshot; equal display replacements do not establish equality.
             let prior = prior?;
             let first = usize::try_from(start.checked_sub(1)?).ok()?;
             let count = usize::try_from(count).ok()?;
-            let lines: Vec<_> = prior.content.split_inclusive('\n').collect();
-            if total != total_lines(&prior.content)
-                || lines.get(first..first.checked_add(count)?)?.concat() != content
+            let end = first.checked_add(count)?;
+            if native_view {
+                let lines = prior.units.split(|unit| *unit == 10).collect::<Vec<_>>();
+                if total == lines.len() as u64 {
+                    if let Some(selected) = lines.get(first..end) {
+                        let selected = selected
+                            .iter()
+                            .map(|line| line.strip_suffix(&[13]).unwrap_or(line))
+                            .collect::<Vec<_>>();
+                        if selected.join(&10) == units {
+                            return Some(prior.clone());
+                        }
+                    }
+                }
+            }
+            if delimited_view && total == total_lines_units(&prior.units) {
+                let lines = prior
+                    .units
+                    .split_inclusive(|unit| *unit == 10)
+                    .collect::<Vec<_>>();
+                if lines
+                    .get(first..end)
+                    .is_some_and(|lines| lines.concat() == units)
+                {
+                    return Some(prior.clone());
+                }
+            }
+            None
+        }
+        "Write" => {
+            if !matches!(data.string_at("/type")?, "create" | "update") {
+                return None;
+            }
+            Some(write_snapshot(&data.string_units("/content")?))
+        }
+        "Edit" => {
+            let before = data.string_units("/originalFile")?;
+            let mut after =
+                apply_structured_patch_units(&before, data.at_pointer("/structuredPatch")?)?;
+            // Preserve the established ending reconstruction only when the
+            // prior exact snapshot proves it; never consult present-day disk.
+            if let Some(prior) = prior {
+                let normalized = tool_file::file_meta::normalize_to_lf_units(&prior.units);
+                if normalized == before || normalized == without_bom(&before) {
+                    after = apply_line_ending(
+                        &after,
+                        tool_file::file_meta::detect_line_ending_units(&prior.units),
+                    );
+                }
+            }
+            Some(write_snapshot(&after))
+        }
+        "NotebookEdit" => {
+            // A native successful notebook result carries the entire updated
+            // source. Validate its JSON structure without reserializing it or
+            // trusting just one cell's possibly transformed source.
+            data.string_units("/new_source")?;
+            data.string_units("/language")?;
+            if !matches!(data.string_at("/cell_type")?, "code" | "markdown")
+                || !matches!(
+                    data.string_at("/edit_mode")?,
+                    "replace" | "insert" | "delete"
+                )
+                || data
+                    .at_pointer("/error")
+                    .is_some_and(|error| !is_ascii(error, ""))
             {
                 return None;
             }
-            Some(prior.clone())
-        }
-        "Write" => {
-            if !matches!(data.get("type")?.as_str()?, "create" | "update") {
-                return None;
+            let original = data.string_units("/original_file")?;
+            let updated = data.string_units("/updated_file")?;
+            for units in [&original, &updated] {
+                let notebook = Utf16JsonProjection::parse_utf16_json(without_bom(units)).ok()?;
+                notebook.array_len("/cells")?;
             }
-            write_snapshot(data.get("content")?.as_str()?)
-        }
-        "Edit" => {
-            let before = data.get("originalFile")?.as_str()?;
-            let mut after = apply_structured_patch(before, data.get("structuredPatch")?)?;
-            // Edit's patch is LF-normalized, while its actual write preserves
-            // the dominant line ending. Use its real codec with a proven prior
-            // snapshot; no current disk read may supply historical metadata.
-            if let Some(prior) = prior {
-                let (normalized, encoding, ending) =
-                    tool_file::file_meta::read_with_metadata(prior.content.as_bytes());
-                if normalized == before
-                    || normalized == before.strip_prefix('\u{feff}').unwrap_or(before)
-                {
-                    let bytes =
-                        tool_file::file_meta::encode_with_metadata(&after, encoding, ending);
-                    after = String::from_utf8(bytes).ok()?;
-                }
-            }
-            write_snapshot(&after)
+            Some(write_snapshot(&updated))
         }
         _ => None,
     }
 }
 
-fn total_lines(content: &str) -> u64 {
+fn total_lines_units(content: &[u16]) -> u64 {
     if content.is_empty() {
         0
     } else {
-        content.bytes().filter(|byte| *byte == b'\n').count() as u64 + 1
+        content.iter().filter(|unit| **unit == 10).count() as u64 + 1
     }
 }
 
-/// Apply jsdiff's complete hunk array without fuzzy matching or oldString
-/// replacement. The latter can differ from the tool's quote-adapted edit.
-fn apply_structured_patch(before: &str, patch: &Value) -> Option<String> {
-    let original: Vec<_> = before.split_inclusive('\n').collect();
+fn apply_line_ending(content: &[u16], ending: tool_file::file_meta::LineEnding) -> Vec<u16> {
+    use tool_file::file_meta::LineEnding;
+    match ending {
+        LineEnding::Lf => content.to_vec(),
+        LineEnding::Crlf | LineEnding::Cr => {
+            let mut result = Vec::new();
+            for unit in tool_file::file_meta::normalize_to_lf_units(content) {
+                if unit == 10 {
+                    if ending == LineEnding::Crlf {
+                        result.push(13);
+                    }
+                    result.push(if ending == LineEnding::Cr { 13 } else { 10 });
+                } else {
+                    result.push(unit);
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Apply complete jsdiff hunks by exact code units, without fuzzy oldString
+/// matching or UTF-8 replacement decoding at any comparison boundary.
+fn apply_structured_patch_units(before: &[u16], patch: JsonValueView<'_>) -> Option<Vec<u16>> {
+    let original = before
+        .split_inclusive(|unit| *unit == 10)
+        .collect::<Vec<_>>();
     let mut output = Vec::new();
     let mut cursor = 0;
-    for hunk in patch.as_array()? {
-        let old_start = usize::try_from(hunk.get("oldStart")?.as_u64()?)
+    for hunk_index in 0..patch.array_len()? {
+        let hunk = patch.get_index(hunk_index)?;
+        let old_start = usize::try_from(unsigned(hunk.get_property("oldStart")?)?)
             .ok()?
             .checked_sub(1)?;
-        let new_start = usize::try_from(hunk.get("newStart")?.as_u64()?)
+        let new_start = usize::try_from(unsigned(hunk.get_property("newStart")?)?)
             .ok()?
             .checked_sub(1)?;
-        let old_count = usize::try_from(hunk.get("oldLines")?.as_u64()?).ok()?;
-        let new_count = usize::try_from(hunk.get("newLines")?.as_u64()?).ok()?;
+        let old_count = usize::try_from(unsigned(hunk.get_property("oldLines")?)?).ok()?;
+        let new_count = usize::try_from(unsigned(hunk.get_property("newLines")?)?).ok()?;
         output.extend(
             original
                 .get(cursor..old_start)?
                 .iter()
-                .map(|line| (*line).to_owned()),
+                .map(|line| line.to_vec()),
         );
         if new_start != output.len() {
             return None;
         }
         cursor = old_start;
         let output_start = output.len();
-        let lines = hunk.get("lines")?.as_array()?;
+        let lines = hunk.get_property("lines")?;
         let mut index = 0;
-        while index < lines.len() {
-            let line = lines[index].as_str()?;
-            let (prefix, body) = line.split_at_checked(1)?;
-            if !matches!(prefix, " " | "-" | "+") || body.contains('\n') {
+        while index < lines.array_len()? {
+            let line = lines.get_index(index)?.code_units()?;
+            let (&prefix, body) = line.split_first()?;
+            if !matches!(prefix, 32 | 45 | 43) || body.contains(&10) {
                 return None;
             }
-            let mut text = body.to_owned();
-            if lines.get(index + 1).and_then(Value::as_str) == Some("\\ No newline at end of file")
+            let mut text = body.to_vec();
+            if lines
+                .get_index(index + 1)
+                .is_some_and(|line| is_ascii(line, "\\ No newline at end of file"))
             {
                 index += 1;
             } else {
-                text.push('\n');
+                text.push(10);
             }
-            if prefix != "+" {
-                if original.get(cursor).copied()? != text {
+            if prefix != 43 {
+                if *original.get(cursor)? != text {
                     return None;
                 }
                 cursor += 1;
             }
-            if prefix != "-" {
+            if prefix != 45 {
                 output.push(text);
             }
             index += 1;
@@ -410,16 +570,11 @@ fn apply_structured_patch(before: &str, patch: &Value) -> Option<String> {
             return None;
         }
     }
-    output.extend(
-        original
-            .get(cursor..)?
-            .iter()
-            .map(|line| (*line).to_owned()),
-    );
+    output.extend(original.get(cursor..)?.iter().map(|line| line.to_vec()));
     if output
         .iter()
         .take(output.len().saturating_sub(1))
-        .any(|line| !line.ends_with('\n'))
+        .any(|line| !line.ends_with(&[10]))
     {
         return None;
     }
@@ -427,12 +582,31 @@ fn apply_structured_patch(before: &str, patch: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
+fn total_lines(content: &str) -> u64 {
+    total_lines_units(&content.encode_utf16().collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+fn apply_structured_patch(before: &str, patch: &serde_json::Value) -> Option<String> {
+    let patch = Utf16JsonProjection::from_serde_value(patch).ok()?;
+    let result = apply_structured_patch_units(
+        &before.encode_utf16().collect::<Vec<_>>(),
+        patch.at_pointer("")?,
+    )?;
+    String::from_utf16(&result).ok()
+}
+
+#[cfg(test)]
+#[path = "file_state_utf16_tests.rs"]
+mod utf16_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use lingxi_core::host::TaskDeliveryHistoryEnvelope;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{MessageId, SessionId};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tool_api::read_file_state::{get, new_read_file_state_map};
 
     const FILE: &str = "/workspace/file.txt";
@@ -773,12 +947,25 @@ mod tests {
             let mut session = session();
             append_read(&mut session, prior);
             let id = call(&mut session, "Edit", json!({"file_path":FILE}));
+            // jsdiff treats bare CR as content in one LF-delimited line.
+            // The scalar test helper uses similar's broader CR tokenizer.
+            let patch = if !before.contains('\n') && before.contains('\r') {
+                json!([{
+                    "oldStart":1,"oldLines":1,"newStart":1,"newLines":1,
+                    "lines":[format!("-{before}"), "\\ No newline at end of file",
+                        format!("+{after}"), "\\ No newline at end of file"]
+                }])
+            } else {
+                json!(tool_file::structured_patch::build_structured_patch(
+                    &before, &after
+                ))
+            };
             result(
                 &mut session,
                 id,
                 Some(json!({
                     "filePath":FILE,"originalFile":before,
-                    "structuredPatch":tool_file::structured_patch::build_structured_patch(&before, &after)
+                    "structuredPatch":patch
                 })),
                 false,
             );

@@ -835,6 +835,9 @@ pub struct PolicyPermissionGate {
     /// producers and gives this one the lifetime it is supposed to have.
     command_input_denies: std::sync::RwLock<Vec<Utf16JsonProjection>>,
     host_mcp_denied_tools: std::sync::RwLock<Vec<String>>,
+    /// Compiled Read-deny artifacts survive repeated searches, while the
+    /// active policy and each candidate's authorization are still read anew.
+    read_search_compilations: crate::filesystem::PatternCompilationPlanCache,
 }
 
 /// Carry an established tool Ask through the prompt boundary. A transport
@@ -1058,6 +1061,7 @@ impl PolicyPermissionGate {
             path_translator: None,
             command_input_denies: std::sync::RwLock::new(Vec::new()),
             host_mcp_denied_tools: std::sync::RwLock::new(Vec::new()),
+            read_search_compilations: Default::default(),
             classifier_auto_mode_settings: std::sync::RwLock::new(None),
             classifier_auto_mode_settings_provider: None,
             classifier_host_capabilities: std::sync::RwLock::new(
@@ -3284,16 +3288,21 @@ impl PermissionGate for PolicyPermissionGate {
         let policy = Arc::new(self.live_policy());
         Some(core_permission::ReadSearchPolicyPreparation {
             exclude_globs: crate::read_deny_exclude_globs(&policy, &base),
-            path_policy: crate::read_deny_globs::read_deny_search_snapshot(policy, None),
+            path_policy: crate::read_deny_globs::read_deny_search_snapshot_with_cache(
+                policy,
+                None,
+                Some(&self.read_search_compilations),
+            ),
         })
     }
 
     fn read_path_policy_snapshot(
         &self,
     ) -> std::sync::Arc<dyn core_permission::ReadPathPolicySnapshot> {
-        crate::read_deny_globs::read_deny_search_snapshot(
+        crate::read_deny_globs::read_deny_search_snapshot_with_cache(
             std::sync::Arc::new(self.live_policy()),
             None,
+            Some(&self.read_search_compilations),
         )
     }
 

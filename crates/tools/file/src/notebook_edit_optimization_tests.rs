@@ -52,7 +52,7 @@ fn legacy_mutate_notebook(
         None => {
             return Err(notebook_error(
                 "Cell ID must be specified when not inserting a new cell.",
-            ))
+            ));
         }
         Some(id) => {
             let found = cells
@@ -166,7 +166,7 @@ fn legacy_mutate_notebook(
         new_source,
         old_source,
         language,
-        cell_id: result_id,
+        cell_id: result_id.map(Into::into),
         model_content,
     })
 }
@@ -288,6 +288,9 @@ fn notebook_mutation_projection_scaling_probe() {
             serialize_notebook(&optimized).unwrap(),
             serialize_notebook(&legacy).unwrap()
         );
-        println!("{{\"probe\":\"notebook_mutation\",\"cells\":{count},\"legacy_cell_subprojections\":{count},\"optimized_changed_cells_materialized\":1,\"optimized_unchanged_cells_imported\":{},\"legacy_us\":{legacy_us},\"optimized_us\":{optimized_us}}}", count - 1);
+        println!(
+            "{{\"probe\":\"notebook_mutation\",\"cells\":{count},\"legacy_cell_subprojections\":{count},\"optimized_changed_cells_materialized\":1,\"optimized_unchanged_cells_imported\":{},\"legacy_us\":{legacy_us},\"optimized_us\":{optimized_us}}}",
+            count - 1
+        );
     }
 }

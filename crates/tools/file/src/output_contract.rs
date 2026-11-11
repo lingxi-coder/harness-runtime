@@ -4,8 +4,7 @@
 
 use crate::Utf16JsonProjection;
 use tool_api::native_output::{
-    array_values, invalid, parse_object, validate_string_array, OutputField, OutputFieldType,
-    UnknownOutputKeys,
+    invalid, parse_object, OutputField, OutputFieldType, UnknownOutputKeys,
 };
 use tool_api::tool_trait::ToolError;
 
@@ -21,11 +20,15 @@ const PATCH_FIELDS: &[OutputField] = &[
     field("oldLines", OutputFieldType::Number, true),
     field("newStart", OutputFieldType::Number, true),
     field("newLines", OutputFieldType::Number, true),
-    field("lines", OutputFieldType::Array, true),
+    field("lines", OutputFieldType::StringArray, true),
 ];
 const GIT_FIELDS: &[OutputField] = &[
     field("filename", OutputFieldType::String, true),
-    field("status", OutputFieldType::String, true),
+    field(
+        "status",
+        OutputFieldType::StringEnum(&["modified", "added"]),
+        true,
+    ),
     field("additions", OutputFieldType::Number, true),
     field("deletions", OutputFieldType::Number, true),
     field("changes", OutputFieldType::Number, true),
@@ -37,7 +40,11 @@ const EDIT_FIELDS: &[OutputField] = &[
     field("oldString", OutputFieldType::String, true),
     field("newString", OutputFieldType::String, true),
     field("originalFile", OutputFieldType::StringOrNull, true),
-    field("structuredPatch", OutputFieldType::Array, true),
+    field(
+        "structuredPatch",
+        OutputFieldType::ObjectArray(PATCH_FIELDS),
+        true,
+    ),
     field("userModified", OutputFieldType::Boolean, true),
     field("replaceAll", OutputFieldType::Boolean, true),
     field("gitDiff", OutputFieldType::ObjectShape(GIT_FIELDS), false),
@@ -49,10 +56,18 @@ const EDIT_FIELDS: &[OutputField] = &[
     field("syncedSkillNext", OutputFieldType::String, false),
 ];
 const WRITE_FIELDS: &[OutputField] = &[
-    field("type", OutputFieldType::String, true),
+    field(
+        "type",
+        OutputFieldType::StringEnum(&["create", "update"]),
+        true,
+    ),
     field("filePath", OutputFieldType::String, true),
     field("content", OutputFieldType::String, true),
-    field("structuredPatch", OutputFieldType::Array, true),
+    field(
+        "structuredPatch",
+        OutputFieldType::ObjectArray(PATCH_FIELDS),
+        true,
+    ),
     field("originalFile", OutputFieldType::StringOrNull, true),
     field("gitDiff", OutputFieldType::ObjectShape(GIT_FIELDS), false),
     field("userModified", OutputFieldType::Boolean, false),
@@ -65,7 +80,11 @@ const NOTEBOOK_FIELDS: &[OutputField] = &[
     field("new_source", OutputFieldType::String, true),
     field("old_source", OutputFieldType::String, false),
     field("cell_id", OutputFieldType::String, false),
-    field("cell_type", OutputFieldType::String, true),
+    field(
+        "cell_type",
+        OutputFieldType::StringEnum(&["code", "markdown"]),
+        true,
+    ),
     field("language", OutputFieldType::String, true),
     field("edit_mode", OutputFieldType::String, true),
     field("error", OutputFieldType::String, false),
@@ -111,53 +130,10 @@ pub(crate) fn parse(
                 .map_err(|_| invalid(tool, "invalid result metadata"))?;
         }
     }
-    let mut parsed = parse_object(
+    parse_object(
         prepared.as_ref().unwrap_or(output),
         tool,
         fields,
         UnknownOutputKeys::Strip,
-    )?;
-    if tool == "NotebookEdit" {
-        require_enum(&parsed, "/cell_type", &["code", "markdown"], tool)?;
-        return Ok(parsed);
-    }
-    if tool == "Write" {
-        require_enum(&parsed, "/type", &["create", "update"], tool)?;
-    }
-    let mut patches = Vec::new();
-    for patch in array_values(&parsed, "/structuredPatch", tool, "structuredPatch")? {
-        let patch = parse_object(&patch, tool, PATCH_FIELDS, UnknownOutputKeys::Strip)?;
-        validate_string_array(&patch, "/lines", tool, "lines")?;
-        patches.push(patch);
-    }
-    parsed
-        .set_field(
-            "structuredPatch",
-            Utf16JsonProjection::array(patches)
-                .map_err(|_| invalid(tool, "could not construct parsed patch"))?,
-        )
-        .map_err(|_| invalid(tool, "could not construct parsed output"))?;
-    if parsed.contains_property("gitDiff") {
-        require_enum(&parsed, "/gitDiff/status", &["modified", "added"], tool)?;
-    }
-    Ok(parsed)
-}
-
-fn require_enum(
-    output: &Utf16JsonProjection,
-    pointer: &str,
-    values: &[&str],
-    tool: &str,
-) -> Result<(), ToolError> {
-    if output
-        .string_at(pointer)
-        .is_some_and(|value| values.contains(&value))
-    {
-        Ok(())
-    } else {
-        Err(invalid(
-            tool,
-            &format!("output field `{pointer}` has an invalid value"),
-        ))
-    }
+    )
 }

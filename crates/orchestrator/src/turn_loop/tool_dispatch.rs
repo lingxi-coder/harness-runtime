@@ -4033,27 +4033,83 @@ mod dispatch_facts_tests {
     }
 }
 
+struct QueryReadTokenCounter {
+    api: std::sync::Arc<dyn crate::OrchestratorApiClient>,
+    model: String,
+    profile: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl tool_api::read_context_room::ReadTokenCounter for QueryReadTokenCounter {
+    async fn count_read_tokens(&self, source: &Utf16JsonProjection) -> Result<Option<u64>, String> {
+        let result = self
+            .api
+            .count_read_text_tokens_exact(&self.model, self.profile.as_deref(), source)
+            .await
+            .map_err(|error| error.to_string());
+        tracing::debug!(event = "read_token_count_completed", model = %self.model,
+            profile = ?self.profile, result = ?result);
+        result
+    }
+}
+
 async fn read_context_room_for_query(
     orch: &ConversationOrchestrator,
     model: &str,
     profile: Option<&str>,
     messages: &[ConversationMessage],
 ) -> Option<std::sync::Arc<tool_api::read_context_room::ReadContextRoom>> {
-    // Unknown provider limits cannot authorize a larger read. Production route
-    // resolution supplies the same concrete input ceiling used by compaction.
-    let resolved = orch.api.context_budget(model, profile).ok().flatten()?;
-    resolved.effective_input_budget?;
-    let (enabled, settings_window) = orch.auto_compact_settings_for(model, profile);
-    let input_budget = orch
-        .api
-        .compact_input_budget(model, profile, settings_window, enabled)
-        .ok()
-        .flatten()?;
-    let threshold = orch.api.compact_threshold(model, profile, input_budget);
-    let held = orch.current_live_context_usage_for(messages).await;
-    Some(std::sync::Arc::new(
+    // A resolved route can count an ordinary Read without a context ceiling.
+    // Only a trusted compaction threshold can authorize a larger Read.
+    let resolved = match orch.api.context_budget(model, profile) {
+        Ok(Some(resolved)) => resolved,
+        result => {
+            tracing::debug!(event = "read_context_room_unavailable", model, profile,
+                reason = "route_context", result = ?result);
+            return None;
+        }
+    };
+    let threshold = if resolved.effective_input_budget.is_none() {
+        tracing::debug!(event = "read_context_room_counter_only", model, profile,
+            reason = "unknown_input_budget", request_model = %resolved.request_model,
+            resolved_profile = %resolved.profile_name);
+        None
+    } else {
+        let (enabled, settings_window) = orch.auto_compact_settings_for(model, profile);
+        match orch
+            .api
+            .compact_input_budget(model, profile, settings_window, enabled)
+        {
+            Ok(Some(budget)) => Some(orch.api.compact_threshold(model, profile, budget)),
+            result => {
+                tracing::debug!(event = "read_context_room_counter_only", model, profile,
+                    reason = "compact_input_budget", result = ?result);
+                None
+            }
+        }
+    };
+    let room = if let Some(threshold) = threshold {
+        let held = orch.current_live_context_usage_for(messages).await;
+        tracing::debug!(
+            event = "read_context_room_created",
+            model,
+            profile,
+            threshold,
+            held
+        );
         tool_api::read_context_room::ReadContextRoom::new(threshold, held)
-            .with_route(model.to_owned(), profile.map(str::to_owned)),
+    } else {
+        tool_api::read_context_room::ReadContextRoom::counter_only()
+    };
+    Some(std::sync::Arc::new(
+        room.with_route(model.to_owned(), profile.map(str::to_owned))
+            .with_token_counter(std::sync::Arc::new(QueryReadTokenCounter {
+                api: orch.api.clone(),
+                // Pin even an implicit/default selection to the concrete
+                // route which supplied this query's context allowance.
+                model: resolved.request_model,
+                profile: Some(resolved.profile_name),
+            })),
     ))
 }
 
@@ -4079,12 +4135,37 @@ mod read_context_room_host_tests {
             })
         }
 
+        async fn count_tokens_exact(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+            system: Option<&str>,
+            messages: Vec<ConversationMessage>,
+            tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+        ) -> Result<Option<u64>, llm_runtime::LlmError> {
+            assert_eq!(model, "known");
+            assert_eq!(profile, Some("provider"));
+            assert!(system.is_none());
+            assert!(tools.is_empty());
+            let [ConversationMessage::User { content, .. }] = messages.as_slice() else {
+                panic!("Read counting sends a single user message");
+            };
+            let [ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            }] = content.as_slice()
+            else {
+                panic!("Read counting retains exact UTF-16 text");
+            };
+            assert_eq!(utf16_code_units, &[b'a' as u16, 0xd800]);
+            Ok(Some(321))
+        }
+
         fn context_budget(
             &self,
             model: &str,
             profile: Option<&str>,
         ) -> Result<Option<llm_runtime::ResolvedContext>, llm_runtime::LlmError> {
-            if model != "known" || profile != Some("provider") {
+            if model != "known" || profile.is_some_and(|profile| profile != "provider") {
                 return Ok(None);
             }
             let route: lingxi_llm_client::protocol::ProviderProfile =
@@ -4173,6 +4254,174 @@ mod read_context_room_host_tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn read_context_room_counting_uses_original_provider_profile_and_exact_source() {
+        let orch = orchestrator(Arc::new(RouteApi));
+        let room = read_context_room_for_query(&orch, "known", Some("provider"), &[])
+            .await
+            .unwrap();
+        let source = Utf16JsonProjection::parse(r#""a\ud800""#).unwrap();
+        assert_eq!(room.refine_tokens(&source, 26, 100).await, 321);
+        assert_eq!(room.claimed(), 0);
+        let implicit = read_context_room_for_query(&orch, "known", None, &[])
+            .await
+            .unwrap();
+        assert!(implicit.matches_route("known", None));
+        assert_eq!(implicit.refine_tokens(&source, 26, 100).await, 321);
+    }
+
+    #[tokio::test]
+    async fn read_context_room_inherited_dispatch_restores_missing_or_stale_counter() {
+        struct ReadApi {
+            units: Vec<u16>,
+            calls: std::sync::atomic::AtomicUsize,
+            known_capacity: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::OrchestratorApiClient for ReadApi {
+            async fn messages_create(
+                &self,
+                request: crate::OrchestratorApiRequest,
+            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+                crate::OrchestratorApiClient::messages_create(&RouteApi, request).await
+            }
+
+            async fn count_read_text_tokens_exact(
+                &self,
+                model: &str,
+                profile: Option<&str>,
+                source: &Utf16JsonProjection,
+            ) -> Result<Option<u64>, llm_runtime::LlmError> {
+                assert_eq!(model, "known");
+                assert_eq!(profile, Some("provider"));
+                assert_eq!(source.string_units(""), Some(self.units.clone()));
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2500))
+            }
+
+            fn context_budget(
+                &self,
+                model: &str,
+                profile: Option<&str>,
+            ) -> Result<Option<llm_runtime::ResolvedContext>, llm_runtime::LlmError> {
+                let mut resolved =
+                    crate::OrchestratorApiClient::context_budget(&RouteApi, model, profile)?;
+                if !self.known_capacity {
+                    if let Some(resolved) = resolved.as_mut() {
+                        resolved.context_window_tokens = None;
+                        resolved.max_input_tokens = None;
+                        resolved.effective_input_budget = None;
+                    }
+                }
+                Ok(resolved)
+            }
+
+            fn compact_input_budget(
+                &self,
+                model: &str,
+                profile: Option<&str>,
+                settings_window: Option<u64>,
+                enabled: bool,
+            ) -> Result<Option<u64>, llm_runtime::LlmError> {
+                crate::OrchestratorApiClient::compact_input_budget(
+                    &RouteApi,
+                    model,
+                    profile,
+                    settings_window,
+                    enabled,
+                )
+            }
+
+            fn compact_threshold(&self, model: &str, profile: Option<&str>, budget: u64) -> u64 {
+                crate::OrchestratorApiClient::compact_threshold(&RouteApi, model, profile, budget)
+            }
+        }
+
+        for (stale_room, known_capacity) in [(false, true), (true, true), (false, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("source.txt");
+            let mut units = vec![b'x' as u16; 120_000];
+            units.push(0xd800);
+            let bytes: Vec<_> = [0xfeff]
+                .into_iter()
+                .chain(units.iter().copied())
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            std::fs::write(&path, bytes).unwrap();
+            let api = Arc::new(ReadApi {
+                units: units.clone(),
+                calls: Default::default(),
+                known_capacity,
+            });
+            let tool = Arc::new(tool_file::FileReadTool::new(
+                tool_api::test_support::ctx_for_file_tools(
+                    tool_api::test_support::make_dummy_fs(),
+                    Arc::new(telemetry::AnalyticsBus::new()),
+                    vec![root.path().to_path_buf()],
+                ),
+            ));
+            let mut tools = tool_api::ToolRegistry::new();
+            tools.register_builtin(tool.clone());
+            let orch = ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                api.clone(),
+                Arc::new(tools),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            );
+            if !known_capacity {
+                let counter_only =
+                    read_context_room_for_query(&orch, "known", Some("provider"), &[])
+                        .await
+                        .expect("a resolved route retains normal-cap exact counting");
+                assert!(!counter_only.has_context_room());
+                assert_eq!(counter_only.room_tokens(0), 0);
+            }
+            let mut inherited = ToolUseContext::model_seed("known".into());
+            inherited.options.model_profile = Some("provider".into());
+            if stale_room {
+                inherited.options.read_context_room = Some(Arc::new(
+                    tool_api::read_context_room::ReadContextRoom::new(500_000, 0)
+                        .with_route("unrelated".into(), Some("other-provider".into())),
+                ));
+            }
+            let id = ToolUseId::new();
+            let calls = vec![(
+                id.clone(),
+                "Read".into(),
+                source_from_value(&serde_json::json!({"file_path":path})),
+                None,
+            )];
+            let dispatched = dispatch_tool_uses_tracked_deferred_with_facts(
+                &orch,
+                &calls,
+                None,
+                None,
+                None,
+                Some(tool),
+                Some(inherited),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                dispatched.results.as_slice(),
+                [ContentBlock::ToolResult { is_error, .. }] if !is_error.unwrap_or(false)
+            ));
+            assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+            let results = orch.transcript.tool_use_results.lock().await;
+            assert_eq!(
+                results[id.as_str()].string_units("/file/content"),
+                Some(units)
+            );
+        }
     }
 }
 
@@ -4360,22 +4609,40 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
         {
             return Ok(DeferredToolDispatch::default());
         }
-        let read_context_room = if let Some(context) = inherited_context.as_ref() {
-            context.options.read_context_room.clone()
-        } else {
-            let (model, profile) = match orch.current_prompt_policy().await.ok() {
+        let (model, profile) = match inherited_context.as_ref() {
+            Some(context) => (
+                context.options.main_loop_model.clone(),
+                context.options.model_profile.clone(),
+            ),
+            None => match orch.current_prompt_policy().await.ok() {
                 Some(policy) => (
                     policy.target.request_model.clone(),
                     policy.target.profile_name.clone(),
                 ),
                 None => orch.current_prompt_route().await,
-            };
-            let messages = match dispatch_facts.as_ref() {
-                Some(facts) => facts.query_history.to_vec(),
-                None => orch.session.lock().await.model_context_history(),
-            };
-            read_context_room_for_query(orch, &model, profile.as_deref(), &messages).await
+            },
         };
+        let read_context_room = match inherited_context
+            .as_ref()
+            .and_then(|context| context.options.read_context_room.as_ref())
+            .filter(|room| room.matches_route(&model, profile.as_deref()))
+        {
+            Some(room) => Some(room.clone()),
+            None => {
+                let messages = match dispatch_facts.as_ref() {
+                    Some(facts) => facts.query_history.to_vec(),
+                    None => orch.session.lock().await.model_context_history(),
+                };
+                read_context_room_for_query(orch, &model, profile.as_deref(), &messages).await
+            }
+        };
+        // A frozen context may have been seeded before an allowance existed,
+        // or a model modifier may have changed its route. Stamp the one shared
+        // host allowance before the core's inherited-context overlay runs.
+        let inherited_context = inherited_context.map(|mut context| {
+            context.options.read_context_room = read_context_room.clone();
+            context
+        });
         let mod_host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
         } else {

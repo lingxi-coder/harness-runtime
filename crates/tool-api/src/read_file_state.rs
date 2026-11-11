@@ -19,8 +19,9 @@
 //!   `READ_FILE_STATE_CACHE_SIZE = 100`).
 //! - `maxSize` bytes = `READ_FILE_STATE_MAX_BYTES` (`fileStateCache.ts:22`,
 //!   `DEFAULT_MAX_CACHE_SIZE_BYTES = 16 * 1024 * 1024`).
-//! - per-entry size = `entry.content.len().max(1)` (UTF-8 byte length, the Rust
-//!   equal of `Math.max(1, Buffer.byteLength(content))`).
+//! - ordinary per-entry size = `entry.content.len().max(1)` (UTF-8 byte length,
+//!   the Rust equal of `Math.max(1, Buffer.byteLength(content))`). Rare exact
+//!   UTF-16 sidecars additionally count their allocated code units.
 //! - MRU-promote on [`ReadFileStateLru::get`]; on [`ReadFileStateLru::set`],
 //!   least-recently-used entries are evicted while the entry count exceeds
 //!   `max` OR the accumulated bytes exceed `maxSize`. A lone entry larger than
@@ -153,6 +154,9 @@ impl From<&ReadFileEntry> for ReadFileMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
     entry: ReadFileEntry,
+    /// Exact JavaScript code units when disk decoding cannot be represented by
+    /// Rust text. Ordinary producers leave this absent and use UTF-16 of text.
+    content_units: Option<Vec<u16>>,
     /// Original and translated pre-canonicalization spellings for each model
     /// route that reached this canonical key, in first-observed order. Keeping
     /// route forms grouped lets reminders require every coordinate spelling to
@@ -166,7 +170,7 @@ struct Node {
     in_model_context: bool,
     /// Monotonic recency stamp; higher = more recently used.
     last_used: u64,
-    /// Cached `entry.content.len().max(1)` (the lru-cache `sizeCalculation`).
+    /// Cached content bytes plus any nonredundant exact UTF-16 sidecar.
     size: u64,
 }
 
@@ -180,6 +184,9 @@ struct Node {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadFileStateLru {
     map: HashMap<PathBuf, Node>,
+    /// Instruction clipping is a session fence, not an evictable read entry.
+    /// Native FileStateCache keeps this Set across delete, clear and clones.
+    start_only_paths: Vec<PathBuf>,
     /// Monotonic clock; every `get`/`set` bumps it to stamp recency.
     clock: u64,
     /// Running sum of every entry's `size` (kept in sync with `map`).
@@ -209,6 +216,9 @@ impl ReadFileStateLru {
         }
         self.total_bytes = self.map.values().map(|node| node.size).sum();
         self.clock = self.clock.max(after.clock);
+        for path in &after.start_only_paths {
+            self.mark_start_only(path.clone());
+        }
         self.evict();
     }
 
@@ -217,6 +227,7 @@ impl ReadFileStateLru {
     fn with_limits(max_entries: usize, max_bytes: u64) -> Self {
         Self {
             map: HashMap::new(),
+            start_only_paths: Vec::new(),
             clock: 0,
             total_bytes: 0,
             max_entries,
@@ -242,6 +253,63 @@ impl ReadFileStateLru {
         self.clock = next;
         node.last_used = next;
         Some(ReadFileMetadata::from(&node.entry))
+    }
+
+    /// Fetch exact cached text without losing unpaired UTF-16 code units.
+    /// This has the same recency effect as a normal entry lookup.
+    pub fn get_content_units(&mut self, path: &Path) -> Option<Vec<u16>> {
+        let next = self.clock + 1;
+        let node = self.map.get_mut(path)?;
+        self.clock = next;
+        node.last_used = next;
+        Some(
+            node.content_units
+                .clone()
+                .unwrap_or_else(|| node.entry.content.encode_utf16().collect()),
+        )
+    }
+
+    /// Record that instruction context exposed only a prefix of this file.
+    /// Never infer clipping merely from stripped frontmatter or comments.
+    pub fn mark_start_only(&mut self, path: PathBuf) {
+        let path = normalized_fence_path(&path);
+        if !self.start_only_paths.contains(&path) {
+            self.start_only_paths.push(path);
+        }
+    }
+
+    /// Persistent clipped-path markers, independent of cached read entries.
+    #[must_use]
+    pub fn start_only_paths(&self) -> Vec<PathBuf> {
+        self.start_only_paths.clone()
+    }
+
+    /// A different admitted session owns a fresh clipping fence. Ordinary LRU
+    /// clear/drain operations deliberately do not call this reset boundary.
+    pub fn reset_for_session(&mut self) {
+        self.map.clear();
+        self.start_only_paths.clear();
+        self.total_bytes = 0;
+        self.clock = 0;
+    }
+
+    fn has_full_model_view(&self, path: &Path) -> bool {
+        self.map
+            .get(path)
+            .or_else(|| self.map.get(&normalized_fence_path(path)))
+            .is_some_and(|node| {
+                (node.in_model_context || node.entry.seeded_from_context)
+                    && entry_covers_full_file(&node.entry)
+            })
+    }
+
+    /// A full model-visible read satisfies the fence only while that observed
+    /// entry remains cached. Eviction makes the persistent fence active again.
+    #[must_use]
+    pub fn holds_only_start_of(&self, path: &Path) -> bool {
+        let path = normalized_fence_path(path);
+        self.start_only_paths.iter().any(|marked| marked == &path)
+            && !self.has_full_model_view(&path)
     }
 
     /// Fetch a clone of the entry for `path` WITHOUT promoting it to
@@ -363,6 +431,26 @@ impl ReadFileStateLru {
         in_model_context: bool,
         new_requested_paths: Vec<PathBuf>,
     ) {
+        self.set_with_requested_aliases_and_units(
+            path,
+            entry,
+            in_model_context,
+            new_requested_paths,
+            None,
+        );
+    }
+
+    /// Source-preserving variant for text producers with exact UTF-16 units.
+    pub fn set_with_requested_aliases_and_units(
+        &mut self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        new_requested_paths: Vec<PathBuf>,
+        content_units: Option<Vec<u16>>,
+    ) {
+        let content_units =
+            content_units.filter(|units| entry.content.encode_utf16().ne(units.iter().copied()));
         // The canonical cache key may be reached through more than one model
         // spelling. Keep prior spellings across every refresh: unlike Native's
         // per-spelling Map entries, this cache folds aliases into one key, so a
@@ -379,7 +467,13 @@ impl ReadFileStateLru {
                 route.push(requested_path);
             }
         }
-        let size = (entry.content.len() as u64).max(1);
+        let size = (entry.content.len() as u64)
+            .saturating_add(
+                content_units
+                    .as_ref()
+                    .map_or(0, |units| (units.len() as u64).saturating_mul(2)),
+            )
+            .max(1);
         self.clock += 1;
         let last_used = self.clock;
         match self.map.entry(path) {
@@ -392,12 +486,14 @@ impl ReadFileStateLru {
                 node.in_model_context |= in_model_context;
                 self.total_bytes = self.total_bytes.saturating_sub(node.size);
                 node.entry = entry;
+                node.content_units = content_units;
                 node.last_used = last_used;
                 node.size = size;
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(Node {
                     entry,
+                    content_units,
                     requested_path_groups: if route.is_empty() {
                         Vec::new()
                     } else {
@@ -570,7 +666,12 @@ impl MemoryForkReadState {
             if inherit_reads {
                 parent.clone()
             } else {
-                ReadFileStateLru::with_limits(parent.max_entries, parent.max_bytes)
+                let mut snapshot =
+                    ReadFileStateLru::with_limits(parent.max_entries, parent.max_bytes);
+                snapshot
+                    .start_only_paths
+                    .clone_from(&parent.start_only_paths);
+                snapshot
             }
         };
         snapshot.strip_seeded_from_context();
@@ -584,7 +685,12 @@ impl MemoryForkReadState {
         MEMORY_FORK_READ_STATE.scope(self.clone(), future).await
     }
 
-    fn invalidate_parent_write(&self, path: &Path, written: &ReadFileEntry) {
+    fn invalidate_parent_write(
+        &self,
+        path: &Path,
+        written: &ReadFileEntry,
+        written_units: Option<&[u16]>,
+    ) {
         let canonical = std::fs::canonicalize(path).ok();
         let candidates = {
             let parent = self
@@ -630,7 +736,18 @@ impl MemoryForkReadState {
             };
             // A foreground Read that already saw these bytes may race this
             // callback. Preserve that observation.
-            if view.content != written.content || view.is_partial_view {
+            let exact_content_changed = written_units.is_some_and(|written_units| {
+                let node = parent.map.get(&key).expect("peek found this entry");
+                match &node.content_units {
+                    Some(prior_units) => prior_units.as_slice() != written_units,
+                    None => node
+                        .entry
+                        .content
+                        .encode_utf16()
+                        .ne(written_units.iter().copied()),
+                }
+            });
+            if view.content != written.content || view.is_partial_view || exact_content_changed {
                 parent.mark_stale_if_unchanged(&key, &view);
             }
         }
@@ -649,8 +766,83 @@ fn active_map(map: &ReadFileStateMap) -> ReadFileStateMap {
         .unwrap_or_else(|_| map.clone())
 }
 
+/// Owned routing authority for a mutation sent to a blocking worker. Tokio
+/// task locals do not propagate to spawn_blocking, so capture both the private
+/// read registry and the parent-invalidation callback before leaving the task.
+#[derive(Clone)]
+pub struct ReadFileStateWriteContext {
+    map: ReadFileStateMap,
+    memory_fork: Option<Arc<MemoryForkReadState>>,
+}
+
+/// Capture the executing model registry and any foreground invalidation owner.
+#[must_use]
+pub fn capture_read_file_state_write(map: &ReadFileStateMap) -> ReadFileStateWriteContext {
+    let memory_fork = MEMORY_FORK_READ_STATE
+        .try_with(|state| Arc::ptr_eq(map, &state.parent).then(|| state.clone()))
+        .ok()
+        .flatten();
+    ReadFileStateWriteContext {
+        map: active_map(map),
+        memory_fork,
+    }
+}
+
+impl ReadFileStateWriteContext {
+    /// This registry has already been resolved to the executing model's view.
+    #[must_use]
+    pub fn map(&self) -> ReadFileStateMap {
+        self.map.clone()
+    }
+
+    /// Check clipping fences using the captured execution view.
+    #[must_use]
+    pub fn start_only_write_guard(
+        &self,
+        observed_path: &Path,
+        io_path: &Path,
+    ) -> Option<StartOnlyWriteBlock> {
+        start_only_write_guard(&self.map, observed_path, io_path)
+    }
+
+    /// Publish a completed write and invalidate its captured foreground view.
+    pub fn set_after_write_with_requested_aliases_and_units(
+        &self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        requested_paths: Vec<PathBuf>,
+        content_units: Option<Vec<u16>>,
+    ) {
+        if let Some(fork) = &self.memory_fork {
+            self.map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_with_requested_aliases_and_units(
+                    path.clone(),
+                    entry.clone(),
+                    in_model_context,
+                    requested_paths,
+                    content_units.clone(),
+                );
+            fork.invalidate_parent_write(&path, &entry, content_units.as_deref());
+        } else {
+            self.map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_with_requested_aliases_and_units(
+                    path,
+                    entry,
+                    in_model_context,
+                    requested_paths,
+                    content_units,
+                );
+        }
+    }
+}
+
 /// Construct a fresh, empty read-state registry with the claude-code defaults
-/// (100 entries / 25 MiB).
+/// (100 entries / 16 MiB).
 #[must_use]
 pub fn new_read_file_state_map() -> ReadFileStateMap {
     Arc::new(Mutex::new(ReadFileStateLru::with_limits(
@@ -751,6 +943,27 @@ pub fn set_with_requested_aliases(
     }
 }
 
+/// Insert exact decoded text while retaining the same path provenance and LRU
+/// semantics as [`set_with_requested_aliases`].
+pub fn set_with_requested_aliases_and_units(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+    requested_paths: Vec<PathBuf>,
+    content_units: Option<Vec<u16>>,
+) {
+    if let Ok(mut guard) = active_map(map).lock() {
+        guard.set_with_requested_aliases_and_units(
+            path,
+            entry,
+            in_model_context,
+            requested_paths,
+            content_units,
+        );
+    }
+}
+
 /// Record successful file mutation in the executing model's cache and fence
 /// an older foreground observation when this is a private memory-fork call.
 pub fn set_after_write_with_requested_aliases(
@@ -760,18 +973,32 @@ pub fn set_after_write_with_requested_aliases(
     in_model_context: bool,
     requested_paths: Vec<PathBuf>,
 ) {
-    set_with_requested_aliases(
+    set_after_write_with_requested_aliases_and_units(
         map,
-        path.clone(),
-        entry.clone(),
+        path,
+        entry,
         in_model_context,
         requested_paths,
+        None,
     );
-    let _ = MEMORY_FORK_READ_STATE.try_with(|state| {
-        if Arc::ptr_eq(map, &state.parent) {
-            state.invalidate_parent_write(&path, &entry);
-        }
-    });
+}
+
+/// Source-preserving post-mutation publication, including memory-fork fences.
+pub fn set_after_write_with_requested_aliases_and_units(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+    requested_paths: Vec<PathBuf>,
+    content_units: Option<Vec<u16>>,
+) {
+    capture_read_file_state_write(map).set_after_write_with_requested_aliases_and_units(
+        path,
+        entry,
+        in_model_context,
+        requested_paths,
+        content_units,
+    );
 }
 
 /// Fetch a clone of the read-state entry for `path`, if present, promoting it to
@@ -790,9 +1017,194 @@ pub fn get(map: &ReadFileStateMap, path: &Path) -> Option<ReadFileEntry> {
 /// poisoned-mutex behavior as [`get`], without cloning its content.
 #[must_use]
 pub fn get_metadata(map: &ReadFileStateMap, path: &Path) -> Option<ReadFileMetadata> {
-    map.lock()
+    active_map(map)
+        .lock()
         .ok()
         .and_then(|mut guard| guard.get_metadata(path))
+}
+
+/// Exact code units for freshness comparisons; ordinary Rust text is encoded
+/// on demand when that producer did not supply a sidecar.
+#[must_use]
+pub fn get_content_units(map: &ReadFileStateMap, path: &Path) -> Option<Vec<u16>> {
+    active_map(map)
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.get_content_units(path))
+}
+
+/// Mark a clipped instruction prefix in the executing model registry.
+pub fn mark_start_only(map: &ReadFileStateMap, path: PathBuf) {
+    active_map(map)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .mark_start_only(path);
+}
+
+#[must_use]
+/// Whether this execution still lacks a complete view of a clipped file.
+pub fn holds_only_start_of(map: &ReadFileStateMap, path: &Path) -> bool {
+    active_map(map)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .holds_only_start_of(path)
+}
+
+fn entry_covers_full_file(entry: &ReadFileEntry) -> bool {
+    if entry.offset.unwrap_or(1) > 1 || entry.is_partial_view {
+        return false;
+    }
+    entry.limit.is_none_or(|limit| {
+        !entry.content.is_empty() && (entry.content.matches('\n').count() as u64 + 1) < limit
+    })
+}
+
+fn normalized_fence_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if result.file_name().is_some_and(|name| name != "..") => {
+                result.pop();
+            }
+            Component::ParentDir if result.has_root() => {}
+            _ => result.push(component.as_os_str()),
+        }
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result
+}
+
+/// Why a complete replacement would lose an unseen instruction-file suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartOnlyWriteBlock {
+    /// The requested spelling is itself marked as clipped.
+    Direct,
+    /// Another clipped spelling names this same physical file.
+    Alias,
+    /// Physical identity could not exclude an alias of a clipped file.
+    UnknownIdentity,
+}
+
+impl StartOnlyWriteBlock {
+    /// Native model-facing refusal corresponding to this fence.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Direct => "You were given only the start of this file, and nothing shows that you have since read all of it in one call, so a Write could lose the rest. To change part of it, use Edit. To replace it whole, first Read it in one call with no offset or limit. If Read returns only a page or says the file is too large, Read it again with allow_large: true. If even that cannot return all of it, use Edit.",
+            Self::Alias => "Only the start of this file was given in this session, so a Write could lose the rest. Nothing was written. To change it, use Edit. If Edit says that the path is a link, use it on the link's target.",
+            Self::UnknownIdentity => "Nothing was written. Only the start of a file was given in this session, and it could not be checked that this path is a different file. To change this file, use Edit.",
+        }
+    }
+}
+
+/// Check the persistent clipping fence, including hard links and symlink
+/// spellings. Call after permission/regular-file admission and again at the
+/// owned mutation boundary. No filesystem operation occurs while holding the
+/// registry lock. A missing target is a new file and cannot lose a suffix.
+#[must_use]
+pub fn start_only_write_guard(
+    map: &ReadFileStateMap,
+    observed_path: &Path,
+    io_path: &Path,
+) -> Option<StartOnlyWriteBlock> {
+    let (marked, direct) = {
+        let map = active_map(map);
+        let state = map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.has_full_model_view(observed_path) {
+            return None;
+        }
+        let direct = state.holds_only_start_of(observed_path) || state.holds_only_start_of(io_path);
+        let marked = state
+            .start_only_paths
+            .iter()
+            .filter(|path| !state.has_full_model_view(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        (marked, direct)
+    };
+    if marked.is_empty() {
+        return None;
+    }
+    let candidate = match file_object_identity(io_path) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return None,
+        Err(_) => {
+            return Some(if direct {
+                StartOnlyWriteBlock::Direct
+            } else {
+                StartOnlyWriteBlock::UnknownIdentity
+            })
+        }
+    };
+    if direct {
+        return Some(StartOnlyWriteBlock::Direct);
+    }
+    let mut unknown = false;
+    for path in marked {
+        match file_object_identity(&path) {
+            Ok(Some(identity)) if identity == candidate => return Some(StartOnlyWriteBlock::Alias),
+            Ok(_) => {}
+            Err(_) => unknown = true,
+        }
+    }
+    unknown.then_some(StartOnlyWriteBlock::UnknownIdentity)
+}
+
+#[cfg(unix)]
+fn file_object_identity(path: &Path) -> std::io::Result<Option<(u64, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.ino() != 0 => Ok(Some((metadata.dev(), metadata.ino()))),
+        Ok(_) => Err(std::io::Error::other("file identity is unavailable")),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn file_object_identity(
+    path: &Path,
+) -> std::io::Result<Option<lingxi_core::host::rooted_fs::RootIdentity>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Access mode zero requests metadata only; unlike a content open it cannot
+    // wait for a peer on a named pipe. Allow concurrent replacement/deletion.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(7)
+        .custom_flags(0x0200_0000)
+        .open(path);
+    match file {
+        Ok(file) => lingxi_core::host::rooted_fs::opened_file_identity(&file)
+            .map(Some)
+            .map_err(|error| std::io::Error::other(error.to_string())),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_object_identity(_path: &Path) -> std::io::Result<Option<()>> {
+    Err(std::io::Error::other("file identity is unavailable"))
 }
 
 #[cfg(test)]
@@ -809,6 +1221,333 @@ mod tests {
             from_read: true,
             seeded_from_context: false,
             is_partial_view: false,
+        }
+    }
+
+    #[test]
+    fn clipping_fence_survives_lru_removal_and_compaction_drains() {
+        let path = PathBuf::from("/project/LINGXI.md");
+        let map = new_read_file_state_map_with_limits(1, 1024);
+        mark_start_only(&map, path.clone());
+        assert!(holds_only_start_of(&map, &path));
+        set(&map, path.clone(), entry("whole"));
+        assert!(!holds_only_start_of(&map, &path));
+        set(&map, PathBuf::from("/other"), entry("other"));
+        assert!(
+            holds_only_start_of(&map, &path),
+            "eviction cannot forget clipping"
+        );
+        set(&map, path.clone(), entry("whole"));
+        map.lock().unwrap().drain_model_context();
+        assert!(holds_only_start_of(&map, &path));
+        set(&map, path.clone(), entry("whole"));
+        map.lock().unwrap().drain().for_each(drop);
+        assert!(holds_only_start_of(&map, &path));
+        assert!(holds_only_start_of(
+            &Arc::new(Mutex::new(map.lock().unwrap().clone())),
+            &path
+        ));
+    }
+
+    #[test]
+    fn host_only_seed_and_partial_reads_do_not_satisfy_clipping_fence() {
+        let path = PathBuf::from("/project/LINGXI.md");
+        let map = new_read_file_state_map();
+        mark_start_only(&map, path.clone());
+        set_with_model_context(&map, path.clone(), entry("host snapshot"), false);
+        assert!(holds_only_start_of(&map, &path));
+        set(
+            &map,
+            path.clone(),
+            ReadFileEntry {
+                offset: Some(2),
+                ..entry("tail")
+            },
+        );
+        assert!(holds_only_start_of(&map, &path));
+        set(
+            &map,
+            path.clone(),
+            ReadFileEntry {
+                is_partial_view: true,
+                ..entry("prefix")
+            },
+        );
+        assert!(holds_only_start_of(&map, &path));
+        set(
+            &map,
+            path.clone(),
+            ReadFileEntry {
+                limit: Some(1),
+                ..entry("one line")
+            },
+        );
+        assert!(holds_only_start_of(&map, &path));
+        set(
+            &map,
+            path.clone(),
+            ReadFileEntry {
+                limit: Some(2),
+                ..entry("one line")
+            },
+        );
+        assert!(
+            !holds_only_start_of(&map, &path),
+            "bounded read below its limit reached EOF"
+        );
+    }
+
+    #[test]
+    fn clipping_alias_guard_checks_file_identity_and_allows_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let marked = dir.path().join("LINGXI.md");
+        let alias = dir.path().join("alias.md");
+        let other = dir.path().join("other.md");
+        std::fs::write(&marked, "prefix\nhidden tail").unwrap();
+        std::fs::hard_link(&marked, &alias).unwrap();
+        std::fs::write(&other, "unrelated").unwrap();
+        let map = new_read_file_state_map();
+        mark_start_only(&map, marked.clone());
+        assert_eq!(
+            start_only_write_guard(&map, &marked, &marked),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        assert_eq!(
+            start_only_write_guard(&map, &alias, &alias),
+            Some(StartOnlyWriteBlock::Alias)
+        );
+        assert_eq!(start_only_write_guard(&map, &other, &other), None);
+        assert_eq!(
+            start_only_write_guard(&map, &dir.path().join("new.md"), &dir.path().join("new.md")),
+            None
+        );
+        let deleted = dir.path().join("deleted.md");
+        mark_start_only(&map, deleted.clone());
+        assert_eq!(
+            start_only_write_guard(&map, &deleted, &deleted),
+            None,
+            "new-file creation cannot overwrite a hidden suffix"
+        );
+        set(&map, alias.clone(), entry("prefix\nhidden tail"));
+        assert_eq!(
+            start_only_write_guard(&map, &alias, &alias),
+            None,
+            "a full Read through the alias authorizes that view"
+        );
+        #[cfg(unix)]
+        {
+            let symlink = dir.path().join("link.md");
+            std::os::unix::fs::symlink(&marked, &symlink).unwrap();
+            assert_eq!(
+                start_only_write_guard(&map, &symlink, &marked),
+                Some(StartOnlyWriteBlock::Direct)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_utf16_cache_does_not_conflate_distinct_surrogates() {
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/surrogates.txt");
+        let units = vec![0xd800, 0x61, 0xdc00];
+        let text = String::from_utf16_lossy(&units);
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry(&text),
+            true,
+            vec![],
+            Some(units.clone()),
+        );
+        assert_eq!(get_content_units(&map, &path), Some(units));
+        set(&map, path.clone(), entry(&text));
+        assert_eq!(
+            get_content_units(&map, &path),
+            Some(text.encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn exact_utf16_sidecars_are_nonredundant_and_count_toward_the_byte_budget() {
+        let mut state = ReadFileStateLru::with_limits(10, 6);
+        let path = PathBuf::from("/invalid.txt");
+        state.mark_start_only(path.clone());
+        state.set_with_requested_aliases_and_units(
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xd800]),
+        );
+        assert_eq!(
+            state.total_bytes(),
+            5,
+            "three display bytes plus two exact-unit bytes"
+        );
+        state.set(PathBuf::from("/other.txt"), entry("xy"));
+        assert!(
+            state.peek(&path).is_none(),
+            "sidecar memory participates in eviction"
+        );
+        assert!(
+            state.holds_only_start_of(&path),
+            "eviction keeps the clipping fence"
+        );
+        state.set_with_requested_aliases_and_units(
+            path.clone(),
+            entry("abc"),
+            true,
+            vec![],
+            Some(vec![97, 98, 99]),
+        );
+        assert!(
+            state.map.get(&path).unwrap().content_units.is_none(),
+            "valid text has no duplicate UTF-16 allocation"
+        );
+        state.reset_for_session();
+        assert!(state.is_empty());
+        assert!(
+            !state.holds_only_start_of(&path),
+            "a different session cannot inherit a previous clipping fence"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_fork_metadata_and_units_use_the_private_cache() {
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/memory/topic.md");
+        mark_start_only(&map, path.clone());
+        set(&map, path.clone(), entry("foreground"));
+        let fork = Arc::new(MemoryForkReadState::new(map.clone(), false));
+        fork.scope(async {
+            assert!(
+                get_metadata(&map, &path).is_none(),
+                "metadata cannot leak foreground state into a private worker"
+            );
+            assert!(
+                holds_only_start_of(&map, &path),
+                "private workers inherit clipping fences even without reads"
+            );
+            let units = vec![0xd800];
+            set_with_requested_aliases_and_units(
+                &map,
+                path.clone(),
+                ReadFileEntry {
+                    mtime_ms: 42,
+                    ..entry("\u{fffd}")
+                },
+                true,
+                vec![],
+                Some(units.clone()),
+            );
+            assert_eq!(get_metadata(&map, &path).unwrap().mtime_ms, 42);
+            assert_eq!(get_content_units(&map, &path), Some(units));
+        })
+        .await;
+        assert_eq!(get_metadata(&map, &path).unwrap().mtime_ms, 1);
+        assert_eq!(get(&map, &path).unwrap().content, "foreground");
+    }
+
+    #[tokio::test]
+    async fn captured_write_context_preserves_private_state_on_blocking_worker() {
+        let map = new_read_file_state_map();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("topic.md");
+        std::fs::write(&path, "\u{fffd}").unwrap();
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xd800]),
+        );
+        let fork = Arc::new(MemoryForkReadState::new(map.clone(), true));
+        fork.scope(async {
+            let owned = capture_read_file_state_write(&map);
+            let worker_path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                owned.set_after_write_with_requested_aliases_and_units(
+                    worker_path.clone(),
+                    ReadFileEntry {
+                        mtime_ms: 42,
+                        ..entry("\u{fffd}")
+                    },
+                    true,
+                    vec![],
+                    Some(vec![0xdc00]),
+                );
+                assert_eq!(
+                    get_content_units(&owned.map(), &worker_path),
+                    Some(vec![0xdc00])
+                );
+            })
+            .await
+            .unwrap();
+            assert_eq!(get_metadata(&map, &path).unwrap().mtime_ms, 42);
+        })
+        .await;
+        assert_eq!(
+            get_metadata(&map, &path).unwrap().mtime_ms,
+            i64::MIN,
+            "equal lossy display must not suppress exact-unit invalidation"
+        );
+        assert_eq!(
+            get_content_units(&map, &path),
+            Some(vec![0xd800]),
+            "private writes do not invent a new foreground observation"
+        );
+    }
+
+    #[test]
+    fn native_322_clipping_state_matches_pinned_helper_transitions() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/tests/fixtures/file_memory_fence_322.json"
+        ))
+        .unwrap();
+        for case in fixture["fenceCases"].as_array().unwrap() {
+            let mut state = ReadFileStateLru::with_limits(100, 16 * 1024 * 1024);
+            for (operation, expected) in case["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(case["expected"].as_array().unwrap())
+            {
+                let path = PathBuf::from(operation["path"].as_str().unwrap());
+                match operation["op"].as_str().unwrap() {
+                    "mark" => state.mark_start_only(path.clone()),
+                    "set" => {
+                        let source = &operation["entry"];
+                        state.set_with_model_context(
+                            path.clone(),
+                            ReadFileEntry {
+                                offset: source["offset"].as_u64(),
+                                limit: source["limit"].as_u64(),
+                                is_partial_view: source["isPartialView"].as_bool().unwrap_or(false),
+                                ..entry(source["content"].as_str().unwrap())
+                            },
+                            source["contentNotInModelContext"].as_bool() != Some(true),
+                        );
+                    }
+                    "delete" => {
+                        state.remove(&path);
+                    }
+                    "clear" => state.drain().for_each(drop),
+                    "clone" => {
+                        let paths = state.start_only_paths();
+                        state = ReadFileStateLru::with_limits(100, 16 * 1024 * 1024);
+                        for path in paths {
+                            state.mark_start_only(path);
+                        }
+                    }
+                    other => panic!("unknown pinned operation {other}"),
+                }
+                assert_eq!(
+                    state.holds_only_start_of(&path),
+                    expected.as_bool().unwrap(),
+                    "{operation:?}"
+                );
+            }
         }
     }
 

@@ -626,6 +626,7 @@ impl crate::conversation::StreamingApiClient for ConfiguredModelSourceStreamingA
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         model_source: Option<Utf16JsonProjection>,
+        _scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<
         futures::stream::BoxStream<
             'static,

@@ -16,6 +16,92 @@ use tracing_subscriber::Registry;
 
 type SourceJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
 
+#[tokio::test]
+async fn native_322_clipped_nested_instruction_requires_full_read_even_after_restore() {
+    use tool_api::test_support::{
+        ctx_for_file_tools, fresh_ctx, fresh_tx, generated_builtin_result, make_dummy_fs,
+    };
+    use tool_api::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let path = cwd.join(branding::MEMORY_FILE);
+    let body = format!(
+        "prefix line\n{}\nHIDDEN-INSTRUCTION-SUFFIX",
+        "x".repeat(50_000)
+    );
+    std::fs::write(&path, &body).unwrap();
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let orch = orch_with_bus(
+        cwd.clone(),
+        map.clone(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    orch.session.lock().await.model = "claude-sonnet-4-6".into();
+    let file = crate::prompt::MemoryFile {
+        source_content: None,
+        path: path.clone(),
+        parent: None,
+        body: body.clone(),
+        is_local_override: false,
+        tier: memory::lingxi_md::LingxiMdTier::Project,
+        globs: None,
+        raw_content: body.clone(),
+        content_differs_from_disk: false,
+    };
+    let messages = orch
+        .persist_nested_memory_files(
+            vec![file],
+            &cwd.join("handler.rs"),
+            &cwd,
+            &Default::default(),
+        )
+        .await;
+    assert_eq!(messages.len(), 1);
+    let rendered = messages[0].text_content();
+    assert!(rendered.contains("> Only the start of this file is shown."));
+    assert!(!rendered.contains("HIDDEN-INSTRUCTION-SUFFIX"));
+    assert!(
+        tool_api::read_file_state::get(&map, &path)
+            .unwrap()
+            .is_partial_view
+    );
+    assert!(tool_api::read_file_state::holds_only_start_of(&map, &path));
+    orch.restore_file_read_state().await;
+    assert!(
+        tool_api::read_file_state::holds_only_start_of(&map, &path),
+        "cold/hot file-state reconstruction preserves explicit clipping provenance"
+    );
+    let mut tools = ctx_for_file_tools(
+        make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![cwd],
+    );
+    tools.read_file_state = map.clone();
+    let write = tool_file::FileWriteTool::new(tools.clone());
+    let input =
+        generated_builtin_result(&serde_json::json!({"file_path":path,"content":"replacement"}));
+    let error = write
+        .call(input.clone(), fresh_ctx(), fresh_tx())
+        .await
+        .unwrap_err();
+    let source_message = error.model_facing_message();
+    let message = source_message.string_at("").unwrap();
+    assert!(message.contains("only the start"), "{message}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    tool_file::FileReadTool::new(tools)
+        .call(
+            generated_builtin_result(&serde_json::json!({"file_path":path})),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+    assert!(!tool_api::read_file_state::holds_only_start_of(&map, &path));
+    write.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+}
+
 fn source_json(value: &serde_json::Value) -> SourceJson {
     SourceJson::from_serde_value(value).expect("test JSON is valid source")
 }
@@ -481,6 +567,11 @@ async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
     assert!(all.contains("first.txt"));
     assert!(!all.contains("overflow.txt"));
     assert!(all.contains("small.txt"));
+    for admitted in ["first.txt", "small.txt"] {
+        let entry = tool_api::read_file_state::get(&map, &dir.path().join(admitted))
+            .expect("an admitted attachment publishes its Read state");
+        assert!(entry.from_read);
+    }
     let omitted = dir.path().join("overflow.txt");
     assert!(
         tool_api::read_file_state::get(&map, &omitted).is_none(),
@@ -845,10 +936,14 @@ async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_disca
             )
             .await
             .unwrap();
+        // Native 2.1.322 always performs fresh I/O, even after a full Read
+        // snapshot was restored. See file_read_322_oracle.mjs's pinned
+        // "Read call always dispatches fresh I/O" range (274306979..274309041).
+        assert_eq!(reread.data.string_at("/type"), Some("text"));
         assert_eq!(
-            reread.data.string_at("/type"),
-            Some("file_unchanged"),
-            "the internal full-Read offset mapping must still dedup a real subsequent Read"
+            reread.data.string_at("/file/content"),
+            Some(body),
+            "a real subsequent Read must return the restored file's current bytes"
         );
     }
 }

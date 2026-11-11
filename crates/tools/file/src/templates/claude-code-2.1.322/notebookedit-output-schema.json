@@ -1,27 +1,18 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "new_source",
-    "cell_type",
-    "language",
-    "edit_mode",
-    "notebook_path",
-    "original_file",
-    "updated_file"
-  ],
   "properties": {
     "new_source": {
       "type": "string",
       "description": "The new source code that was written to the cell"
     },
     "old_source": {
-      "type": "string",
-      "description": "The previous cell source (replace/delete only). Enables cell-relative diff rendering without re-reading the notebook."
+      "description": "The previous cell source (replace/delete only). Enables cell-relative diff rendering without re-reading the notebook.",
+      "type": "string"
     },
     "cell_id": {
-      "type": "string",
-      "description": "The ID of the cell that was edited"
+      "description": "The ID of the cell that was edited",
+      "type": "string"
     },
     "cell_type": {
       "type": "string",
@@ -40,8 +31,8 @@
       "description": "The edit mode that was used"
     },
     "error": {
-      "type": "string",
-      "description": "Error message if the operation failed"
+      "description": "Error message if the operation failed",
+      "type": "string"
     },
     "notebook_path": {
       "type": "string",
@@ -55,5 +46,15 @@
       "type": "string",
       "description": "The updated notebook content after modification"
     }
-  }
+  },
+  "required": [
+    "new_source",
+    "cell_type",
+    "language",
+    "edit_mode",
+    "notebook_path",
+    "original_file",
+    "updated_file"
+  ],
+  "additionalProperties": false
 }

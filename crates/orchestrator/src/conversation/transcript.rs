@@ -12,6 +12,31 @@ fn erase_tool_dispatch_fence(
     Arc::new(fence)
 }
 
+async fn remember_user_content_source_shape(
+    orchestrator: &ConversationOrchestrator,
+    row: &session::JsonlMessage,
+) {
+    if row.message_type != "user" {
+        return;
+    }
+    let Ok(uuid) = uuid::Uuid::parse_str(&row.uuid) else {
+        return;
+    };
+    let id = MessageId::from_uuid(uuid);
+    let mut session = orchestrator.session.lock().await;
+    if row.message.string_units("/content").is_some() {
+        session
+            .native_request_history
+            .scalar_user_content_ids
+            .insert(id);
+    } else {
+        session
+            .native_request_history
+            .scalar_user_content_ids
+            .remove(&id);
+    }
+}
+
 // JSONL decodes valid UTF-16 strings as ordinary Rust text. App Chat's live
 // canonical rows must use that same representation; unpaired units still need
 // the exact JS carrier. Ordinary Native Chat/Code retains its source carrier.
@@ -4735,6 +4760,7 @@ impl ConversationOrchestrator {
             match result {
                 Ok(()) => {
                     telemetry::emit_session_appended(&row.session_id, &row.uuid);
+                    remember_user_content_source_shape(self, row).await;
                     if let Some(id) = crate::resume::native_zce_message_id(row) {
                         self.session
                             .lock()
@@ -5203,6 +5229,7 @@ impl ConversationOrchestrator {
         };
         match append_result {
             Ok((last_uuid, newly_appended)) => {
+                remember_user_content_source_shape(self, &jmsg).await;
                 if pending_prompt_id.is_some() && last_uuid.is_none() {
                     return Err(OrchestratorError::Internal(
                         "pending prompt append completed without a transcript tip".into(),

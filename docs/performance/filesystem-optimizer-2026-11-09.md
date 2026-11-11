@@ -2,6 +2,8 @@
 
 ## Executive summary
 
+**2026-11-10 follow-up:** the SDK mismatch and all three baseline failures are resolved; integrated validation passed 3,997 default-suite tests, 486 all-feature tests and 403 native cases. See [the recovery report](filesystem-recovery-2026-11-10.md) for current acceptance.
+
 Implemented **29 deduplicated findings: 0 critical, 5 high, 19 medium, 5 low**. The audit covered all 13 code-optimizer domains plus logging, using pattern-first searches and narrow confirmation before implementation. Independent reviews covered permission/state/projection/history semantics and asynchronous Read/search/lock/PDF ownership.
 
 The three largest changes are:
@@ -158,7 +160,7 @@ The rooted-lock change also applies to `crates/platforms/posix-minimal/src/fs.rs
 
 Raw timing observations are in `outputs/performance-probes.json`. They are single local comparative runs under concurrent compiler load, not an end-to-end throughput or production-latency claim. Correctness assertions use byte/count comparisons rather than timing thresholds.
 
-## Validation
+## Initial validation before the 2026-11-10 recovery
 
 - Native Claude Code 2.1.322: **403 cases and 64 pinned ranges passed**, including 18 bundled-ripgrep searches.
 - Default file tools: **443 passed**, 1 manual probe ignored by the ordinary suite.
@@ -168,7 +170,7 @@ Raw timing observations are in `outputs/performance-probes.json`. They are singl
   - `mobile_linux_sandbox_uses_selected_profile_for_project_source_writes_and_cwd`: existing `.atlas-workspaces/apps` versus `.atlas/.apps` expectation mismatch.
   - `connect_http_fetch_timeout_drops_slow_post`: existing timeout returns a routed error while the test expects a pending call.
   - `kill_tree_terminates_grandchildren`: host rejects process-group SIGKILL with `EPERM`.
-- Final primary-workspace integration build: blocked by a concurrent change in untouched `crates/llm-runtime/src/service.rs:6818`: the pinned SDK `AnthropicRequestPolicy` has no `plain_text_message_content_indices` field (E0560). This field is added in the primary workspace diff and is absent from the optimization patch. The landed filesystem files match the tested isolated source; full primary-workspace acceptance remains blocked by that SDK mismatch.
+- Initial primary-workspace integration build was blocked by a concurrent change in untouched `crates/llm-runtime/src/service.rs:6818`: the pinned SDK `AnthropicRequestPolicy` has no `plain_text_message_content_indices` field (E0560). This field is added in the primary workspace diff and is absent from the optimization patch. The landed filesystem files match the tested isolated source; that SDK mismatch was repaired in the 2026-11-10 follow-up above.
 - Rustfmt and scoped diff checks passed. Two independent implementation reviews found no remaining actionable regression after the PDF/FIFO corrections.
 
 Commands and target-by-target results are recorded in `outputs/verification.json`; baseline reproduction logs remain under `work/`. The first all-feature build ran out of disk space; its log is retained and the completed retry is the reported result.
@@ -204,11 +206,12 @@ Commands and target-by-target results are recorded in `outputs/verification.json
 
 Only a direct dependency on the workspace-existing `tokio-util` was added to tool-file; no external dependency version changed.
 
-## Remaining limits
+## Follow-up closure and remaining limits
 
-- Individual OS syscalls, regex operations, and codec stages remain uninterruptible. Checks run between chunks/stages. Read/media concurrency is four; render-process concurrency is two. Offloading adds a thread-handoff cost for small reads.
-- Multiline grep still buffers a file. Its existing per-file 10,000-record valve remains. Explicit unlimited pages and large filename offsets intentionally retain their requested storage semantics.
-- The 256-entry compilation caches can thrash with larger active working sets, and concurrent cold misses may compile twice. Permission decisions and filesystem authority are not cached.
-- Contended rooted locks retry every 10 ms without a deadline or reopening the capability. This trades small scheduling overhead for runtime progress.
-- Renderer stderr remains inherited, preserving prior returned process-error bytes; Poppler diagnostics may name the private staged input. Cleanup failures are logged and retain the prior result. Detached cleanup requires a live Tokio runtime.
-- Windows code was updated/reviewed but not runtime-validated on this macOS host. No packaged Desktop, physical-device, production, or soak acceptance is claimed.
+The November 10 [follow-up](filesystem-gaps-2026-11-10.md) replaces the deferred mutation offload with owned blocking preparation/commit transactions, removes Grep's per-file 10,000-record loss, and adds retained matcher plans plus concurrent compilation singleflight. It also implements the documented encoding, memory fence, search, schema, and token-count gaps. Dependency additions reuse versions already locked in the workspace; the dependency statement above describes the original November 9 patch.
+
+- Individual OS calls, regex operations, and codec stages remain uninterruptible. Checks run between bounded stages/chunks. Read/media and search admission are four; render processes are two. Synchronous mutation commits are serialized, preserving their pre-offload ordering while preparation proceeds off the async runtime.
+- Multiline matching still needs a file-sized buffer. Explicit unlimited pages and large filename offsets intentionally retain their requested output storage semantics.
+- Rooted lock retries remain every 10 ms without reopening the capability. This trades scheduling overhead for runtime progress.
+- Renderer stderr remains inherited, preserving existing returned error bytes; Poppler may name the private staged input. Cleanup failures are logged and retain the prior result. Detached renderer cleanup requires a live Tokio runtime.
+- Native Windows runtime, signed Desktop package, physical-device, live-service, and production soak acceptance require their respective environments. The follow-up records exactly which source, native fixture, CLI, and platform checks actually ran.

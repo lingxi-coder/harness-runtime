@@ -34,6 +34,7 @@ fn clean_metadata(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(fields) => {
             fields.remove("catchUndefinedFields");
+            fields.remove("$schema");
             fields.values_mut().for_each(clean_metadata);
         }
         serde_json::Value::Array(items) => items.iter_mut().for_each(clean_metadata),
@@ -53,13 +54,18 @@ fn latest_native_factory_metadata_matches_production_schemas() {
             .unwrap();
         let mut input = reference["input"].clone();
         clean_metadata(&mut input);
-        assert_eq!(value(tool.input_schema()), input, "{} input", tool.name());
+        let mut actual_input = value(tool.input_schema());
+        // This legacy test compares factory metadata. The separate raw-schema
+        // receipts verify the serializer's complete $schema envelope and bytes.
+        clean_metadata(&mut actual_input);
+        assert_eq!(actual_input, input, "{} input", tool.name());
         let mut expected = reference["output"].clone();
         clean_metadata(&mut expected);
         let mut actual = value(
             tool.output_schema()
                 .expect("file outputs expose their native shape"),
         );
+        clean_metadata(&mut actual);
         let extension_names: &[&str] = match tool.name() {
             "Edit" => &[
                 "staleRecovered",

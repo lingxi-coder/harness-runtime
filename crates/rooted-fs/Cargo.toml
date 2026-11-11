@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fs2 = "0.4"
 serde.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
 

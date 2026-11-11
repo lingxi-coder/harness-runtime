@@ -26,16 +26,15 @@
 //! `USE_BUILTIN_RIPGREP` name (it is not a `CLAUDE_*` name, so the LingXi rename
 //! does not apply).
 //!
-//! LingXi's Grep is an IN-PROCESS engine on the `grep-*`/`ignore` crates (the
-//! same libraries ripgrep itself is built on), which IS claude-code's default
-//! "embedded" mode. This module ports the mode DECISION (the env + `$PATH`
-//! surface) so `USE_BUILTIN_RIPGREP` is consumed faithfully.
+//! LingXi uses the in-process `grep-*` engine by default. On desktop Unix an
+//! explicit system opt-out executes the selected binary over each already
+//! approved, rooted file descriptor. Its stdout/stderr are captured in owned
+//! anonymous files, its group is retired before the leader is reaped, and
+//! cancellation/deadline handling cannot strand a pipe-drainer thread. The
+//! pinned type catalogue and permission-filtered host walk remain authoritative.
 //!
-//! RESIDUAL: the actual system-`rg` SUBPROCESS execution backend (spawning the
-//! resolved binary and reformatting its output to the tool's model-facing
-//! `content` shape) is NOT ported — the in-process engine remains the executor
-//! for both modes. Swapping in a subprocess backend that reproduces the tool's
-//! output format is a separate, larger change.
+//! Platforms without that owned-process implementation reject explicit system
+//! selection with a clear error; they do not silently run the embedded engine.
 
 use std::path::PathBuf;
 

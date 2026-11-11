@@ -1,15 +1,6 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "filePath",
-    "oldString",
-    "newString",
-    "originalFile",
-    "structuredPatch",
-    "userModified",
-    "replaceAll"
-  ],
   "properties": {
     "filePath": {
       "type": "string",
@@ -24,24 +15,16 @@
       "description": "The new string that replaced it"
     },
     "originalFile": {
+      "description": "The original file contents before editing",
       "type": [
         "string",
         "null"
-      ],
-      "description": "The original file contents before editing"
+      ]
     },
     "structuredPatch": {
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "oldStart",
-          "oldLines",
-          "newStart",
-          "newLines",
-          "lines"
-        ],
         "properties": {
           "oldStart": {
             "type": "number"
@@ -61,7 +44,15 @@
               "type": "string"
             }
           }
-        }
+        },
+        "required": [
+          "oldStart",
+          "oldLines",
+          "newStart",
+          "newLines",
+          "lines"
+        ],
+        "additionalProperties": false
       },
       "description": "Diff patch showing the changes"
     },
@@ -75,15 +66,6 @@
     },
     "gitDiff": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "filename",
-        "status",
-        "additions",
-        "deletions",
-        "changes",
-        "patch"
-      ],
       "properties": {
         "filename": {
           "type": "string"
@@ -108,19 +90,29 @@
           "type": "string"
         },
         "repository": {
+          "description": "GitHub owner/repo when available",
           "type": [
             "string",
             "null"
-          ],
-          "description": "GitHub owner/repo when available"
+          ]
         }
-      }
+      },
+      "required": [
+        "filename",
+        "status",
+        "additions",
+        "deletions",
+        "changes",
+        "patch"
+      ],
+      "additionalProperties": false
     },
     "staged": {
-      "type": "boolean",
-      "description": "True when the edit was held for the machine owner to review instead of written; the file is unchanged"
+      "description": "True when the edit was held for the machine owner to review instead of written; the file is unchanged",
+      "type": "boolean"
     },
     "stagedWording": {
+      "description": "@internal Which message a staged result gave (see stagedResultWording); absent unless staged",
       "type": "string",
       "enum": [
         "review",
@@ -128,8 +120,7 @@
         "cloud",
         "linked",
         "policy"
-      ],
-      "description": "@internal Which message a staged result gave (see stagedResultWording); absent unless staged"
+      ]
     },
     "staleRecovered": {
       "type": "boolean",
@@ -150,5 +141,15 @@
       ],
       "description": "LingXi retained native across-process metadata"
     }
-  }
+  },
+  "required": [
+    "filePath",
+    "oldString",
+    "newString",
+    "originalFile",
+    "structuredPatch",
+    "userModified",
+    "replaceAll"
+  ],
+  "additionalProperties": false
 }

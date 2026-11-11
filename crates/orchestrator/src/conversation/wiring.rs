@@ -127,6 +127,8 @@ impl ConversationOrchestrator {
         let current_effort_explicit = current_effort.is_some();
         let response_language = config.language.clone();
         let ultracode = config.ultracode;
+        let prompt_runtime = PromptRuntime::new_with_response_language(response_language);
+        prompt_runtime.bind_read_state_session(session.session_id);
         Self {
             side_chat,
             persistent_app_chat: false,
@@ -180,7 +182,7 @@ impl ConversationOrchestrator {
             workspace_trusted: true,
             hooks_restricted: false,
             transcript: TranscriptStore::new(),
-            prompt_runtime: PromptRuntime::new_with_response_language(response_language),
+            prompt_runtime,
             compaction_runtime: CompactionRuntime::new(),
             persistent_chat_context: None,
             idle_compaction_enabled: false,
@@ -329,6 +331,7 @@ impl ConversationOrchestrator {
                 .try_lock()
                 .expect("with_read_state_map runs at construction, before any turn holds the lock");
             self.restore_file_read_state_for_session(&session);
+            self.restore_historical_read_fences_from_sidecars();
         }
         self
     }
@@ -493,6 +496,7 @@ impl ConversationOrchestrator {
             s.session_id = session_id;
         }
         self.main_reports.reset_for_builder(session_id);
+        self.prompt_runtime.bind_read_state_session(session_id);
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         self

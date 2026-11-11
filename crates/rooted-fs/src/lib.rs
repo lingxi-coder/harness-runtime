@@ -22,6 +22,7 @@ mod text_window;
 mod types;
 
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
@@ -100,6 +101,88 @@ pub enum FileIdentity {
 pub struct FileMutationIdentity {
     pub root: RootIdentity,
     pub file: FileIdentity,
+}
+
+/// Bytes observed while preparing a direct write. Cooperating writers must
+/// serialize validation and mutation; an external writer can still race the
+/// final validation-to-write boundary of direct file I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootedWriteExpectation {
+    Missing,
+    Existing { len: u64, sha256: [u8; 32] },
+}
+
+impl RootedWriteExpectation {
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::Existing {
+            len: bytes.len() as u64,
+            sha256: Sha256::digest(bytes).into(),
+        }
+    }
+}
+
+fn verify_write_expectation(
+    file: &mut std::fs::File,
+    relative: &Path,
+    expectation: &RootedWriteExpectation,
+) -> Result<(), RootedFsError> {
+    let RootedWriteExpectation::Existing { len, sha256 } = expectation else {
+        return Ok(());
+    };
+    let before = file
+        .metadata()
+        .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+    if before.len() != *len {
+        return Err(RootedFsError::ContentChanged);
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0u8; 65_536];
+    let mut consumed = 0u64;
+    loop {
+        let count = match file.read(&mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|error| RootedFsError::Fs(map_io(relative, error)))?,
+        };
+        if count == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(count as u64);
+        if consumed > *len {
+            return Err(RootedFsError::ContentChanged);
+        }
+        digest.update(&chunk[..count]);
+    }
+    let actual: [u8; 32] = digest.finalize().into();
+    let after = file
+        .metadata()
+        .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+    if consumed != *len
+        || actual != *sha256
+        || after.len() != *len
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err(RootedFsError::ContentChanged);
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+    Ok(())
+}
+
+fn verify_write_admission(
+    identity: Option<&FileMutationIdentity>,
+    expectation: Option<&RootedWriteExpectation>,
+) -> Result<(), RootedFsError> {
+    if let (Some(identity), Some(expectation)) = (identity, expectation) {
+        if matches!(identity.file, FileIdentity::Missing)
+            != matches!(expectation, RootedWriteExpectation::Missing)
+        {
+            return Err(RootedFsError::ContentChanged);
+        }
+    }
+    Ok(())
 }
 
 fn validate_file_identity(file: &std::fs::File, expected: &FileIdentity) -> Result<(), FsError> {
@@ -327,6 +410,9 @@ pub enum RootedFsError {
     /// The final component is not a regular file (for example, a FIFO).
     #[error("requested final path component is not a regular file")]
     NotRegularFile,
+    /// Prepared bytes or the observed missing-file state changed before write.
+    #[error("file content changed after write preparation")]
+    ContentChanged,
     /// A caller cancelled a chunked snapshot before all bytes were consumed.
     #[error("rooted file read cancelled")]
     Cancelled,
@@ -1379,7 +1465,7 @@ mod imp {
         match open_destination() {
             Ok(current) if same_task_file(&source, &current, relative)? => return Ok(source),
             Ok(_) if !replace => {
-                return Err(FsError::AlreadyExists(relative.display().to_string()))
+                return Err(FsError::AlreadyExists(relative.display().to_string()));
             }
             Ok(_) => (),
             Err(FsError::NotFound(_)) => (),
@@ -1888,7 +1974,15 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, None, || {}, |file| read_snapshot_bytes(file, relative))
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            || {},
+            |file| read_snapshot_bytes(file, relative),
+        )
     }
 
     pub(super) fn read_file_after_permission_cancellable(
@@ -1899,7 +1993,12 @@ mod imp {
         should_cancel: impl FnMut() -> bool,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
         read_file_after_permission_inner(
-            root, relative, requested, approved, None, || {},
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            || {},
             |file| read_snapshot_bytes_cancellable(file, relative, should_cancel),
         )
     }
@@ -1911,7 +2010,15 @@ mod imp {
         approved: &Path,
         expected: &FileMutationIdentity,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {}, |file| read_snapshot_bytes(file, relative))
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            Some(expected),
+            || {},
+            |file| read_snapshot_bytes(file, relative),
+        )
     }
 
     pub(super) fn open_file_after_permission(
@@ -1977,11 +2084,13 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
         expected: Option<&FileMutationIdentity>,
+        expectation: Option<&RootedWriteExpectation>,
         after_permission: F,
     ) -> Result<RootedWriteResult, RootedFsError>
     where
         F: FnOnce(),
     {
+        verify_write_admission(expected, expectation)?;
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
             verify_resolution(requested, approved)?;
@@ -2002,12 +2111,22 @@ mod imp {
             &parent,
             &file_name,
             relative,
-            GENERIC_WRITE | SYNCHRONIZE,
+            GENERIC_WRITE
+                | SYNCHRONIZE
+                | if matches!(expectation, Some(RootedWriteExpectation::Existing { .. })) {
+                    GENERIC_READ
+                } else {
+                    0
+                },
             SHARE_ALL,
-            match expected.map(|value| value.file) {
-                Some(FileIdentity::Missing) => FILE_CREATE,
-                Some(FileIdentity::Existing(_)) => FILE_OPEN,
-                None => FILE_OVERWRITE_IF,
+            match expectation {
+                Some(RootedWriteExpectation::Missing) => FILE_CREATE,
+                Some(RootedWriteExpectation::Existing { .. }) => FILE_OPEN,
+                None => match expected.map(|value| value.file) {
+                    Some(FileIdentity::Missing) => FILE_CREATE,
+                    Some(FileIdentity::Existing(_)) => FILE_OPEN,
+                    None => FILE_OVERWRITE_IF,
+                },
             },
             FILE_ATTRIBUTE_NORMAL,
         )
@@ -2018,6 +2137,10 @@ mod imp {
                     .unwrap_or(false)
             {
                 RootedFsError::LeafSymlink
+            } else if expectation.is_some()
+                && matches!(error, FsError::AlreadyExists(_) | FsError::NotFound(_))
+            {
+                RootedFsError::ContentChanged
             } else {
                 RootedFsError::Fs(error)
             }
@@ -2032,6 +2155,11 @@ mod imp {
             if matches!(expected.file, FileIdentity::Existing(_)) {
                 validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
             }
+        }
+        if let Some(expectation) = expectation {
+            verify_write_expectation(&mut file, relative, expectation)?;
+        }
+        if expected.is_some() || expectation.is_some() {
             file.set_len(0)
                 .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
         }
@@ -2062,7 +2190,16 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
     ) -> Result<RootedWriteResult, RootedFsError> {
-        write_file_after_permission_inner(root, relative, requested, approved, bytes, None, || {})
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            None,
+            None,
+            || {},
+        )
     }
 
     pub(super) fn write_file_after_permission_pinned(
@@ -2080,6 +2217,48 @@ mod imp {
             approved,
             bytes,
             Some(expected),
+            None,
+            || {},
+        )
+    }
+
+    pub(super) fn write_file_after_permission_checked(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expectation: &RootedWriteExpectation,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            None,
+            Some(expectation),
+            || {},
+        )
+    }
+
+    pub(super) fn write_file_after_permission_pinned_checked(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expected: &FileMutationIdentity,
+        expectation: &RootedWriteExpectation,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            Some(expected),
+            Some(expectation),
             || {},
         )
     }
@@ -2102,6 +2281,7 @@ mod imp {
             requested,
             approved,
             bytes,
+            None,
             None,
             after_permission,
         )
@@ -2926,6 +3106,76 @@ pub fn write_file_after_permission(
     imp::write_file_after_permission(root, relative, requested, approved, bytes)
 }
 
+/// Check prepared bytes through the same opened handle that will be
+/// truncated. Missing targets are created exclusively. Cooperating callers
+/// must serialize complete checked-write transactions.
+pub fn write_file_after_permission_checked(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    bytes: &[u8],
+    expectation: &RootedWriteExpectation,
+) -> Result<RootedWriteResult, RootedFsError> {
+    #[cfg(any(unix, windows))]
+    {
+        imp::write_file_after_permission_checked(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            expectation,
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, relative, requested, approved, bytes, expectation);
+        Err(RootedFsError::Fs(FsError::Io(
+            "checked file I/O unsupported".into(),
+        )))
+    }
+}
+
+/// Checked direct write under the originally admitted root and leaf identity.
+pub fn write_file_after_permission_pinned_checked(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    bytes: &[u8],
+    expected: &FileMutationIdentity,
+    expectation: &RootedWriteExpectation,
+) -> Result<RootedWriteResult, RootedFsError> {
+    #[cfg(any(unix, windows))]
+    {
+        imp::write_file_after_permission_pinned_checked(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            expected,
+            expectation,
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            expected,
+            expectation,
+        );
+        Err(RootedFsError::Fs(FsError::Io(
+            "checked file I/O unsupported".into(),
+        )))
+    }
+}
+
 /// Read one single-link regular file under a root admitted before permissions.
 pub fn read_file_after_permission_pinned(
     root: &Path,
@@ -3144,6 +3394,21 @@ std::thread_local! {
     // One-shot injection between a successful pathname type check and openat.
     static AFTER_READ_REGULAR_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+}
+
+#[cfg(all(unix, test))]
+std::thread_local! {
+    static AFTER_WRITE_REGULAR_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(all(unix, test))]
+fn run_after_write_regular_check_hook() {
+    AFTER_WRITE_REGULAR_CHECK_HOOK.with(|hook| {
+        let callback = hook.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
 }
 
 #[cfg(all(unix, test))]
@@ -4318,7 +4583,15 @@ mod imp {
         requested: &Path,
         approved: &Path,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, None, || {}, |file| read_snapshot_bytes(file, relative))
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            || {},
+            |file| read_snapshot_bytes(file, relative),
+        )
     }
 
     pub(super) fn read_file_after_permission_cancellable(
@@ -4329,7 +4602,12 @@ mod imp {
         should_cancel: impl FnMut() -> bool,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
         read_file_after_permission_inner(
-            root, relative, requested, approved, None, || {},
+            root,
+            relative,
+            requested,
+            approved,
+            None,
+            || {},
             |file| read_snapshot_bytes_cancellable(file, relative, should_cancel),
         )
     }
@@ -4341,7 +4619,15 @@ mod imp {
         approved: &Path,
         expected: &FileMutationIdentity,
     ) -> Result<RootedFileSnapshot, RootedFsError> {
-        read_file_after_permission_inner(root, relative, requested, approved, Some(expected), || {}, |file| read_snapshot_bytes(file, relative))
+        read_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            Some(expected),
+            || {},
+            |file| read_snapshot_bytes(file, relative),
+        )
     }
 
     pub(super) fn open_file_after_permission(
@@ -4442,11 +4728,13 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
         expected: Option<&FileMutationIdentity>,
+        expectation: Option<&RootedWriteExpectation>,
         after_permission: F,
     ) -> Result<RootedWriteResult, RootedFsError>
     where
         F: FnOnce(),
     {
+        verify_write_admission(expected, expectation)?;
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
             verify_resolution(requested, approved)?;
@@ -4471,22 +4759,36 @@ mod imp {
         .map_err(RootedFsError::Fs)?;
         verify_parent_resolution(requested, approved)?;
         verify_leaf_at(&parent, &file_name, relative)?;
+        #[cfg(test)]
+        run_after_write_regular_check_hook();
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::WRONLY
+            (if matches!(expectation, Some(RootedWriteExpectation::Existing { .. })) {
+                OFlags::RDWR
+            } else {
+                OFlags::WRONLY
+            }) | OFlags::NONBLOCK
                 | OFlags::NOFOLLOW
                 | OFlags::CLOEXEC
-                | match expected.map(|value| value.file) {
-                    Some(FileIdentity::Missing) => OFlags::CREATE | OFlags::EXCL,
-                    Some(FileIdentity::Existing(_)) => OFlags::empty(),
-                    None => OFlags::CREATE | OFlags::TRUNC,
+                | match expectation {
+                    Some(RootedWriteExpectation::Missing) => OFlags::CREATE | OFlags::EXCL,
+                    Some(RootedWriteExpectation::Existing { .. }) => OFlags::empty(),
+                    None => match expected.map(|value| value.file) {
+                        Some(FileIdentity::Missing) => OFlags::CREATE | OFlags::EXCL,
+                        Some(FileIdentity::Existing(_)) => OFlags::empty(),
+                        None => OFlags::CREATE | OFlags::TRUNC,
+                    },
                 },
             Mode::from_bits_retain(0o666),
         )
         .map_err(|error| {
             if error == rustix::io::Errno::LOOP {
                 RootedFsError::LeafSymlink
+            } else if expectation.is_some()
+                && matches!(error, rustix::io::Errno::EXIST | rustix::io::Errno::NOENT)
+            {
+                RootedFsError::ContentChanged
             } else {
                 RootedFsError::Fs(map_unix_io(relative, error))
             }
@@ -4503,6 +4805,11 @@ mod imp {
             if matches!(expected.file, FileIdentity::Existing(_)) {
                 validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
             }
+        }
+        if let Some(expectation) = expectation {
+            verify_write_expectation(&mut file, relative, expectation)?;
+        }
+        if expected.is_some() || expectation.is_some() {
             file.set_len(0)
                 .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
         }
@@ -4536,7 +4843,16 @@ mod imp {
         approved: &Path,
         bytes: &[u8],
     ) -> Result<RootedWriteResult, RootedFsError> {
-        write_file_after_permission_inner(root, relative, requested, approved, bytes, None, || {})
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            None,
+            None,
+            || {},
+        )
     }
 
     pub(super) fn write_file_after_permission_pinned(
@@ -4554,6 +4870,48 @@ mod imp {
             approved,
             bytes,
             Some(expected),
+            None,
+            || {},
+        )
+    }
+
+    pub(super) fn write_file_after_permission_checked(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expectation: &RootedWriteExpectation,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            None,
+            Some(expectation),
+            || {},
+        )
+    }
+
+    pub(super) fn write_file_after_permission_pinned_checked(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        expected: &FileMutationIdentity,
+        expectation: &RootedWriteExpectation,
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            Some(expected),
+            Some(expectation),
             || {},
         )
     }
@@ -4576,6 +4934,7 @@ mod imp {
             requested,
             approved,
             bytes,
+            None,
             None,
             after_permission,
         )
@@ -5464,7 +5823,9 @@ mod tests {
             );
             assert!(link_task_transcript(&root, name, Some(&pin), &target).is_err());
             assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "spool");
-            eprintln!("Windows symlink privilege unavailable: success branch requires Developer Mode or symlink privilege");
+            eprintln!(
+                "Windows symlink privilege unavailable: success branch requires Developer Mode or symlink privilege"
+            );
             return;
         }
         std::fs::remove_file(probe).unwrap();
@@ -5964,6 +6325,211 @@ mod tests {
             std::fs::read_to_string(victim.path().join("state.txt")).unwrap(),
             "victim"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn checked_write_revalidates_then_truncates_the_same_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let relative = Path::new("large.txt");
+        let path = root.join(relative);
+        let original = vec![b'a'; 196_625];
+        std::fs::write(&path, &original).unwrap();
+        let expected = RootedWriteExpectation::from_bytes(&original);
+        let result =
+            write_file_after_permission_checked(&root, relative, &path, &path, b"short", &expected)
+                .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"short",
+            "hashing must rewind before write and remove the old suffix"
+        );
+        assert!(result.modified.is_some());
+        assert!(result.parent.is_some());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn checked_write_rejects_changed_bytes_even_when_length_and_mtime_match() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let relative = Path::new("state.txt");
+        let path = root.join(relative);
+        std::fs::write(&path, b"original").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let expected = RootedWriteExpectation::from_bytes(b"original");
+        std::fs::write(&path, b"external").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        let result = write_file_after_permission_checked(
+            &root,
+            relative,
+            &path,
+            &path,
+            b"tool output",
+            &expected,
+        );
+        assert!(
+            matches!(result, Err(RootedFsError::ContentChanged)),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn checked_write_rejects_missing_and_newly_created_target_races() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let relative = Path::new("state.txt");
+        let path = root.join(relative);
+        let existing = RootedWriteExpectation::from_bytes(b"old");
+        assert!(matches!(
+            write_file_after_permission_checked(
+                &root, relative, &path, &path, b"output", &existing
+            ),
+            Err(RootedFsError::ContentChanged)
+        ));
+        assert!(
+            !path.exists(),
+            "an expected existing target must never be recreated"
+        );
+        std::fs::write(&path, b"concurrent creator").unwrap();
+        assert!(matches!(
+            write_file_after_permission_checked(
+                &root,
+                relative,
+                &path,
+                &path,
+                b"output",
+                &RootedWriteExpectation::Missing
+            ),
+            Err(RootedFsError::ContentChanged)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"concurrent creator");
+        std::fs::remove_file(&path).unwrap();
+        write_file_after_permission_checked(
+            &root,
+            relative,
+            &path,
+            &path,
+            b"created",
+            &RootedWriteExpectation::Missing,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"created");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn checked_pinned_write_retains_root_leaf_and_missing_admission_guards() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let relative = Path::new("state.txt");
+        let path = root.join(relative);
+        std::fs::write(&path, b"same bytes").unwrap();
+        let pin = root_identity(&root).unwrap();
+        let admitted = FileMutationIdentity {
+            root: pin,
+            file: file_identity_pinned(&root, relative, &pin).unwrap(),
+        };
+        std::fs::rename(&path, root.join("original.txt")).unwrap();
+        std::fs::write(&path, b"same bytes").unwrap();
+        let expectation = RootedWriteExpectation::from_bytes(b"same bytes");
+        assert!(write_file_after_permission_pinned_checked(
+            &root,
+            relative,
+            &path,
+            &path,
+            b"output",
+            &admitted,
+            &expectation
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"same bytes");
+        assert!(matches!(
+            write_file_after_permission_pinned_checked(
+                &root,
+                relative,
+                &path,
+                &path,
+                b"output",
+                &admitted,
+                &RootedWriteExpectation::Missing
+            ),
+            Err(RootedFsError::ContentChanged)
+        ));
+        std::fs::remove_file(&path).unwrap();
+        let missing = FileMutationIdentity {
+            root: pin,
+            file: FileIdentity::Missing,
+        };
+        write_file_after_permission_pinned_checked(
+            &root,
+            relative,
+            &path,
+            &path,
+            b"created",
+            &missing,
+            &RootedWriteExpectation::Missing,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_checked_writes_reject_fifo_swaps_without_a_reader() {
+        for checked in [false, true] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().canonicalize().unwrap();
+                let relative = Path::new("candidate.txt");
+                let requested = root.join(relative);
+                std::fs::write(&requested, b"original").unwrap();
+                let swapped = requested.clone();
+                AFTER_WRITE_REGULAR_CHECK_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        std::fs::remove_file(&swapped).unwrap();
+                        assert!(std::process::Command::new("mkfifo")
+                            .arg(&swapped)
+                            .status()
+                            .unwrap()
+                            .success());
+                    }));
+                });
+                let result = if checked {
+                    write_file_after_permission_checked(
+                        &root,
+                        relative,
+                        &requested,
+                        &requested,
+                        b"output",
+                        &RootedWriteExpectation::from_bytes(b"original"),
+                    )
+                } else {
+                    write_file_after_permission(&root, relative, &requested, &requested, b"output")
+                };
+                assert!(
+                    result.is_err(),
+                    "an opened FIFO must never reach truncation/write"
+                );
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("write open must not wait for a FIFO reader");
+            worker.join().unwrap();
+        }
     }
 
     #[cfg(unix)]

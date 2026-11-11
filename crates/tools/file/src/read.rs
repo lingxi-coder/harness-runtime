@@ -133,9 +133,41 @@ struct ReadAllowance<'a> {
     opted_in: bool,
 }
 
+/// Bound direct invocations as well as the dispatcher's native schema gate.
+/// JavaScript's integer schema rejects values outside the safe-integer range;
+/// a malformed optional value must never silently become an unbounded read.
+fn read_range_argument(
+    input: &Utf16JsonProjection,
+    name: &str,
+    positive: bool,
+) -> Result<Option<u64>, ToolError> {
+    let Some(value) = input.get_property(name) else {
+        return Ok(None);
+    };
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let number = value.as_number().filter(|number| {
+        number.is_finite()
+            && number.fract() == 0.0
+            && *number >= if positive { 1.0 } else { 0.0 }
+            && *number <= MAX_SAFE_INTEGER
+    });
+    number.map(|number| Some(number as u64)).ok_or_else(|| {
+        ToolError::InvalidInput(
+            format!(
+                "{name} must be a {} safe integer (at most 9007199254740991)",
+                if positive { "positive" } else { "non-negative" }
+            )
+            .into(),
+        )
+    })
+}
+
 impl ReadAllowance<'_> {
     fn current_room(&self) -> ReadRoom {
-        let room_tokens = self.room.map(|room| room.room_tokens(0));
+        let room_tokens = self
+            .room
+            .filter(|room| room.has_context_room())
+            .map(|room| room.room_tokens(0));
         ReadRoom {
             room_tokens,
             raised: room_tokens
@@ -275,21 +307,53 @@ fn count_read_tokens(content: &str, ext: Option<&str>, offset: u64, raised: bool
     estimated.max((numbered.len() as u64).div_ceil(2))
 }
 
-fn admit_read_tokens(
+async fn refined_read_tokens(
     allowance: &ReadAllowance<'_>,
+    units: &[u16],
+    ext: Option<&str>,
+    offset: u64,
+    raised: bool,
+    max_tokens: u64,
+    cancel: &CancellationToken,
+) -> Result<u64, ToolError> {
+    let display = String::from_utf16_lossy(units);
+    let estimate = count_read_tokens(&display, ext, offset, raised);
+    let Some(room) = allowance.room else {
+        return Ok(estimate);
+    };
+    if estimate == 0 || estimate <= max_tokens / 4 {
+        return Ok(estimate);
+    }
+    let source = crate::utf16_mutation::string(units);
+    let counted = if raised {
+        add_line_numbers_source(&source, offset.max(1))
+    } else {
+        source
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ToolError::Aborted),
+        tokens = room.refine_tokens(&counted, estimate, max_tokens) => Ok(tokens),
+    }
+}
+
+fn admit_read_tokens<'a>(
+    allowance: &ReadAllowance<'a>,
     initial: ReadLimits,
     raised: bool,
     tokens: u64,
-) -> Result<(), u64> {
+) -> Result<Option<tool_api::read_context_room::ReadTokenClaim<'a>>, u64> {
     if tokens > initial.max_tokens {
         return Err(initial.max_tokens);
     }
     if raised && tokens > 0 {
         if let Some(room) = allowance.room {
-            return room.try_claim(tokens, initial.max_tokens, allowance.base.max_tokens);
+            return room
+                .try_reserve(tokens, initial.max_tokens, allowance.base.max_tokens)
+                .map(Some);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Build the byte-locked max-tokens-exceeded error — 1:1 with
@@ -308,8 +372,9 @@ pub fn format_max_tokens_exceeded(token_count: u64, max_tokens: u64) -> String {
 /// count_tokens API as `effectiveCount = apiCount ?? tokenEstimate` and errors
 /// when `effectiveCount > maxTokens`.
 ///
-/// The count_tokens API client is not reachable from the tool context, so this
-/// ports TS's own offline fallback exactly: `apiCount` is `None`, hence
+/// The pure helper below is the local fallback used in tests. Production uses
+/// the host's route-pinned exact counter through `refined_read_tokens`; absent
+/// or unsupported counters select this fallback: `apiCount` is `None`, hence
 /// `effectiveCount == tokenEstimate`, and the gate errors iff
 /// `tokenEstimate > maxTokens`. The `maxTokens/4` early-pass band still admits
 /// reads in `(maxTokens/4, maxTokens]` (TS would API-refine them, but its
@@ -342,6 +407,7 @@ const PARTIAL_VIEW_PREFIX: &str = "[Truncated: PARTIAL view \u{2014} ";
 struct GracefulTruncation {
     /// The truncated content (`U` / `T` in claude-code).
     content: String,
+    units: Vec<u16>,
     /// The model-facing line count for the truncated content (`S`).
     line_count: u64,
     /// The `[Truncated: PARTIAL view — …]` banner (`R`). NOT appended to the
@@ -374,17 +440,33 @@ fn truncate_to_token_budget(
     total_lines: u64,
     full_file_path: &str,
 ) -> GracefulTruncation {
+    truncate_units_to_token_budget(
+        &content.encode_utf16().collect::<Vec<_>>(),
+        token_count,
+        max_tokens,
+        total_lines,
+        full_file_path,
+    )
+}
+
+fn truncate_units_to_token_budget(
+    content: &[u16],
+    token_count: u64,
+    max_tokens: u64,
+    total_lines: u64,
+    full_file_path: &str,
+) -> GracefulTruncation {
     let cap = max_tokens as f64;
     let token_count_f = token_count.max(1) as f64;
-    let content_len = content.encode_utf16().count() as f64;
+    let content_len = content.len() as f64;
     // `N = Math.max(0.5, f.length / Math.max(1, tokenCount))`.
     let n_ratio = (content_len / token_count_f).max(0.5);
     // `O(V) = V.length / N` — JavaScript's UTF-16 length.
-    let est_tokens = |text: &str| (text.encode_utf16().count() as f64) / n_ratio;
+    let est_tokens = |text: &[u16]| (text.len() as f64) / n_ratio;
 
     // Split into lines for the line-based shrink (`D = f.split("\n")`). This is a
     // plain (non-inclusive) split, matching claude-code's `f.split("\n")`.
-    let lines: Vec<&str> = content.split('\n').collect();
+    let lines: Vec<&[u16]> = content.split(|unit| *unit == 10).collect();
     let num_lines = lines.len();
 
     // `$ = max(1, min(D.length, floor(D.length * l / tokenCount * 0.85)))`.
@@ -392,7 +474,7 @@ fn truncate_to_token_budget(
         .floor()
         .max(1.0) as usize;
     line_n = line_n.clamp(1, num_lines);
-    let mut head = lines[..line_n].join("\n");
+    let mut head = lines[..line_n].join(&10);
 
     // Up to 6 iterations of `$ *= 0.7` until it fits or `$ <= 1`.
     for _ in 0..6 {
@@ -400,27 +482,36 @@ fn truncate_to_token_budget(
             break;
         }
         line_n = ((line_n as f64) * 0.7).floor().max(1.0) as usize;
-        head = lines[..line_n].join("\n");
+        head = lines[..line_n].join(&10);
     }
 
     let mut char_based = false;
     // Char-based fallback when the line shrink couldn't fit / produced blank.
-    if est_tokens(&head) > cap || lingxi_core::host::effort::trim_js_whitespace(&head).is_empty() {
+    if est_tokens(&head) > cap
+        || lingxi_core::host::effort::trim_js_whitespace(&String::from_utf16_lossy(&head))
+            .is_empty()
+    {
         // `V = max(1, floor(l * N * 0.85))` UTF-16 budget.
         let mut unit_budget: usize = (cap * n_ratio * 0.85).floor().max(1.0) as usize;
         for _ in 0..6 {
-            head = slice_utf16_on_char_boundary(content, unit_budget);
+            head = content[..content.len().min(unit_budget)].to_vec();
             if est_tokens(&head) <= cap {
                 break;
             }
             unit_budget = ((unit_budget as f64) * 0.7).floor().max(1.0) as usize;
+        }
+        if head
+            .last()
+            .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+        {
+            head.pop();
         }
         char_based = true;
     }
 
     // `T = U, S = W ? Uu(U,"\n")+1 : $`.
     let line_count = if char_based {
-        head.matches('\n').count() as u64 + 1
+        head.iter().filter(|unit| **unit == 10).count() as u64 + 1
     } else {
         line_n as u64
     };
@@ -440,15 +531,16 @@ fn truncate_to_token_budget(
     } else {
         format!(
             "{PARTIAL_VIEW_PREFIX}{full_file_path}: showing the first {shown} of {full} characters ({token_count} tokens, cap {max_tokens}); this file has very long lines and cannot be paginated by line. Use {grep_name} to find a specific section, or {read_name} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
-            shown = head.encode_utf16().count(),
-            full = content.encode_utf16().count(),
+            shown = head.len(),
+            full = content.len(),
             grep_name = GREP_TOOL_NAME,
             read_name = TOOL_NAME,
         )
     };
 
     GracefulTruncation {
-        content: head,
+        content: String::from_utf16_lossy(&head),
+        units: head,
         line_count,
         note,
     }
@@ -473,20 +565,26 @@ fn slice_utf16_on_char_boundary(content: &str, unit_budget: usize) -> String {
 /// selected line and joins the selected lines with LF. Its terminal empty line
 /// is a real range entry, so both empty files and trailing-LF files count it.
 fn select_text_range(content: &str, offset: u64, limit: Option<u64>) -> StreamedTextRange {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    select_text_range_units(&content.encode_utf16().collect::<Vec<_>>(), offset, limit)
+}
+
+fn select_text_range_units(content: &[u16], offset: u64, limit: Option<u64>) -> StreamedTextRange {
+    let content = content.strip_prefix(&[0xfeff]).unwrap_or(content);
     let offset = offset.max(1);
     let mut total_lines = 0;
     let mut selected = Vec::new();
     let end_line = limit.map(|limit| offset.saturating_add(limit));
-    for (index, line) in content.split('\n').enumerate() {
+    for (index, line) in content.split(|unit| *unit == 10).enumerate() {
         let line_number = index as u64 + 1;
         total_lines += 1;
         if line_number >= offset && end_line.is_none_or(|end| line_number < end) {
-            selected.push(line.strip_suffix('\r').unwrap_or(line));
+            selected.push(line.strip_suffix(&[13]).unwrap_or(line));
         }
     }
+    let units = selected.join(&10);
     StreamedTextRange {
-        content: selected.join("\n"),
+        content: String::from_utf16_lossy(&units),
+        units,
         total_lines,
         read_lines: selected.len() as u64,
         not_text: None,
@@ -530,6 +628,7 @@ pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
 
 struct StreamedTextRange {
     content: String,
+    units: Vec<u16>,
     total_lines: u64,
     read_lines: u64,
     not_text: Option<crate::file_meta::NotText>,
@@ -557,30 +656,22 @@ fn check_selected_range_size(bytes: usize, limit: usize) -> Result<(), ToolError
 }
 
 impl NativeTextDecoder {
-    fn decode(&mut self, chunk: &[u8], eof: bool) -> String {
+    fn decode(&mut self, chunk: &[u8], eof: bool) -> Vec<u16> {
         self.pending.extend_from_slice(chunk);
         if !self.started {
             if self.pending.len() < 2 && !eof {
-                return String::new();
+                return Vec::new();
             }
             self.started = true;
             self.utf16le = self.pending.starts_with(&[0xff, 0xfe]);
         }
-        let mut text = String::new();
+        let mut text = Vec::new();
         if self.utf16le {
-            let mut consumed = self.pending.len() / 2 * 2;
-            if !eof && consumed >= 2 {
-                let last =
-                    u16::from_le_bytes([self.pending[consumed - 2], self.pending[consumed - 1]]);
-                if (0xd800..=0xdbff).contains(&last) {
-                    consumed -= 2;
-                }
-            }
-            let units = self.pending[..consumed]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+            let consumed = self.pending.len() / 2 * 2;
             text.extend(
-                char::decode_utf16(units).map(|value| value.unwrap_or(char::REPLACEMENT_CHARACTER)),
+                self.pending[..consumed]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
             );
             self.pending.drain(..consumed);
             if eof {
@@ -591,22 +682,23 @@ impl NativeTextDecoder {
             while consumed < self.pending.len() {
                 match std::str::from_utf8(&self.pending[consumed..]) {
                     Ok(valid) => {
-                        text.push_str(valid);
+                        text.extend(valid.encode_utf16());
                         consumed = self.pending.len();
                     }
                     Err(error) => {
                         let valid_end = consumed + error.valid_up_to();
-                        text.push_str(
+                        text.extend(
                             std::str::from_utf8(&self.pending[consumed..valid_end])
-                                .expect("validated prefix"),
+                                .expect("validated prefix")
+                                .encode_utf16(),
                         );
                         if let Some(length) = error.error_len() {
                             self.invalid_utf8 = true;
-                            text.push(char::REPLACEMENT_CHARACTER);
+                            text.push(0xfffd);
                             consumed = valid_end + length;
                         } else if eof {
                             self.invalid_utf8 = true;
-                            text.push(char::REPLACEMENT_CHARACTER);
+                            text.push(0xfffd);
                             consumed = self.pending.len();
                         } else {
                             consumed = valid_end;
@@ -619,11 +711,28 @@ impl NativeTextDecoder {
         }
         if !self.emitted && !text.is_empty() {
             self.emitted = true;
-            if text.starts_with('\u{feff}') {
+            if text.first() == Some(&0xfeff) {
                 text.remove(0);
             }
         }
         text
+    }
+}
+
+// Node's UTF-8 byte length repairs unpaired surrogates, while a complete
+// surrogate pair costs four bytes. A pending high surrogate was charged three
+// bytes, so the following low surrogate adds only one, even across chunks.
+fn appended_unit_utf8_bytes(previous: Option<u16>, unit: u16) -> usize {
+    if (0xdc00..=0xdfff).contains(&unit)
+        && previous.is_some_and(|prev| (0xd800..=0xdbff).contains(&prev))
+    {
+        1
+    } else if (0xd800..=0xdfff).contains(&unit) {
+        3
+    } else {
+        char::from_u32(u32::from(unit))
+            .expect("non-surrogate BMP")
+            .len_utf8()
     }
 }
 
@@ -641,7 +750,7 @@ fn read_text_range_streaming<R: Read>(
     let max_selected_bytes = usize::try_from(max_selected_bytes).unwrap_or(usize::MAX);
     let mut selected = Vec::new();
     let mut current_line = 1_u64;
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut selected_bytes = 0_usize;
     let mut prefix = Vec::with_capacity(NUL_SCAN_WINDOW);
     let mut decoder = NativeTextDecoder::default();
@@ -659,11 +768,11 @@ fn read_text_range_streaming<R: Read>(
                 .min(NUL_SCAN_WINDOW.saturating_sub(prefix.len()))],
         );
         let decoded = decoder.decode(chunk, n == 0);
-        for character in decoded.chars() {
+        for unit in decoded {
             let selecting = current_line >= offset && current_line < end_line;
-            if character == '\n' {
+            if unit == 10 {
                 if selecting {
-                    if line.ends_with('\r') {
+                    if line.last() == Some(&13) {
                         line.pop();
                         selected_bytes = selected_bytes.saturating_sub(1);
                     }
@@ -675,17 +784,18 @@ fn read_text_range_streaming<R: Read>(
                 }
                 current_line = current_line.saturating_add(1);
             } else if selecting {
-                selected_bytes = selected_bytes.saturating_add(character.len_utf8());
+                selected_bytes = selected_bytes
+                    .saturating_add(appended_unit_utf8_bytes(line.last().copied(), unit));
                 check_selected_range_size(
                     // A terminal CR is removed at LF/EOF. Defer charging
                     // that single pending byte until another character makes
                     // it part of the selected content.
                     selected_bytes
-                        .saturating_sub(usize::from(character == '\r'))
+                        .saturating_sub(usize::from(unit == 13))
                         .saturating_add(selected.len()),
                     max_selected_bytes,
                 )?;
-                line.push(character);
+                line.push(unit);
             }
         }
         if n == 0 {
@@ -693,7 +803,7 @@ fn read_text_range_streaming<R: Read>(
         }
     }
     if current_line >= offset && current_line < end_line {
-        if line.ends_with('\r') {
+        if line.last() == Some(&13) {
             line.pop();
             selected_bytes = selected_bytes.saturating_sub(1);
         }
@@ -714,8 +824,10 @@ fn read_text_range_streaming<R: Read>(
     } else {
         None
     };
+    let units = selected.join(&10);
     Ok(StreamedTextRange {
-        content: selected.join("\n"),
+        content: String::from_utf16_lossy(&units),
+        units,
         total_lines: current_line,
         read_lines: selected.len() as u64,
         not_text,
@@ -1335,6 +1447,26 @@ pub fn add_line_numbers_source(
     let display = String::from_utf16_lossy(&output);
     Utf16JsonProjection::root_string(display, output)
         .expect("display text is derived from the same UTF-16 units")
+}
+
+fn text_read_projection(
+    file: &serde_json::Value,
+    units: &[u16],
+    not_text: Option<crate::file_meta::NotText>,
+) -> (Utf16JsonProjection, Utf16JsonProjection) {
+    let mut data = crate::generated_result(&json!({ "type": "text", "file": file }));
+    data.set_string_units("/file/content", units)
+        .expect("text content field");
+    let mut model = map_read_result_text(&data).expect("text read result");
+    if let Some(kind) = not_text {
+        let mut model_units = model.string_units("").expect("model text");
+        model_units.extend("\n\n".encode_utf16());
+        model_units.extend(kind.read_warning().encode_utf16());
+        model =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&model_units), model_units)
+                .expect("matching display");
+    }
+    (data, model)
 }
 
 /// Re-run Read's model-text mapper for a result supplied by a Mod. The result
@@ -2165,18 +2297,10 @@ impl FileReadTool {
 }
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["file_path"],
-        "properties": {
-            "file_path": { "type": "string", "description": "The absolute path to the file to read" },
-            "offset": { "type": "integer", "minimum": 0, "description": "The line number to start reading from. Only provide if the file is too large to read at once" },
-            "limit":  { "type": "integer", "minimum": 1, "description": "The number of lines to read. Only provide if the file is too large to read at once." },
-            "pages":  { "type": "string", "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request." },
-            "allow_large": { "type": "boolean", "description": "Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it." }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/read-input-schema.json"
+    ))
+    .expect("pinned read input schema is valid JSON")
 });
 
 #[async_trait]
@@ -2295,8 +2419,8 @@ impl Tool for FileReadTool {
         let _cancel_read_on_drop = read_cancel.clone().drop_guard();
         // Native defaults offset to one before dispatch and state recording.
         // An absent limit reads to EOF; notebook dispatch resets both values.
-        let input_offset = crate::input_u64(&input, "offset");
-        let input_limit = crate::input_u64(&input, "limit");
+        let input_offset = read_range_argument(&input, "offset", false)?;
+        let input_limit = read_range_argument(&input, "limit", true)?;
         let offset = input_offset.unwrap_or(1);
         let allowance = ReadAllowance {
             room: ctx.options.read_context_room.as_deref().filter(|room| {
@@ -2694,30 +2818,52 @@ impl Tool for FileReadTool {
 
             let not_text = streamed.not_text;
             let mut slice = streamed.content;
+            let slice_units = streamed.units;
             let total_lines = streamed.total_lines;
             let line_range_start = offset;
             let read_lines = streamed.read_lines;
-            let token_estimate =
-                count_read_tokens(&slice, ext.as_deref(), offset, raised.is_some());
-            if let Err(token_cap) =
-                admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate)
-            {
-                self.emit_failed(&invocation_id, "max_tokens_exceeded")
-                    .await;
-                return Err(ToolError::Io(
-                    format!(
-                        "{}{}",
-                        format_max_tokens_exceeded(token_estimate, token_cap),
-                        allowance.hint(None, Some(token_estimate))
-                    )
-                    .into(),
-                ));
-            }
+            let token_estimate = refined_read_tokens(
+                &allowance,
+                &slice_units,
+                ext.as_deref(),
+                offset,
+                raised.is_some(),
+                limits.max_tokens,
+                &read_cancel,
+            )
+            .await?;
+            let read_claim =
+                match admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate) {
+                    Ok(claim) => claim,
+                    Err(token_cap) => {
+                        self.emit_failed(&invocation_id, "max_tokens_exceeded")
+                            .await;
+                        return Err(ToolError::Io(
+                            format!(
+                                "{}{}",
+                                format_max_tokens_exceeded(token_estimate, token_cap),
+                                allowance.hint(None, Some(token_estimate))
+                            )
+                            .into(),
+                        ));
+                    }
+                };
 
             let duration_ms = started.elapsed().as_millis() as u64;
             self.emit_completed(&invocation_id, size, duration_ms).await;
+            self.emit_session_file_read(
+                &requested_path,
+                total_lines,
+                read_lines,
+                size,
+                slice.len() as u64,
+                offset,
+                input_limit,
+            )
+            .await;
+
             check_read_cancelled(&ctx)?;
-            tool_api::read_file_state::set_with_requested_aliases(
+            tool_api::read_file_state::set_with_requested_aliases_and_units(
                 &self.ctx.read_file_state,
                 requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
@@ -2731,33 +2877,9 @@ impl Tool for FileReadTool {
                 },
                 true,
                 vec![requested_path.clone(), path.clone()],
+                Some(slice_units.clone()),
             );
-            self.emit_session_file_read(
-                &requested_path,
-                total_lines,
-                read_lines,
-                size,
-                slice.len() as u64,
-                offset,
-                input_limit,
-            )
-            .await;
 
-            let mut model_content = if slice.is_empty() {
-                if read_lines >= 1 && total_lines > 1 {
-                    format!("{offset}\t")
-                } else if read_lines >= 1 || total_lines == 0 {
-                    EMPTY_FILE_WARNING.to_string()
-                } else {
-                    format_offset_beyond_eof(offset, total_lines)
-                }
-            } else {
-                add_line_numbers(&slice, offset)
-            };
-            if let Some(kind) = not_text {
-                model_content.push_str("\n\n");
-                model_content.push_str(&kind.read_warning());
-            }
             let mut file = json!({
                 "filePath": file_path,
                 "content": std::mem::take(&mut slice),
@@ -2768,9 +2890,13 @@ impl Tool for FileReadTool {
             if let Some(id) = &task_output_id {
                 file["taskId"] = json!(id);
             }
+            let (data, model_content) = text_read_projection(&file, &slice_units, not_text);
+            if let Some(claim) = read_claim {
+                claim.commit();
+            }
             return Ok(ToolCallResult {
-                data: crate::generated_result(&json!({ "type": "text", "file": file })),
-                model_content: Some(model_content.into()),
+                data,
+                model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
@@ -2824,19 +2950,30 @@ impl Tool for FileReadTool {
         // NotebookEdit. A parse failure surfaces the JSON error (TS's
         // `jsonParse` throws → propagates out of `call`).
         if is_notebook {
-            let notebook_content = String::from_utf8_lossy(&bytes);
-            let cells = match crate::notebook_read::read_notebook(&notebook_content) {
-                Ok(c) => c,
-                Err(e) => {
+            let notebook_size = bytes.len() as u64;
+            // Keep ECMAScript JSON strings in the source carrier throughout
+            // parsing, projection and serialization. A serde Value boundary
+            // rejects valid lone-surrogate escapes before cells can be read.
+            let (cells, cells_json) = match run_read_job(&read_cancel, move |_| {
+                let cells =
+                    crate::notebook_read::read_notebook_source(&String::from_utf8_lossy(&bytes))
+                        .map_err(|error| ToolError::Io(error.into()))?;
+                let cells_json = cells
+                    .to_json_string()
+                    .map_err(|error| ToolError::Io(error.to_string().into()))?;
+                Ok((cells, cells_json))
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(ToolError::Aborted) => return Err(ToolError::Aborted),
+                Err(error) => {
                     self.emit_failed(&invocation_id, "notebook_parse").await;
-                    return Err(ToolError::Io(e.into()));
+                    return Err(error);
                 }
             };
-            // Serialized cells JSON — TS's `cellsJson = jsonStringify(cells)`
-            // (`FileReadTool.ts:824`). One serialization, reused for the byte cap,
-            // the token gate, and the registry entry (matches TS's single
-            // `cellsJson`).
-            let cells_json = serde_json::to_string(&cells).unwrap_or_default();
+            // Reuse one canonical cells JSON string for byte/token admission
+            // and the read-state registry, as Native does.
 
             // Notebook byte-size cap (`FileReadTool.ts:826-836`): if the serialized
             // cells JSON exceeds `maxSizeBytes` (the 256 KB default — LingXi has no
@@ -2871,19 +3008,30 @@ impl Tool for FileReadTool {
             // (`FileReadTool.ts:838`) on the notebook path too, after the
             // byte-size check and before recording state. `ext` is `"ipynb"`
             // (bytesPerToken 4).
-            if let Err(msg) =
-                validate_content_tokens(&cells_json, Some("ipynb"), allowance.base.max_tokens)
-            {
+            let notebook_units = cells_json.encode_utf16().collect::<Vec<_>>();
+            let notebook_tokens = refined_read_tokens(
+                &allowance,
+                &notebook_units,
+                Some("ipynb"),
+                1,
+                false,
+                allowance.base.max_tokens,
+                &read_cancel,
+            )
+            .await?;
+            if notebook_tokens > allowance.base.max_tokens {
+                let msg = format_max_tokens_exceeded(notebook_tokens, allowance.base.max_tokens);
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
                 return Err(ToolError::Io(msg.into()));
             }
 
             // Rejected notebooks never need their model-facing text rendered.
-            let model_content = crate::notebook_read::render_cells_model_text(&cells);
+            let model_content = crate::notebook_read::render_cells_model_text_source(&cells)
+                .expect("processed notebook cells are an exact source array");
 
             let duration_ms = started.elapsed().as_millis() as u64;
-            self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
+            self.emit_completed(&invocation_id, notebook_size, duration_ms)
                 .await;
 
             // Native stores serialized cells, offset one and no line limit.
@@ -2909,11 +3057,19 @@ impl Tool for FileReadTool {
             return Ok(ToolCallResult {
                 // binary `{type:"notebook", file:{filePath, cells}}`; the rendered
                 // cells text rides on `model_content`.
-                data: crate::generated_result(&json!({
-                    "type": "notebook",
-                    "file": { "filePath": file_path, "cells": cells },
-                })),
-                model_content: Some(model_content.into()),
+                data: Utf16JsonProjection::object(vec![
+                    ("type".into(), "notebook".into()),
+                    (
+                        "file".into(),
+                        Utf16JsonProjection::object(vec![
+                            ("filePath".into(), file_path.into()),
+                            ("cells".into(), cells),
+                        ])
+                        .expect("notebook result file"),
+                    ),
+                ])
+                .expect("notebook result"),
+                model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
@@ -2923,10 +3079,12 @@ impl Tool for FileReadTool {
         }
 
         let not_text = crate::file_meta::classify_not_text(&bytes);
-        let content = crate::file_meta::decode_native_text(&bytes);
-        let selected = select_text_range(&content, offset, limit);
+        let content_units = crate::file_meta::decode_native_text_units(&bytes);
+        let content = String::from_utf16_lossy(&content_units);
+        let selected = select_text_range_units(&content_units, offset, limit);
         let total_lines = selected.total_lines;
         let mut slice = selected.content;
+        let mut slice_units = selected.units;
         let line_range_start = offset;
         let mut read_lines = selected.read_lines;
 
@@ -2940,67 +3098,100 @@ impl Tool for FileReadTool {
         //
         // `pages` is never set on the text path (it's a PDF-only input), so the
         // `k` flag here is `offset <= 1 && limit is None`.
-        let token_estimate = count_read_tokens(&slice, ext.as_deref(), offset, raised.is_some());
+        let token_estimate = refined_read_tokens(
+            &allowance,
+            &slice_units,
+            ext.as_deref(),
+            offset,
+            raised.is_some(),
+            limits.max_tokens,
+            &read_cancel,
+        )
+        .await?;
         let mut partial_note: Option<String> = None;
         // Mirror `validateContentTokens`'s early-pass band: skip when 0 or
         // `<= maxTokens/4`; otherwise the offline fallback is `effectiveCount ==
         // estimate`, over budget iff `estimate > maxTokens`.
-        if let Err(token_cap) =
-            admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate)
-        {
-            let is_full_read = offset <= 1 && limit.is_none();
-            if is_full_read {
-                // Graceful truncation (`T=U, S=lineCount, v=S, R=note`).
-                let trunc = truncate_to_token_budget(
-                    &slice,
-                    token_estimate,
-                    allowance.base.max_tokens,
-                    total_lines,
-                    &requested_path.display().to_string(),
-                );
-                slice = trunc.content;
-                read_lines = trunc.line_count;
-                let cap_label = if raised.is_some() && token_cap > allowance.base.max_tokens {
-                    format!("allow_large had room for {token_cap} tokens this turn")
-                } else {
-                    format!("cap {}", allowance.base.max_tokens)
-                };
-                let note = trunc.note.replace(
-                    &format!(" tokens, cap {}", allowance.base.max_tokens),
-                    &format!(" tokens, {cap_label}"),
-                );
-                partial_note = Some(note.replace(
-                    ". Do NOT",
-                    &format!(".{} Do NOT", allowance.hint(None, Some(token_estimate))),
-                ));
-            } else {
-                self.emit_failed(&invocation_id, "max_tokens_exceeded")
-                    .await;
-                return Err(ToolError::Io(
-                    format!(
-                        "{}{}",
-                        format_max_tokens_exceeded(token_estimate, token_cap),
-                        allowance.hint(None, Some(token_estimate))
-                    )
-                    .into(),
-                ));
-            }
-        }
+        let read_claim =
+            match admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate) {
+                Ok(claim) => claim,
+                Err(token_cap) => {
+                    let is_full_read = offset <= 1 && limit.is_none();
+                    if is_full_read {
+                        // Graceful truncation (`T=U, S=lineCount, v=S, R=note`).
+                        let trunc = truncate_units_to_token_budget(
+                            &slice_units,
+                            token_estimate,
+                            allowance.base.max_tokens,
+                            total_lines,
+                            &requested_path.display().to_string(),
+                        );
+                        slice = trunc.content;
+                        slice_units = trunc.units;
+                        read_lines = trunc.line_count;
+                        let cap_label = if raised.is_some() && token_cap > allowance.base.max_tokens
+                        {
+                            format!("allow_large had room for {token_cap} tokens this turn")
+                        } else {
+                            format!("cap {}", allowance.base.max_tokens)
+                        };
+                        let note = trunc.note.replace(
+                            &format!(" tokens, cap {}", allowance.base.max_tokens),
+                            &format!(" tokens, {cap_label}"),
+                        );
+                        partial_note = Some(note.replace(
+                            ". Do NOT",
+                            &format!(".{} Do NOT", allowance.hint(None, Some(token_estimate))),
+                        ));
+                    } else {
+                        self.emit_failed(&invocation_id, "max_tokens_exceeded")
+                            .await;
+                        return Err(ToolError::Io(
+                            format!(
+                                "{}{}",
+                                format_max_tokens_exceeded(token_estimate, token_cap),
+                                allowance.hint(None, Some(token_estimate))
+                            )
+                            .into(),
+                        ));
+                    }
+                    None
+                }
+            };
 
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
             .await;
 
-        // Record the read into the shared read-state registry — 1:1 with TS
-        // `readFileState.set(fullFilePath, {content, timestamp, offset,
-        // limit})` (`FileReadTool.ts:1032`). `content` is the range-limited
-        // slice TS stores (from `readFileInRange`), `mtime_ms` is floored, and
-        // `offset` is defaulted; a partial first page records its returned line
-        // count as `limit`. The key is the normalized absolute model route.
-        // Canonical identity remains for permission and rooted I/O; the source
-        // route and translated host spelling are captured together.
+        // `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
+        // successful TEXT read. Rust finishes this sink await before committing
+        // the token reservation and seen-state, so cancelling sink delivery
+        // cannot publish a Read which never returned. NOT fired on notebooks,
+        // images or PDFs. The byte/line counts mirror
+        // `readFileInRange`'s return: `totalBytes = Buffer.byteLength(text)` →
+        // full content byte length; `readBytes = R!==void 0 ? byteLen(T) : _` →
+        // the (possibly truncated) slice's byte length; `readLines = S` → the
+        // model-facing line count (truncation overwrites it). `offset` is the
+        // defaulted offset; `limit` only when supplied. See
+        // [`emit_session_file_read`] for the `ext` / `messageID` (omitted) /
+        // session-flag handling.
+        self.emit_session_file_read(
+            &requested_path,
+            total_lines,
+            read_lines,
+            content.len() as u64,
+            slice.len() as u64,
+            offset,
+            input_limit,
+        )
+        .await;
+
+        // Record the range-limited view at the final synchronous publication
+        // boundary, together with its owned token claim. A partial first page
+        // records its returned line count as `limit`; route aliases remain
+        // separate from canonical rooted-I/O authority.
         check_read_cancelled(&ctx)?;
-        tool_api::read_file_state::set_with_requested_aliases(
+        tool_api::read_file_state::set_with_requested_aliases_and_units(
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
@@ -3033,31 +3224,10 @@ impl Tool for FileReadTool {
             },
             true,
             vec![requested_path.clone(), path.clone()],
+            Some(slice_units.clone()),
         );
 
         ctx.nested_memory_triggers.enqueue(requested_path.clone());
-
-        // `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
-        // successful TEXT read, mirroring TS's site (after `readFileState.set`,
-        // before returning the data). NOT fired on the notebook path (TS returns
-        // before this site) nor on images/PDFs. The byte/line counts mirror
-        // `readFileInRange`'s return: `totalBytes = Buffer.byteLength(text)` →
-        // full content byte length; `readBytes = R!==void 0 ? byteLen(T) : _` →
-        // the (possibly truncated) slice's byte length; `readLines = S` → the
-        // model-facing line count (truncation overwrites it). `offset` is the
-        // defaulted offset; `limit` only when supplied. See
-        // [`emit_session_file_read`] for the `ext` / `messageID` (omitted) /
-        // session-flag handling.
-        self.emit_session_file_read(
-            &requested_path,
-            total_lines,
-            read_lines,
-            content.len() as u64,
-            slice.len() as u64,
-            offset,
-            input_limit,
-        )
-        .await;
 
         // Model-facing serialization (FILE.A). `content` above stays the RAW
         // slice — that is what the TUI renders (`emit_tool_result` payload). The
@@ -3066,43 +3236,6 @@ impl Tool for FileReadTool {
         // `<system-reminder>` warning otherwise. This mirrors
         // claude-code's `FileReadTool` mapper (`FileReadTool.ts:692-714`), where
         // the model string diverges from the UI chrome.
-        let mut model_content = if slice.is_empty() {
-            if read_lines >= 1 && total_lines > 1 {
-                format!("{offset}\t")
-            } else if read_lines >= 1 || total_lines == 0 {
-                EMPTY_FILE_WARNING.to_string()
-            } else {
-                format_offset_beyond_eof(offset, total_lines)
-            }
-        } else {
-            // FT-08 (delivery half): the `[Truncated: PARTIAL view — …]` banner
-            // is NOT part of the tool_result. The oracle's `Sgm` ends with
-            // `if(R!==void 0)daf(L,R)` (@294616079) — it stashes the banner in a
-            // WeakMap keyed on the RESULT DATA object and returns `{data:L}`
-            // only; the tool_result text is the cat -n render alone. The
-            // dispatcher then re-reads it (@294300871:
-            // `if(e.name===Ns&&re.data&&typeof re.data==="object"){let pt=paf(re.data);
-            //  if(pt!==void 0)S.push({message:gc({type:"read_truncation_notice",banner:pt,toolUseID:t})})}`)
-            // and the attachment renderer turns it into its OWN meta user
-            // message (@296736309:
-            // `read_truncation_notice:(e)=>Zy([kn({content:pze(e.banner),isMeta:!0})])`).
-            // LingXi used to concatenate the note onto `model_content` after a
-            // blank line, which put the banner INSIDE the tool_result block —
-            // different bytes, and it made the file's own content and the
-            // harness's warning indistinguishable to the model. The banner now
-            // rides `new_messages` (see below), the same seam the image-resize
-            // note already uses.
-            //
-            // NOTE (parity verdict 12/14): no per-read cyber-risk/malware reminder
-            // is appended — claude-code v2.1.183 does not have one; the
-            // defensive-security guidance lives in the system-prompt body instead.
-            add_line_numbers(&slice, offset)
-        };
-        if let Some(kind) = not_text {
-            model_content.push_str("\n\n");
-            model_content.push_str(&kind.read_warning());
-        }
-
         // claude-code FileRead result `data` (2.1.191): `{type, file:{…}}` — pure
         // metadata; the cat -n model render rides on `model_content`. The text
         // `file` is `{filePath, content, numLines, startLine, totalLines,
@@ -3137,9 +3270,13 @@ impl Tool for FileReadTool {
             None => vec![],
         };
 
+        let (data, model_content) = text_read_projection(&file, &slice_units, not_text);
+        if let Some(claim) = read_claim {
+            claim.commit();
+        }
         Ok(ToolCallResult {
-            data: crate::generated_result(&json!({ "type": "text", "file": file })),
-            model_content: Some(model_content.into()),
+            data,
+            model_content: Some(model_content),
             new_messages,
             context_modifier: None,
             is_error: false,
@@ -5391,6 +5528,196 @@ mod tests {
             .string_at("")
             .unwrap()
             .ends_with(ALLOW_LARGE_UNAVAILABLE_HINT));
+    }
+
+    #[test]
+    fn native_322_lossless_utf16_range_and_truncation() {
+        let fixture =
+            Utf16JsonProjection::parse(include_str!("fixtures/utf16_read_native_322.json"))
+                .unwrap();
+        for index in 0..fixture.array_len("/rangeCases").unwrap() {
+            let prefix = format!("/rangeCases/{index}");
+            let content = fixture
+                .string_units(&format!("{prefix}/input/content"))
+                .unwrap();
+            let start = fixture
+                .number_at(&format!("{prefix}/input/offset"))
+                .unwrap() as u64;
+            let limit = fixture
+                .number_at(&format!("{prefix}/input/limit"))
+                .map(|value| value as u64);
+            let selected = select_text_range_units(&content, start, limit);
+            assert_eq!(
+                selected.units,
+                fixture
+                    .string_units(&format!("{prefix}/expected/content"))
+                    .unwrap(),
+                "case {index}"
+            );
+            assert_eq!(
+                selected.read_lines,
+                fixture
+                    .number_at(&format!("{prefix}/expected/numLines"))
+                    .unwrap() as u64
+            );
+            assert_eq!(
+                selected.total_lines,
+                fixture
+                    .number_at(&format!("{prefix}/expected/totalLines"))
+                    .unwrap() as u64
+            );
+            let file = json!({"content":selected.content,"numLines":selected.read_lines,"totalLines":selected.total_lines,"startLine":start});
+            let (_, model) = text_read_projection(&file, &selected.units, None);
+            assert_eq!(
+                model.string_units(""),
+                fixture.string_units(&format!("{prefix}/expected/modelContent")),
+                "case {index}"
+            );
+        }
+        for index in 0..fixture.array_len("/truncationCases").unwrap() {
+            let prefix = format!("/truncationCases/{index}");
+            let content = fixture
+                .string_units(&format!("{prefix}/input/content"))
+                .unwrap();
+            let truncation = truncate_units_to_token_budget(
+                &content,
+                fixture
+                    .number_at(&format!("{prefix}/input/tokenCount"))
+                    .unwrap() as u64,
+                fixture
+                    .number_at(&format!("{prefix}/input/maxTokens"))
+                    .unwrap() as u64,
+                fixture
+                    .number_at(&format!("{prefix}/input/totalLines"))
+                    .unwrap() as u64,
+                fixture
+                    .string_at(&format!("{prefix}/input/filePath"))
+                    .unwrap(),
+            );
+            assert_eq!(
+                truncation.units,
+                fixture
+                    .string_units(&format!("{prefix}/expected/content"))
+                    .unwrap(),
+                "case {index}"
+            );
+            assert_eq!(
+                truncation.note,
+                fixture
+                    .string_at(&format!("{prefix}/expected/note"))
+                    .unwrap(),
+                "case {index}"
+            );
+            assert_eq!(
+                truncation.line_count,
+                fixture
+                    .number_at(&format!("{prefix}/expected/numLines"))
+                    .unwrap() as u64
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_utf16_retains_surrogates_across_every_byte_boundary() {
+        struct ByteReader<'a>(&'a [u8]);
+        impl Read for ByteReader<'_> {
+            fn read(&mut self, destination: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || destination.is_empty() {
+                    return Ok(0);
+                }
+                destination[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+        let units = vec![0xfeff, 0xd800, 97, 0xdc00, 13, 10, 0xd83d, 0xde00, 0xd801];
+        let mut bytes: Vec<u8> = units
+            .iter()
+            .flat_map(|unit: &u16| unit.to_le_bytes())
+            .collect();
+        bytes.push(0xff);
+        let streamed = read_text_range_streaming(
+            ByteReader(&bytes),
+            Path::new("surrogates.txt"),
+            1,
+            3,
+            Some("txt"),
+            1024,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let buffered = select_text_range_units(&units, 1, Some(3));
+        assert_eq!(streamed.units, buffered.units);
+        assert_eq!(streamed.content, buffered.content);
+        assert_eq!(streamed.total_lines, buffered.total_lines);
+        assert!(streamed.not_text.is_none());
+        assert!(read_text_range_streaming(
+            ByteReader(&bytes),
+            Path::new("surrogates.txt"),
+            2,
+            1,
+            Some("txt"),
+            7,
+            &CancellationToken::new()
+        )
+        .is_ok());
+        assert!(read_text_range_streaming(
+            ByteReader(&bytes),
+            Path::new("surrogates.txt"),
+            2,
+            1,
+            Some("txt"),
+            6,
+            &CancellationToken::new()
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn reads_return_and_cache_exact_utf16_in_buffered_and_streaming_paths() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let state = ctx.read_file_state.clone();
+        let tool = FileReadTool::new(ctx);
+        let expected = vec![0xd800, 97, 0xdc00, 0xd83d, 0xde00, 0xd801];
+        for streaming in [false, true] {
+            let target = tmp.path().join(if streaming {
+                "streamed-surrogates.txt"
+            } else {
+                "buffered-surrogates.txt"
+            });
+            let mut units = vec![0xfeff];
+            let offset = if streaming {
+                units.extend(std::iter::repeat_n([120, 10], 70_000).flatten());
+                70_001
+            } else {
+                1
+            };
+            units.extend_from_slice(&expected);
+            let mut bytes: Vec<u8> = units.into_iter().flat_map(u16::to_le_bytes).collect();
+            bytes.push(0xff);
+            std::fs::write(&target, bytes).unwrap();
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"file_path":target,"offset":offset,"limit":1})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.data.string_units("/file/content"),
+                Some(expected.clone())
+            );
+            let mut model: Vec<u16> = format!("{offset}\t").encode_utf16().collect();
+            model.extend_from_slice(&expected);
+            assert_eq!(result.model_content.unwrap().string_units(""), Some(model));
+            assert_eq!(
+                tool_api::read_file_state::get_content_units(&state, &target),
+                Some(expected.clone())
+            );
+        }
     }
 
     #[tokio::test]

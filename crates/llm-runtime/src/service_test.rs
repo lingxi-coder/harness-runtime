@@ -455,6 +455,72 @@ mod tests {
     }
 
     #[test]
+    fn main_request_retains_scalar_shape_sources_through_adjacent_user_merge() {
+        use lingxi_core::types::MessageId;
+        use std::collections::HashSet;
+
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "native",
+            "claude-opus-4-6",
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+        );
+        let scalar = MessageId::new();
+        let array = MessageId::new();
+        let merged_scalar = MessageId::new();
+        let merged_array = MessageId::new();
+        let assistant = |text: &str| ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: text.to_owned(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        };
+        let mut main = MessagesCreateRequest::new(
+            "claude-opus-4-6",
+            None,
+            None,
+            vec![
+                ConversationMessage::user(scalar, "same text".into()),
+                assistant("first response"),
+                ConversationMessage::user(array, "same text".into()),
+                assistant("second response"),
+                ConversationMessage::user(merged_scalar, "scalar source".into()),
+                ConversationMessage::user(merged_array, "array source".into()),
+            ],
+            vec![],
+        );
+        main.opts.scalar_user_content_ids = HashSet::from([scalar, merged_scalar]);
+        let request = service.build_main_message_request(main, false).unwrap().0;
+        assert_eq!(
+            request.execution.scalar_user_content_ids,
+            HashSet::from([scalar, merged_scalar])
+        );
+        assert_eq!(request.input.messages.len(), 5);
+        assert_eq!(
+            request.execution.request_content_source_ids[0],
+            vec![HashSet::from([scalar])]
+        );
+        assert_eq!(
+            request.execution.request_content_source_ids[2],
+            vec![HashSet::from([array])]
+        );
+        assert_eq!(request.input.messages[4].content.len(), 2);
+        assert_eq!(
+            request.execution.request_content_source_ids[4],
+            vec![
+                HashSet::from([merged_scalar]),
+                HashSet::from([merged_array])
+            ]
+        );
+    }
+
+    #[test]
     fn native_context_1m_latch_key_strips_only_case_insensitive_beta_tags() {
         let request = LlmRequest::new("claude-[1M]-Opus-[2m]-Alias");
         let actual = String::from_utf16(&native_context_1m_model_key(&request)).unwrap();
@@ -12337,6 +12403,7 @@ mod tests {
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
                 None,
+                std::collections::HashSet::new(),
             ))
             .await;
 
@@ -12385,6 +12452,7 @@ mod tests {
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
                 None,
+                std::collections::HashSet::new(),
             )
             .await
             .expect("positive control reaches transport");
@@ -12439,6 +12507,7 @@ mod tests {
                 std::collections::HashSet::new(),
                 std::collections::HashMap::new(),
                 None,
+                std::collections::HashSet::new(),
             )
             .await;
 

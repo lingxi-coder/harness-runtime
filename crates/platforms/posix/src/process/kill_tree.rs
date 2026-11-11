@@ -28,9 +28,9 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 /// only signal that one process, which is rarely what callers want.
 ///
 /// # Errors
-/// Returns [`ProcessError::Io`] when the `SIGTERM` call fails with anything
-/// other than `ESRCH` (already dead). `ESRCH` from the `SIGKILL`
-/// escalation is treated as success — by then the group is gone.
+/// Returns [`ProcessError::Io`] when signalling fails unless the group is gone
+/// or macOS confirms that every remaining member has exited. A permission
+/// denial for live or uninspectable members remains an error.
 pub async fn kill_tree_unix(pid: u32) -> Result<(), ProcessError> {
     kill_tree_with_grace(pid, DEFAULT_GRACE).await
 }
@@ -41,13 +41,13 @@ pub async fn kill_tree_unix(pid: u32) -> Result<(), ProcessError> {
 ///
 /// # Errors
 /// Returns [`ProcessError::Io`] when `killpg(SIGKILL)` fails with
-/// anything other than [`group_already_gone`].
+/// anything other than a confirmed completed stop.
 #[allow(clippy::similar_names)] // pid/pgid: standard POSIX names.
 pub fn kill_tree_force(pid: u32) -> Result<(), ProcessError> {
     let pgid = pgid_from(pid)?;
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
-        Err(e) if group_already_gone(e) => Ok(()),
+        Err(e) if group_stop_completed(pid, e) => Ok(()),
         Err(e) => Err(ProcessError::Io(format!("killpg SIGKILL: {e}"))),
     }
 }
@@ -61,16 +61,17 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
     // SIGTERM first. Already-gone group is a success.
     match killpg(pgid, Signal::SIGTERM) {
         Ok(()) => {}
-        Err(e) if group_already_gone(e) => return Ok(()),
+        Err(e) if group_stop_completed(pid, e) => return Ok(()),
         Err(e) => return Err(ProcessError::Io(format!("killpg SIGTERM: {e}"))),
     }
 
     tokio::time::sleep(grace).await;
 
-    // SIGKILL escalation. Only ESRCH proves the group is gone.
+    // Darwin can report EPERM for an unreaped zombie-only group. Inspect
+    // membership before treating that denial as a completed stop.
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
-        Err(e) if group_already_gone(e) => Ok(()),
+        Err(e) if group_stop_completed(pid, e) => Ok(()),
         Err(e) => Err(ProcessError::Io(format!("killpg SIGKILL: {e}"))),
     }
 }
@@ -79,6 +80,25 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
 /// live group was not signalled and must remain a stop error.
 fn group_already_gone(e: nix::errno::Errno) -> bool {
     matches!(e, nix::errno::Errno::ESRCH)
+}
+
+fn group_stop_completed(pid: u32, error: nix::errno::Errno) -> bool {
+    if group_already_gone(error) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        error == nix::errno::Errno::EPERM
+            && matches!(
+                super::spawn_unsafe::team_group_has_live_members(pid),
+                Ok(false)
+            )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
@@ -91,6 +111,8 @@ fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
 mod tests {
     use super::{kill_tree_force, kill_tree_unix};
     use mobile_linux_api::ProcessError;
+    #[cfg(target_os = "macos")]
+    use std::time::Duration;
 
     /// Killing a non-existent PGID returns `Ok(())` — `ESRCH` on the first
     /// signal is treated as success because the caller's only goal is "the
@@ -107,6 +129,30 @@ mod tests {
     fn permission_denied_is_not_an_already_gone_group() {
         assert!(!super::group_already_gone(nix::errno::Errno::EPERM));
         assert!(super::group_already_gone(nix::errno::Errno::ESRCH));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn permission_denied_for_a_live_owned_group_is_not_a_completed_stop() {
+        let mut command = tokio::process::Command::new("/bin/sleep");
+        command.arg("60").kill_on_drop(true);
+        super::super::spawn_unsafe::attach_setsid(&mut command);
+        let mut child = command.spawn().expect("spawn owned group");
+        let pid = child.id().expect("owned child identity");
+        let completed = super::group_stop_completed(pid, nix::errno::Errno::EPERM);
+        let stopped = kill_tree_force(pid);
+        if stopped.is_err() {
+            let _ = child.start_kill();
+        }
+        let waited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        stopped.expect("stop owned group");
+        waited
+            .expect("owned group exits promptly")
+            .expect("reap owned child");
+        assert!(
+            !completed,
+            "a live group must retain its permission-denied error"
+        );
     }
 
     /// `kill_tree_force` likewise treats `ESRCH` as success.

@@ -1334,6 +1334,7 @@ mod tests {
                 lingxi_core::host::task_delivery::TaskDeliveryRequest,
             >,
             model_source: Option<Utf16JsonProjection>,
+            scalar_user_content_ids: std::collections::HashSet<MessageId>,
         ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
         {
             let events = crate::conversation::StreamingApiClient::stream_with_effort_override(
@@ -1354,6 +1355,7 @@ mod tests {
                 typed_attachment_ids,
                 task_deliveries,
                 model_source,
+                scalar_user_content_ids,
             )
             .await?;
             Ok(self.delay_tail(events))

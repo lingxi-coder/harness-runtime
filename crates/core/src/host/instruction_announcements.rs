@@ -133,11 +133,11 @@ fn parse_instructions(value: &Utf16JsonProjection) -> Option<InstructionsAttachm
             _ => InstructionFileType::User,
         };
         let content_units = file.get_property("content")?.code_units()?.to_vec();
-        parsed_files.push(InstructionFile::new(
-            path,
-            kind,
-            root_string_units(content_units),
-        ));
+        let mut descriptor = InstructionFile::new(path, kind, root_string_units(content_units));
+        descriptor.start_only = file
+            .get_property("startOnly")
+            .and_then(|value| value.as_bool());
+        parsed_files.push(descriptor);
     }
     let removed = match value.get_property("removed") {
         None => Vec::new(),
@@ -319,12 +319,97 @@ fn instruction_file_projection(file: &InstructionFile) -> Utf16JsonProjection {
         InstructionFileType::Local => "Local",
         InstructionFileType::AutoMem => "AutoMem",
     };
-    Utf16JsonProjection::object(vec![
+    let mut fields = vec![
         ("path".into(), file.path.clone()),
         ("type".into(), Utf16JsonProjection::from(kind)),
         ("content".into(), file.content.clone()),
-    ])
-    .expect("instruction descriptor fields form an object")
+    ];
+    if let Some(start_only) = file.start_only {
+        fields.push(("startOnly".into(), bool_projection(start_only)));
+    }
+    Utf16JsonProjection::object(fields).expect("instruction descriptor fields form an object")
+}
+
+pub const INSTRUCTION_START_ONLY_MARKER: &str = "\n\n> Only the start of this file is shown.";
+
+/// Native 2.1.322 PXe: one nested file may consume at most five percent of the
+/// selected model's context, with a 40,000 UTF-16-unit floor. Unknown providers
+/// retain their own host context window and use the native generic ratio.
+#[must_use]
+pub fn nested_instruction_character_limit(model: &str, context_tokens: Option<u64>) -> usize {
+    let model = super::model_capabilities::normalize_model_id(model).replace(['.', '_'], "-");
+    let bytes_per_token = if model.is_empty()
+        || matches!(
+            model.as_str(),
+            "claude-3-opus"
+                | "claude-3-sonnet"
+                | "claude-3-haiku"
+                | "claude-3-5-sonnet"
+                | "claude-3-5-haiku"
+                | "claude-3-7-sonnet"
+                | "claude-opus-4-0"
+                | "claude-opus-4-1"
+                | "claude-opus-4-5"
+                | "claude-opus-4-6"
+                | "claude-sonnet-4-0"
+                | "claude-sonnet-4-5"
+                | "claude-sonnet-4-6"
+                | "claude-haiku-4-5"
+        ) {
+        4_u64
+    } else {
+        3
+    };
+    let tokens = context_tokens
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or(200_000);
+    // Positive integer round(tokens * .05 * ratio), without floating-point
+    // rounding drift or overflow at the host-provided context boundary.
+    let units = (u128::from(tokens) * u128::from(bytes_per_token) + 10) / 20;
+    usize::try_from(units.max(40_000)).unwrap_or(usize::MAX)
+}
+
+/// Native mno: retain whole lines when possible and never end the prefix with
+/// a high surrogate. The returned projection keeps exact JavaScript units.
+#[must_use]
+pub fn clip_instruction_start(
+    content: &Utf16JsonProjection,
+    path: Option<&Utf16JsonProjection>,
+    limit: usize,
+) -> Utf16JsonProjection {
+    let units = content
+        .string_units("")
+        .expect("instruction content is a string");
+    if units.len() <= limit {
+        return content.clone();
+    }
+    let last_newline = units
+        .iter()
+        .take(limit.saturating_add(1))
+        .rposition(|unit| *unit == 10);
+    let line_cut = last_newline.filter(|index| *index > 0);
+    let mut end = line_cut.unwrap_or(limit).min(units.len());
+    if end > 0 && (0xd800..=0xdbff).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    let mut result = units[..end].to_vec();
+    let offset = if line_cut.is_some() {
+        result.iter().filter(|unit| **unit == 10).count() + 2
+    } else {
+        1
+    };
+    result.extend(INSTRUCTION_START_ONLY_MARKER.encode_utf16());
+    match path {
+        Some(path) => {
+            result.extend(" For the rest, call Read on ".encode_utf16());
+            result.extend(path.string_units("").expect("instruction path is a string"));
+            result.extend(format!(" with offset={offset} and a limit.").encode_utf16());
+        }
+        None => result.extend(
+            " This session's instruction files are too long together to send whole.".encode_utf16(),
+        ),
+    }
+    root_string_units(result)
 }
 
 fn file_blocks(files: &[InstructionFile]) -> Vec<u16> {

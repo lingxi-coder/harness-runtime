@@ -52,6 +52,11 @@ fn legacy_parse_object_fields(
                     issues.push(false_literal_issue(field_path));
                     continue;
                 }
+                OutputFieldType::StringEnum(_)
+                | OutputFieldType::ObjectArray(_)
+                | OutputFieldType::StringArray => {
+                    unreachable!("recursive array and enum rules postdate the legacy oracle")
+                }
             };
             issues.push(type_issue(expected, value, field_path));
             continue;

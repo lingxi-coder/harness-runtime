@@ -7,7 +7,6 @@
 //! - Overwrite is allowed unconditionally.
 //! - New files use UTF-8. Existing UTF-16LE encoding and leading BOMs persist.
 
-use crate::structured_patch::count_patch_lines;
 use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -113,6 +112,7 @@ fn write_resolution_error(
     error: lingxi_core::host::rooted_fs::RootedFsError,
 ) -> ToolError {
     match error {
+        lingxi_core::host::rooted_fs::RootedFsError::ContentChanged => ToolError::InvalidInput(crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE.into()),
         lingxi_core::host::rooted_fs::RootedFsError::Cancelled => ToolError::Aborted,
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
@@ -249,15 +249,10 @@ fn is_subagent_report_md(path: &std::path::Path) -> bool {
 }
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["file_path", "content"],
-        "properties": {
-            "file_path": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)" },
-            "content":   { "type": "string", "description": "The content to write to the file" }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/write-input-schema.json"
+    ))
+    .expect("pinned write input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -357,11 +352,15 @@ impl Tool for FileWriteTool {
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        crate::mutation_io::check_cancel(ctx.cancel.as_ref())?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
-        let content = crate::input_string(&input, "content")
+        let requested_content = input
+            .string_units("/content")
             .ok_or_else(|| ToolError::InvalidInput("content is required".into()))?;
+        let content_display = String::from_utf16_lossy(&requested_content);
+        let content = content_display.as_str();
         // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
         // against the CURRENT session cwd (`ctx.cwd()`, switchable by
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
@@ -419,7 +418,13 @@ impl Tool for FileWriteTool {
         let canon = if let Some(scope) = &memory_mutation {
             scope.target()
         } else {
-            match canonicalize_write_target(&path, &trusted_dirs) {
+            let requested = path.clone();
+            let roots = trusted_dirs.clone();
+            match crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+                canonicalize_write_target(&requested, &roots)
+            })
+            .await?
+            {
                 Ok(p) => p,
                 Err(_) => {
                     emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -442,11 +447,18 @@ impl Tool for FileWriteTool {
         // on physical existence (TS `meta !== null`, `FileWriteTool.ts:279`),
         // NOT on the create-vs-update truthiness — an existing-but-empty file
         // still requires a prior Read.
-        let snapshot = if let Some(scope) = &memory_mutation {
-            scope.read_file()
-        } else {
-            write_rooted_snapshot(&path, &canon, &trusted_dirs)
-        };
+        let snapshot_path = path.clone();
+        let snapshot_canon = canon.clone();
+        let snapshot_roots = trusted_dirs.clone();
+        let snapshot_scope = memory_mutation.clone();
+        let snapshot = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            if let Some(scope) = &snapshot_scope {
+                scope.read_file()
+            } else {
+                write_rooted_snapshot(&snapshot_path, &snapshot_canon, &snapshot_roots)
+            }
+        })
+        .await?;
         let prior_snapshot = match snapshot {
             Ok(snapshot) => Some(snapshot),
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
@@ -479,14 +491,47 @@ impl Tool for FileWriteTool {
             .as_ref()
             .and_then(|snapshot| snapshot.modified)
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        let (is_create, file_exists, prior_decoded, encoding, not_text) = match prior_snapshot {
-            Some(snapshot) => {
-                let not_text = crate::file_meta::classify_not_text(&snapshot.bytes);
-                let (decoded, encoding, _) = crate::file_meta::read_with_metadata(&snapshot.bytes);
-                (decoded.is_empty(), true, Some(decoded), encoding, not_text)
-            }
-            None => (true, false, None, crate::file_meta::Encoding::Utf8, None),
-        };
+        let (is_create, file_exists, prior_decoded, encoding, not_text, write_expectation) =
+            crate::mutation_io::prepare(ctx.cancel.as_ref(), move || match prior_snapshot {
+                Some(snapshot) => {
+                    let expectation =
+                        lingxi_core::host::rooted_fs::RootedWriteExpectation::from_bytes(
+                            &snapshot.bytes,
+                        );
+                    let not_text = crate::file_meta::classify_not_text(&snapshot.bytes);
+                    let (decoded, encoding, _) =
+                        crate::file_meta::read_with_metadata_units(&snapshot.bytes);
+                    (
+                        decoded.is_empty(),
+                        true,
+                        Some(decoded),
+                        encoding,
+                        not_text,
+                        expectation,
+                    )
+                }
+                None => (
+                    true,
+                    false,
+                    None,
+                    crate::file_meta::Encoding::Utf8,
+                    None,
+                    lingxi_core::host::rooted_fs::RootedWriteExpectation::Missing,
+                ),
+            })
+            .await?;
+
+        let fence_state =
+            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
+        let fence_requested = requested_path.clone();
+        let fence_canon = canon.clone();
+        if let Some(blocked) = crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+            fence_state.start_only_write_guard(&fence_requested, &fence_canon)
+        })
+        .await?
+        {
+            return Err(ToolError::InvalidInput(blocked.message().into()));
+        }
 
         // Read-before-write staleness guard (Batch F): only for an EXISTING
         // file. New-file creation skips it (TS `meta === null` skips the
@@ -503,9 +548,9 @@ impl Tool for FileWriteTool {
             // Current mtime (floored ms), captured from the same opened handle
             // as the pre-write bytes; `None` falls back to epoch `0`.
             let current_mtime_ms = prior_mtime_ms;
-            let cmp_content = prior_decoded.as_deref().unwrap_or("");
-            let cmp_content = cmp_content.strip_prefix('\u{feff}').unwrap_or(cmp_content);
-            if let Err(e) = crate::check_read_before_write(
+            let cmp_content =
+                crate::utf16_mutation::without_bom(prior_decoded.as_deref().unwrap_or(&[]));
+            if let Err(e) = crate::check_read_before_write_units(
                 &self.ctx.read_file_state,
                 &requested_path,
                 current_mtime_ms,
@@ -524,9 +569,13 @@ impl Tool for FileWriteTool {
                 kind.mutation_refusal_message().into(),
             ));
         }
-        let content =
-            crate::file_meta::preserve_bom(prior_decoded.as_deref().unwrap_or(""), content);
-        let content = content.as_ref();
+        let content_units = crate::file_meta::preserve_bom_units(
+            prior_decoded.as_deref().unwrap_or(&[]),
+            &requested_content,
+        )
+        .into_owned();
+        let content_display = String::from_utf16_lossy(&content_units);
+        let content = content_display.as_str();
 
         // (/rewind) Back up the pre-write content (or record a null backup for a
         // brand-new file) BEFORE writing so /rewind can restore it.
@@ -534,44 +583,83 @@ impl Tool for FileWriteTool {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
-        let result = if let Some(scope) = &memory_mutation {
-            scope.write_file(content.as_bytes())
-        } else {
-            let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs)
-            else {
-                self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::PathBlocked { path });
+        let bytes = crate::file_meta::encode_units_with_metadata(
+            &content_units,
+            encoding,
+            crate::file_meta::LineEnding::Lf,
+        );
+        let bytes_written = bytes.len() as u64;
+        let commit_path = path.clone();
+        let commit_canon = canon.clone();
+        let commit_requested = requested_path.clone();
+        let commit_file_path = file_path.to_owned();
+        let commit_scope = memory_mutation.clone();
+        let state =
+            tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
+        let published_units = crate::file_meta::normalize_to_lf_units(
+            crate::utf16_mutation::without_bom(&content_units),
+        );
+        let history = ctx.file_history.clone();
+        let result = crate::mutation_io::commit(ctx.cancel.as_ref(), move || {
+            if let Some(blocked) = state.start_only_write_guard(&commit_requested, &commit_canon) {
+                return Err(ToolError::InvalidInput(blocked.message().into()));
+            }
+            let result = if let Some(scope) = &commit_scope {
+                scope.write_file_checked(&bytes, &write_expectation)
+            } else {
+                let Some((root, relative)) =
+                    crate::shared::rooted_location(&commit_canon, &trusted_dirs)
+                else {
+                    return Err(ToolError::PathBlocked { path: commit_path });
+                };
+                lingxi_core::host::rooted_fs::write_file_after_permission_checked(
+                    &root,
+                    &relative,
+                    &commit_path,
+                    &commit_canon,
+                    &bytes,
+                    &write_expectation,
+                )
             };
-            lingxi_core::host::rooted_fs::write_file_after_permission(
-                &root,
-                &relative,
-                &path,
-                &canon,
-                content.as_bytes(),
-            )
-        };
-        let write_result = match result {
+            let mut result =
+                result.map_err(|error| write_resolution_error(&commit_file_path, error))?;
+            if let (Some(history), Some(parent)) = (history.as_ref(), result.parent.take()) {
+                history.track_completed_write(&commit_canon.to_string_lossy(), parent);
+            }
+            let new_mtime_ms = result
+                .modified
+                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            state.set_after_write_with_requested_aliases_and_units(
+                commit_requested.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: String::from_utf16_lossy(&published_units),
+                    mtime_ms: new_mtime_ms,
+                    offset: None,
+                    limit: None,
+                    from_read: false,
+                    seeded_from_context: false,
+                    is_partial_view: false,
+                },
+                true,
+                vec![commit_requested, commit_path],
+                Some(published_units),
+            );
+            Ok(result)
+        })
+        .await?;
+        let _write_result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_write").await;
-                return Err(write_resolution_error(file_path, error));
+                return Err(error);
             }
         };
 
-        if let (Some(fh), Some(parent)) = (ctx.file_history.as_ref(), write_result.parent) {
-            fh.track_completed_write(&canon.to_string_lossy(), parent)
-                .await;
-        }
-
-        let structured_patch = if is_create {
-            Vec::new()
+        let (structured_patch, lines_added, lines_removed) = if is_create {
+            (crate::generated_result(&json!([])), 0, 0)
         } else {
-            crate::structured_patch::build_structured_patch(
-                prior_decoded.as_deref().unwrap_or(""),
-                content,
-            )
+            crate::utf16_mutation::patch(prior_decoded.as_deref().unwrap_or(&[]), &content_units)
         };
-        let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
         if lines_added > 0 || lines_removed > 0 {
             // The oracle records the MODEL that made the change, not the tool.
             otel::record_lines_of_code_change(
@@ -581,40 +669,9 @@ impl Tool for FileWriteTool {
             );
         }
 
-        let bytes_written = bytes.len() as u64;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
             .await;
-
-        // Post-write: update the read-state registry so an immediate second
-        // Write/Edit succeeds and Read-dedup sees the new mtime (TS
-        // `FileWriteTool.ts:332-337` `readFileState.set({content, timestamp:
-        // <new mtime>, offset: undefined, limit: undefined})`). Write stores
-        // the model-sent `content` verbatim (it is written as UTF-8/LF), with
-        // offset/limit cleared so the next read counts as a full read.
-        let new_mtime_ms = write_result
-            .modified
-            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set_after_write_with_requested_aliases(
-            &self.ctx.read_file_state,
-            requested_path.clone(),
-            tool_api::read_file_state::ReadFileEntry {
-                content: content
-                    .strip_prefix('\u{feff}')
-                    .unwrap_or(content)
-                    .replace("\r\n", "\n"),
-                mtime_ms: new_mtime_ms,
-                offset: None,
-                limit: None,
-                // A post-write entry is NOT a Read — the Read-dedup gate must
-                // skip it (TS stores `offset: undefined` here; we flag it).
-                from_read: false,
-                seeded_from_context: false,
-                is_partial_view: false,
-            },
-            true,
-            vec![requested_path.clone(), path.clone()],
-        );
 
         // Mirror Claude Code's automatic post-edit diagnostics path by
         // updating the matching LSP document before the next model turn.
@@ -635,12 +692,6 @@ impl Tool for FileWriteTool {
         // jsdiff `structuredPatch` hunk array of the prior content → the new
         // content; a `create` emits `[]` (TS `structuredPatch: []`). Same 1:1
         // jsdiff port as Edit (`structured_patch::build_structured_patch`).
-        let structured_patch = if is_create {
-            serde_json::json!([])
-        } else {
-            serde_json::json!(structured_patch)
-        };
-
         // `data` is byte-faithful to claude-code's Write result `data` object —
         // the object `mapToolResultToToolResultBlockParam` receives (binary
         // field names, casing, and order):
@@ -666,20 +717,26 @@ impl Tool for FileWriteTool {
         //   - `gitDiff`         = OMITTED (absent) — claude only attaches it when
         //                          git diff capture is enabled; LingXi has none.
         let original_file = if is_create {
-            Value::Null
+            crate::generated_result(&Value::Null)
         } else {
-            Value::String(prior_decoded.clone().unwrap_or_default())
+            crate::utf16_mutation::string(prior_decoded.as_deref().unwrap_or(&[]))
         };
-
+        let mut data = crate::generated_result(&json!({
+            "type": type_str,
+            "filePath": file_path,
+            "content": "",
+            "structuredPatch": [],
+            "originalFile": null,
+            "userModified": false,
+        }));
+        data.set_field("content", crate::utf16_mutation::string(&content_units))
+            .expect("result field");
+        data.set_field("structuredPatch", structured_patch)
+            .expect("result field");
+        data.set_field("originalFile", original_file)
+            .expect("result field");
         Ok(ToolCallResult {
-            data: crate::generated_result(&json!({
-                "type": type_str,
-                "filePath": file_path,
-                "content": content,
-                "structuredPatch": structured_patch,
-                "originalFile": original_file,
-                "userModified": false,
-            })),
+            data,
             // Model-facing text is the byte-faithful Write message, surfaced
             // verbatim (NOT a JSON dump of `data`).
             model_content: Some(content_message.into()),

@@ -1,3 +1,5 @@
+//! Native filesystem prompt byte receipts.
+
 use std::sync::Arc;
 
 use tool_api::tool_trait::{PromptOptions, Tool};

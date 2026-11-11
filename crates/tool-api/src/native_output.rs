@@ -28,6 +28,12 @@ pub enum OutputFieldType {
     ObjectShape(&'static [OutputField]),
     /// A JSON string or `null`.
     StringOrNull,
+    /// A string enum, with Zod's `invalid_value` issue for every invalid input type.
+    StringEnum(&'static [&'static str]),
+    /// An array checked and stripped recursively against an object item shape.
+    ObjectArray(&'static [OutputField]),
+    /// An array whose every item must be a string.
+    StringArray,
     /// The literal JSON boolean `false`.
     False,
 }
@@ -102,7 +108,12 @@ fn parse_object_fields(
                 OutputFieldType::Number => "number",
                 OutputFieldType::Boolean => "boolean",
                 OutputFieldType::Array => "array",
+                OutputFieldType::ObjectArray(_) | OutputFieldType::StringArray => "array",
                 OutputFieldType::Object | OutputFieldType::ObjectShape(_) => "object",
+                OutputFieldType::StringEnum(values) => {
+                    issues.push(string_enum_issue(values, field_path));
+                    continue;
+                }
                 OutputFieldType::False => {
                     issues.push(false_literal_issue(field_path));
                     continue;
@@ -125,6 +136,36 @@ fn parse_object_fields(
                 &field_path,
                 issues,
             )?,
+            OutputFieldType::ObjectArray(nested) => {
+                let array = value.at_pointer("").expect("validated output array");
+                let mut items = Vec::with_capacity(array.array_len().expect("output array"));
+                for index in 0..array.array_len().expect("output array") {
+                    let item = array.get_index(index).expect("output array item");
+                    let mut item_path = field_path.clone();
+                    item_path.push(array_index(index));
+                    let item = item
+                        .to_projection()
+                        .map_err(|_| invalid(tool_name, "could not construct parsed output"))?;
+                    items.push(parse_object_fields(
+                        &item,
+                        tool_name,
+                        nested,
+                        UnknownOutputKeys::Strip,
+                        &item_path,
+                        issues,
+                    )?);
+                }
+                Utf16JsonProjection::array(items)
+                    .map_err(|_| invalid(tool_name, "could not construct parsed output"))?
+            }
+            OutputFieldType::StringArray => {
+                collect_string_array_issues(
+                    value.at_pointer("").expect("validated output array"),
+                    &field_path,
+                    issues,
+                );
+                value
+            }
             _ => value,
         };
         if let Some(passthrough) = passthrough.as_mut() {
@@ -142,6 +183,55 @@ fn parse_object_fields(
     // their schema position rather than stopping after a top-level failure.
     Utf16JsonProjection::object_units(retained)
         .map_err(|_| invalid(tool_name, "could not construct parsed output"))
+}
+
+fn array_index(index: usize) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(&index.to_string()).expect("array index")
+}
+
+fn string_enum_issue(values: &[&str], path: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    let quoted = values
+        .iter()
+        .map(|value| {
+            Utf16JsonProjection::from(*value)
+                .to_json_string()
+                .expect("enum option")
+        })
+        .collect::<Vec<_>>();
+    let message = if quoted.len() == 1 {
+        format!("Invalid input: expected {}", quoted[0])
+    } else {
+        format!("Invalid option: expected one of {}", quoted.join("|"))
+    };
+    Utf16JsonProjection::object(vec![
+        ("code".into(), "invalid_value".into()),
+        (
+            "values".into(),
+            Utf16JsonProjection::array(values.iter().map(|value| (*value).into()).collect())
+                .expect("enum values"),
+        ),
+        (
+            "path".into(),
+            Utf16JsonProjection::array(path).expect("enum issue path"),
+        ),
+        ("message".into(), message.into()),
+    ])
+    .expect("enum output issue")
+}
+
+fn collect_string_array_issues(
+    array: JsonValueView<'_>,
+    path: &[Utf16JsonProjection],
+    issues: &mut Vec<Utf16JsonProjection>,
+) {
+    for index in 0..array.array_len().expect("validated output array") {
+        let item = array.get_index(index).expect("validated output array item");
+        if item.as_str().is_none() {
+            let mut item_path = path.to_vec();
+            item_path.push(array_index(index));
+            issues.push(type_issue("string", Some(item), item_path));
+        }
+    }
 }
 
 fn false_literal_issue(path: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
@@ -323,11 +413,16 @@ fn matches_type(value: JsonValueView<'_>, kind: OutputFieldType) -> bool {
         OutputFieldType::String => value.as_str().is_some(),
         OutputFieldType::Number => value.as_number().is_some_and(f64::is_finite),
         OutputFieldType::Boolean => value.as_bool().is_some(),
-        OutputFieldType::Array => value.array_len().is_some(),
+        OutputFieldType::Array | OutputFieldType::ObjectArray(_) | OutputFieldType::StringArray => {
+            value.array_len().is_some()
+        }
         OutputFieldType::Object | OutputFieldType::ObjectShape(_) => {
             value.object_entries().is_some()
         }
         OutputFieldType::StringOrNull => value.as_str().is_some() || value.is_null(),
+        OutputFieldType::StringEnum(values) => {
+            value.as_str().is_some_and(|value| values.contains(&value))
+        }
         OutputFieldType::False => value.as_bool() == Some(false),
     }
 }

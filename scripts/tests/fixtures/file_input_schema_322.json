@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceRequestSha256": "706c1bc4ea0d1ce0fd97324bfa08c83afc824776cda62a5c0317511aa2c3e91a",
+  "controls": "--safe-mode --setting-sources empty --tools explicit-six --allowedTools explicit-six",
+  "schemas": [
+    {
+      "tool": "Edit",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"file_path\":{\"description\":\"The absolute path to the file to modify\",\"type\":\"string\"},\"old_string\":{\"description\":\"The text to replace\",\"type\":\"string\"},\"new_string\":{\"description\":\"The text to replace it with (must be different from old_string)\",\"type\":\"string\"},\"replace_all\":{\"description\":\"Replace all occurrences of old_string (default false)\",\"default\":false,\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"additionalProperties\":false}",
+      "sha256": "817017bfbd1919c88d58f4284924e233c594e76409e8d2ac2489f0701282e69d",
+      "sourceRequestByteRange": [
+        2889,
+        3441
+      ]
+    },
+    {
+      "tool": "Glob",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"pattern\":{\"description\":\"The glob pattern to match files against\",\"type\":\"string\"},\"path\":{\"description\":\"The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \\\"undefined\\\" or \\\"null\\\" - simply omit it for the default behavior. Must be a valid directory path if provided.\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"additionalProperties\":false}",
+      "sha256": "8e0245e67bbe76c6b42457f13660bf8f8c91f25436d851318f832326d16c2c4f",
+      "sourceRequestByteRange": [
+        3884,
+        4423
+      ]
+    },
+    {
+      "tool": "Grep",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"pattern\":{\"description\":\"The regular expression pattern to search for in file contents\",\"type\":\"string\"},\"path\":{\"description\":\"File or directory to search in (rg PATH). Defaults to current working directory.\",\"type\":\"string\"},\"glob\":{\"description\":\"Glob pattern to filter files (e.g. \\\"*.js\\\", \\\"*.{ts,tsx}\\\") - maps to rg --glob\",\"type\":\"string\"},\"output_mode\":{\"description\":\"Output mode: \\\"content\\\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \\\"files_with_matches\\\" shows file paths (supports head_limit), \\\"count\\\" shows match counts (supports head_limit). Defaults to \\\"files_with_matches\\\".\",\"type\":\"string\",\"enum\":[\"content\",\"files_with_matches\",\"count\"]},\"-B\":{\"description\":\"Number of lines to show before each match (rg -B). Requires output_mode: \\\"content\\\", ignored otherwise.\",\"type\":\"number\"},\"-A\":{\"description\":\"Number of lines to show after each match (rg -A). Requires output_mode: \\\"content\\\", ignored otherwise.\",\"type\":\"number\"},\"-C\":{\"description\":\"Alias for context.\",\"type\":\"number\"},\"context\":{\"description\":\"Number of lines to show before and after each match (rg -C). Requires output_mode: \\\"content\\\", ignored otherwise.\",\"type\":\"number\"},\"-n\":{\"description\":\"Show line numbers in output (rg -n). Requires output_mode: \\\"content\\\", ignored otherwise. Defaults to true.\",\"type\":\"boolean\"},\"-i\":{\"description\":\"Case insensitive search (rg -i)\",\"type\":\"boolean\"},\"-o\":{\"description\":\"Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: \\\"content\\\", ignored otherwise. Defaults to false.\",\"type\":\"boolean\"},\"type\":{\"description\":\"File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types.\",\"type\":\"string\"},\"head_limit\":{\"description\":\"Limit output to first N lines/entries, equivalent to \\\"| head -N\\\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for unlimited (use sparingly — large result sets waste context).\",\"type\":\"number\"},\"offset\":{\"description\":\"Skip first N lines/entries before applying head_limit, equivalent to \\\"| tail -n +N | head -N\\\". Works across all output modes. Defaults to 0.\",\"type\":\"number\"},\"multiline\":{\"description\":\"Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.\",\"type\":\"boolean\"}},\"required\":[\"pattern\"],\"additionalProperties\":false}",
+      "sha256": "4e6ca5e90f2d1541098e2fa5ced79451e8974c0003a7bd1ee347768117f7b63b",
+      "sourceRequestByteRange": [
+        5390,
+        8064
+      ]
+    },
+    {
+      "tool": "NotebookEdit",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"notebook_path\":{\"description\":\"The absolute path to the Jupyter notebook file to edit (must be absolute, not relative)\",\"type\":\"string\"},\"cell_id\":{\"description\":\"The ID of the cell to edit. When inserting a new cell, the new cell will be inserted after the cell with this ID, or at the beginning if not specified.\",\"type\":\"string\"},\"new_source\":{\"description\":\"The new source for the cell\",\"type\":\"string\"},\"cell_type\":{\"description\":\"The type of the cell (code or markdown). If not specified, it defaults to the current cell type. If using edit_mode=insert, this is required.\",\"type\":\"string\",\"enum\":[\"code\",\"markdown\"]},\"edit_mode\":{\"description\":\"The type of edit to make (replace, insert, delete). Defaults to replace.\",\"type\":\"string\",\"enum\":[\"replace\",\"insert\",\"delete\"]}},\"required\":[\"notebook_path\",\"new_source\"],\"additionalProperties\":false}",
+      "sha256": "2da1abf7e4a5e3420370cad93b2fc956e274b743c4206d7b85c2f8219f0429eb",
+      "sourceRequestByteRange": [
+        8752,
+        9692
+      ]
+    },
+    {
+      "tool": "Read",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"file_path\":{\"description\":\"The absolute path to the file to read\",\"type\":\"string\"},\"offset\":{\"description\":\"The line number to start reading from. Only provide if the file is too large to read at once\",\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"limit\":{\"description\":\"The number of lines to read. Only provide if the file is too large to read at once.\",\"type\":\"integer\",\"exclusiveMinimum\":0,\"maximum\":9007199254740991},\"pages\":{\"description\":\"Page range for PDF files (e.g., \\\"1-5\\\", \\\"3\\\", \\\"10-20\\\"). Only applicable to PDF files. Maximum 20 pages per request.\",\"type\":\"string\"},\"allow_large\":{\"description\":\"Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it.\",\"type\":\"boolean\"}},\"required\":[\"file_path\"],\"additionalProperties\":false}",
+      "sha256": "34ef4c574a752ead7dbb42800a8507c84eef14cba4dc82b4003040149cb8bc1d",
+      "sourceRequestByteRange": [
+        11541,
+        12612
+      ]
+    },
+    {
+      "tool": "Write",
+      "json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"file_path\":{\"description\":\"The absolute path to the file to write (must be absolute, not relative)\",\"type\":\"string\"},\"content\":{\"description\":\"The content to write to the file\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"additionalProperties\":false}",
+      "sha256": "afb946a50519ce686704d62a989f9a803d246d411f4c3aeec64c5ab09f6d4005",
+      "sourceRequestByteRange": [
+        13289,
+        13637
+      ]
+    }
+  ]
+}

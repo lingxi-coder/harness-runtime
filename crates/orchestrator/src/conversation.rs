@@ -303,6 +303,42 @@ pub trait OrchestratorApiClient: Send + Sync {
         Ok(None)
     }
 
+    /// Exact count for a single Read source string. Production bypasses normal
+    /// generation-history preparation; simple hosts can reuse their existing
+    /// exact-count seam while retaining source UTF-16 and provider selection.
+    async fn count_read_text_tokens_exact(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<Option<u64>, LlmError> {
+        let units = source
+            .string_units("")
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "Read token counting requires source text".into(),
+            })?;
+        let message = ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&units),
+                utf16_code_units: units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+            api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
+        };
+        self.count_tokens_exact(model, profile, None, vec![message], Vec::new())
+            .await
+    }
+
     /// Host-validated beta additions applied to provider requests. The
     /// orchestrator consumes these for the same context-window/compaction
     /// calculations; default clients have none.
@@ -774,6 +810,7 @@ pub trait StreamingApiClient: Send + Sync {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if max_tokens.is_some() {
             return Err(LlmError::UnsupportedCapability {
@@ -2326,10 +2363,10 @@ pub use drivers_impl::{
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;
-#[path = "conversation/goal_retry.rs"]
-mod goal_retry_impl;
 #[path = "conversation/goal_proposal.rs"]
 mod goal_proposal_impl;
+#[path = "conversation/goal_retry.rs"]
+mod goal_retry_impl;
 #[path = "conversation/hooks.rs"]
 mod hooks_impl;
 #[path = "conversation/main_reports.rs"]
@@ -2389,14 +2426,14 @@ mod runtime_impl;
 #[path = "conversation/storage_recovery.rs"]
 mod storage_recovery;
 
+#[path = "conversation/auto_memory.rs"]
+mod auto_memory;
 #[path = "conversation/headless_mcp.rs"]
 mod headless_mcp;
 #[path = "conversation/headless_ui.rs"]
 mod headless_ui;
 #[path = "conversation/idle_compaction.rs"]
 mod idle_compaction_impl;
-#[path = "conversation/auto_memory.rs"]
-mod auto_memory;
 pub use auto_memory::AutoMemoryHandle;
 #[path = "conversation/background_memory.rs"]
 mod background_memory;

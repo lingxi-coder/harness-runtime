@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "requestSha256": "449b56f241633e46e09dfdf95eff83faa16083d0f127dd81bf922fd07a3389fc",
+  "requestBytes": 120082,
+  "model": "claude-sonnet-4-6",
+  "requestJsonTemplate": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":__SOURCE_JSON__}],\"tools\":[]}",
+  "sourceRecipe": {
+    "length": 120000,
+    "prefix": "READ_COUNT_SOURCE_322_",
+    "suffix": "_END_READ_322_",
+    "fill": "x"
+  },
+  "sourceSha256": "f2b41e00d186d6b4829bdeaa84a78e0a47f7f8c2f96b2a1a5144762400ef151d",
+  "stubCount": 2500,
+  "controls": "Actual native CLI safe-mode Read of120000ASCII, isolated config, local dummy provider, no external account; request-002 raw body captured."
+}

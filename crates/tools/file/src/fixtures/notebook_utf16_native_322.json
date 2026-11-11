@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "notebook and cell selector validation",
+      "start": 274283692,
+      "end": 274284312,
+      "sha256": "48f000978c73c70e517dbdccd94a7fe1084eed59b282e1963150bcb5d17de025"
+    },
+    {
+      "name": "notebook cell mutation and file serialization",
+      "start": 275888610,
+      "end": 275889388,
+      "sha256": "bd24accdcb9671920d8d0f9962018bd81e5917c977ad39abf14b41a1881c4e17"
+    },
+    {
+      "name": "notebook model result renderer",
+      "start": 275884972,
+      "end": 275885500,
+      "sha256": "4ce528e11e9bb5ffa7cc14b5069c34082d7958c5f8156e6f19b88892708e5222"
+    }
+  ],
+  "notebooks": [
+    {
+      "name": "select exact lone surrogate identifier",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"\\ud800\",\"source\":\"first\",\"metadata\":{},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"id\":\"\\ud801\",\"source\":\"second\",\"metadata\":{},\"outputs\":[],\"execution_count\":null}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "\udc02",
+        "cell_id": "\ud801"
+      },
+      "expected": {
+        "data": {
+          "new_source": "\udc02",
+          "old_source": "second",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "\ud801",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"\\ud800\",\n   \"source\": \"first\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"\\ud801\",\n   \"source\": \"\\udc02\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Updated cell \ud801 with \udc02"
+      }
+    },
+    {
+      "name": "missing lone surrogate identifier",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"\\ud800\",\"source\":\"first\",\"metadata\":{},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"id\":\"\\ud801\",\"source\":\"second\",\"metadata\":{},\"outputs\":[],\"execution_count\":null}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "x",
+        "cell_id": "\udc00"
+      },
+      "expected": {
+        "error": "Cell with ID \"\udc00\" not found in notebook."
+      }
+    },
+    {
+      "name": "delete exact lone surrogate identifier",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"\\ud800\",\"source\":\"first\",\"metadata\":{},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"id\":\"\\ud801\",\"source\":\"second\",\"metadata\":{},\"outputs\":[],\"execution_count\":null}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "delete",
+        "new_source": "",
+        "cell_id": "\ud800"
+      },
+      "expected": {
+        "data": {
+          "new_source": "",
+          "old_source": "first",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "delete",
+          "cell_id": "\ud800",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"\\ud801\",\n   \"source\": \"second\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Deleted cell \ud800"
+      }
+    }
+  ]
+}

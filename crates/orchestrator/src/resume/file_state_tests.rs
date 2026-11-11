@@ -258,9 +258,44 @@ async fn cli_file_state_resume_restores_full_read_without_write() {
         .collect::<Vec<_>>();
     *orchestrator.session.lock().await = state_from_messages(fixture.session_id, &rows);
     orchestrator.restore_resume_runtime_metadata(&rows).await;
-    assert_eq!(get(&map, &path).unwrap().content, "before\r\n");
+    assert_eq!(get(&map, &path).unwrap().content, "before\n");
     edit(&fixture.context_with_map(map), &path).await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"after\r\n");
+}
+
+#[tokio::test]
+async fn native_file_state_resume_replays_mixed_and_cr_only_edit_sidecars() {
+    for (before, expected_view, expected_disk) in [
+        ("before\r\ntail\n", "after\ntail\n", "after\ntail\n"),
+        ("before\rtail\r", "after\rtail\r", "after\rtail\r"),
+        (
+            "before\r\ntail\r\nlast\n",
+            "after\ntail\nlast\n",
+            "after\r\ntail\r\nlast\r\n",
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        let path = fixture.cwd.join("mixed.txt");
+        std::fs::write(&path, before).unwrap();
+        fixture.record("Read", json!({"file_path": path})).await;
+        fixture
+            .record(
+                "Edit",
+                json!({"file_path":path,"old_string":"before","new_string":"after"}),
+            )
+            .await;
+        let map = new_read_file_state_map();
+        let orchestrator = fixture.fresh_orchestrator(map.clone());
+        let rows = fixture
+            .rows
+            .iter()
+            .map(|row| serde_json::from_value(row.clone()).unwrap())
+            .collect::<Vec<_>>();
+        *orchestrator.session.lock().await = state_from_messages(fixture.session_id, &rows);
+        orchestrator.restore_resume_runtime_metadata(&rows).await;
+        assert_eq!(get(&map, &path).unwrap().content, expected_view);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected_disk);
+    }
 }
 
 #[tokio::test]

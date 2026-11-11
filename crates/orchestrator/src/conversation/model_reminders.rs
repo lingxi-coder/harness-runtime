@@ -104,6 +104,7 @@ fn native_mcp_dropped_tools_attachment(
 pub(crate) struct NestedMemoryHistory {
     /// Raw path/content identities recovered from durable instructions rows.
     pub(crate) announced: HashMap<Vec<u16>, Vec<u16>>,
+    pub(crate) announced_start_only: HashSet<Vec<u16>>,
     pub(crate) nested: HashMap<PathBuf, String>,
 }
 
@@ -279,6 +280,9 @@ impl ConversationOrchestrator {
         }
         if let Some(files) = recover_instruction_files(&raw) {
             for file in files {
+                if file.start_only == Some(true) {
+                    prior.announced_start_only.insert(file.path_units());
+                }
                 prior
                     .announced
                     .insert(file.path_units(), file.content_units());
@@ -314,7 +318,18 @@ impl ConversationOrchestrator {
         cwd: &Path,
         prior: &NestedMemoryHistory,
     ) -> Vec<ConversationMessage> {
-        use lingxi_core::host::instruction_announcements::js_trim;
+        use lingxi_core::host::instruction_announcements::{
+            clip_instruction_start, js_trim, nested_instruction_character_limit,
+            INSTRUCTION_START_ONLY_MARKER,
+        };
+        let (model, profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let limit = nested_instruction_character_limit(
+            &model,
+            self.api.context_window_tokens(&model, profile.as_deref()),
+        );
         let mut messages = Vec::new();
         for file in files {
             let key = memory::lingxi_md::agents::identity(&file.path);
@@ -327,25 +342,54 @@ impl ConversationOrchestrator {
             {
                 continue;
             }
-            if !self.seed_nested_memory_read_state(&file).await {
-                continue;
-            }
             let body = js_trim(&file.body);
             let body_units = body.encode_utf16().collect::<Vec<_>>();
             let path_units = native_filesystem_path_units(&file.path);
-            let nested_was_announced = prior.nested.get(&file.path).is_some_and(|old| old == body);
             let instruction_was_announced = prior
                 .announced
                 .get(&path_units)
                 .is_some_and(|old| old == &body_units);
-            if nested_was_announced || instruction_was_announced {
+            let announced_prefix = prior.announced_start_only.contains(&path_units)
+                && prior.announced.get(&path_units).is_some_and(|old| {
+                    let marker = INSTRUCTION_START_ONLY_MARKER
+                        .encode_utf16()
+                        .collect::<Vec<_>>();
+                    let prefix_end = old
+                        .windows(marker.len())
+                        .rposition(|window| window == marker)
+                        .unwrap_or_else(|| old.len().saturating_sub(1));
+                    body_units.starts_with(&old[..prefix_end])
+                });
+            let clipped = announced_prefix
+                || (!instruction_was_announced
+                    && file.tier != memory::lingxi_md::LingxiMdTier::Managed
+                    && body_units.len() > limit);
+            let clipped_body = clipped.then(|| {
+                let content = Source::from(body);
+                let path =
+                    Source::root_string(String::from_utf16_lossy(&path_units), path_units.clone())
+                        .expect("filesystem path projection");
+                clip_instruction_start(&content, Some(&path), limit)
+            });
+            if !self
+                .seed_nested_memory_read_state_with_clipping(&file, clipped)
+                .await
+            {
+                continue;
+            }
+            let nested_was_announced = prior.nested.get(&file.path).is_some_and(|old| {
+                old == body
+                    || clipped_body.as_ref().and_then(|value| value.string_at(""))
+                        == Some(old.as_str())
+            });
+            if nested_was_announced || instruction_was_announced || announced_prefix {
                 continue;
             }
             let display_path = crate::prompt::nested_memory::relative_display_path(&file.path, cwd);
             let mut content = serde_json::json!({
                 "path": file.path,
                 "type": file.tier,
-                "content": file.body,
+                "content": clipped_body.as_ref().and_then(|body| body.string_at("")).unwrap_or(&file.body),
                 "contentDiffersFromDisk": file.content_differs_from_disk,
             });
             if let Some(globs) = &file.globs {
@@ -354,8 +398,13 @@ impl ConversationOrchestrator {
             if let Some(parent) = &file.parent {
                 content["parent"] = serde_json::json!(parent);
             }
-            if file.content_differs_from_disk {
+            if file.content_differs_from_disk && !clipped {
                 content["rawContent"] = serde_json::json!(file.raw_content);
+            }
+            if clipped {
+                // Explicit durable provenance for cold resume; never infer a
+                // clipping fence from model/user-authored reminder prose.
+                content["startOnly"] = serde_json::Value::Bool(true);
             }
             let attachment = serde_json::json!({
                 "type": "nested_memory",

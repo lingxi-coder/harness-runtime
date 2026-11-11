@@ -155,6 +155,7 @@ async fn raw_stream(
         None,
         Default::default(),
         Default::default(),
+        Default::default(),
     )
     .0
 }

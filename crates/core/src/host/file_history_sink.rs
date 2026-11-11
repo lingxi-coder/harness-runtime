@@ -19,9 +19,7 @@ pub trait FileHistorySink: Send + Sync {
 
     /// Bind a previously missing parent to the directory that actually
     /// performed a successful rooted write. A changed parent remains unbound.
-    async fn track_completed_write(
-        &self,
-        file_path: &str,
-        parent: super::rooted_fs::RootedWriteParent,
-    );
+    /// This records an in-memory handle receipt inside the owned synchronous
+    /// commit; implementations must not wait for asynchronous work.
+    fn track_completed_write(&self, file_path: &str, parent: super::rooted_fs::RootedWriteParent);
 }

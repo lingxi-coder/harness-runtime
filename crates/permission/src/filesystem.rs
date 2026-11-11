@@ -819,6 +819,7 @@ fn test_rule_pattern_impl(
     behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
     source_units: bool,
+    plan: Option<&PatternCompilationPlan>,
 ) -> RulePatternMatch {
     let file_abs = expand_path(input_path, roots);
     let (rel_pattern, root_opt) = pattern_with_root(pattern, source, roots);
@@ -839,6 +840,7 @@ fn test_rule_pattern_impl(
                     behavior,
                     roots,
                     source_units,
+                    plan,
                 );
                 if matched != RulePatternMatch::NoMatch {
                     return matched;
@@ -859,73 +861,18 @@ fn test_rule_pattern_impl(
         return RulePatternMatch::NoMatch;
     }
 
-    // Port of the oracle's `FTm` (matchingRuleForInput's pattern rewrite):
-    //   if (e.endsWith("/**")) { let r = e.slice(0,-3);
-    //     return /[^/]/.test(r) ? (r.includes("/")||!t||/^[!#]/.test(r) ? r : "/"+r) : "/**" }
-    //   return e
-    // where `t` is `behavior === "allow"`. `ignore` treats `dir` as matching
-    // `dir` and everything under it, so the `/**` suffix is redundant — but
-    // WHICH form replaces it depends on the rule's behavior.
-    // A bare root-anchored `/**` (also `//**` / `~/**`) would strip to "",
-    // which is not a pattern at all. claude-code never reaches that state: its
-    // `FTm` only rewrites a `/**`-suffixed pattern when the remainder contains
-    // a non-slash character (`/[^/]/.test(r)`), so `"/**"` is handed to
-    // `ignore().add()` UNCHANGED and matches every path under the root. Keep
-    // the whole pattern in that case rather than stripping it away — the empty
-    // string only ever existed on our side, and treating it as "matches
-    // nothing" silently revoked a grant the oracle honors.
-    let stripped: std::borrow::Cow<'_, str> = match rel_pattern.strip_suffix("/**") {
-        None => std::borrow::Cow::Borrowed(rel_pattern.as_str()),
-        Some(remainder) => {
-            if remainder.chars().all(|c| c == '/') {
-                // `/[^/]/.test(r)` is false (r is empty or all slashes). The
-                // oracle's false arm returns the LITERAL `"/**"`, not `e` —
-                // `return /[^/]/.test(r) ? (…) : "/**"`. For the only reachable
-                // input the two agree (`pattern_with_root` has already rewritten
-                // `//**` to `/**`), but emit the literal so a future reader
-                // porting an adjacent branch is not misled.
-                std::borrow::Cow::Borrowed("/**")
-            } else if remainder.contains('/')
-                || behavior != crate::rule::PermissionBehavior::Allow
-                || remainder.starts_with(['!', '#'])
-            {
-                // Multi-segment, non-allow, or gitignore-sigil: left UNANCHORED,
-                // so gitignore matches the pattern at any depth. Keeping deny
-                // and ask broad is the safe direction.
-                std::borrow::Cow::Borrowed(remainder)
-            } else {
-                // Single-segment ALLOW: re-anchored to the root so
-                // `Edit(src/**)` cannot authorize `<root>/vendor/src/...`.
-                std::borrow::Cow::Owned(format!("/{remainder}"))
-            }
-        }
+    let Some((stripped, negated)) = stripped_permission_pattern(&rel_pattern, behavior) else {
+        return RulePatternMatch::NoMatch;
     };
     let stripped = stripped.as_ref();
 
-    // Match the relative path as if rooted at `/`: build a one-pattern matcher
-    // anchored at `/` and test `/<relative>`. Computing the relative path
-    // ourselves (above) — rather than handing the absolute path to the builder
-    // — avoids the `ignore` crate's prefix-strip mis-matching paths that sit
-    // OUTSIDE the root (it would otherwise glob-test the unstripped absolute).
-    // Split the gitignore negation off LAST, once `pattern_with_root` and the
-    // `/**` rewrite have both run on the `!`-prefixed spelling (claude-code's
-    // `Xn` keeps a `/^[!#]/` remainder unanchored for exactly this reason).
-    let (stripped, negated) = match stripped.strip_prefix('!') {
-        // `Ki`: a bare `!` is "a negation of every path" and is dropped.
-        Some(rest)
-            if rest
-                .trim_matches(crate::source_input::is_js_trim_char)
-                .is_empty() =>
-        {
-            return RulePatternMatch::NoMatch;
-        }
-        Some(rest) => (rest, true),
-        None => (stripped, false),
-    };
-
     let matched = if source_units {
         let target = Path::new("/").join(&rel_str);
-        let Some(matcher) = cached_source_glob(stripped) else {
+        let matcher = plan.map_or_else(
+            || cached_source_glob(stripped),
+            |plan| plan.source_glob(stripped),
+        );
+        let Some(matcher) = matcher else {
             return RulePatternMatch::NoMatch;
         };
         if matcher.regex.is_none() {
@@ -955,6 +902,79 @@ fn test_rule_pattern_impl(
     } else {
         RulePatternMatch::Match
     }
+}
+
+/// Normalize the matcher key without binding it to any candidate path.
+fn stripped_permission_pattern(
+    rel_pattern: &str,
+    behavior: crate::rule::PermissionBehavior,
+) -> Option<(std::borrow::Cow<'_, str>, bool)> {
+    // Port of the oracle's `FTm` (matchingRuleForInput's pattern rewrite):
+    //   if (e.endsWith("/**")) { let r = e.slice(0,-3);
+    //     return /[^/]/.test(r) ? (r.includes("/")||!t||/^[!#]/.test(r) ? r : "/"+r) : "/**" }
+    //   return e
+    // where `t` is `behavior === "allow"`. `ignore` treats `dir` as matching
+    // `dir` and everything under it, so the `/**` suffix is redundant — but
+    // WHICH form replaces it depends on the rule's behavior.
+    // A bare root-anchored `/**` (also `//**` / `~/**`) would strip to "",
+    // which is not a pattern at all. claude-code never reaches that state: its
+    // `FTm` only rewrites a `/**`-suffixed pattern when the remainder contains
+    // a non-slash character (`/[^/]/.test(r)`), so `"/**"` is handed to
+    // `ignore().add()` UNCHANGED and matches every path under the root. Keep
+    // the whole pattern in that case rather than stripping it away — the empty
+    // string only ever existed on our side, and treating it as "matches
+    // nothing" silently revoked a grant the oracle honors.
+    let stripped: std::borrow::Cow<'_, str> = match rel_pattern.strip_suffix("/**") {
+        None => std::borrow::Cow::Borrowed(rel_pattern),
+        Some(remainder) => {
+            if remainder.chars().all(|c| c == '/') {
+                // `/[^/]/.test(r)` is false (r is empty or all slashes). The
+                // oracle's false arm returns the LITERAL `"/**"`, not `e` —
+                // `return /[^/]/.test(r) ? (…) : "/**"`. For the only reachable
+                // input the two agree (`pattern_with_root` has already rewritten
+                // `//**` to `/**`), but emit the literal so a future reader
+                // porting an adjacent branch is not misled.
+                std::borrow::Cow::Borrowed("/**")
+            } else if remainder.contains('/')
+                || behavior != crate::rule::PermissionBehavior::Allow
+                || remainder.starts_with(['!', '#'])
+            {
+                // Multi-segment, non-allow, or gitignore-sigil: left UNANCHORED,
+                // so gitignore matches the pattern at any depth. Keeping deny
+                // and ask broad is the safe direction.
+                std::borrow::Cow::Borrowed(remainder)
+            } else {
+                // Single-segment ALLOW: re-anchored to the root so
+                // `Edit(src/**)` cannot authorize `<root>/vendor/src/...`.
+                std::borrow::Cow::Owned(format!("/{remainder}"))
+            }
+        }
+    };
+    // Match the relative path as if rooted at `/`: build a one-pattern matcher
+    // anchored at `/` and test `/<relative>`. Computing the relative path
+    // ourselves (above) — rather than handing the absolute path to the builder
+    // — avoids the `ignore` crate's prefix-strip mis-matching paths that sit
+    // OUTSIDE the root (it would otherwise glob-test the unstripped absolute).
+    // Split the gitignore negation off LAST, once `pattern_with_root` and the
+    // `/**` rewrite have both run on the `!`-prefixed spelling (claude-code's
+    // `Xn` keeps a `/^[!#]/` remainder unanchored for exactly this reason).
+    let negated = stripped.starts_with('!');
+    let stripped = if negated {
+        let rest = &stripped[1..];
+        if rest
+            .trim_matches(crate::source_input::is_js_trim_char)
+            .is_empty()
+        {
+            return None;
+        }
+        match stripped {
+            std::borrow::Cow::Borrowed(value) => std::borrow::Cow::Borrowed(&value[1..]),
+            std::borrow::Cow::Owned(value) => std::borrow::Cow::Owned(value[1..].to_owned()),
+        }
+    } else {
+        stripped
+    };
+    Some((stripped, negated))
 }
 
 /// Native 2.1.318 `Dn/es`: normalize repeated slashes and a leading BOM;
@@ -1143,6 +1163,17 @@ pub(crate) fn test_rule_pattern_units(
     behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
 ) -> RulePatternMatch {
+    test_rule_pattern_units_with_plan(input_path, pattern, source, behavior, roots, None)
+}
+
+pub(crate) fn test_rule_pattern_units_with_plan(
+    input_path: &[u16],
+    pattern: &[u16],
+    source: PermissionRuleSource,
+    behavior: crate::rule::PermissionBehavior,
+    roots: &FsRoots,
+    plan: Option<&PatternCompilationPlan>,
+) -> RulePatternMatch {
     let cwd = roots
         .cwd
         .to_string_lossy()
@@ -1185,7 +1216,131 @@ pub(crate) fn test_rule_pattern_units(
         behavior,
         &mapped_roots,
         true,
+        plan,
     )
+}
+
+/// Immutable matcher artifacts owned by one read-search policy snapshot.
+/// The key set comes only from that snapshot's active rules, so walking more
+/// files cannot grow it. No candidate path or authorization result is retained.
+type PreparedSourceGlob =
+    std::sync::Arc<std::sync::OnceLock<Option<std::sync::Arc<SourceGlobMatcher>>>>;
+
+#[derive(Default)]
+pub(crate) struct PatternCompilationPlan {
+    source_globs: std::collections::HashMap<String, PreparedSourceGlob>,
+}
+
+/// Retain only the current active artifact plan between a gate's searches.
+/// Older snapshots own their cells independently; removed keys leave this slot.
+#[derive(Default)]
+pub(crate) struct PatternCompilationPlanCache(
+    std::sync::Mutex<Option<std::sync::Arc<PatternCompilationPlan>>>,
+);
+
+impl PatternCompilationPlanCache {
+    pub(crate) fn reuse(
+        &self,
+        mut plan: PatternCompilationPlan,
+    ) -> std::sync::Arc<PatternCompilationPlan> {
+        let mut previous = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = previous.as_ref() {
+            for (pattern, slot) in &mut plan.source_globs {
+                if let Some(retained) = previous.source_globs.get(pattern) {
+                    *slot = std::sync::Arc::clone(retained);
+                }
+            }
+        }
+        let plan = std::sync::Arc::new(plan);
+        *previous = Some(std::sync::Arc::clone(&plan));
+        plan
+    }
+}
+
+impl PatternCompilationPlan {
+    pub(crate) fn prepare_rule(
+        &mut self,
+        pattern: &[u16],
+        source: PermissionRuleSource,
+        behavior: crate::rule::PermissionBehavior,
+        roots: &FsRoots,
+    ) {
+        let pattern = crate::source_input::trim_gitignore_end_units(pattern);
+        let cwd = roots
+            .cwd
+            .to_string_lossy()
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let home = roots
+            .home
+            .as_deref()
+            .map(|path| path.to_string_lossy().encode_utf16().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let lingxi_home = roots
+            .lingxi_home
+            .to_string_lossy()
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let Some(mapped) =
+            crate::source_input::exact_operation_strings(&[pattern, &cwd, &home, &lingxi_home])
+        else {
+            return;
+        };
+        let mapped_roots = FsRoots {
+            cwd: PathBuf::from(&mapped[1]),
+            home: roots.home.as_ref().map(|_| PathBuf::from(&mapped[2])),
+            lingxi_home: PathBuf::from(&mapped[3]),
+        };
+        let (relative, root) = pattern_with_root(&mapped[0], source, &mapped_roots);
+        let Some(relative) = prepare_permission_pattern_impl(&relative, behavior, true) else {
+            return;
+        };
+        if behavior != crate::rule::PermissionBehavior::Allow {
+            if let Some(twin) = root
+                .as_ref()
+                .and_then(|root| physical_permission_pattern(root, &relative))
+            {
+                // Physical twins are already operation strings here. Re-enter
+                // preparation directly rather than mapping them twice.
+                self.prepare_mapped_pattern(&format!("/{twin}"), source, behavior, &mapped_roots);
+            }
+        }
+        self.retain_pattern(&relative, behavior);
+    }
+
+    fn prepare_mapped_pattern(
+        &mut self,
+        pattern: &str,
+        source: PermissionRuleSource,
+        behavior: crate::rule::PermissionBehavior,
+        roots: &FsRoots,
+    ) {
+        let (relative, _) = pattern_with_root(pattern, source, roots);
+        if let Some(relative) = prepare_permission_pattern_impl(&relative, behavior, true) {
+            self.retain_pattern(&relative, behavior);
+        }
+    }
+
+    fn retain_pattern(&mut self, relative: &str, behavior: crate::rule::PermissionBehavior) {
+        let Some((pattern, _)) = stripped_permission_pattern(relative, behavior) else {
+            return;
+        };
+        self.source_globs
+            .entry(pattern.into_owned())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()));
+    }
+
+    fn source_glob(&self, pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
+        match self.source_globs.get(pattern) {
+            Some(slot) => slot.get_or_init(|| cached_source_glob(pattern)).clone(),
+            // New symlink landings are resolved by the live policy and are not
+            // accumulated in the snapshot's fixed compilation-artifact set.
+            None => cached_source_glob(pattern),
+        }
+    }
 }
 
 struct SourceGlobMatcher {
@@ -1222,7 +1377,9 @@ const MAX_SOURCE_GLOB_REGEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SOURCE_GLOB_COMPILED_BYTES: usize = 8 * 1024 * 1024;
 
 fn exhausted_source_glob() -> SourceGlobMatcher {
-    tracing::warn!("permission glob exceeded its compilation budget; retaining restrictions and withholding grants");
+    tracing::warn!(
+        "permission glob exceeded its compilation budget; retaining restrictions and withholding grants"
+    );
     SourceGlobMatcher {
         regex: None,
         is_whitelist: false,
@@ -1239,11 +1396,13 @@ enum SourceGlobBuildError {
 const COMPILED_PATTERN_CACHE_CAPACITY: usize = 256;
 
 /// FIFO replacement bounds retained artifacts while continuing to admit rules
-/// introduced after startup. Hits do not reorder entries or allocate. More
-/// simultaneously active patterns than the capacity can still cause churn.
+/// introduced after startup. Each slot coordinates one cold compilation. A
+/// saturated cache evicts completed artifacts first; callers wait only when
+/// every slot is actively being compiled, keeping in-flight state bounded too.
 struct CompiledPatternCache<T> {
-    entries: indexmap::IndexMap<String, T>,
+    entries: indexmap::IndexMap<String, std::sync::Arc<std::sync::OnceLock<T>>>,
     capacity: usize,
+    available: std::sync::Arc<std::sync::Condvar>,
 }
 
 impl<T> CompiledPatternCache<T> {
@@ -1251,21 +1410,39 @@ impl<T> CompiledPatternCache<T> {
         Self {
             entries: indexmap::IndexMap::new(),
             capacity,
+            available: std::sync::Arc::new(std::sync::Condvar::new()),
         }
     }
 
+    #[cfg(test)]
     fn get(&self, pattern: &str) -> Option<&T> {
-        self.entries.get(pattern)
+        self.entries.get(pattern)?.get()
     }
+}
 
-    fn insert(&mut self, pattern: String, compiled: T) {
-        if self.capacity == 0 {
-            return;
+struct CompilationCompletion<'a, T> {
+    cache: &'a std::sync::Mutex<CompiledPatternCache<T>>,
+    pattern: &'a str,
+    slot: std::sync::Arc<std::sync::OnceLock<T>>,
+}
+
+impl<T> Drop for CompilationCompletion<'_, T> {
+    fn drop(&mut self) {
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.slot.get().is_none()
+            && guard
+                .entries
+                .get(self.pattern)
+                .is_some_and(|slot| std::sync::Arc::ptr_eq(slot, &self.slot))
+        {
+            // A panicking compiler must release its slot and wake blocked
+            // admissions rather than permanently consuming cache capacity.
+            guard.entries.shift_remove(self.pattern);
         }
-        if !self.entries.contains_key(&pattern) && self.entries.len() == self.capacity {
-            self.entries.shift_remove_index(0);
-        }
-        self.entries.insert(pattern, compiled);
+        guard.available.notify_all();
     }
 }
 
@@ -1274,22 +1451,47 @@ fn cached_compilation<T: Clone>(
     pattern: &str,
     build: impl FnOnce() -> T,
 ) -> T {
-    {
-        let guard = cache
+    let slot = loop {
+        let mut guard = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(hit) = guard.get(pattern) {
-            return hit.clone();
+        if let Some(slot) = guard.entries.get(pattern) {
+            break std::sync::Arc::clone(slot);
         }
+        if guard.capacity == 0 {
+            drop(guard);
+            return build();
+        }
+        if guard.entries.len() == guard.capacity {
+            if let Some(index) = guard.entries.values().position(|slot| slot.get().is_some()) {
+                guard.entries.shift_remove_index(index);
+            } else {
+                let available = std::sync::Arc::clone(&guard.available);
+                drop(
+                    available
+                        .wait(guard)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                continue;
+            }
+        }
+        let slot = std::sync::Arc::new(std::sync::OnceLock::new());
+        guard
+            .entries
+            .insert(pattern.to_owned(), std::sync::Arc::clone(&slot));
+        break slot;
+    };
+    if let Some(hit) = slot.get() {
+        return hit.clone();
     }
-    // Compilation stays outside the shared lock. Concurrent cold callers may
-    // compile the same immutable pattern; replacement still retains one slot.
-    let built = build();
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(pattern.to_string(), built.clone());
-    built
+    let _completion = CompilationCompletion {
+        cache,
+        pattern,
+        slot: std::sync::Arc::clone(&slot),
+    };
+    // OnceLock serializes only callers for this key. Other patterns compile
+    // outside the shared cache lock, including negative and budget results.
+    slot.get_or_init(build).clone()
 }
 
 fn cached_source_glob(pattern: &str) -> Option<std::sync::Arc<SourceGlobMatcher>> {
@@ -2522,6 +2724,267 @@ mod tests {
         );
         assert!(guard.get("exhausted").is_some());
         assert!(guard.get("valid").is_some());
+    }
+
+    #[test]
+    fn compiled_pattern_cache_coordinates_concurrent_cold_callers() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
+        };
+        let cache = std::sync::Mutex::new(CompiledPatternCache::new(2));
+        let builds = AtomicUsize::new(0);
+        let callers = Barrier::new(12);
+        std::thread::scope(|scope| {
+            let handles = (0..12)
+                .map(|_| {
+                    scope.spawn(|| {
+                        callers.wait();
+                        cached_compilation(&cache, "same-cold-pattern", || {
+                            builds.fetch_add(1, Ordering::SeqCst);
+                            // Give competing callers the opportunity to request this
+                            // still-uninitialized slot; correctness has no deadline.
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            Arc::new(42)
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let values = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn compiled_pattern_cache_allows_independent_builds_and_bounds_in_flight_slots() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Condvar, Mutex,
+        };
+        let cache = Mutex::new(CompiledPatternCache::new(1));
+        let release = (Mutex::new(false), Condvar::new());
+        let second_build = AtomicBool::new(false);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                cached_compilation(&cache, "first", || {
+                    entered_tx.send(()).unwrap();
+                    let mut released = release.0.lock().unwrap();
+                    while !*released {
+                        released = release.1.wait(released).unwrap();
+                    }
+                    1
+                })
+            });
+            entered_rx.recv().unwrap();
+            let second = scope.spawn(|| {
+                waiting_tx.send(()).unwrap();
+                cached_compilation(&cache, "second", || {
+                    second_build.store(true, Ordering::SeqCst);
+                    2
+                })
+            });
+            waiting_rx.recv().unwrap();
+            assert_eq!(cache.lock().unwrap().entries.len(), 1);
+            assert!(!second_build.load(Ordering::SeqCst));
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            assert_eq!(first.join().unwrap(), 1);
+            assert_eq!(second.join().unwrap(), 2);
+        });
+        assert!(second_build.load(Ordering::SeqCst));
+        assert_eq!(cache.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn compiled_pattern_cache_releases_panicking_compilation_slot() {
+        let cache = std::sync::Mutex::new(CompiledPatternCache::new(1));
+        assert!(std::panic::catch_unwind(|| {
+            cached_compilation(&cache, "panic", || -> usize { panic!("compiler failed") })
+        })
+        .is_err());
+        assert!(cache.lock().unwrap().entries.is_empty());
+        assert_eq!(cached_compilation(&cache, "recovered", || 7), 7);
+        // A disabled cache compiles directly without admitting an in-flight slot.
+        let disabled = std::sync::Mutex::new(CompiledPatternCache::new(0));
+        assert_eq!(cached_compilation(&disabled, "uncached", || 9), 9);
+        assert!(disabled.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn compilation_plan_retains_active_rules_after_global_cache_churn() {
+        use crate::rule::PermissionBehavior;
+        let roots = FsRoots {
+            cwd: "/__permission_plan__".into(),
+            home: None,
+            lingxi_home: "/__permission_plan_home__".into(),
+        };
+        let mut plan = PatternCompilationPlan::default();
+        let count = COMPILED_PATTERN_CACHE_CAPACITY + 17;
+        let patterns = (0..count)
+            .map(|index| format!("plan-path-{index}/**"))
+            .collect::<Vec<_>>();
+        for pattern in &patterns {
+            plan.prepare_rule(
+                &pattern.encode_utf16().collect::<Vec<_>>(),
+                PermissionRuleSource::Session,
+                PermissionBehavior::Deny,
+                &roots,
+            );
+        }
+        let compiled = patterns
+            .iter()
+            .map(|pattern| {
+                plan.source_glob(pattern.strip_suffix("/**").unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        // Force the process-global cache to replace every prepared artifact.
+        for index in 0..COMPILED_PATTERN_CACHE_CAPACITY * 2 {
+            cached_source_glob(&format!("independent-churn-{index}"));
+        }
+        for ((pattern, retained), index) in patterns.iter().zip(compiled).zip(0..) {
+            let cached = plan
+                .source_glob(pattern.strip_suffix("/**").unwrap())
+                .unwrap();
+            assert!(std::sync::Arc::ptr_eq(&retained, &cached));
+            let target = format!("/__permission_plan__/plan-path-{index}/file")
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            let pattern = pattern.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(
+                test_rule_pattern_units_with_plan(
+                    &target,
+                    &pattern,
+                    PermissionRuleSource::Session,
+                    PermissionBehavior::Deny,
+                    &roots,
+                    Some(&plan)
+                ),
+                RulePatternMatch::Match
+            );
+        }
+        assert_eq!(
+            plan.source_globs.len(),
+            count,
+            "candidate checks cannot add compilation keys"
+        );
+    }
+
+    #[test]
+    fn compilation_plan_cache_reuses_active_cells_and_releases_removed_keys() {
+        use crate::rule::PermissionBehavior;
+        use std::sync::Arc;
+        let roots = FsRoots {
+            cwd: "/__permission_plan__".into(),
+            home: None,
+            lingxi_home: "/__permission_plan_home__".into(),
+        };
+        let make_plan = |patterns: &[&str]| {
+            let mut plan = PatternCompilationPlan::default();
+            for pattern in patterns {
+                plan.prepare_rule(
+                    &pattern.encode_utf16().collect::<Vec<_>>(),
+                    PermissionRuleSource::Session,
+                    PermissionBehavior::Deny,
+                    &roots,
+                );
+            }
+            plan
+        };
+        let cache = PatternCompilationPlanCache::default();
+        let first = cache.reuse(make_plan(&["retained/**", "removed/**"]));
+        let compiled = first.source_glob("retained").unwrap();
+        let removed = Arc::downgrade(first.source_globs.get("removed").unwrap());
+        let second = cache.reuse(make_plan(&["retained/**", "added/**"]));
+        assert!(Arc::ptr_eq(
+            first.source_globs.get("retained").unwrap(),
+            second.source_globs.get("retained").unwrap()
+        ));
+        assert_eq!(second.source_globs.len(), 2);
+        assert!(!second.source_globs.contains_key("removed"));
+        // A concurrent older search can continue using its captured cells.
+        assert!(removed.upgrade().is_some());
+        drop(first);
+        assert!(
+            removed.upgrade().is_none(),
+            "the gate must not accumulate stale rule artifacts"
+        );
+        for index in 0..COMPILED_PATTERN_CACHE_CAPACITY * 2 {
+            cached_source_glob(&format!("plan-slot-churn-{index}"));
+        }
+        assert!(Arc::ptr_eq(
+            &compiled,
+            &second.source_glob("retained").unwrap()
+        ));
+    }
+
+    #[test]
+    fn compilation_plan_preserves_utf16_negation_and_exhaustion_semantics() {
+        use crate::rule::PermissionBehavior::{Allow, Ask, Deny};
+        let roots = FsRoots {
+            cwd: "/__permission_plan__".into(),
+            home: Some("/__permission_home__".into()),
+            lingxi_home: "/__permission_plan_home__".into(),
+        };
+        let mut patterns = vec![
+            "src/**".encode_utf16().collect::<Vec<_>>(),
+            "!src/**".encode_utf16().collect(),
+            "/src/[ab]".encode_utf16().collect(),
+            "[".encode_utf16().collect(),
+            "~/résumé/**".encode_utf16().collect(),
+            "src/\u{1f600}?".encode_utf16().collect(),
+            "!".encode_utf16().collect(),
+        ];
+        patterns.push(vec![
+            b's' as u16,
+            b'r' as u16,
+            b'c' as u16,
+            b'/' as u16,
+            0xd800,
+            b'?' as u16,
+        ]);
+        patterns.push(vec![b'*' as u16; MAX_SOURCE_GLOB_UNITS + 1]);
+        let targets = [
+            "src/a",
+            "src/other",
+            "elsewhere",
+            "~/résumé/one",
+            "src/\u{1f600}x",
+        ];
+        for behavior in [Allow, Ask, Deny] {
+            for pattern in &patterns {
+                let mut plan = PatternCompilationPlan::default();
+                plan.prepare_rule(pattern, PermissionRuleSource::Session, behavior, &roots);
+                for target in targets {
+                    let target = target.encode_utf16().collect::<Vec<_>>();
+                    assert_eq!(
+                        test_rule_pattern_units_with_plan(
+                            &target,
+                            pattern,
+                            PermissionRuleSource::Session,
+                            behavior,
+                            &roots,
+                            Some(&plan)
+                        ),
+                        test_rule_pattern_units(
+                            &target,
+                            pattern,
+                            PermissionRuleSource::Session,
+                            behavior,
+                            &roots
+                        ),
+                        "pattern {pattern:?}, behavior {behavior:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

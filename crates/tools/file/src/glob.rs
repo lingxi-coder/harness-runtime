@@ -43,9 +43,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use tool_api::context::ToolUseContext;
-use tool_api::native_output::{
-    parse_object, validate_string_array, OutputField, OutputFieldType, UnknownOutputKeys,
-};
+use tool_api::native_output::{parse_object, OutputField, OutputFieldType, UnknownOutputKeys};
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
@@ -60,9 +58,10 @@ use crate::grep::{
     is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG, SEARCH_INCOMPLETE_NOTE,
 };
 use crate::shared::{
-    open_rooted_search_file, prepare_search_read_policy, run_search_candidate_hook,
-    run_search_preparation_hook, search_path_is_read_denied, ReadDenyPolicy, SearchControl,
-    SearchResolutionError, SearchResolutionSnapshot, SearchStop, SearchWalkError, StableTopK,
+    acquire_search_job, open_rooted_search_file, prepare_search_read_policy,
+    run_search_candidate_hook, run_search_preparation_hook, search_argv_string,
+    search_path_is_read_denied, ReadDenyPolicy, SearchControl, SearchResolutionError,
+    SearchResolutionSnapshot, SearchStop, SearchWalkError, StableTopK,
 };
 
 /// Tool name byte-lock.
@@ -309,15 +308,10 @@ impl GlobTool {
 }
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["pattern"],
-        "properties": {
-            "pattern": { "type": "string", "description": "The glob pattern to match files against" },
-            "path":    { "type": "string", "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided." }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/glob-input-schema.json"
+    ))
+    .expect("pinned glob input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -410,7 +404,7 @@ impl Tool for GlobTool {
                 },
                 OutputField {
                     name: "filenames",
-                    kind: OutputFieldType::Array,
+                    kind: OutputFieldType::StringArray,
                     required: true,
                 },
                 OutputField {
@@ -436,7 +430,6 @@ impl Tool for GlobTool {
             ],
             UnknownOutputKeys::Strip,
         )?;
-        validate_string_array(output, "/filenames", TOOL_NAME, "filenames")?;
         Ok(parsed)
     }
     fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
@@ -476,10 +469,11 @@ impl Tool for GlobTool {
         input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        let pattern = search_argv_string(input, "pattern");
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
             &[
-                ("pattern", crate::input_string(input, "pattern")),
+                ("pattern", pattern.as_deref()),
                 ("path", crate::input_string(input, "path")),
             ],
         )?;
@@ -542,8 +536,9 @@ impl Tool for GlobTool {
         // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
         let trusted = self.ctx.read_roots_for_tool(TOOL_NAME, &input).await;
 
-        let pattern = crate::input_string(&input, "pattern")
+        let pattern_source = search_argv_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
+        let pattern = pattern_source.as_ref();
 
         // claude-code Glob `getPath({path:e}){return e?$i(e):Ct()}`: a supplied
         // `path` is used as-is, otherwise the LIVE cwd (`Ct()`). The no-cell
@@ -693,28 +688,36 @@ impl Tool for GlobTool {
         let deadline = started + timeout;
         let (control, _search_owner) = SearchControl::new(deadline, _ctx.cancel.clone());
         let call_control = control.clone();
+        let job_permit = acquire_search_job(&control)
+            .await
+            .map_err(|stop| match stop {
+                SearchStop::Cancelled => ToolError::Aborted,
+                SearchStop::TimedOut => ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()),
+            })?;
 
         let search_path = base.clone();
         let search_path_for_hook = base.clone();
-        let (hits, total, timed_out) = lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
-            // This is deliberately after the deny overrides have been built
-            // and immediately before the walk is created. The test hook swaps
-            // a symlink at this exact preparation boundary.
-            run_search_preparation_hook(&search_path_for_hook);
-            search_resolution.verify()?;
-            glob_walk(
-                canon_base,
-                overrides,
-                no_ignore,
-                hidden,
-                control,
-                search_resolution,
-                read_deny_policy,
-            )
-        })
-        .await
-        .map_err(|e| ToolError::Io(e.to_string().into()))?
-        .map_err(|error| search_resolution_error(&search_path, error))?;
+        let (hits, total, truncated, count_complete, timed_out) =
+            lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
+                let _job_permit = job_permit;
+                // This is deliberately after the deny overrides have been built
+                // and immediately before the walk is created. The test hook swaps
+                // a symlink at this exact preparation boundary.
+                run_search_preparation_hook(&search_path_for_hook);
+                search_resolution.verify()?;
+                glob_walk(
+                    canon_base,
+                    overrides,
+                    no_ignore,
+                    hidden,
+                    control,
+                    search_resolution,
+                    read_deny_policy,
+                )
+            })
+            .await
+            .map_err(|e| ToolError::Io(e.to_string().into()))?
+            .map_err(|error| search_resolution_error(&search_path, error))?;
         call_control
             .check_cancellation()
             .map_err(|_| ToolError::Aborted)?;
@@ -725,8 +728,6 @@ impl Tool for GlobTool {
         if timed_out && hits.is_empty() {
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()));
         }
-
-        let truncated = total > MAX_GLOB_MATCHES;
 
         // Relativize each hit against the canonicalized LIVE cwd (TS
         // `files.map(toRelativePath)`, `GlobTool.ts:166`, where `toRelativePath`
@@ -748,7 +749,7 @@ impl Tool for GlobTool {
             "numFiles": num_files,
             "truncated": truncated,
             "totalMatches": total,
-            "countIsComplete": !timed_out,
+            "countIsComplete": count_complete,
         }));
         if timed_out {
             data.set_field("timedOut", crate::generated_result(&json!(true)))
@@ -778,7 +779,7 @@ fn glob_walk(
     control: SearchControl,
     search_resolution: SearchResolutionSnapshot,
     read_deny_policy: Option<ReadDenyPolicy>,
-) -> Result<(Vec<(PathBuf, SystemTime)>, usize, bool), SearchWalkError> {
+) -> Result<(Vec<(PathBuf, SystemTime)>, usize, bool, bool, bool), SearchWalkError> {
     search_resolution.verify()?;
     let mut wb = WalkBuilder::new(&canon_base);
     wb.overrides(overrides);
@@ -795,9 +796,16 @@ fn glob_walk(
     }
 
     let mut timed_out = false;
-    let mut hits = StableTopK::new(Some(MAX_GLOB_MATCHES), |a: &(PathBuf, SystemTime), b| {
-        a.1.cmp(&b.1)
-    });
+    let postfilter = read_deny_policy.is_some();
+    let mut candidate_count = 0;
+    let mut last_candidate = None;
+    // Keep each permitted candidate's rank in the pre-postfilter stream. Native
+    // stops checking Read-deny rules after its page fills, so trailing denied
+    // candidates still make that page's total a lower bound.
+    let mut hits = StableTopK::new(
+        Some(MAX_GLOB_MATCHES),
+        |a: &(PathBuf, SystemTime, usize), b| a.1.cmp(&b.1),
+    );
     for entry in wb.build() {
         search_resolution.verify()?;
         match control.check() {
@@ -817,20 +825,26 @@ fn glob_walk(
             continue;
         }
         let path = entry.path();
-        if search_path_is_read_denied(&read_deny_policy, path) {
-            continue;
+        let denied = search_path_is_read_denied(&read_deny_policy, path);
+        let mtime = if denied {
+            // This is metadata only: do not open or read a denied file. Retain
+            // the sort position internally to reproduce the native floor.
+            entry.metadata().ok().and_then(|m| m.modified().ok())
+        } else {
+            // Pin metadata to a rooted no-follow handle after the walker's
+            // classification; never reopen a possibly swapped candidate path.
+            run_search_candidate_hook(path);
+            let file = open_rooted_search_file(&canon_base, path)?;
+            file.metadata().ok().and_then(|m| m.modified().ok())
         }
-        // Pin metadata to a rooted no-follow handle after the walker's regular
-        // classification. This closes the leaf/ancestor swap window that a
-        // second pathname metadata lookup would leave open.
-        run_search_candidate_hook(path);
-        let file = open_rooted_search_file(&canon_base, path)?;
-        let mtime = file
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        hits.push((path.to_path_buf(), mtime));
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+        let rank = (mtime, candidate_count);
+        candidate_count += 1;
+        last_candidate =
+            Some(last_candidate.map_or(rank, |last: (SystemTime, usize)| last.max(rank)));
+        if !denied {
+            hits.push((path.to_path_buf(), mtime, rank.1));
+        }
     }
     search_resolution.verify()?;
     match control.check() {
@@ -838,13 +852,33 @@ fn glob_walk(
         Err(SearchStop::TimedOut) => timed_out = true,
         Ok(()) => {}
     }
-    let total = hits.total();
-    Ok((hits.into_sorted(), total, timed_out))
+    let permitted = hits.total();
+    let hits = hits.into_sorted();
+    let postfilter_has_more = postfilter
+        && hits.len() == MAX_GLOB_MATCHES
+        && last_candidate
+            > hits
+                .last()
+                .map(|(_, mtime, encounter)| (*mtime, *encounter));
+    let truncated = permitted > MAX_GLOB_MATCHES || postfilter_has_more;
+    let count_complete = !timed_out && !postfilter_has_more;
+    let total = if postfilter_has_more {
+        MAX_GLOB_MATCHES
+    } else {
+        permitted
+    };
+    let hits = hits
+        .into_iter()
+        .map(|(path, mtime, _)| (path, mtime))
+        .collect();
+    Ok((hits, total, truncated, count_complete, timed_out))
 }
 
 fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
     let error = match error {
         SearchWalkError::Cancelled => return ToolError::Aborted,
+        SearchWalkError::Engine(message) => return ToolError::Io(message.into()),
+        SearchWalkError::InvalidInput(message) => return ToolError::InvalidInput(message.into()),
         SearchWalkError::Resolution(error) => error,
     };
     let reason = match error {
@@ -862,6 +896,105 @@ fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn malformed_utf16_glob_pattern_coerces_at_native_argv_boundary() {
+        let _env = lock_and_clear_glob_env().await;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_search_gaps_322.json"
+        ))
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        for name in ["�.txt", "ordinary.txt"] {
+            std::fs::write(tmp.path().join(name), "x").unwrap();
+        }
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        for case in fixture["surrogateGlobs"].as_array().unwrap() {
+            let input = Utf16JsonProjection::parse(case["inputJson"].as_str().unwrap()).unwrap();
+            tool.validate_input(&input, &fresh_ctx()).await.unwrap();
+            let result = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+            let expected: Vec<_> = case["expected"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|file| file.as_str().unwrap().strip_prefix("/fixture/").unwrap())
+                .collect();
+            assert_eq!(crate::test_data(&result.data)["filenames"], json!(expected));
+            for field in ["totalMatches", "truncated", "countIsComplete"] {
+                assert_eq!(
+                    crate::test_data(&result.data)[field],
+                    case["expected"][field]
+                );
+            }
+        }
+        let input = Utf16JsonProjection::parse(r#"{"pattern":"\ud800\u0000"}"#).unwrap();
+        let error = tool.validate_input(&input, &fresh_ctx()).await.unwrap_err();
+        assert_eq!(
+            error.0.string_at(""),
+            Some(
+                "Glob pattern cannot contain null bytes (\\0). Remove the null byte and try again."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn active_read_deny_page_total_is_native_lower_bound() {
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        use std::sync::Arc;
+        let _env = lock_and_clear_glob_env().await;
+        for count in [99, 100, 101, 150] {
+            let tmp = TempDir::new().unwrap();
+            for index in 0..count {
+                std::fs::write(tmp.path().join(format!("f{index:03}.txt")), "x").unwrap();
+            }
+            let (mut ctx, _) = make_ctx(&tmp);
+            // Even an unrelated active rule selects the native postfilter loop.
+            let policy = Arc::new(
+                permission::PermissionPolicy::from_rules(
+                    permission::PermissionMode::Default,
+                    [PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Read(unmatched.secret)"),
+                        behavior: PermissionBehavior::Deny,
+                        source: PermissionRuleSource::Session,
+                    }],
+                )
+                .with_roots(permission::FsRoots {
+                    cwd: tmp.path().into(),
+                    home: None,
+                    lingxi_home: tmp.path().join(".lingxi"),
+                }),
+            );
+            ctx.permission_policy = policy.clone();
+            ctx.permission_gate = Some(Arc::new(permission::PolicyPermissionGate::new(
+                policy,
+                Arc::new(permission::DenyOnAskGate),
+            )));
+            let result = GlobTool::new(ctx)
+                .call(
+                    crate::generated_result(&json!({"pattern":"*.txt"})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            let data = crate::test_data(&result.data);
+            assert_eq!(data["numFiles"], count.min(MAX_GLOB_MATCHES));
+            assert_eq!(data["totalMatches"], count.min(MAX_GLOB_MATCHES));
+            assert_eq!(data["truncated"], count > MAX_GLOB_MATCHES);
+            assert_eq!(data["countIsComplete"], count <= MAX_GLOB_MATCHES);
+            if count > MAX_GLOB_MATCHES {
+                assert!(result
+                    .model_content
+                    .unwrap()
+                    .string_at("")
+                    .unwrap()
+                    .contains("there are more than 100 matches"));
+            }
+        }
+    }
+
     #[test]
     fn search_optimizer_glob_walk_retains_only_oldest_hundred_and_counts_all() {
         let tmp = TempDir::new().unwrap();
@@ -875,7 +1008,7 @@ mod tests {
         let resolution = SearchResolutionSnapshot::capture(&root, &root, &[]);
         let (control, _owner) =
             SearchControl::new(Instant::now() + std::time::Duration::from_secs(60), None);
-        let (hits, total, timed_out) = glob_walk(
+        let (hits, total, _, _, timed_out) = glob_walk(
             root.clone(),
             OverrideBuilder::new(&root).build().unwrap(),
             true,
@@ -904,7 +1037,7 @@ mod tests {
         std::fs::write(root.join("one.txt"), "x").unwrap();
         let (expired, _expired_owner) = SearchControl::new(Instant::now(), None);
         let resolution = SearchResolutionSnapshot::capture(&root, &root, &[]);
-        let (hits, total, timed_out) = glob_walk(
+        let (hits, total, _, _, timed_out) = glob_walk(
             root.clone(),
             OverrideBuilder::new(&root).build().unwrap(),
             true,
@@ -922,7 +1055,7 @@ mod tests {
         let control = control.with_test_stop(move || {
             (checks.fetch_add(1, Ordering::Relaxed) >= 2).then_some(SearchStop::TimedOut)
         });
-        let (hits, total, timed_out) = glob_walk(
+        let (hits, total, _, _, timed_out) = glob_walk(
             root.clone(),
             OverrideBuilder::new(&root).build().unwrap(),
             true,

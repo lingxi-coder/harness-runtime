@@ -622,9 +622,16 @@ impl ReplayedSession {
             )
             .into_iter()
             .collect(),
-            model_reminder_attachments: model_reminder_attachments_from_messages(&self.messages)
-                .into_iter()
-                .collect(),
+            model_reminder_attachments: {
+                let mut attachments = model_reminder_attachments_from_messages(&self.messages);
+                attachments.extend(
+                    self.runtime_metadata
+                        .historical_read_fence_attachments
+                        .iter()
+                        .cloned(),
+                );
+                attachments.into_iter().collect()
+            },
             native_request_history: self.state.native_request_history.clone(),
             cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
             compacted: tracking.compacted,
@@ -691,6 +698,9 @@ pub struct ResumeRuntimeMetadata {
     pub prompt_snapshot_epoch: Option<u64>,
     /// Hint from the latest raw prompt_snapshot, with no older-row fallback.
     pub context_rendering_hint: Option<lingxi_core::host::instructions::InstructionRendering>,
+    /// Explicit clipping provenance on the selected lineage before compact
+    /// boundaries. This is kept outside model history and ordinary file reads.
+    pub historical_read_fence_attachments: Vec<(MessageId, Utf16JsonProjection)>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -777,6 +787,13 @@ fn replay_captured_session_inner(
         .filter(|message| !message.is_sidechain)
         .cloned()
         .collect::<Vec<_>>();
+    runtime_metadata.historical_read_fence_attachments = historical_read_fence_attachments(
+        &transcript_entries,
+        messages
+            .iter()
+            .map(|message| message.uuid.clone())
+            .collect(),
+    );
     let (display_state, _, _) = build_state_from_jsonl_with_text_projection(
         session_id,
         &display_entries,
@@ -1635,6 +1652,49 @@ pub(crate) fn model_reminder_attachments_from_messages(
         .collect()
 }
 
+/// Follow original parent links and compact-boundary logical back-links from
+/// the selected chain. Unrelated branches and sidechains cannot contribute a
+/// historical clipping fence merely because they share the transcript file.
+fn historical_read_fence_attachments(
+    entries: &[JsonlMessage],
+    mut pending: Vec<String>,
+) -> Vec<(MessageId, Utf16JsonProjection)> {
+    let rows = entries
+        .iter()
+        .filter(|row| !row.is_sidechain)
+        .map(|row| (row.uuid.as_str(), row))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut selected = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !selected.insert(id.clone()) {
+            continue;
+        }
+        let Some(row) = rows.get(id.as_str()) else {
+            continue;
+        };
+        pending.extend(row.parent_uuid.iter().cloned());
+        if is_compact_boundary(row) {
+            pending.extend(row.logical_parent_uuid.iter().cloned());
+        }
+    }
+    entries
+        .iter()
+        .filter(|row| {
+            !row.is_sidechain && selected.contains(&row.uuid) && row.message_type == "attachment"
+        })
+        .filter_map(|row| {
+            let attachment = attachment_projection(row)?;
+            if file_state::start_only_paths(attachment).is_empty() {
+                return None;
+            }
+            Some((
+                MessageId::from_uuid(Uuid::parse_str(&row.uuid).ok()?),
+                attachment.clone(),
+            ))
+        })
+        .collect()
+}
+
 fn restore_deferred_tool_state_from_messages(
     deferral: &tool_api::DeferralState,
     messages: &[JsonlMessage],
@@ -1726,6 +1786,7 @@ pub(crate) fn native_request_history_from_messages(
     let mut task_deliveries = std::collections::HashMap::new();
     let mut task_delivery_envelopes = std::collections::HashMap::new();
     let mut synthetic_closing_ids = HashSet::new();
+    let mut scalar_user_content_ids = HashSet::new();
 
     for row in messages {
         let Ok(outer_uuid) = Uuid::parse_str(&row.uuid) else {
@@ -1744,6 +1805,11 @@ pub(crate) fn native_request_history_from_messages(
                 outer_extras.insert(outer_id, row.extra.clone());
             }
             "user" => {
+                if row.message.string_units("/content").is_some() {
+                    scalar_user_content_ids.insert(outer_id);
+                } else {
+                    scalar_user_content_ids.remove(&outer_id);
+                }
                 if let Ok(task_delivery) = row.extra.subprojection("/taskDelivery") {
                     task_deliveries.insert(outer_id, task_delivery);
                 }
@@ -1775,6 +1841,7 @@ pub(crate) fn native_request_history_from_messages(
             &outer_extras,
         );
     NativeRequestHistoryMetadata {
+        scalar_user_content_ids,
         before_closing_line_ids,
         synthetic_closing_ids,
         task_deliveries,
@@ -3085,6 +3152,13 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         prompt_snapshot: prompt_snapshot_from_messages(messages),
         prompt_snapshot_epoch: Some(0),
         context_rendering_hint: context_rendering_hint_from_messages(messages),
+        historical_read_fence_attachments: historical_read_fence_attachments(
+            messages,
+            messages
+                .iter()
+                .map(|message| message.uuid.clone())
+                .collect(),
+        ),
     }
 }
 
@@ -3779,6 +3853,19 @@ impl ConversationOrchestrator {
     /// full runtime projection on that raw stream would let preserved
     /// pre-compaction assistant rows overwrite the normalized current usage.
     pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        let selected = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .map(|message| message.id().as_uuid().to_string())
+            .collect();
+        let historical_fences = historical_read_fence_attachments(messages, selected);
+        let historical_ids = historical_fences
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<HashSet<_>>();
         self.restore_plan_file_slug(plan_files::plan_slug_from_messages(messages).as_deref());
         *self.prompt_runtime.context_rendering_hint.lock().await =
             context_rendering_hint_from_messages(messages);
@@ -3801,7 +3888,25 @@ impl ConversationOrchestrator {
             .model_reminder_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            model_reminder_attachments_from_messages(messages);
+            model_reminder_attachments_from_messages(messages)
+                .into_iter()
+                .filter(|(id, attachment)| {
+                    file_state::start_only_paths(attachment).is_empty()
+                        || historical_ids.contains(id)
+                })
+                .collect();
+        {
+            let mut state = self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (_, attachment) in &historical_fences {
+                for path in file_state::start_only_paths(attachment) {
+                    state.mark_start_only(path);
+                }
+            }
+        }
         self.restore_prompt_ingress_sent_sets(messages).await;
         self.restore_mod_attachment_provenance_from_messages(messages)
             .await;
@@ -3861,6 +3966,7 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.sent_skill_names.lock().await = skills;
         restore_deferred_tool_state_from_history(self.tools.deferral(), &history, &attachments);
         self.restore_file_read_state().await;
+        self.restore_historical_read_fences_from_sidecars();
     }
 
     /// Rebuild only historical file contents proven by the adopted model
@@ -3872,7 +3978,8 @@ impl ConversationOrchestrator {
     }
 
     pub(crate) fn restore_file_read_state_for_session(&self, session: &SessionState) {
-        self.prompt_runtime.reset_read_state();
+        self.prompt_runtime
+            .prepare_read_state_restore(session.session_id);
         let attachments = self
             .transcript
             .model_reminder_attachments
@@ -3884,6 +3991,27 @@ impl ConversationOrchestrator {
             &self.prompt_runtime.read_state_map,
             &attachments,
         );
+    }
+
+    /// Admission-only replay: callers have just installed this session's
+    /// lineage-filtered raw sidecars. Ordinary same-session read reconstruction
+    /// does not treat stale sidecars from another session as authority.
+    pub(crate) fn restore_historical_read_fences_from_sidecars(&self) {
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .prompt_runtime
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for attachment in attachments.values() {
+            for path in file_state::start_only_paths(attachment) {
+                state.mark_start_only(path);
+            }
+        }
     }
 
     async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
@@ -4044,8 +4172,17 @@ impl ConversationOrchestrator {
                 .transcript
                 .model_reminder_attachments
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                model_reminder_attachments_from_messages(&replayed.messages);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = {
+                let mut attachments = model_reminder_attachments_from_messages(&replayed.messages);
+                attachments.extend(
+                    replayed
+                        .runtime_metadata
+                        .historical_read_fence_attachments
+                        .iter()
+                        .cloned(),
+                );
+                attachments
+            };
             orch.prompt_runtime
                 .prompt_snapshot_resume
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -4080,6 +4217,7 @@ impl ConversationOrchestrator {
                 .map_err(|error| ResumeError::Profile(error.to_string()))?;
             orch.sync_active_goal_stop_hook_for_current_state().await;
             orch.restore_file_read_state().await;
+            orch.restore_historical_read_fences_from_sidecars();
             if !replayed.runtime_metadata.deferred_tools.is_empty() {
                 replay_deferred_tools_after_resume(
                     &orch,
@@ -4225,6 +4363,49 @@ mod exact_history_string_tests {
         assert_eq!(snapshot.message_id, MessageId::from_uuid(over_id));
         assert_eq!(snapshot.context_tokens, 200_001.0);
         assert!(snapshot.context_tokens > 200_000.0);
+    }
+
+    #[test]
+    fn cold_resume_retains_scalar_user_source_shape_beside_exact_text() {
+        let scalar = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","parentUuid":null,"sessionId":"33333333-3333-4333-8333-333333333333","timestamp":"2026-11-09T00:00:00.000Z","cwd":"/fixture","message":{"role":"user","content":"\ud800A\udc00"}}"#,
+        );
+        let array = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","parentUuid":"11111111-1111-4111-8111-111111111111","sessionId":"33333333-3333-4333-8333-333333333333","timestamp":"2026-11-09T00:00:01.000Z","cwd":"/fixture","message":{"role":"user","content":[{"type":"text","text":"\ud800A\udc00"}]}}"#,
+        );
+        let rows = [scalar, array];
+        let state = state_from_messages(
+            Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap(),
+            &rows,
+        );
+        let scalar_id = MessageId::from_uuid(Uuid::parse_str(&rows[0].uuid).unwrap());
+        let array_id = MessageId::from_uuid(Uuid::parse_str(&rows[1].uuid).unwrap());
+        assert_eq!(
+            state.native_request_history.scalar_user_content_ids,
+            HashSet::from([scalar_id])
+        );
+        assert!(!state
+            .native_request_history
+            .scalar_user_content_ids
+            .contains(&array_id));
+        assert_eq!(state.history.len(), 2);
+        for message in state.history {
+            let ConversationMessage::User { content, .. } = message else {
+                panic!("expected a restored user row");
+            };
+            assert!(
+                matches!(content.as_slice(), [ContentBlock::TextJsUtf16 { utf16_code_units, .. }]
+                if utf16_code_units.as_slice() == [0xd800, 65, 0xdc00])
+            );
+        }
+
+        let mut later_array = rows[1].clone();
+        later_array.uuid.clone_from(&rows[0].uuid);
+        let metadata = native_request_history_from_messages(&[rows[0].clone(), later_array]);
+        assert!(
+            metadata.scalar_user_content_ids.is_empty(),
+            "a later array source with the same UUID replaces earlier scalar provenance"
+        );
     }
 
     #[test]
@@ -5352,3 +5533,40 @@ mod nested_memory_resume_287_tests;
 #[cfg(test)]
 #[path = "resume/captured_thinking_recovery_tests.rs"]
 mod captured_thinking_recovery_tests;
+
+#[cfg(test)]
+mod read_fence_lineage_tests {
+    use super::*;
+
+    #[test]
+    fn native_322_clipping_restore_follows_logical_ancestors_and_rejects_unrelated_branches() {
+        let session = Uuid::new_v4();
+        let clipped = Uuid::new_v4();
+        let tail = Uuid::new_v4();
+        let boundary = Uuid::new_v4();
+        let summary = Uuid::new_v4();
+        let unrelated = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let attachment = serde_json::json!({
+            "type":"nested_memory", "path":"/project/LINGXI.md",
+            "content":{"path":"/project/LINGXI.md","content":"prefix", "startOnly":true}
+        });
+        let rows = [
+            serde_json::json!({"type":"attachment","uuid":clipped,"parentUuid":null,"sessionId":session,"attachment":attachment}),
+            serde_json::json!({"type":"user","uuid":tail,"parentUuid":clipped,"sessionId":session,"message":{"role":"user","content":"continue"}}),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":boundary,"parentUuid":null,"logicalParentUuid":tail,"sessionId":session,"compactMetadata":{},"content":"compact"}),
+            serde_json::json!({"type":"user","uuid":summary,"parentUuid":boundary,"sessionId":session,"message":{"role":"user","content":"summary"}}),
+            serde_json::json!({"type":"attachment","uuid":unrelated,"parentUuid":null,"sessionId":session,"attachment":attachment}),
+            serde_json::json!({"type":"attachment","uuid":child,"parentUuid":boundary,"sessionId":session,"isSidechain":true,"attachment":attachment}),
+        ];
+        let source = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        let loaded = session::jsonl::route_lines(&source);
+        let retained =
+            historical_read_fence_attachments(&loaded.messages_in_order, vec![summary.to_string()]);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].0, MessageId::from_uuid(clipped));
+    }
+}

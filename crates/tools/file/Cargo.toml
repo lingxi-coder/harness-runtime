@@ -18,7 +18,7 @@ similar = "=2.7.0"
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["fs", "rt"] }
+tokio = { workspace = true, features = ["fs", "rt", "time"] }
 tokio-util.workspace = true
 once_cell = "1"
 walkdir = "2.5"
@@ -30,12 +30,15 @@ grep-matcher = "=0.1.7"
 thiserror.workspace = true
 dirs = "5"
 unicode-normalization = "=0.1.25"
+icu_collator = { path = "../../../third_party/icu_collator", version = "=2.3.1", default-features = false, features = ["compiled_data"] }
+icu_locale = "=2.3.1"
+sys-locale = "=0.3.2"
 uuid = { version = "1.10", features = ["v4"] }
 # Image decode/resize/re-encode for FileRead image reading (claude-code's image
 # path). Optional + gated behind `image-read`; matches codex (no defaults, the
 # four codecs only). base64 encodes the processed image for the Anthropic source.
 image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png", "gif", "webp"], optional = true }
-base64 = { version = "=0.22.1", optional = true }
+base64 = "=0.22.1"
 # PDF page-count parsing for FileRead PDF routing (claude-code getPDFPageCount).
 # Pure-Rust PARSER (NOT a renderer — page-image extraction is P4b). Optional.
 # default-features = false drops the nom parser (get_pages would fail to link),
@@ -43,22 +46,28 @@ base64 = { version = "=0.22.1", optional = true }
 lopdf = { version = "=0.45.0", optional = true }
 # pdftoppm renders pages into a scratch directory; TempDir gives a unique dir +
 # automatic cleanup (RAII). Already in the workspace (dev-dep here + elsewhere),
-# so no new external crate enters the lockfile. Optional, gated behind pdf-render.
-tempfile = { version = "3", optional = true }
+# so no new external crate enters the lockfile. Shared with system-rg capture.
+tempfile = "3"
 
 [features]
 # FileRead image reading. OFF by default (engine-mobile/minimal stay lean and
 # never compile the image codecs); engine-desktop enables it.
-image-read = ["dep:image", "dep:base64"]
+image-read = ["dep:image"]
 # FileRead PDF reading. OFF by default; routes PDFs to an inline document block
 # (page-count gate via lopdf). engine-desktop enables it alongside image-read.
-pdf-read = ["dep:lopdf", "dep:base64"]
+pdf-read = ["dep:lopdf"]
 # FileRead PDF page-image extraction (claude-code FileRead `pages` path). Spawns
 # the `pdftoppm` system binary (poppler-utils) — no new Rust crate, just the
 # tokio process/time features + tempfile for the scratch dir. Implies pdf-read
 # (routing + page count) and image-read (per-page resize via process_image).
 # OFF by default; engine-mobile never compiles it. engine-desktop enables it.
-pdf-render = ["pdf-read", "image-read", "dep:tempfile", "tokio/process", "tokio/time"]
+pdf-render = ["pdf-read", "image-read", "tokio/process", "tokio/time"]
+
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos"))))'.dependencies]
+# Owned system-rg process groups are a desktop opt-out; embedded search stays
+# independent of desktop transports on mobile. WNOWAIT keeps PID ownership.
+rustix = { version = "0.38", features = ["process"] }
+platform-posix = { path = "../../platforms/posix" }
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

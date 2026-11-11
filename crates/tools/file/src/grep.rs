@@ -8,8 +8,7 @@
 //!
 //! Documented divergences from the `rg` CLI (behavioral parity, not blockers):
 //! - Engine is `ignore::WalkBuilder` + `grep_searcher`, not the `rg` process.
-//! - `--type` coverage is whatever `ignore::types::TypesBuilder::add_defaults`
-//!   ships — may be a sub/superset of the bundled `rg` type list.
+//! - `--type` definitions are pinned to the bundled 2.1.322 `rg --type-list`.
 //! - Content formatting follows the 2.1.322 JSON-output parser: context uses
 //!   `-` separators and `--` group breaks, and long lines are replaced only
 //!   after they exceed 500 UTF-16 code units.
@@ -19,9 +18,8 @@
 //!   (mirrors TS `NODE_ENV === 'test'`).
 //! - There is NO per-file match cap (matching TS / the `rg` CLI): count mode
 //!   reports the TRUE per-file + total counts, and content mode is bounded only
-//!   by `head_limit` (default 250). A large `RECORDS_CAP` (10_000) bounds the
-//!   *recorded* lines per file as a memory safety valve, but never limits the
-//!   *count* — so totals stay accurate even when recording stops.
+//!   by `head_limit` (default 250). Content is projected into its requested
+//!   page as matches arrive, so large offsets need no per-file record buffer.
 //! - A wall-clock walk budget honors `LINGXI_GLOB_TIMEOUT_SECONDS`
 //!   (default 20s, 60s on WSL); a timeout with zero results is surfaced as an
 //!   error (`utils/ripgrep.ts:130-133,444-454`), partial results are returned.
@@ -31,7 +29,23 @@
 //!   relative `P` → `!**/P`). Empty (no `Read`-deny rule) ⇒ VCS excludes only.
 
 use crate::Utf16JsonProjection;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "openbsd",
+        target_os = "redox"
+    ))
+))]
+#[path = "system_rg.rs"]
+mod system_rg;
+
 use async_trait::async_trait;
+use base64::Engine as _;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
@@ -48,9 +62,7 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use tool_api::context::ToolUseContext;
-use tool_api::native_output::{
-    parse_object, validate_string_array, OutputField, OutputFieldType, UnknownOutputKeys,
-};
+use tool_api::native_output::{parse_object, OutputField, OutputFieldType, UnknownOutputKeys};
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
@@ -62,22 +74,28 @@ use tool_api::util::path_validation::{
 use tool_api::BuiltinToolContext;
 
 use crate::shared::{
-    open_rooted_search_file, prepare_search_read_policy, run_search_candidate_hook,
-    run_search_preparation_hook, search_path_is_read_denied, ReadDenyPolicy, SearchControl,
-    SearchReader, SearchResolutionError, SearchResolutionSnapshot, SearchStop, SearchWalkError,
-    StableTopK,
+    acquire_search_job, open_rooted_search_file, prepare_search_read_policy,
+    run_search_candidate_hook, run_search_preparation_hook, search_argv_string,
+    search_path_is_read_denied, ReadDenyPolicy, SearchControl, SearchReader, SearchResolutionError,
+    SearchResolutionSnapshot, SearchStop, SearchWalkError, StableTopK,
 };
+
+#[cfg(not(all(
+    unix,
+    not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "openbsd",
+        target_os = "redox"
+    ))
+)))]
+const SYSTEM_RIPGREP_UNSUPPORTED: &str = "System ripgrep was selected by USE_BUILTIN_RIPGREP, but this platform does not support owned system-rg execution. Set USE_BUILTIN_RIPGREP=true to use embedded search.";
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Grep";
-
-/// Memory safety valve: cap on the number of *recorded* (content-mode) lines
-/// per file. This bounds peak memory for a pathological single-file match storm
-/// WITHOUT capping the *count* — `head_limit` (default 250) is the real,
-/// TS-faithful truncation, and count mode always reports the true total. Set
-/// generously so it never trips for realistic inputs (TS / the `rg` CLI have no
-/// per-file cap at all).
-pub const GREP_RECORDS_CAP: usize = 10_000;
 
 /// Default cap on grep results when `head_limit` is unspecified
 /// (`GrepTool.ts:108`). Pass `head_limit=0` for unlimited.
@@ -248,43 +266,62 @@ fn compare_file_matches_for_mode(
     }
 }
 
-/// Approximate JS `String.prototype.localeCompare(b)` under the default
-/// (en-US root) collation, used for the equal-mtime filename tiebreak in
-/// `files_with_matches` (binary @200995124: `P[0].localeCompare(L[0])`). The
-/// observable divergence from Rust byte `Ord` is CASE: localeCompare orders
-/// letters case-insensitively at the PRIMARY level (so `a` < `B` < `c`, unlike
-/// byte Ord where `B`(66) < `a`(97)), and breaks an otherwise-equal compare by
-/// case at the tertiary level with LOWERCASE before uppercase (`a` < `A`,
-/// `readme` < `README`). Verified against `node`:
-///   "a".localeCompare("B")===-1, "a".localeCompare("A")===-1,
-///   "README".localeCompare("readme")===1, "_x".localeCompare("ax")===-1,
-///   "file2".localeCompare("file10")===1 (NOT numeric).
-///
-/// Implementation: a two-level compare — primary is the lowercased codepoint
-/// order (case-insensitive); on a primary tie, the first position whose chars
-/// differ (necessarily only by case) is decided lowercase-first. This is exact
-/// for the ASCII filename domain (letters/digits/`._-`); full ICU/DUCET
-/// weighting for arbitrary Unicode is not ported (no collation dep) — a
-/// documented approximation for the rare equal-mtime non-ASCII tiebreak.
+/// The native equal-mtime tiebreak is `left.localeCompare(right)` with no
+/// explicit options (2.1.322 @272436770). Use its default-locale ICU profile;
+/// lowercasing code points gets accents, canonical equivalents and punctuation
+/// wrong even for otherwise ordinary source-file names.
 fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    // Primary: case-insensitive (lowercased) codepoint order.
-    let primary = a.to_lowercase().cmp(&b.to_lowercase());
-    if primary != Ordering::Equal {
-        return primary;
+    static COLLATOR: Lazy<icu_collator::CollatorBorrowed<'static>> =
+        Lazy::new(|| search_collator(&search_default_locale()));
+    COLLATOR.compare(a, b)
+}
+
+fn search_collator(locale: &str) -> icu_collator::CollatorBorrowed<'static> {
+    use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+    use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
+    let locale = icu_locale::Locale::try_from_str(locale).unwrap_or_else(|_| {
+        icu_locale::Locale::try_from_str("en-US").expect("compiled ICU data includes en-US")
+    });
+    let mut preferences = icu_collator::CollatorPreferences::from(&locale);
+    preferences.case_first = Some(CollationCaseFirst::False);
+    preferences.numeric_ordering = Some(CollationNumericOrdering::False);
+    let mut options = CollatorOptions::default();
+    options.strength = Some(Strength::Tertiary);
+    options.alternate_handling = Some(AlternateHandling::NonIgnorable);
+    icu_collator::Collator::try_new(preferences, options)
+        .expect("compiled ICU data provides the native default collation profile")
+}
+
+fn search_default_locale() -> String {
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android"))]
+    let locale = sys_locale::get_locale();
+    #[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))]
+    let locale = lingxi_core::native_locale::current_lc_ctype();
+    #[cfg(not(any(unix, target_os = "windows", target_os = "android")))]
+    let locale: Option<String> = None;
+    let locale = locale.as_deref().unwrap_or("en-US");
+    let locale = locale.split('.').next().unwrap_or(locale);
+    let locale = locale.split('@').next().unwrap_or(locale);
+    if locale.is_empty() || locale.eq_ignore_ascii_case("C") || locale.eq_ignore_ascii_case("POSIX")
+    {
+        "en-US".to_owned()
+    } else {
+        locale.replace('_', "-")
     }
-    // Tertiary tiebreak: at the first differing char (which can only differ by
-    // case given the primary tie), lowercase sorts before uppercase.
-    for (ca, cb) in a.chars().zip(b.chars()) {
-        if ca != cb {
-            match (ca.is_lowercase(), cb.is_lowercase()) {
-                (true, false) => return Ordering::Less,
-                (false, true) => return Ordering::Greater,
-                _ => return ca.cmp(&cb),
-            }
+}
+
+/// Reconstruct the exact shipped type catalogue instead of depending on the
+/// host `ignore` release's evolving defaults. This also makes `type: "all"`
+/// and rejection of unknown names match the bundled rg version.
+fn pinned_type_filter(name: &str) -> Result<ignore::types::Types, ignore::Error> {
+    let mut builder = TypesBuilder::new();
+    for line in include_str!("templates/claude-code-2.1.322/rg-types.txt").lines() {
+        let (name, globs) = line.split_once(": ").expect("pinned rg type definition");
+        for glob in globs.split(", ") {
+            builder.add(name, glob)?;
         }
     }
-    a.chars().count().cmp(&b.chars().count())
+    builder.select(name).build()
 }
 
 /// Native JSON submatch offsets are byte offsets, while output line numbers
@@ -705,69 +742,179 @@ fn value_as_bool(v: JsonValueView<'_>) -> Option<bool> {
 }
 
 /// Custom `grep_searcher` sink collecting match (and, for content mode, context)
-/// lines. Counting is DECOUPLED from recording: `match_count` always counts
-/// every match (so count mode reports the true total and content mode is bounded
-/// only by `head_limit`, matching TS / `rg`); recording stops past
-/// `GREP_RECORDS_CAP` as a pure memory valve, but the search keeps running so the
-/// count stays accurate.
-struct GrepSink {
-    /// `(line_number, text, is_context)` records in encounter order (content
-    /// mode only). `is_context` separates `rg`'s context lines from its
-    /// matching lines: only matching lines are subject to `-o`, and the two
-    /// carry different `--max-columns` markers (ST-13/ST-14).
-    records: Vec<(Option<u64>, String, bool)>,
-    /// True count of *matched* (not context) lines seen — never capped.
+fn json_event_text(value: &Value) -> String {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return text.to_owned();
+    }
+    value
+        .get("bytes")
+        .and_then(Value::as_str)
+        .and_then(|bytes| base64::engine::general_purpose::STANDARD.decode(bytes).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
+/// Project searcher events directly into the requested output page. Retaining
+/// complete per-file records silently truncated unlimited pages at 10,000 and
+/// made high offsets empty; the page now owns the only retained output rows.
+struct GrepContent<'a> {
+    matcher: Option<&'a RegexMatcher>,
+    path: &'a Path,
+    relative: String,
+    page: &'a mut SearchPage<String>,
+    previous_line: &'a mut Option<(PathBuf, u64)>,
+    only_matching: bool,
+    show_line_numbers: bool,
+    single_file: bool,
+    context_breaks: bool,
+    recorded_any: bool,
+    timed_out: bool,
+    control: &'a SearchControl,
+}
+
+impl GrepContent<'_> {
+    fn record(
+        &mut self,
+        number: Option<u64>,
+        bytes: &[u8],
+        context: bool,
+        native_submatches: Option<&[Value]>,
+    ) -> std::io::Result<()> {
+        self.recorded_any = true;
+        let text = decode_line(bytes);
+        let first_line = number.unwrap_or(0);
+        if self.context_breaks
+            && self
+                .previous_line
+                .as_ref()
+                .is_some_and(|(previous_path, line)| {
+                    previous_path != self.path || first_line > line.saturating_add(1)
+                })
+        {
+            self.page.push_with(|| "--".to_owned());
+        }
+        let mut last_line = first_line;
+        let mut emit = |line_number, line: &str| -> Result<(), SearchStop> {
+            self.page.push_with(|| {
+                let line = line.strip_suffix('\r').unwrap_or(line).to_owned();
+                let line = apply_max_columns(line, context);
+                let separator = if context { '-' } else { ':' };
+                let numbered = if self.show_line_numbers {
+                    format!("{line_number}{separator}{line}")
+                } else {
+                    line
+                };
+                if self.single_file {
+                    numbered
+                } else {
+                    format!("{}{separator}{numbered}", self.relative)
+                }
+            });
+            last_line = line_number;
+            Ok(())
+        };
+        let rendered = if self.only_matching && !context {
+            if let Some(submatches) = native_submatches {
+                let mut previous_start = 0;
+                let mut line_offset = 0;
+                let bytes = text.as_bytes();
+                submatches.iter().try_for_each(|matched| {
+                    self.control.check_cancellation()?;
+                    let start = matched["start"].as_u64().unwrap_or(0) as usize;
+                    let start = start.min(bytes.len());
+                    // rg emits offsets in order; saturate malformed external
+                    // events without slicing backwards or quadratic rescans.
+                    let start = start.max(previous_start);
+                    line_offset += bytes[previous_start..start]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count() as u64;
+                    previous_start = start;
+                    json_event_text(&matched["match"])
+                        .split('\n')
+                        .enumerate()
+                        .try_for_each(|(index, line)| {
+                            self.control.check_cancellation()?;
+                            emit(first_line + line_offset + index as u64, line)
+                        })
+                })
+            } else if let Some(matcher) = self.matcher {
+                emit_only_matching_spans(
+                    matcher,
+                    &text,
+                    first_line,
+                    self.control,
+                    self.timed_out,
+                    &mut emit,
+                )
+                .map(|_| ())
+            } else {
+                Ok(())
+            }
+        } else {
+            text.split('\n').enumerate().try_for_each(|(index, line)| {
+                // The sink admitted this event before its deadline. Finish
+                // projecting that event, including a captured partial result,
+                // while still honoring explicit cancellation between rows.
+                self.control.check_cancellation()?;
+                emit(first_line + index as u64, line)
+            })
+        };
+        rendered.map_err(|_| std::io::Error::other("search stopped while projecting content"))?;
+        *self.previous_line = Some((self.path.to_path_buf(), last_line));
+        Ok(())
+    }
+
+    fn finish(&mut self, binary_offset: Option<u64>) {
+        if let Some(offset) = binary_offset.filter(|_| self.recorded_any) {
+            self.page.push_with(|| {
+                let message =
+                    format!("binary file matches (found \"\\0\" byte around offset {offset})");
+                if self.single_file {
+                    message
+                } else {
+                    format!("{}:{message}", self.relative)
+                }
+            });
+        }
+    }
+}
+
+struct GrepSink<'a> {
+    content: Option<GrepContent<'a>>,
+    /// Always count matches, including rows outside the requested page.
     match_count: usize,
-    /// Set when the records valve (`GREP_RECORDS_CAP`) stopped *recording*
-    /// lines for this file (counting continued). Surfaces `truncated: true`.
-    overflow: bool,
-    /// Push match + context lines into `records` (content mode).
-    record_lines: bool,
-    /// Stop after the first match (`files_with_matches`, mirrors `rg -l`).
     first_match_only: bool,
-    binary_offset: Option<u64>,
     control: SearchControl,
 }
 
-impl Sink for GrepSink {
+impl Sink for GrepSink<'_> {
     type Error = std::io::Error;
 
     fn finish(&mut self, _searcher: &Searcher, finish: &SinkFinish) -> Result<(), Self::Error> {
         self.control.check_io()?;
-        self.binary_offset = finish.binary_byte_offset();
+        if let Some(content) = &mut self.content {
+            content.finish(finish.binary_byte_offset());
+        }
         Ok(())
     }
 
     fn matched(&mut self, _s: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         self.control.check_io()?;
-        // Always count first — counting is never limited (TS / `rg` have no
-        // per-file cap; count mode must report the true total).
         self.match_count += 1;
-
-        // `files_with_matches`: one match is enough; stop early like `rg -l`.
         if self.first_match_only {
             return Ok(false);
         }
-
-        // Record lines only while under the memory valve. Past the valve we KEEP
-        // SEARCHING (return Ok(true)) so the count keeps climbing — we just stop
-        // appending to `records`.
-        if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
-            self.records
-                .push((mat.line_number(), decode_line(mat.bytes()), false));
-            if self.records.len() >= GREP_RECORDS_CAP {
-                self.overflow = true;
-            }
+        if let Some(content) = &mut self.content {
+            content.record(mat.line_number(), mat.bytes(), false, None)?;
         }
         Ok(true)
     }
 
     fn context(&mut self, _s: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, Self::Error> {
         self.control.check_io()?;
-        // Context lines also respect the records valve (they share the buffer).
-        if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
-            self.records
-                .push((ctx.line_number(), decode_line(ctx.bytes()), true));
+        if let Some(content) = &mut self.content {
+            content.record(ctx.line_number(), ctx.bytes(), true, None)?;
         }
         Ok(true)
     }
@@ -829,32 +976,10 @@ impl GrepTool {
 /// `multiline`) were model-visible bytes the oracle never sends; the runtime
 /// defaults themselves are unaffected — they live in `call()`.
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
-    tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["pattern"],
-        "properties": {
-            "pattern":     { "type": "string", "description": "The regular expression pattern to search for in file contents" },
-            "path":        { "type": "string", "description": "File or directory to search in (rg PATH). Defaults to current working directory." },
-            "glob":        { "type": "string", "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob" },
-            "output_mode": {
-                "type": "string",
-                "enum": ["content", "files_with_matches", "count"],
-                "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."
-            },
-            "-B":          { "type": "number", "description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise." },
-            "-A":          { "type": "number", "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise." },
-            "-C":          { "type": "number", "description": "Alias for context." },
-            "context":     { "type": "number", "description": "Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise." },
-            "-n":          { "type": "boolean", "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true." },
-            "-i":          { "type": "boolean", "description": "Case insensitive search (rg -i)" },
-            "-o":          { "type": "boolean", "description": "Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: \"content\", ignored otherwise. Defaults to false." },
-            "type":        { "type": "string", "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types." },
-            "head_limit":  { "type": "number", "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for unlimited (use sparingly — large result sets waste context)." },
-            "offset":      { "type": "number", "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0." },
-            "multiline":   { "type": "boolean", "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false." }
-        }
-    }))
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/grep-input-schema.json"
+    ))
+    .expect("pinned grep input schema is valid JSON")
 });
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -911,13 +1036,32 @@ static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     }))
 });
 
+fn compile_search_matcher(
+    pattern: &str,
+    case_insensitive: bool,
+    multiline: bool,
+) -> Result<RegexMatcher, SearchWalkError> {
+    RegexMatcherBuilder::new()
+        .case_insensitive(case_insensitive)
+        .multi_line(multiline)
+        .dot_matches_new_line(multiline)
+        // Retain upstream supported limits: 100 MiB regex, 1000 MiB DFA, nesting250.
+        .build(pattern)
+        .map_err(|error| {
+            SearchWalkError::InvalidInput(format!("invalid regex {pattern:?}: {error}"))
+        })
+}
+
 struct GrepWalkArgs {
     canon_base: PathBuf,
     search_resolution: SearchResolutionSnapshot,
     read_deny_policy: Option<ReadDenyPolicy>,
     overrides: ignore::overrides::Override,
     types_filter: Option<ignore::types::Types>,
-    matcher: RegexMatcher,
+    matcher: Option<RegexMatcher>,
+    system_command: Option<PathBuf>,
+    pattern: String,
+    case_insensitive: bool,
     cwd_for_rel: PathBuf,
     control: SearchControl,
     pagination: SearchPagination,
@@ -948,6 +1092,9 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchWalkError> {
         overrides,
         types_filter,
         matcher,
+        system_command,
+        pattern,
+        case_insensitive,
         cwd_for_rel,
         control,
         pagination,
@@ -978,7 +1125,7 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchWalkError> {
     let single_file = canon_base.is_file();
     let mut previous_line: Option<(PathBuf, u64)> = None;
 
-    'walk: for entry in wb.build() {
+    for entry in wb.build() {
         search_resolution.verify()?;
         match control.check() {
             Ok(()) => {}
@@ -1010,124 +1157,141 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchWalkError> {
         run_search_candidate_hook(path);
         let mut file = open_rooted_search_file(&canon_base, path)?;
 
-        let mut sb = SearcherBuilder::new();
-        sb.multi_line(multiline);
-        sb.line_number(content_mode);
-        // The bundled rg skips binary data found during directory discovery,
-        // but explicit files remain searchable with NUL bytes converted to LF.
-        sb.binary_detection(if single_file {
-            BinaryDetection::convert(0)
-        } else {
-            BinaryDetection::quit(0)
+        let mut content = content_mode.then(|| GrepContent {
+            matcher: matcher.as_ref(),
+            path,
+            relative: to_relative_path(path, &cwd_for_rel),
+            page: &mut content_lines,
+            previous_line: &mut previous_line,
+            only_matching,
+            show_line_numbers,
+            single_file,
+            context_breaks,
+            recorded_any: false,
+            timed_out: false,
+            control: &control,
         });
-        if let Some(b) = ctx_before {
-            sb.before_context(b);
-        }
-        if let Some(a) = ctx_after {
-            sb.after_context(a);
-        }
-        let mut searcher = sb.build();
-
-        let mut sink = GrepSink {
-            records: Vec::new(),
-            match_count: 0,
-            overflow: false,
-            record_lines: content_mode,
-            first_match_only: files_mode,
-            binary_offset: None,
-            control: control.clone(),
-        };
-        let searched = searcher.search_reader(
-            &matcher,
-            SearchReader {
-                inner: &mut file,
-                control: &control,
-            },
-            &mut sink,
-        );
-        match control.check() {
-            Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
-            Err(SearchStop::TimedOut) => timed_out = true,
-            Ok(()) if searched.is_err() => {
-                return Err(SearchResolutionError::SearchRootChanged.into());
+        let match_count;
+        if let Some(command) = &system_command {
+            #[cfg(all(
+                unix,
+                not(any(
+                    target_os = "android",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "visionos",
+                    target_os = "openbsd",
+                    target_os = "redox"
+                ))
+            ))]
+            {
+                match system_rg::search(
+                    &mut file,
+                    system_rg::Options {
+                        command,
+                        pattern: &pattern,
+                        case_insensitive,
+                        multiline,
+                        single_file,
+                        files_mode,
+                        count_mode,
+                        only_matching: content_mode && only_matching,
+                        context_before: ctx_before,
+                        context_after: ctx_after,
+                    },
+                    &control,
+                    content.as_mut(),
+                ) {
+                    Ok((count, expired)) => {
+                        match_count = count;
+                        timed_out |= expired;
+                    }
+                    Err(error) => match control.check() {
+                        Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+                        Err(SearchStop::TimedOut) => {
+                            match_count = 0;
+                            timed_out = true;
+                        }
+                        Ok(()) => return Err(error),
+                    },
+                }
             }
-            Ok(()) => {}
-        }
+            #[cfg(not(all(
+                unix,
+                not(any(
+                    target_os = "android",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "visionos",
+                    target_os = "openbsd",
+                    target_os = "redox"
+                ))
+            )))]
+            {
+                let _ = (command, &pattern, case_insensitive);
+                return Err(SearchWalkError::Engine(
+                    SYSTEM_RIPGREP_UNSUPPORTED.to_owned(),
+                ));
+            }
+        } else {
+            let mut sb = SearcherBuilder::new();
+            sb.multi_line(multiline);
+            sb.line_number(content_mode);
+            // The bundled rg skips binary data found during directory discovery,
+            // but explicit files remain searchable with NUL bytes converted to LF.
+            sb.binary_detection(if single_file {
+                BinaryDetection::convert(0)
+            } else {
+                BinaryDetection::quit(0)
+            });
+            if let Some(b) = ctx_before {
+                sb.before_context(b);
+            }
+            if let Some(a) = ctx_after {
+                sb.after_context(a);
+            }
+            let mut searcher = sb.build();
 
-        total_matches += sink.match_count as u64;
-        if sink.match_count == 0 {
+            let mut sink = GrepSink {
+                content: content.take(),
+                match_count: 0,
+                first_match_only: files_mode,
+                control: control.clone(),
+            };
+            let searched = searcher.search_reader(
+                matcher.as_ref().expect("embedded search matcher"),
+                SearchReader {
+                    inner: &mut file,
+                    control: &control,
+                },
+                &mut sink,
+            );
+            match control.check() {
+                Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
+                Err(SearchStop::TimedOut) => timed_out = true,
+                Ok(()) if searched.is_err() => {
+                    return Err(SearchResolutionError::SearchRootChanged.into());
+                }
+                Ok(()) => {}
+            }
+
+            match_count = sink.match_count;
+            drop(sink);
+        }
+        drop(content);
+        total_matches += match_count as u64;
+        if match_count == 0 {
             continue;
         }
 
-        if content_mode {
-            let rel = to_relative_path(path, &cwd_for_rel);
-            for (lnum, text, is_context) in &sink.records {
-                let first_line = lnum.unwrap_or(0);
-                if context_breaks
-                    && previous_line.as_ref().is_some_and(|(previous_path, line)| {
-                        previous_path != path || first_line > line.saturating_add(1)
-                    })
-                {
-                    content_lines.push_with(|| "--".to_string());
-                }
-                let mut last_line = first_line;
-                let mut emit = |line_number, line: &str| -> Result<(), SearchStop> {
-                    content_lines.push_with(|| {
-                        let line = line.strip_suffix('\r').unwrap_or(line).to_string();
-                        let line = apply_max_columns(line, *is_context);
-                        let separator = if *is_context { '-' } else { ':' };
-                        let numbered = if show_line_numbers {
-                            format!("{line_number}{separator}{line}")
-                        } else {
-                            line
-                        };
-                        if single_file {
-                            numbered
-                        } else {
-                            format!("{rel}{separator}{numbered}")
-                        }
-                    });
-                    last_line = line_number;
-                    Ok(())
-                };
-                let rendered = if only_matching && !*is_context {
-                    emit_only_matching_spans(
-                        &matcher, text, first_line, &control, timed_out, &mut emit,
-                    )
-                    .map(|_| ())
-                } else {
-                    text.split('\n').enumerate().try_for_each(|(index, line)| {
-                        control.check_cancellation()?;
-                        emit(first_line + index as u64, line)
-                    })
-                };
-                match rendered {
-                    Err(SearchStop::Cancelled) => return Err(SearchWalkError::Cancelled),
-                    Err(SearchStop::TimedOut) => {
-                        timed_out = true;
-                        break 'walk;
-                    }
-                    Ok(()) => {}
-                }
-                previous_line = Some((path.to_path_buf(), last_line));
-            }
-            if let Some(offset) = sink.binary_offset.filter(|_| !sink.records.is_empty()) {
-                content_lines.push_with(|| {
-                    let message =
-                        format!("binary file matches (found \"\\0\" byte around offset {offset})");
-                    if single_file {
-                        message
-                    } else {
-                        format!("{rel}:{message}")
-                    }
-                });
-            }
-        } else if count_mode {
+        if count_mode {
             count_lines.push_with(|| {
                 let rel = to_relative_path(path, &cwd_for_rel);
-                format!("{rel}:{}", sink.match_count)
+                format!("{rel}:{match_count}")
             });
-        } else {
+        } else if files_mode {
             // files_with_matches: defer relativize until after sort.
             let mtime = file
                 .metadata()
@@ -1159,6 +1323,8 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchWalkError> {
 fn search_resolution_error(path: &Path, error: SearchWalkError) -> ToolError {
     let error = match error {
         SearchWalkError::Cancelled => return ToolError::Aborted,
+        SearchWalkError::Engine(message) => return ToolError::Io(message.into()),
+        SearchWalkError::InvalidInput(message) => return ToolError::InvalidInput(message.into()),
         SearchWalkError::Resolution(error) => error,
     };
     let reason = match error {
@@ -1206,7 +1372,7 @@ impl Tool for GrepTool {
             &[
                 OutputField {
                     name: "mode",
-                    kind: OutputFieldType::String,
+                    kind: OutputFieldType::StringEnum(&["content", "files_with_matches", "count"]),
                     required: false,
                 },
                 OutputField {
@@ -1216,7 +1382,7 @@ impl Tool for GrepTool {
                 },
                 OutputField {
                     name: "filenames",
-                    kind: OutputFieldType::Array,
+                    kind: OutputFieldType::StringArray,
                     required: true,
                 },
                 OutputField {
@@ -1262,18 +1428,6 @@ impl Tool for GrepTool {
             ],
             UnknownOutputKeys::Strip,
         )?;
-        validate_string_array(output, "/filenames", TOOL_NAME, "filenames")?;
-        if parsed.get_property("mode").is_some()
-            && !matches!(
-                parsed.string_at("/mode"),
-                Some("content" | "files_with_matches" | "count")
-            )
-        {
-            return Err(tool_api::native_output::invalid(
-                TOOL_NAME,
-                "output field `mode` has an invalid value",
-            ));
-        }
         Ok(parsed)
     }
     fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
@@ -1314,13 +1468,16 @@ impl Tool for GrepTool {
         input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        let pattern = search_argv_string(input, "pattern");
+        let glob = search_argv_string(input, "glob");
+        let kind = search_argv_string(input, "type");
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
             &[
-                ("pattern", crate::input_string(input, "pattern")),
+                ("pattern", pattern.as_deref()),
                 ("path", crate::input_string(input, "path")),
-                ("glob", crate::input_string(input, "glob")),
-                ("type", crate::input_string(input, "type")),
+                ("glob", glob.as_deref()),
+                ("type", kind.as_deref()),
             ],
         )?;
         validate_whole_number("head_limit", input)?;
@@ -1382,7 +1539,7 @@ impl Tool for GrepTool {
         let trusted = self.ctx.read_roots_for_tool(TOOL_NAME, &input).await;
 
         // --- Arg parsing (GrepTool.ts:310-326) ---
-        let pattern = crate::input_string(&input, "pattern")
+        let pattern = search_argv_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
         // claude-code Grep `getPath`: a supplied `path` is used as-is, otherwise
         // the LIVE cwd (`Ct()`). The no-cell fallback (`cwd_now()`==
@@ -1392,8 +1549,10 @@ impl Tool for GrepTool {
             Some(path) => crate::checked_model_file_path(path, &self.cwd_now())?,
             None => self.cwd_now(),
         };
-        let glob_filter = crate::input_string(&input, "glob");
-        let type_filter = crate::input_string(&input, "type");
+        let glob_filter_source = search_argv_string(&input, "glob");
+        let type_filter_source = search_argv_string(&input, "type");
+        let glob_filter = glob_filter_source.as_deref();
+        let type_filter = type_filter_source.as_deref();
         let output_mode = crate::input_string(&input, "output_mode")
             .unwrap_or("files_with_matches")
             .to_string();
@@ -1429,20 +1588,24 @@ impl Tool for GrepTool {
         let files_mode = output_mode == "files_with_matches";
         let count_mode = output_mode == "count";
 
-        // `USE_BUILTIN_RIPGREP` opt-out surface (binary `A3r`): an explicitly
-        // falsy env value + a system `rg` on `$PATH` makes claude-code shell to
-        // that binary. LingXi's in-process `grep-*` engine IS the embedded
-        // default; resolve + record the mode DECISION here so the env var is
-        // consumed faithfully. The system-`rg` SUBPROCESS execution backend is a
-        // documented residual (`crate::ripgrep_mode`), so the in-process engine
-        // remains the executor for both modes.
-        if let crate::ripgrep_mode::RipgrepMode::System { command } =
-            crate::ripgrep_mode::resolve_ripgrep_mode()
-        {
-            tracing::debug!(
-                rg = %command.display(),
-                "USE_BUILTIN_RIPGREP opt-out selected system rg; in-process engine used (subprocess backend is a residual)"
-            );
+        let system_command = match crate::ripgrep_mode::resolve_ripgrep_mode() {
+            crate::ripgrep_mode::RipgrepMode::Embedded => None,
+            crate::ripgrep_mode::RipgrepMode::System { command } => Some(command),
+        };
+        #[cfg(not(all(
+            unix,
+            not(any(
+                target_os = "android",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "visionos",
+                target_os = "openbsd",
+                target_os = "redox"
+            ))
+        )))]
+        if system_command.is_some() {
+            return Err(ToolError::InvalidInput(SYSTEM_RIPGREP_UNSUPPORTED.into()));
         }
 
         let started = Instant::now();
@@ -1482,27 +1645,6 @@ impl Tool for GrepTool {
         // the cwd must be canonicalized too for `strip_prefix` to match.
         let live_cwd = self.cwd_now();
         let cwd_for_rel = std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
-
-        // --- Build regex matcher (multiline → -U --multiline-dotall) ---
-        let matcher = match RegexMatcherBuilder::new()
-            .case_insensitive(case_insensitive)
-            .multi_line(multiline)
-            .dot_matches_new_line(multiline)
-            // Keep grep-regex's upstream defaults intact here:
-            //   size_limit = 100 MiB
-            //   dfa_size_limit = 1000 MiB
-            //   nest_limit = 250
-            // Claude/ripgrep do not impose LingXi-specific lower caps, and the
-            // smaller 10 MiB / 10 MiB / 50 overrides rejected valid patterns.
-            .build(pattern)
-        {
-            Ok(m) => m,
-            Err(e) => {
-                return Err(ToolError::InvalidInput(
-                    format!("invalid regex {pattern:?}: {e}").into(),
-                ));
-            }
-        };
 
         // --- Build glob/VCS overrides (GrepTool.ts:332-335, 391-409) ---
         // In OverrideBuilder, `!` is an ignore and a bare glob is a whitelist —
@@ -1567,19 +1709,14 @@ impl Tool for GrepTool {
 
         // --- Build --type filter (GrepTool.ts:386-389) ---
         let types_filter = match type_filter {
-            Some(t) => {
-                let mut tb = TypesBuilder::new();
-                tb.add_defaults();
-                tb.select(t);
-                match tb.build() {
-                    Ok(types) => Some(types),
-                    Err(e) => {
-                        return Err(ToolError::InvalidInput(
-                            format!("invalid type {t:?}: {e}").into(),
-                        ));
-                    }
+            Some(t) => match pinned_type_filter(t) {
+                Ok(types) => Some(types),
+                Err(e) => {
+                    return Err(ToolError::InvalidInput(
+                        format!("invalid type {t:?}: {e}").into(),
+                    ));
                 }
-            }
+            },
             None => None,
         };
 
@@ -1613,7 +1750,14 @@ impl Tool for GrepTool {
         let deadline = started + ripgrep_timeout(is_wsl);
         let (control, _search_owner) = SearchControl::new(deadline, _ctx.cancel.clone());
         let call_control = control.clone();
+        let job_permit = acquire_search_job(&control)
+            .await
+            .map_err(|stop| match stop {
+                SearchStop::Cancelled => ToolError::Aborted,
+                SearchStop::TimedOut => ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()),
+            })?;
         let pagination = SearchPagination::new(head_limit, offset);
+        let pattern_owned = pattern.into_owned();
         let cwd_for_rel_in_worker = cwd_for_rel.clone();
         let search_path = base.clone();
         let search_path_for_hook = base.clone();
@@ -1625,6 +1769,19 @@ impl Tool for GrepTool {
             total_matches,
             timed_out,
         } = lingxi_core::host::memory_tool_scope::run_memory_blocking(move || {
+            let _job_permit = job_permit;
+            let matcher = if system_command.is_some() {
+                None
+            } else {
+                Some(compile_search_matcher(
+                    &pattern_owned,
+                    case_insensitive,
+                    multiline,
+                )?)
+            };
+            control
+                .check_cancellation()
+                .map_err(|_| SearchWalkError::Cancelled)?;
             // This is deliberately after the deny overrides have been built
             // and immediately before the walk is created. The test hook swaps
             // a symlink at this exact preparation boundary.
@@ -1637,6 +1794,9 @@ impl Tool for GrepTool {
                 overrides,
                 types_filter,
                 matcher,
+                system_command,
+                pattern: pattern_owned,
+                case_insensitive,
                 cwd_for_rel: cwd_for_rel_in_worker,
                 control,
                 pagination,
@@ -1873,7 +2033,10 @@ mod tests {
             read_deny_policy: None,
             overrides: OverrideBuilder::new(&canon_base).build().unwrap(),
             types_filter: None,
-            matcher: RegexMatcherBuilder::new().build("needle").unwrap(),
+            matcher: Some(RegexMatcherBuilder::new().build("needle").unwrap()),
+            system_command: None,
+            pattern: "needle".into(),
+            case_insensitive: false,
             cwd_for_rel: canon_base.clone(),
             canon_base,
             control,
@@ -2041,10 +2204,12 @@ mod tests {
         });
         let mut args = optimizer_walk_args(&path, control, SearchPagination::new(None, 0));
         args.multiline = true;
-        args.matcher = RegexMatcherBuilder::new()
-            .multi_line(true)
-            .build("needle\\nneedle")
-            .unwrap();
+        args.matcher = Some(
+            RegexMatcherBuilder::new()
+                .multi_line(true)
+                .build("needle\\nneedle")
+                .unwrap(),
+        );
         let result = grep_walk(args).unwrap();
         assert!(result.timed_out);
         assert_eq!(result.total_matches, 0);
@@ -3653,47 +3818,247 @@ mod tests {
         assert_eq!(content_str(&result), "Found 1 file\na.rs");
     }
 
-    /// The records valve (`GREP_RECORDS_CAP`) is a pure memory bound that trips
-    /// `truncated` once recording stops — but it NEVER caps the count. A file
-    /// with one match over the valve records exactly `GREP_RECORDS_CAP` content
-    /// lines yet still reports the true total in count mode.
-    #[tokio::test]
-    async fn records_valve_sets_truncated_but_not_count() {
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "visionos",
+            target_os = "openbsd",
+            target_os = "redox"
+        ))
+    ))]
+    #[test]
+    fn configured_system_rg_walk_preserves_paging_counts_and_read_denies() {
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        use std::sync::Arc;
+        let Some(command) = crate::ripgrep_mode::find_rg_on_path() else {
+            assert!(
+                std::env::var_os("LINGXI_REQUIRE_SYSTEM_RG_TESTS").is_none(),
+                "system rg required"
+            );
+            return;
+        };
         let tmp = TempDir::new().unwrap();
-        let n = GREP_RECORDS_CAP + 5;
+        std::fs::write(tmp.path().join("public.txt"), "needle\nneedle\nneedle\n").unwrap();
+        std::fs::write(tmp.path().join("Secret.txt"), "needle EXTERNAL_SECRET\n").unwrap();
+        let policy = Arc::new(
+            permission::PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                [PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Read(Secret.txt)"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )
+            .with_roots(permission::FsRoots {
+                cwd: tmp.path().into(),
+                home: None,
+                lingxi_home: tmp.path().join(".lingxi"),
+            }),
+        );
+        let (mut ctx, _) = make_ctx(&tmp);
+        ctx.permission_policy = policy;
+        for mode in ["content", "count", "files"] {
+            let (control, _owner) =
+                SearchControl::new(Instant::now() + Duration::from_secs(30), None);
+            let pagination = SearchPagination::new(Some(1), usize::from(mode == "content"));
+            let mut args = optimizer_walk_args(tmp.path(), control, pagination);
+            args.read_deny_policy =
+                prepare_search_read_policy(&ctx, tmp.path(), &args.canon_base).1;
+            args.system_command = Some(command.clone());
+            args.matcher = None;
+            args.content_mode = mode == "content";
+            args.count_mode = mode == "count";
+            args.files_mode = mode == "files";
+            let result = grep_walk(args).unwrap();
+            assert!(!result.timed_out);
+            match mode {
+                "content" => {
+                    assert_eq!(result.content_lines.values, ["public.txt:2:needle"]);
+                    assert_eq!(result.content_lines.total, 3);
+                }
+                "count" => {
+                    assert_eq!(result.count_lines.values, ["public.txt:3"]);
+                    assert_eq!(result.total_matches, 3);
+                }
+                _ => {
+                    assert_eq!(result.files_matched.total(), 1);
+                    assert!(result.files_matched.into_sorted()[0]
+                        .0
+                        .ends_with("public.txt"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_utf16_search_arguments_follow_native_argv_coercion() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_search_gaps_322.json"
+        ))
+        .unwrap();
+        for case in fixture["surrogateSearches"].as_array().unwrap() {
+            let tmp = TempDir::new().unwrap();
+            let file = tmp.path().join("a.txt");
+            std::fs::write(&file, case["contents"].as_str().unwrap()).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            let tool = GrepTool::new(ctx);
+            let mut input =
+                Utf16JsonProjection::parse(case["inputJson"].as_str().unwrap()).unwrap();
+            tool.validate_input(&input, &fresh_ctx()).await.unwrap();
+            if case["singleFile"] == true {
+                input
+                    .set_field("path", crate::generated_result(&json!(file)))
+                    .unwrap();
+            }
+            let result = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_eq!(
+                crate::test_data(&result.data),
+                case["expected"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                result.model_content.as_ref().and_then(|v| v.string_at("")),
+                case["modelText"].as_str()
+            );
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "hit\n").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let input =
+            Utf16JsonProjection::parse(fixture["surrogateType"]["inputJson"].as_str().unwrap())
+                .unwrap();
+        let error = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        assert!(matches!(&error, ToolError::InvalidInput(_)));
+        assert!(
+            error
+                .model_facing_message()
+                .string_at("")
+                .is_some_and(|message| message.contains('�')),
+            "unknown type was not passed through: {error}"
+        );
+        // The exact outer process-error wrapper is not established by the raw
+        // type argv receipt; preserve the existing InvalidInput contract here.
+    }
+
+    #[tokio::test]
+    async fn malformed_utf16_search_arguments_preserve_ordered_nul_guard() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        for (field, json) in [
+            ("pattern", r#"{"pattern":"\ud800\u0000","head_limit":-1}"#),
+            (
+                "glob",
+                r#"{"pattern":"hit","glob":"\ud800\u0000","head_limit":-1}"#,
+            ),
+            (
+                "type",
+                r#"{"pattern":"hit","type":"\ud800\u0000","head_limit":-1}"#,
+            ),
+        ] {
+            let input = Utf16JsonProjection::parse(json).unwrap();
+            let error = tool.validate_input(&input, &fresh_ctx()).await.unwrap_err();
+            assert_eq!(error.0.string_at(""),Some(format!("Grep {field} cannot contain null bytes (\\0). Remove the null byte and try again.").as_str()));
+        }
+    }
+
+    #[test]
+    fn pinned_type_catalogue_matches_bundled_rg_receipt() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_search_gaps_322.json"
+        ))
+        .unwrap();
+        let types = pinned_type_filter("all").unwrap();
+        let definitions = types.definitions();
+        let expected = fixture["types"].as_array().unwrap();
+        assert_eq!(definitions.len(), expected.len());
+        for (actual, expected) in definitions.iter().zip(expected) {
+            assert_eq!(actual.name(), expected["name"].as_str().unwrap());
+            assert_eq!(
+                actual.globs(),
+                expected["globs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|glob| glob.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(pinned_type_filter("notanativetype").is_err());
+    }
+
+    #[test]
+    fn unicode_filename_collation_matches_bun_default_options() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_search_gaps_322.json"
+        ))
+        .unwrap();
+        let input: Vec<&str> = fixture["collation"]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        for (locale, key) in [("en-US", "en"), ("sv-SE", "sv")] {
+            let collator = search_collator(locale);
+            let mut sorted = input.clone();
+            sorted.sort_by(|left, right| collator.compare(left, right));
+            let expected: Vec<&str> = fixture["collation"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(sorted, expected, "{locale}");
+        }
+        assert_eq!(
+            search_collator("en-US").compare("é", "e\u{0301}"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[tokio::test]
+    async fn content_pages_preserve_matches_beyond_ten_thousand() {
+        let tmp = TempDir::new().unwrap();
+        let n = 10_005;
         let content: String = (0..n).map(|i| format!("fn f{i}() {{}}\n")).collect();
         std::fs::write(tmp.path().join("big.rs"), content).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
-
-        // Content mode, unlimited head_limit → records valve is the only bound.
-        let result = tool
-            .call(
-                crate::generated_result(
-                    &json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
-                ),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        // The records valve trips at GREP_RECORDS_CAP — observable as numLines
-        // capped (`truncated` is not part of the binary GrepTool result).
-        assert_eq!(
-            crate::test_data(&result.data)["numLines"],
-            GREP_RECORDS_CAP as i64
-        );
-
-        // Count mode still reports the TRUE total (valve doesn't cap counting).
+        for (limit, offset, expected) in [(0, 0, n), (3, 10_001, 3), (250, 0, 250)] {
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"pattern":"fn", "output_mode":"content",
+                    "head_limit":limit, "offset":offset})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(crate::test_data(&result.data)["numLines"], expected);
+            assert_eq!(crate::test_data(&result.data)["totalLines"], n);
+            if offset > 0 {
+                assert!(content_str(&result).contains("big.rs:10002:fn f10001() {}"));
+                assert!(!content_str(&result).contains("big.rs:10001:"));
+            }
+        }
         let count = tool
             .call(
-                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
+                crate::generated_result(&json!({"pattern":"fn", "output_mode":"count"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(crate::test_data(&count.data)["numMatches"], n as i64);
+        assert_eq!(crate::test_data(&count.data)["numMatches"], n);
     }
 
     #[tokio::test]

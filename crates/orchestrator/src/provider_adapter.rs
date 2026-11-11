@@ -196,6 +196,7 @@ impl ProviderApiAdapter {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         model_source: Option<Utf16JsonProjection>,
+        scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
         let route = crate::query_model::current();
         if let Some(route) = route.as_ref() {
@@ -216,6 +217,7 @@ impl ProviderApiAdapter {
         request.opts.max_output_tokens = max_tokens;
         request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
         request.opts.typed_attachment_ids = typed_attachment_ids;
+        request.opts.scalar_user_content_ids = scalar_user_content_ids;
         request.opts.task_deliveries = task_deliveries;
         request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
         request.opts.query_source = Some("scheduled_task".into());
@@ -775,6 +777,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                         opts.typed_attachment_ids,
                         opts.task_deliveries,
                         opts.model_source,
+                        opts.scalar_user_content_ids,
                     )?;
                     canonical.input.controls.anthropic.context_hint =
                         opts.context_hint.map(|value| {
@@ -848,6 +851,17 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let tools = llm_runtime::convert::to_tool_declarations(tools)?;
         self.service
             .count_tokens_exact(model, profile, system, msgs, tools)
+            .await
+    }
+
+    async fn count_read_text_tokens_exact(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &Utf16JsonProjection,
+    ) -> Result<Option<u64>, LlmError> {
+        self.service
+            .count_read_text_tokens_exact(model, profile, source)
             .await
     }
 
@@ -1507,6 +1521,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         )
         .await
     }
@@ -1532,6 +1547,7 @@ impl StreamingApiClient for ProviderApiAdapter {
             lingxi_core::host::task_delivery::TaskDeliveryRequest,
         >,
         model_source: Option<Utf16JsonProjection>,
+        scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(
@@ -1545,6 +1561,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 typed_attachment_ids,
                 task_deliveries,
                 model_source,
+                scalar_user_content_ids,
             )?;
             let mut request = request;
             request
@@ -1589,6 +1606,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 typed_attachment_ids,
                 task_deliveries,
                 model_source,
+                scalar_user_content_ids,
             )
             .await
     }
@@ -1980,6 +1998,7 @@ mod tests {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         )
         .await
         .expect("stream opens through ProviderApiAdapter and ApiService");
@@ -2088,6 +2107,7 @@ mod tests {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         )
         .await
         .expect("stream opens through ProviderApiAdapter and ApiService");
@@ -2807,6 +2827,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 Some(model_source.clone()),
+                Default::default(),
             )
             .unwrap();
         assert_eq!(
@@ -2841,6 +2862,7 @@ mod tests {
                     Default::default(),
                     Default::default(),
                     Some(model_source),
+                    Default::default(),
                 ),
             )
             .await
@@ -2902,6 +2924,7 @@ mod tests {
                         Default::default(),
                         Default::default(),
                         None,
+                        Default::default(),
                     )
                     .await;
                     let mut request = llm_runtime::MessagesCreateRequest::new(
@@ -3787,6 +3810,7 @@ mod tests {
                     [attachment_id].into_iter().collect(),
                     [(delivery_id, delivery.clone())].into_iter().collect(),
                     wire.model_source.clone(),
+                    std::collections::HashSet::new(),
                 )
                 .await;
             let expected = expected_transport
@@ -3829,7 +3853,11 @@ mod tests {
                 .body_json
                 .clone();
             for pointer in ["/system", "/tools", "/messages", "/model", "/max_tokens"] {
-                assert_eq!(actual.payload_at(pointer), expected.payload_at(pointer), "{query_source} {pointer}: the source-backed parent prefix must survive exactly");
+                assert_eq!(
+                    actual.payload_at(pointer),
+                    expected.payload_at(pointer),
+                    "{query_source} {pointer}: the source-backed parent prefix must survive exactly"
+                );
             }
             assert_eq!(
                 actual.string_at("/model"),
@@ -5486,14 +5514,14 @@ mod tests {
             Some(200_000)
         );
         assert_eq!(
-        crate::query_model::server_error_notice(
-            "Sonnet 4.6",
-            "Opus 4.7",
-            adapter.context_window_tokens("claude-sonnet-4-6", Some("anthropic")),
-            adapter.context_window_tokens("claude-opus-4-7", Some("anthropic")),
-        ),
-        "Switched to Opus 4.7 due to high demand for Sonnet 4.6 · context window 1M → 200K tokens"
-    );
+            crate::query_model::server_error_notice(
+                "Sonnet 4.6",
+                "Opus 4.7",
+                adapter.context_window_tokens("claude-sonnet-4-6", Some("anthropic")),
+                adapter.context_window_tokens("claude-opus-4-7", Some("anthropic")),
+            ),
+            "Switched to Opus 4.7 due to high demand for Sonnet 4.6 · context window 1M → 200K tokens"
+        );
     }
 }
 
