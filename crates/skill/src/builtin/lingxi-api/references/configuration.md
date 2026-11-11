@@ -24,23 +24,12 @@ then add/edit the server. The general settings-layer selector is not the MCP
 scope selector. On mobile, use the native MCP settings page and inspect the
 scope/location it shows; labels can differ by build.
 
-If the user requests file configuration and permitted file tools are available,
-read and merge the correct JSON store directly, retaining other keys and
-servers. Do not overwrite malformed content or a concurrently changed file.
-Validate JSON syntax and report that connection/authentication remains unchecked
-until a real reload or connection result. Host-managed Bot configuration and
-router secrets must be changed through their owner, not this fallback.
-
-Before changing a server, resolve the requested scope, inspect existing content,
-and preserve unrelated entries. Do not put MCP server definitions into
-`settings.json`, copy credentials into a shared project, or show secret values.
-Plugin-provided and managed server definitions are not writable user scopes.
-Afterward report separately what was persisted, whether login is needed,
-whether a connection succeeded, and which tools were actually discovered.
-
-Hooks react to runtime events; a memory entry does not execute them. Cron and
-Bot routines schedule work and have different owners. Permissions remain
-runtime/host decisions even when the skill describes the desired operation.
+For a requested file change, read and merge the correct store; preserve
+unrelated entries and reject malformed/concurrently changed data. Do not put
+MCP definitions into `settings.json`, credentials in shared files, or rewrite
+plugin/managed definitions. Report saved configuration, login, connection and
+discovered tools separately. Bot/router configuration uses its native owner.
+Hooks react to events; a memory entry does not execute them.
 
 A skill is a directory that contains `SKILL.md`. Project skills are
 `{{config_dir}}/skills` directories from the working directory up. The walk ends at the git root when that root is below the home directory, and at the home directory when there is no such root. User skills are
@@ -52,20 +41,27 @@ instruction files and discovered `.mcp.json` servers, and it still runs managed 
 does not install an MCP server or add a tool by naming it. Use
 `plugin-authoring` or `workflow-authoring` only if that skill is registered.
 
+Bundled skills such as `lingxi-api` are compiled in, with no filesystem skill
+root. Use the catalog and `Skill` instead of scanning private configuration.
+File reads cover permitted workspaces and registered skill roots; a known user
+skills path does not grant access to the whole tree.
+
+For installation, preserve the original frontmatter, instructions and linked
+resources in the chosen scope. Verify loader refresh separately from file
+creation. Instructions do not install CLI/browser dependencies: report saved,
+loaded and executed separately. Desktop built-ins work without the standalone
+`lingxi` executable on PATH.
+
 Source anchors: Harness `crates/configuration-admin/src/mcp_bridge.rs`,
 `crates/command-api/src/builtins/bundled/update_config_skill.rs`; product
 `apps/cli/host/src/commands/mcp.rs` and native settings surfaces.
 
-Configuration has distinct owners: Harness settings are the layers above;
-Desktop preferences are userData/settings.v1.json; provider account metadata is
-host-global under provider-accounts/<store_scope>.json, with credentials in the
-native broker/secure store. Bot and Local App grants have their own native
-owners. These are not interchangeable JSON files. /config opens the resolved
-Harness user file, not Desktop appearance settings. Config cannot set native
-appearance preferences. Do not infer .claude or CLAUDE.md paths from code ancestry. Provider-specific
-authentication variables apply only to the selected provider; actual Anthropic
-protocol identifiers and credentials remain valid on an Anthropic route.
-Config-home and global-file rules are in sessions. Do not collapse them.
+Desktop preferences are `userData/settings.v1.json`; provider metadata is
+host-global `provider-accounts/<store_scope>.json`, with credentials in the
+native broker. Bot/App grants have separate owners. `/config` opens the
+resolved Harness user file, not Desktop appearance settings. Provider auth
+variables apply only to their selected route. Config-home rules are in sessions.
+
 Permission mode decides whether an unmatched tool call asks. It does not start
 an operating-system sandbox. The starting mode is manual (ask first) and prints
 no mode line. Shift+Tab cycles modes in the terminal. `--permission-mode`

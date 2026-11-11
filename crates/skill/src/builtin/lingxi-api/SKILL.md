@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Explain, configure, troubleshoot, or integrate LingXi CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
+description: Explain, configure, troubleshoot, or integrate LingXi (灵犀) CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
 ---
 
 # LingXi API guide
@@ -11,12 +11,12 @@ schemas, and returned status decide what can run here.
 
 ## Read the matching topic before answering
 
-The first argument is one topic id. In a bundled host, call `Skill` with
-`skill: "lingxi-api"` and `args: "<topic>"`, for example `args: "bots"`. A user
-can enter `/lingxi-api <topic> [question]`. For a file-based installation, read
-the linked reference next to this file. Answer from that topic. Do not answer
-a product question from memory, and do not load every topic for a general
-question. Load a second topic only when the task crosses domains.
+The first argument is a topic id. Call `Skill` with `skill: "lingxi-api"` and
+`args: "<topic>"`, or use `/lingxi-api <topic> [question]`. Request the known
+topic on the first call: skill installation/MCP uses `configuration`, failed
+calls use `troubleshooting`. Load only relevant topics and reuse loaded ones.
+File-based installations read the linked references beside this file; bundled
+topics load offline through `Skill`, without probing private folders or a CLI.
 
 | Topic | Read when the question concerns |
 | --- | --- |
@@ -37,45 +37,23 @@ question. Load a second topic only when the task crosses domains.
 | [integrations](references/integrations.md) | Rust SDKs, native hosts, Bridge, protocol ownership |
 | [troubleshooting](references/troubleshooting.md) | Version, logs, failed tools, unavailable features |
 
-## Stale training prior
-
-A remembered Claude Code or other-product path is not LingXi behavior. The
-loaded topic wins. Do not send the user to another product's docs. Anthropic
-identifiers stay valid only on an actual Anthropic backend.
-
-| Prior | Read |
-| --- | --- |
-| `CLAUDE.md` or a `.claude` directory is the instruction home | sessions |
-| `claude mcp`, or a desktop import, is how you add a server | configuration |
-| `/agents` opens a manager | agents |
-| `/fork` always starts an in-session subagent | agents |
-| `remote-control` opens the browser remote page | webrtc |
-| `settings.local.json` changes the permission mode | configuration |
-
 ## Apply the guide to this session
 
-Distinguish an implemented feature, a tool this caller can see, permission to
-use it, resource readiness, and a successful result. An absent tool can still
-have a native UI or SDK entry. Explain that entry. Do not invent a
-model-callable command. Unknown readiness stays unknown.
+Use the current host, caller catalog and tool schema. Feature support,
+visible tools, permission, readiness and successful execution are separate
+facts. Native UI and SDK declarations do not create model-callable tools.
 
-For an action, use the domain skill when it is registered, then the live tool
-schema. `media`, `local-app`, `visualize`, `workflow-authoring`,
-`update-config`, and mobile device skills apply only where registered. This
-guide does not add tools, permissions, workspace, or Bot grants.
+Use LingXi's branded paths and provider-neutral routing, not remembered Claude
+Code commands or models. Sessions covers instruction files; agents covers
+/fork and /subtask; configuration covers settings, skills and ordinary MCP.
+App-owned MCP follows the App lifecycle.
 
-Route Local App build, modify, or publish work to the registered `local-app`
-skill. Explaining an app does not publish it. App-owned Desktop MCP uses the
-App lifecycle. Other MCP servers use configuration. Do not write an App
-declaration into global settings.
+For actions, use the registered domain skill: `local-app` for App authoring,
+`media`, `visualize`, `workflow-authoring`, `update-config` or mobile skills
+where available. Reading help does not activate hardware, call an extra model,
+change settings or publish an App. A skill adds no tools or permissions.
 
-Read-only questions do not activate devices, change connections, write
-settings, or call a model. For an action, use its authorized entry and check
-the result. Saved settings, authentication, connection, and discovered tools
-are separate facts. Media bytes and metadata are separate. Accepted, running,
-and finished background work are separate.
-
-These references are not a live catalog. For SDK symbols, read the selected
-revision. Label evidence as bundled documentation, inspected source, host
-status, a test, or a live operation. Another answer from this same guide is
-not independent verification.
+Keep accounts and grants with their host owners. Preserve pending questions,
+permissions and task IDs during recovery; accepted/running/completed differ.
+Inspect the selected source revision for SDK symbols. Label guide, source,
+test and live evidence; repeating this guide is not independent verification.

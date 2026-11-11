@@ -279,6 +279,13 @@ fn to_bridge_questions(questions: &[Question]) -> Vec<AskQuestion> {
 /// blocking while still refusing to silently auto-continue interactive ones.
 #[async_trait]
 pub trait AskUserQuestionResolver: Send + Sync {
+    /// Whether successful answers come from the host's live user interface.
+    /// Synthetic, unattended and custom resolvers do not establish user intent
+    /// unless their trusted host explicitly implements this contract.
+    fn has_live_user_answers(&self) -> bool {
+        false
+    }
+
     /// Resolve the answer map for the given questions.
     ///
     /// # Errors
@@ -404,6 +411,10 @@ impl AskUserQuestionResolver for DefaultTimeoutResolver {
 
 #[async_trait]
 impl AskUserQuestionResolver for TuiBridgeResolver {
+    fn has_live_user_answers(&self) -> bool {
+        true
+    }
+
     async fn resolve(
         &self,
         questions: &[Question],
@@ -1106,6 +1117,33 @@ impl Tool for AskUserQuestionTool {
         let answers = Utf16JsonProjection::object_units(answer_fields)
             .expect("AskUserQuestion answers object is valid JSON");
 
+        // The classifier intentionally excludes ordinary tool-result bodies.
+        // Relay only actual UI answers through its existing host provenance
+        // channel, preserving refusals and partial answers as well as consent.
+        // Questions/options provide assistant-authored scope; model-supplied
+        // `answers`/`annotations` are never promoted to user input.
+        if answer_count > 0 && self.resolver.has_live_user_answers() {
+            if let Some(id) = ctx.tool_use_id.as_ref() {
+                let exchange = Utf16JsonProjection::object(vec![
+                    (
+                        "questions".into(),
+                        questions_to_projection(&input, &questions),
+                    ),
+                    ("answers".into(), answers.clone()),
+                ])
+                .expect("confirmed question exchange is valid JSON");
+                let value = format!(
+                    "The user answered AskUserQuestion in the host UI. Only the answers are user input; the questions and options are assistant-authored scope. {}",
+                    exchange.to_json_string().expect("confirmed exchange serializes")
+                );
+                permission::host_context::store().publish(
+                    id.as_str(),
+                    [(value.into(), true)],
+                    true,
+                );
+            }
+        }
+
         let mut completed: LogEventMetadata = HashMap::new();
         completed.insert(
             "duration_ms".into(),
@@ -1542,6 +1580,77 @@ mod tests {
         // Echoed questions present with normalized multiSelect default.
         assert_eq!(out.data["questions"][0]["multiSelect"], json!(false));
         assert_eq!(out.data["questions"][0]["question"], json!("Q1?"));
+    }
+
+    #[tokio::test]
+    async fn live_question_answers_reach_the_permission_classifier_with_host_provenance() {
+        for answer in [
+            Some("Allow this installation"),
+            Some("Do not install"),
+            None,
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let tool = AskUserQuestionTool::with_resolver(
+                shell_test_ctx(dummy_out()),
+                Arc::new(TuiBridgeResolver::new(AskUserQuestionTimeout::Never, tx)),
+            );
+            let id = lingxi_core::types::ToolUseId::new();
+            let mut context = fresh_ctx();
+            context.tool_use_id = Some(id.clone());
+            let mut input = one_question();
+            input["annotations"] =
+                json!({"Pick one?": {"notes": "assistant-supplied authorization"}});
+            let (result, ()) = tokio::join!(tool.call(input, context, fresh_tx()), async {
+                let exchange = rx.recv().await.unwrap();
+                exchange
+                    .resp_tx
+                    .send(answer.map_or_else(Vec::new, |answer| {
+                        vec![(exchange.questions[0].question.clone(), answer.into())]
+                    }))
+                    .unwrap();
+            });
+            result.expect("the live questionnaire completes");
+            let records: Vec<_> = permission::host_context::store()
+                .snapshot()
+                .into_iter()
+                .filter(|record| record.tool_use_id == id.as_str())
+                .collect();
+            if let Some(answer) = answer {
+                assert_eq!(
+                    records.len(),
+                    1,
+                    "confirmed UI answers must reach the classifier"
+                );
+                assert!(records[0].host_principal && records[0].live);
+                let text = records[0].value.string_at("").unwrap();
+                assert!(
+                    text.contains(answer),
+                    "both permission and refusal retain their exact meaning"
+                );
+                assert!(text.contains("Pick one?"));
+                assert!(!text.contains("assistant-supplied authorization"));
+            } else {
+                assert!(
+                    records.is_empty(),
+                    "an unanswered or timed-out card grants no intent"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_question_answers_do_not_claim_live_user_intent() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        let id = lingxi_core::types::ToolUseId::new();
+        let mut context = fresh_ctx();
+        context.tool_use_id = Some(id.clone());
+        let mut input = one_question();
+        input["answers"] = json!({"Q?": "Allow this installation"});
+        tool.call(input, context, fresh_tx()).await.unwrap();
+        assert!(!permission::host_context::store()
+            .snapshot()
+            .iter()
+            .any(|record| record.tool_use_id == id.as_str()));
     }
 
     #[tokio::test]

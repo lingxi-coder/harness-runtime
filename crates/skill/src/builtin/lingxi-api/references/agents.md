@@ -22,30 +22,37 @@ and is unavailable in a coordinator session. The command returns when the
 spawn is accepted; the subagent result comes back to this session later.
 While agent view is off, `/fork` is the in-session spawn and `/subtask` is not registered.
 
-Delegate a specific goal and required context. The child receives its permitted
-tools and workspace; do not assume it has all parent capabilities, credentials,
-OS permission or files. A skill describing a tool does not add that tool to a
-child. A live Media conversation belongs to its interactive main-session
-handoff, not an arbitrary child or scheduled turn.
+Delegate a bounded goal with required context. Children receive only their
+own permitted tools/workspace; parent credentials, Media handoff and native
+permissions do not transfer. A skill cannot add a missing tool.
 
 Fusion, where offered, is the `fusion` Agent type. Check the catalog before
 calling it ready. Its extra model work costs more usage, and a panel result is
 not proof that an external action happened.
 
+Current Fusion settings use named `fusion.strategies` and
+`fusion.defaultStrategyId`, with model roles inside each strategy's `config`.
+Old root-level `fusion.panelModels` is rejected. Inspect `/fusion` and the
+current settings schema before changing the user's configuration; preserve
+their strategy, model/profile choices and unrelated settings. Use the selected
+provider's available models rather than hard-coding another provider's roles.
+
 Preserve agent, session, task and Bot identities and use the relevant service
 for continuation/cancellation. A turn being interrupted does not prove all
 spawned processes stopped. Report terminal state from the owning task service.
 `ListAgents` and background task lists need not describe the same population.
+After a resume or interruption, discover the current recipients before sending
+a message. Historical display names and task IDs do not prove that a live
+mailbox still exists; `recipient not found` requires checking that task's owner
+and state rather than retrying the same stale recipient.
 
 Source anchors: Harness `crates/agent/src/{builtins,tool_resolver}.rs`,
 `crates/tools/agent/src/agent.rs`, `crates/fusion`,
 `crates/runtime/src/desktop/background_agent.rs`.
 
-Execution completion is distinct from report delivery. When handback is enabled,
-only a host-issued receipt establishes delivered/flagged delivery; withheld or
-pending reports are not successful parent results. Plain text and a Done label
-are insufficient. Host-supplied control tools use the enforcing invoker and
-cannot be replaced by a Mod result. Cancel/resume preserves run-generation and
-receipt identity. Pool and host configuration determine actual concurrency.
+Execution and report delivery are separate. Only host-issued handback receipts
+establish delivery; withheld/pending reports are not delivered. Mod/plain-text
+results cannot replace the enforcing host invoker. Cancel/resume preserves run
+and receipt identity; host pools determine concurrency.
 lingxi-code-guide has only Read/Grep/Glob and the same bundled references as this
 skill: repeating that corpus is not independent verification of source code.

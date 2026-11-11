@@ -18,32 +18,24 @@ and permissions. The same runtime does not make their tools interchangeable.
 | Model communication | Provider-neutral llm-client and selected provider profile |
 | Mobile command execution | Mobile Linux runtime, mounted paths and host lifecycle |
 
-For “what can you do?”, give a short task-oriented overview and identify the
-current host. Use tools already visible to the caller, or a catalog search tool
-when present, to establish actual action entries. Do not enumerate a parent's
-private tools or present all SDK interfaces as executable abilities. A remote
-viewer controls the selected host; it does not acquire that host's files locally.
-
-Offline help remains readable without a model/network service. Actual answers
-or operations can still depend on a network model, an installed local model,
-credentials, a device, or OS permission. A tool's absence is not evidence that
-another product host lacks the feature. Offer that host's native route where known.
-
-The product web console and each SDK have their own delivery state. A page or
-API declaration alone does not establish a running hosted Agent or cloud Bot.
-The website `/login` console is a prototype and does not create a product
-account. Remote sign-in is the remote page, not that console.
+For “what can you do?”, identify the host and give a short task-oriented
+overview based on its visible catalog/search tools. Native UI, SDK declarations
+and another host's tools are not model-callable grants. Remote viewers operate
+on their selected host, not a local copy of its files. Models, credentials,
+network, hardware and OS permission determine actual readiness.
 
 The public handbook is the user-facing contract for install, a first session,
 provider accounts, the CLI, desktop, phone, permissions, models, remote
 control, and help. These topics are its offline copy. The installed npm
 command is `lingxi`; help and `/doctor` identify the same program as
-`lingxi-cli`. A source checkout runs `lingxi-cli`. Do not invent a public
-registry release, an Intel/Windows/Linux desktop package, or an App Store,
-TestFlight, or public APK link. The desktop build this site records is an
-Apple silicon Mac beta that runs a local engine, without cloud accounts or
-cross-device sync. Phone builds recorded there are internal betas. Adding a
-provider account does not create a LingXi subscription.
+`lingxi-cli`. A source checkout runs `lingxi-cli`. This offline guide is not a
+release catalog: verify the product's actual distribution channel before
+providing install links, versions or supported packages. Build scripts and
+source support do not prove that a public package is available. Desktop runs
+its Agent engine locally; authenticated Teams and Remote Control services have
+their own network and account requirements. Remote attachment does not copy
+the host's session into a synchronized local history. Adding a provider account
+does not create a LingXi subscription.
 
 Source anchors: Harness `crates/runtime/src/{desktop,mobile}`,
 `crates/tool-api/src/registry.rs`; product host composition and Remote Control.

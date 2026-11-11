@@ -9,7 +9,8 @@ Choose the interface for the caller before writing an integration:
 | Native mobile command execution | Mobile Linux API and Android/iOS platform wrappers |
 | Product UI talking to its runtime | Product Bridge protocol / native FFI |
 | Local App requesting Agent work | Pinned official AG-UI App Agent profile and host grants |
-| Agent invoking tools in an App page | WebMCP page tool contract and host bridge |
+| Agent invoking Desktop App operations | App-owned MCP lifecycle and its discovered tool schema |
+| Agent invoking tools in a supported Mobile App page | Optional WebMCP page tool contract and host bridge |
 | External tool/service integration | MCP |
 | Reusable instructions/resources | Agent Skills |
 | Bot-to-Bot work in a Bot-capable host | Scoped Bot MCP router and durable task state |

@@ -27,21 +27,11 @@ logs from runs started with debug enabled; do not claim prompt expansion
 enabled logging in an already running process. An executable slash handler
 cannot automatically be invoked as a prompt Skill.
 
-Product help and privacy requests use the address published on the product
-privacy page. A screen that links to another product's website is not LingXi
-support. Do not send the user there.
-
-Use a targeted reversible remedy justified by the evidence. Do not clear user
-data, reset rootfs, loosen permissions, recreate credentials, re-pair devices,
-or edit transcripts as a generic recovery step. For dropped App/Bot connections,
-query the original task/session rather than submitting the same action again.
-
-Report what the check established: source/schema, unit/fake-host test, compiled
-package, device interaction or live service outcome. A build alone does not
-prove physical camera, signed credentials, remote approval or task completion.
-
-Source anchors: Harness bundled `debug`/`doctor` commands, host status and tool
-results; product acceptance records for the exact build under investigation.
+Use LingXi's published help/privacy contact, not another product's support.
+Apply a targeted, reversible remedy. Do not clear data/rootfs, loosen
+permissions or recreate credentials as generic recovery. Recover existing
+App/Bot task IDs instead of replaying effects. Report source/schema, unit test,
+compiled package, device interaction and live-service evidence separately.
 
 Desktop logs default to the client userData/logs/desktop.jsonl; session JSONL
 and subagents are under the resolved config-home/projects/<encoded-project>/.
@@ -49,8 +39,25 @@ Resolve those paths from the running host; brands and relocated homes differ.
 Match session ID, child/task ID, timestamps and the package/source receipt.
 Read only relevant text/tool/error records; redact credentials and opaque
 provider reasoning payloads. Compare the actual package's dependency fingerprints,
-not merely neighboring checkout heads. A local unsupported-capability encoding
-error does not prove a request was sent to a different provider. In particular,
-ToolSearch plus defer_loading on a GPT route indicates a discovery wire mismatch.
-Host-supplied SubagentHandback unavailable indicates a host dispatch problem;
-verify its receipt/disposition rather than treating plain text as delivered.
+not merely neighboring checkout heads. A local wire-encoding error does not prove another provider received a call.
+ToolSearch plus defer_loading on a GPT route indicates a discovery wire
+mismatch. A SubagentHandback error needs its host receipt/disposition checked;
+plain text does not prove delivery.
+
+Inspect exact tool calls/results and live schemas before changing settings.
+`Skill` with `skill: "lingxi-api", args: "configuration"` loads offline help
+without filesystem access. Invalid types, unsupported browser actions and stale
+task IDs need their own corrections, not permission changes.
+
+Auto mode reviews the proposed effect. A classifier-unavailable/quota error is
+not a safety verdict. An explicit denial retains its scope; do not retry it
+through another tool or disable checks. A confirmed answer in the host's
+AskUserQuestion UI is user input for that question, while an unanswered card,
+assistant-supplied `answers` field or ordinary external tool output establishes
+no consent. If a later review claims that a recorded answer is missing,
+inspect the host-to-classifier context for that tool-use ID and package version;
+asking the same question repeatedly does not repair a lost context bridge.
+
+A denied memory/plan/skill read should use the exact path and registered roots
+reported by the current host. Do not guess paths from another product's old
+transcript or add the entire private config home to trusted directories.
