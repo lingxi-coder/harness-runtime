@@ -8108,6 +8108,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         publication.denial_kind = denial_kind.clone();
         if let Some(frame) = publication.frame.as_mut() {
             frame.denial_kind = denial_kind;
+            frame.permission_decision = permission_decision;
         }
         publish_or_defer_tool_result(
             orch,

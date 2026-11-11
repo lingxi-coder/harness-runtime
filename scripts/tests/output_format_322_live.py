@@ -74,6 +74,11 @@ def verify(root, config_path, reference_root):
                         tool_result_batches.add(pending_tool_ids.pop(block["tool_use_id"]))
                         assert block.get("is_error") is False
                         assert block.get("content") == "LXI_LIVE_322_TOOL"
+                        facts = [fact for fact in row.get("tool_result_meta", [])
+                                 if fact.get("id") == block["tool_use_id"]]
+                        assert len(facts) == 1, "accepted tool lost its permission facts"
+                        assert facts[0]["permission_decision"] == {
+                            "decision": "accept", "source": "user_permanent", "reason_type": "rule"}
                         tool_results += 1
         if kind != "result":
             continue
