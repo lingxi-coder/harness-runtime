@@ -15,6 +15,9 @@ uuid = { version = "1.10", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38", features = ["fs"] }
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.13"
 

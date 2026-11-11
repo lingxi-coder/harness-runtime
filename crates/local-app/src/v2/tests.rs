@@ -384,6 +384,91 @@ fn schema_downgrade_is_blocked_and_initial_schema_can_be_newer() {
         })
     ));
 }
+#[cfg(target_vendor = "apple")]
+#[test]
+fn native_source_identity_upgrade_preserves_owner_and_retries_partial_upgrades() {
+    for partial in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let directory = home.join("source");
+        fs::create_dir(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        let library = AppLibrary::open(&home).unwrap();
+        let legacy = rooted_fs::root_identity(&directory).unwrap();
+        let persistent = native_source_identity(source).unwrap();
+        assert_ne!(legacy, persistent);
+        let (source_id, request_id) = registered_source(&library, source, legacy);
+        let mut binding = authoring(source);
+        binding.project_ref = Some(ProjectRef::DesktopPath {
+            path: source.into(),
+        });
+        library
+            .register_native_authoring(binding.clone(), &source_id, &request_id, false, |_| {
+                Ok(legacy)
+            })
+            .unwrap();
+        if partial {
+            let owner = fs::read_dir(library.root().join("pending-authoring"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("owner-")
+                })
+                .unwrap();
+            let mut saved: Value = serde_json::from_slice(&fs::read(&owner).unwrap()).unwrap();
+            saved["sourceIdentity"] = serde_json::to_value(persistent).unwrap();
+            fs::write(owner, serde_json::to_vec(&saved).unwrap()).unwrap();
+        }
+        let reopened = AppLibrary::open(&home).unwrap();
+        let (actual_source_id, actual, _) = reopened
+            .resolve_native_authoring_with_source_id(
+                source,
+                binding.project_ref.as_ref().unwrap(),
+                binding.authoring_session_id.as_deref().unwrap(),
+                |owner| native_source_identity(&owner.source_directory),
+            )
+            .unwrap();
+        assert_eq!(actual_source_id, source_id);
+        assert_eq!(actual, binding);
+        assert_eq!(
+            reopened
+                .prepare_native_authoring_source(source, Some(&source_id), || {
+                    native_source_identity(source)
+                })
+                .unwrap(),
+            source_id
+        );
+        assert!(
+            AppLibrary::open(&home).is_ok(),
+            "identity upgrade must be idempotent"
+        );
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn native_source_identity_upgrade_does_not_adopt_an_unproven_legacy_volume() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(temp.path()).unwrap();
+    let directory = home.join("source");
+    fs::create_dir(&directory).unwrap();
+    let source = directory.to_str().unwrap();
+    let library = AppLibrary::open(&home).unwrap();
+    let mut stale = serde_json::to_value(rooted_fs::root_identity(&directory).unwrap()).unwrap();
+    stale["volume"] = json!(stale["volume"].as_u64().unwrap() + 2);
+    let stale = serde_json::from_value(stale).unwrap();
+    let (source_id, _) = registered_source(&library, source, stale);
+    let reopened = AppLibrary::open(&home).unwrap();
+    assert!(reopened
+        .prepare_native_authoring_source(source, Some(&source_id), || native_source_identity(
+            source
+        ))
+        .is_err());
+}
+
 #[test]
 fn continued_development_only_reuses_recorded_matching_session() {
     let (dir, lib, req) = setup();

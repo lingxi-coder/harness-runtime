@@ -2634,87 +2634,97 @@ async fn describe_session_source_inner<F: FnOnce()>(
         .map_err(|error| io_error(error.to_string()))?;
     let identity =
         rooted_fs::opened_file_identity(&file).map_err(|error| io_error(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| io_error(error.to_string()))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|error| io_error(error.to_string()))?;
     let authority = TranscriptFileAuthority::from_capture(canonical_home, relative, root, identity)
         .map_err(|error| io_error(error.to_string()))?;
     after_read();
-    if authority
-        .read_checked()
-        .map_err(|error| io_error(error.to_string()))?
-        != bytes
-    {
-        return Err(io_error("session source changed during capture".into()));
+    // A tool can inspect its own source while the writer is appending another
+    // row. Refresh only an append of this pinned inode, then derive identity,
+    // mode and workspace from the refreshed bytes. Never resolve the UUID to
+    // another file or carry authority across a rewrite or replacement.
+    for _ in 0..3 {
+        let current = authority
+            .read_checked()
+            .map_err(|error| io_error(error.to_string()))?;
+        if !current.starts_with(&bytes) {
+            return Err(io_error("session source changed during capture".into()));
+        }
+        bytes = current;
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error(error.to_string()))?;
+        let content = String::from_utf8(bytes).map_err(|error| io_error(error.to_string()))?;
+        let loaded = route_captured_session_source(source, session_id, &content)?;
+        if loaded.malformed_line_count != 0 {
+            return Err(io_error("session source contains malformed rows".into()));
+        }
+        let workspace = transcript_workspace_path(source, &loaded);
+        let in_ordinary_scope = ordinary
+            && (unfiltered
+                || scope == SessionDiscoveryScope::All
+                || transcript_matches_target_dirs(workspace.as_deref(), &dirs.target_cwds));
+        let in_alias_scope = aliases
+            .iter()
+            .any(|alias_cwd| cwd_alias_matches_source(source, alias_cwd, &content));
+        if !in_ordinary_scope && !in_alias_scope {
+            return Err(missing());
+        }
+        let empty_session = loaded.messages_in_order.is_empty()
+            && loaded
+                .mobile_empty_sessions
+                .contains(&session_id.to_string());
+        if empty_session
+            && crate::jsonl::validated_empty_draft_cwd(&content, &session_id.to_string()).is_none()
+        {
+            return Err(io_error("invalid empty session anchor".into()));
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let candidate = CatalogCandidate {
+            uuid: session_id,
+            path: source.to_path_buf(),
+            stem: source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(missing)?
+                .to_string(),
+            file_len: metadata.len(),
+            file_modified: modified,
+            file_created: metadata.created().unwrap_or(modified),
+            current_read_validated: true,
+        };
+        let current_is_sdk_entrypoint = matches!(
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+            Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+        );
+        let mut skipped = 0;
+        let row = enrich_candidate_from_content(
+            candidate,
+            content.clone(),
+            current_is_sdk_entrypoint,
+            &[],
+            &mut None,
+            &mut skipped,
+        )
+        .await?
+        .ok_or(LoaderError::EmptyDirectory)?;
+        let current = authority
+            .read_checked()
+            .map_err(|error| io_error(error.to_string()))?;
+        if current != content.as_bytes() {
+            if !current.starts_with(content.as_bytes()) {
+                return Err(io_error("session source changed during description".into()));
+            }
+            bytes = current;
+            continue;
+        }
+        return Ok(DescribedSessionSource {
+            metadata: row,
+            empty_session,
+        });
     }
-    let content = String::from_utf8(bytes).map_err(|error| io_error(error.to_string()))?;
-    let loaded = route_captured_session_source(source, session_id, &content)?;
-    if loaded.malformed_line_count != 0 {
-        return Err(io_error("session source contains malformed rows".into()));
-    }
-    let workspace = transcript_workspace_path(source, &loaded);
-    let in_ordinary_scope = ordinary
-        && (unfiltered
-            || scope == SessionDiscoveryScope::All
-            || transcript_matches_target_dirs(workspace.as_deref(), &dirs.target_cwds));
-    let in_alias_scope = aliases
-        .iter()
-        .any(|alias_cwd| cwd_alias_matches_source(source, alias_cwd, &content));
-    if !in_ordinary_scope && !in_alias_scope {
-        return Err(missing());
-    }
-    let empty_session = loaded.messages_in_order.is_empty()
-        && loaded
-            .mobile_empty_sessions
-            .contains(&session_id.to_string());
-    if empty_session
-        && crate::jsonl::validated_empty_draft_cwd(&content, &session_id.to_string()).is_none()
-    {
-        return Err(io_error("invalid empty session anchor".into()));
-    }
-    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let candidate = CatalogCandidate {
-        uuid: session_id,
-        path: source.to_path_buf(),
-        stem: source
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(missing)?
-            .to_string(),
-        file_len: metadata.len(),
-        file_modified: modified,
-        file_created: metadata.created().unwrap_or(modified),
-        current_read_validated: true,
-    };
-    let current_is_sdk_entrypoint = matches!(
-        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
-        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
-    );
-    let mut skipped = 0;
-    let row = enrich_candidate_from_content(
-        candidate,
-        content.clone(),
-        current_is_sdk_entrypoint,
-        &[],
-        &mut None,
-        &mut skipped,
-    )
-    .await?
-    .ok_or(LoaderError::EmptyDirectory)?;
-    if authority
-        .read_checked()
-        .map_err(|error| io_error(error.to_string()))?
-        != content.as_bytes()
-    {
-        return Err(io_error("session source changed during description".into()));
-    }
-    Ok(DescribedSessionSource {
-        metadata: row,
-        empty_session,
-    })
+    Err(io_error("session source is still being saved".into()))
 }
 
 /// Resolve an exact UUID once, then enrich only that selected transcript. This
@@ -7312,6 +7322,98 @@ mod tests {
         .await;
         assert!(matches!(full, Err(LoaderError::Io { .. })));
         assert!(matches!(found, Err(LoaderError::Io { .. })));
+    }
+
+    #[tokio::test]
+    async fn exact_source_description_refreshes_a_concurrently_appended_transcript() {
+        use std::io::Write;
+
+        let (_temp, home, cwd, dir) = setup();
+        let id = write_session(&dir, &cwd, "selected", SystemTime::now(), false, None);
+        let source = dir.join(format!("{id}.jsonl"));
+        let result = describe_session_source_inner(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            &source,
+            id,
+            || {
+                let row = json!({
+                    "type": "assistant", "uuid": Uuid::new_v4(), "parentUuid": id,
+                    "sessionId": id, "cwd": cwd,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "message": {"role":"assistant", "content":[{"type":"text", "text":"saved while describing"}]}
+                });
+                writeln!(std::fs::OpenOptions::new().append(true).open(&source).unwrap(), "{row}").unwrap();
+            },
+        )
+        .await
+        .expect("normal transcript append must not make an exact Local App source unavailable");
+        assert_eq!(result.metadata.path, source);
+        assert_eq!(result.metadata.uuid, id);
+        assert_eq!(result.metadata.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn exact_source_description_rechecks_colliding_scope_after_concurrent_relocation() {
+        use std::io::Write;
+
+        let (temp, home, _, _) = setup();
+        let cwd = temp.path().join("work-proj").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let dir = home.join("projects").join(project_dir_name(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = write_session(&dir, &cwd, "selected", SystemTime::now(), false, None);
+        let source = dir.join(format!("{id}.jsonl"));
+        let other = temp.path().join("work/proj");
+        std::fs::create_dir_all(&other).unwrap();
+        let result = describe_session_source_inner(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            &source,
+            id,
+            || {
+                let row = json!({"type":"relocated", "sessionId":id, "relocatedCwd":other});
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&source)
+                        .unwrap(),
+                    "{row}"
+                )
+                .unwrap();
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(LoaderError::SessionNotFound { .. })),
+            "a refreshed append must not keep authority for the previous workspace: {}",
+            result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "accepted".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_source_description_rejects_a_same_inode_rewrite_during_capture() {
+        let (_temp, home, cwd, dir) = setup();
+        let id = write_session(&dir, &cwd, "selected", SystemTime::now(), false, None);
+        let source = dir.join(format!("{id}.jsonl"));
+        let result = describe_session_source_inner(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            &source,
+            id,
+            || {
+                let content = std::fs::read_to_string(&source).unwrap();
+                std::fs::write(&source, content.replace("selected", "rewritten")).unwrap();
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(LoaderError::Io { .. })));
     }
 
     #[tokio::test]

@@ -21,6 +21,12 @@ mod journal;
 mod text_window;
 mod types;
 
+// The standard library does not expose Apple's persistent volume UUID.
+// Keep this read-only descriptor query in one small platform module.
+#[cfg(target_vendor = "apple")]
+#[allow(unsafe_code)]
+mod apple_identity;
+
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -2739,6 +2745,29 @@ pub fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
     imp::root_identity(root)
 }
 
+/// Identity for durable source receipts. Apple volume UUIDs survive device
+/// renumbering across mounts; unsupported volumes retain the existing identity.
+/// Use `root_identity`, rather than this value, for pinned filesystem operations.
+pub fn persistent_root_identity_pinned(
+    root: &Path,
+    expected: &RootIdentity,
+) -> Result<RootIdentity, FsError> {
+    #[cfg(target_vendor = "apple")]
+    {
+        imp::persistent_root_identity(root, expected)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let current = root_identity(root)?;
+        if current != *expected {
+            return Err(FsError::OutsideWorkspace(
+                "source directory identity changed".into(),
+            ));
+        }
+        Ok(current)
+    }
+}
+
 /// Exclusively create one directory below a pinned root and retain its opened
 /// handle. Existing entries, including empty directories and links, are never
 /// adopted or chmodded. The parent must already exist.
@@ -3775,6 +3804,19 @@ mod imp {
     pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
         let directory = open_root(root)?;
         identity_from_fd(&directory, root)
+    }
+
+    #[cfg(target_vendor = "apple")]
+    pub(super) fn persistent_root_identity(
+        root: &Path,
+        expected: &RootIdentity,
+    ) -> Result<RootIdentity, FsError> {
+        use std::os::fd::AsFd;
+        let directory = open_root_checked(root, Some(expected))?;
+        let identity = identity_from_fd(&directory, root)?;
+        let persistent = crate::apple_identity::persistent_identity(directory.as_fd(), identity)?;
+        let _current = open_root_checked(root, Some(&identity))?;
+        Ok(persistent)
     }
 
     pub(super) fn file_identity_pinned(

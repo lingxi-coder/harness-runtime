@@ -12,6 +12,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(target_vendor = "apple")]
+mod source_identity;
+
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RELEASE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
@@ -449,7 +452,8 @@ pub fn native_source_identity(source: &str) -> Result<rooted_fs::RootIdentity, A
             "authoring source changed during validation".into(),
         ));
     }
-    Ok(identity)
+    rooted_fs::persistent_root_identity_pinned(path, &identity)
+        .map_err(|error| AppError::Invalid(format!("invalid durable authoring source: {error}")))
 }
 
 fn valid_uuid(value: &str) -> bool {
@@ -540,7 +544,10 @@ impl AppLibrary {
         ensure_directory(&root.join("apps"))?;
         ensure_directory(&root.join("transactions"))?;
         ensure_directory(&root.join("pending-authoring"))?;
-        Ok(Self { config_home, root })
+        let library = Self { config_home, root };
+        #[cfg(target_vendor = "apple")]
+        source_identity::upgrade_current_sources(&library)?;
+        Ok(library)
     }
     /// Return the canonical library directory used for records and immutable releases.
     pub fn root(&self) -> &Path {
