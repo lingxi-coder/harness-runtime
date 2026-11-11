@@ -33,6 +33,14 @@ The broad nine-package attempt ran 4,128 passing tests, 15 failing tests and fiv
 
 The [frozen validation report](filesystem-gaps-validation-2026-11-10.md) remains historical evidence for its explicitly identified snapshot and SDK revision. The publication checks use the clean integrated source and the published SDK above. Final consumer Git pins, build identity, CLI flows, main parity and shared-checkout preservation are recorded under `/Users/luolingfeng/lingxi/artifacts/filesystem-delivery-20261110`.
 
+## Published consumer acceptance
+
+The consumer pins functional runtime `a799ce782014a1ff6f1c58531547417fee82a54c` and SDK `54cf6b7b96e36c16593e43e170d80767099fbe7d`. All 2,890 validated Rust and root Cargo inputs match the fetched runtime. The fixture-only follow-up changes no Rust or Cargo input.
+
+The production CLI built from app `a6b115d2bc6684c45983e2b60a2e3e5cc6e9ef98` passes all four disposable flows: six-tool lifecycle, malformed UTF-16 lifecycle, ASCII exact Read count and malformed UTF-16 exact Read count. Both lifecycles perform resumed Edit before another Read. Both count request bodies are byte-identical to the pinned native 2.1.322 captures. Binary SHA-256: `8655412d67706bd9b9045d6bafc236f29fad025e32f7db755347f17b4f1fe77d`.
+
+The first consumer run exposed two extraction omissions. Filesystem smoke helpers are now self-contained instead of importing a dirty-snapshot-only session module. Debug CLI workers use the existing 64 MiB startup stack budget after the shared 8 MiB budget overflowed before the first provider request. The rebuilt CLI passes the same flows; the release limit remains unchanged. Failed attempts and their original build receipts are retained separately.
+
 ## Preservation and acceptance
 
 Publication uses isolated clean worktrees. Shared checkout files, staged state, branches and HEADs are excluded from mutation; concurrent edits are retained and recorded separately. No private snapshot, broad working-tree commit, stash, reset, cleanup or force push is used.

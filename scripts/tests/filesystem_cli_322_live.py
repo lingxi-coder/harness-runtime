@@ -20,12 +20,83 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from session_cli_321_live import (MODEL, dump, isolated_env, snapshot_requests, snapshot_transcripts,
-                                  setup_lingxi_account, remove_lingxi_account)
+MODEL = "claude-sonnet-4-6"
+FAKE_KEY = "sk-ant-api03-fake-local-session-321-only"
 
 NATIVE_SHA = "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450"
 TOOLS = "Read,Write,Edit,NotebookEdit,Glob,Grep"
 
+
+def dump(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=True) + "\n")
+
+def isolated_env(engine: str, config: Path, tmp: Path, base_url: str) -> dict[str, str]:
+    """Only explicit dummy credentials and loopback routes enter the child."""
+    env = {"PATH": os.defpath, "TMPDIR": str(tmp), "LANG": "en_US.UTF-8", "TERM": "xterm-256color", "CLAUDE_CONFIG_DIR" if engine == "native" else "LINGXI_CONFIG_DIR": str(config), "ANTHROPIC_API_KEY": FAKE_KEY, "ANTHROPIC_BASE_URL": base_url, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_FEATURE_FLAGS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1", "DO_NOT_TRACK": "1", "HTTP_PROXY": base_url, "HTTPS_PROXY": base_url, "ALL_PROXY": base_url, "NO_PROXY": "127.0.0.1,localhost"}
+    if engine == "lingxi":
+        env["LINGXI_API_BASE_URL"] = base_url
+    return env
+
+def snapshot_transcripts(root: Path, capture: Path):
+    """Retain exact owned JSONL bytes at each process boundary."""
+    records = []
+    for source in sorted((root / "config" / "projects").rglob("*.jsonl")):
+        raw = source.read_bytes()
+        relative = source.relative_to(root / "config")
+        target = capture / "transcripts" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        rows = [json.loads(line) for line in raw.splitlines() if line]
+        records.append({"path": str(relative), "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "ends_in_lf": raw.endswith(b"\n"), "record_types": [row.get("type") for row in rows]})
+    dump(capture / "transcript-inventory.json", records)
+
+def snapshot_requests(api: FilesystemLoopback, begin: int, capture: Path):
+    records = []
+    for ordinal in range(begin + 1, len(api.requests) + 1):
+        raw = (api.root / f"request-{ordinal:03}.json").read_bytes()
+        name = f"request-{ordinal - begin:03}.json"
+        (capture / name).write_bytes(raw)
+        records.append({"path": name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    dump(capture / "request-inventory.json", records)
+
+def setup_lingxi_account(binary: Path, root: Path, api: FilesystemLoopback, timeout=30, capture_name="account-setup"):
+    """Use the supported account CLI, dummy stdin key, and owned hashed scope."""
+    target = root / "captures" / capture_name
+    target.mkdir()
+    command = [str(binary), "--bare", "provider", "accounts", "add", "anthropic", "--name", "SESSION_QA_LOOPBACK_ONLY_321", "--execution-binding", "anthropic", "--api-key-stdin", "--json"]
+    env = isolated_env("lingxi", root / "config", root / "tmp", api.base_url)
+    dump(target / "invocation.json", {"argv": command, "cwd": str(root / "work"), "environment": env, "stdin": "fixed synthetic API key only", "scope": "owned nondefault LINGXI_CONFIG_DIR; Broker service names are path-hashed"})
+    process = subprocess.run(command, cwd=root / "work", env=env, input=(FAKE_KEY + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    (target / "stdout.json").write_bytes(process.stdout)
+    (target / "stderr.txt").write_bytes(process.stderr)
+    account_id = None
+    if process.returncode == 0:
+        snapshot = json.loads(process.stdout)
+        accounts = snapshot.get("accounts", snapshot.get("snapshot", {}).get("accounts", []))
+        matching = [account for account in accounts if account.get("displayName") == "SESSION_QA_LOOPBACK_ONLY_321"]
+        if len(matching) == 1:
+            account_id = matching[0]["accountId"]
+    result = {"exit_code": process.returncode, "passed": process.returncode == 0 and account_id is not None, "account_id": account_id, "stderr": process.stderr.decode(errors="replace")}
+    dump(target / "result.json", result)
+    return result
+
+def remove_lingxi_account(binary: Path, root: Path, api: FilesystemLoopback, account_id: str, timeout=30, capture_name="account-remove"):
+    """Remove only the exact synthetic account created by this fixture."""
+    target = root / "captures" / capture_name
+    target.mkdir()
+    command = [str(binary), "--bare", "provider", "accounts", "remove", "anthropic", account_id, "--json"]
+    process = subprocess.run(command, cwd=root / "work", env=isolated_env("lingxi", root / "config", root / "tmp", api.base_url), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    (target / "stdout.json").write_bytes(process.stdout)
+    (target / "stderr.txt").write_bytes(process.stderr)
+    absent = False
+    if process.returncode == 0:
+        snapshot = json.loads(process.stdout)
+        accounts = snapshot.get("accounts", snapshot.get("snapshot", {}).get("accounts", []))
+        absent = all(account.get("accountId") != account_id for account in accounts)
+    result = {"exit_code": process.returncode, "passed": process.returncode == 0 and absent, "account_id": account_id, "removed_from_owned_registry": absent}
+    dump(target / "result.json", result)
+    return result
 
 def blocks(value):
     """Walk request JSON without interpreting content as executable code."""
