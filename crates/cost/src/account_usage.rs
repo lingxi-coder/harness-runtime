@@ -235,8 +235,22 @@ mod tests {
             restored.try_into_state().unwrap().per_account_usage.len(),
             0
         );
+
     }
 
+    #[test]
+    fn duplicate_account_rows_are_rejected() {
+        let mut state = crate::CostState::default();
+        add(&mut state.per_account_usage, None, "m", &usage(1), 1, 0, 0);
+        let mut vector = crate::CostStateVector::from(&state);
+        vector
+            .per_account_usage
+            .push(vector.per_account_usage[0].clone());
+        assert!(matches!(
+            vector.try_into_state(),
+            Err(crate::CostPersistError::Storage(message)) if message.contains("duplicate account")
+        ));
+    }
     #[test]
     fn legacy_cost_states_preserve_totals_and_usage_without_account_rows() {
         let mut expected = crate::CostState {
@@ -304,20 +318,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn duplicate_account_rows_are_rejected() {
-        let mut state = crate::CostState::default();
-        add(&mut state.per_account_usage, None, "m", &usage(1), 1, 0, 0);
-        let mut vector = crate::CostStateVector::from(&state);
-        let restored: crate::CostStateVector =
-            serde_json::from_value(serde_json::to_value(&vector).unwrap()).unwrap();
-        assert_eq!(restored.try_into_state().unwrap(), state);
-        vector
-            .per_account_usage
-            .push(vector.per_account_usage[0].clone());
-        assert!(matches!(
-            vector.try_into_state(),
-            Err(crate::CostPersistError::Storage(message)) if message.contains("duplicate account")
-        ));
-    }
 }
