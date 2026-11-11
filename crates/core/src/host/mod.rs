@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod prompt_policy;
+pub mod result_usage;
 pub mod goal;
 pub mod remote_ui;
 pub mod session_context;

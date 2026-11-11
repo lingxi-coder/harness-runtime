@@ -1343,11 +1343,22 @@ pub(super) async fn fixture_runtime(
     let inner = crate::headless::session::build_prepared(
         config,
         prepared,
-        stream,
+        stream.clone(),
         Arc::new(crate::headless::HeadlessPermissionRequestSink),
     )
     .await
     .unwrap();
+    // Production initializes this identity with its init parameters before
+    // publishing; the direct-publisher fixture must use that same session.
+    let session_id = inner
+        .orchestrator
+        .session()
+        .lock()
+        .await
+        .session_id
+        .as_uuid()
+        .to_string();
+    *stream.session_id_handle().lock().await = session_id;
     crate::headless::host::configure_native_command_catalog(
         &inner,
         native_catalog_user_agent.as_ref(),

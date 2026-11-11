@@ -277,6 +277,7 @@ impl ModResultStage {
                     model_text,
                     result: raw,
                     denial_kind: None,
+                    permission_decision: None,
                 }),
             };
         }
@@ -298,6 +299,7 @@ impl ModResultStage {
                     model_text: frame.model_text,
                     result: frame.result,
                     denial_kind: frame.denial_kind,
+                    permission_decision: frame.permission_decision,
                 }),
         }
     }
@@ -1905,6 +1907,19 @@ impl ConversationOrchestrator {
         result: &Source,
         denial_kind: Option<&str>,
     ) {
+        self.emit_tool_result_frame_with_metadata(id, tool, model_text, result, denial_kind, None)
+            .await;
+    }
+
+    pub(crate) async fn emit_tool_result_frame_with_metadata(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        model_text: &Source,
+        result: &Source,
+        denial_kind: Option<&str>,
+        permission_decision: Option<&Source>,
+    ) {
         if let Some(stage) = active_mod_result_stage() {
             let mut stage = stage.lock().await;
             if stage.tool_use_id == id.as_str() {
@@ -1913,6 +1928,7 @@ impl ConversationOrchestrator {
                     model_text: model_text.clone(),
                     result: result.clone(),
                     denial_kind: denial_kind.map(str::to_string),
+                    permission_decision: permission_decision.cloned(),
                 });
                 return;
             }
@@ -1925,6 +1941,7 @@ impl ConversationOrchestrator {
                     model_text: model_text.clone(),
                     result: result.clone(),
                     denial_kind: denial_kind.map(str::to_string),
+                    permission_decision: permission_decision.cloned(),
                 },
             );
             return;
@@ -1936,18 +1953,20 @@ impl ConversationOrchestrator {
             .await
             .get(id.as_str())
             .cloned();
-        match denial_kind {
-            Some(kind) => {
-                self.output
-                    .emit_tool_result_denied(id, tool, model_text, result, kind, None)
-                    .await;
-            }
-            None => {
-                self.output
-                    .emit_tool_result(id, tool, model_text, result, mcp_meta.as_ref())
-                    .await
-            }
-        }
+        self.output
+            .emit_tool_result_with_metadata(
+                id,
+                tool,
+                model_text,
+                result,
+                mcp_meta.as_ref(),
+                denial_kind,
+                &lingxi_core::host::orchestrator::ToolResultFrameMetadata {
+                    permission_decision: permission_decision.cloned(),
+                    ..Default::default()
+                },
+            )
+            .await;
     }
 
     /// Turn frame buffering on for the streaming driver, and off again.
@@ -2006,6 +2025,26 @@ impl ConversationOrchestrator {
         is_error: bool,
         publication: Option<crate::turn_loop::ToolResultFramePublication>,
     ) {
+        self.release_tool_frame_with_publication_and_identity(
+            id,
+            tool,
+            content,
+            is_error,
+            publication,
+            None,
+        )
+        .await;
+    }
+
+    pub(crate) async fn release_tool_frame_with_publication_and_identity(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        content: &Source,
+        is_error: bool,
+        publication: Option<crate::turn_loop::ToolResultFramePublication>,
+        row_identity: Option<(MessageId, String)>,
+    ) {
         let id_key = id.to_string();
         let pending = self
             .transcript
@@ -2031,19 +2070,25 @@ impl ConversationOrchestrator {
         let substituted = pending
             .as_ref()
             .is_some_and(|p| !p.model_text.semantically_eq(content));
-        let (tool, pending_result, pending_denial_kind) = match pending {
+        let (tool, pending_result, pending_denial_kind, pending_permission_decision) = match pending
+        {
             // A substitution replaced the model-facing text, so the buffered
             // payload describes an outcome that was DISCARDED. claude-code's
             // synthetic carries a synthetic `toolUseResult` too, so the real
             // one must not reach the SDK.
-            Some(p) => (p.tool, Some(p.result), p.denial_kind),
+            Some(p) => (p.tool, Some(p.result), p.denial_kind, p.permission_decision),
             // Actor-backed dispatches carry their frame only when Tn accepts
             // the completed row; it was deliberately not emitted from W1.
             None => match publication {
-                Some(frame) => (frame.tool, Some(frame.result), frame.denial_kind),
+                Some(frame) => (
+                    frame.tool,
+                    Some(frame.result),
+                    frame.denial_kind,
+                    frame.permission_decision,
+                ),
                 // Never dispatched: synthesize the payload the dispatch would
                 // have carried, matching every other error result.
-                None => (tool.to_string(), None, None),
+                None => (tool.to_string(), None, None, None),
             },
         };
         // `tool_use_results` stores the transcript's `toolUseResult` side
@@ -2083,18 +2128,25 @@ impl ConversationOrchestrator {
                 .cloned()
         };
         let denial_kind = denial_kind_from_side_table.or(pending_denial_kind);
-        match denial_kind {
-            Some(kind) => {
-                self.output
-                    .emit_tool_result_denied(id, &tool, content, &result, &kind, None)
-                    .await;
-            }
-            None => {
-                self.output
-                    .emit_tool_result(id, &tool, content, &result, mcp_meta.as_ref())
-                    .await
-            }
-        }
+        self.output
+            .emit_tool_result_with_metadata(
+                id,
+                &tool,
+                content,
+                &result,
+                mcp_meta.as_ref(),
+                denial_kind.as_deref(),
+                &lingxi_core::host::orchestrator::ToolResultFrameMetadata {
+                    row_id: row_identity.as_ref().map(|(id, _)| *id),
+                    timestamp: row_identity.map(|(_, timestamp)| timestamp),
+                    permission_decision: if substituted {
+                        None
+                    } else {
+                        pending_permission_decision
+                    },
+                },
+            )
+            .await;
     }
 
     /// Record the `toolDenialKind` for a tool that was denied rather than run,
@@ -3543,6 +3595,18 @@ impl ConversationOrchestrator {
         raw: &ConversationMessage,
         publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> ConversationMessage {
+        self.append_streamed_query_row_counted(raw, publication_guard, true)
+            .await
+    }
+
+    /// Multiple public tool-result rows from one provider response contribute
+    /// one query-user batch. Other user/meta rows retain ordinary event counts.
+    pub(crate) async fn append_streamed_query_row_counted(
+        &self,
+        raw: &ConversationMessage,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+        count_user_event: bool,
+    ) -> ConversationMessage {
         // Native increments its query-local num_turns counter when this
         // through-wrapper yields a user row. Count here instead of diffing
         // session history: compaction can rebuild IDs, and fallback cleanup
@@ -3557,7 +3621,11 @@ impl ConversationOrchestrator {
         let current_after = publication_guard
             .as_ref()
             .is_none_or(|guard| guard.is_current());
-        if current_before && current_after && matches!(&stored, ConversationMessage::User { .. }) {
+        if count_user_event
+            && current_before
+            && current_after
+            && matches!(&stored, ConversationMessage::User { .. })
+        {
             self.note_query_user_event();
         }
         stored

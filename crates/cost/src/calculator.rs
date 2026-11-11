@@ -16,6 +16,56 @@ use crate::usage::{ApiSpeed, Usage};
 pub struct CostCalculator;
 
 impl CostCalculator {
+    /// Ordered floating-point projection for the public result format. Integer
+    /// settlement (including provider/account quotes) remains authoritative.
+    /// Use category arithmetic only when it reproduces that accepted charge.
+    pub(crate) fn result_cost_usd(usage: &Usage, pricing: &ModelPricing, accepted: u64) -> f64 {
+        let fallback = accepted as f64 / 1_000_000_000.0;
+        if accepted == u64::MAX || Self::calculate_nano_usd(usage, pricing) != accepted {
+            return fallback;
+        }
+        if matches!(
+            pricing.source,
+            PricingSource::PublishedPartial {
+                conditional: true,
+                ..
+            }
+        ) || (matches!(pricing.source, PricingSource::PublishedPartial { .. })
+            && usage.speed == Some(ApiSpeed::Fast))
+        {
+            return Self::result_cost_usd(
+                usage,
+                &PricingCatalog::default_unknown_pricing(&pricing.model_ref),
+                accepted,
+            );
+        }
+        let fast = Self::fast_tier_override(usage, pricing);
+        let pricing = fast.as_ref().unwrap_or(pricing);
+        let unknown = PricingCatalog::default_unknown_pricing(&pricing.model_ref);
+        let rate = |class| {
+            pricing
+                .token_rates
+                .get(&class)
+                .or_else(|| {
+                    matches!(pricing.source, PricingSource::PublishedPartial { .. })
+                        .then(|| unknown.token_rates.get(&class))
+                        .flatten()
+                })
+                .map_or(0.0, |rate| rate.nano_usd_per_token as f64 / 1_000.0)
+        };
+        let token_cost = |class| usage.tokens_for(class) as f64 / 1_000_000.0 * rate(class);
+        // 2.1.322 W1t/dB: input + output + cache-read + (1h + 5m),
+        // followed by server tools. Do not fold the categories into nano-USD
+        // before converting: that changes the serialized last decimal digit.
+        let cache = token_cost(TokenClass::CacheWrite1h) + token_cost(TokenClass::CacheWrite);
+        let tokens = token_cost(TokenClass::Input)
+            + token_cost(TokenClass::Output)
+            + token_cost(TokenClass::CacheRead)
+            + cache
+            + token_cost(TokenClass::ReasoningOutput);
+        tokens + Self::non_token_nano_usd(usage, pricing) as f64 / 1_000_000_000.0
+    }
+
     /// Total cost in nano-USD. Saturating arithmetic — no panic on overflow.
     #[must_use]
     pub fn calculate_nano_usd(usage: &Usage, pricing: &ModelPricing) -> u64 {

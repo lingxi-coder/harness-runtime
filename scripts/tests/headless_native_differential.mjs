@@ -12,12 +12,12 @@ import {compareBuffers, createComparisonContext} from './headless-byte-compare.m
 import {compareMetadataWrapped, compareHttpWrapped, resolvePidSocketRules, mapForkSessionFiles, compareForkSessionHeaders} from './headless-fixtures/normalization-adapter.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const baseline = JSON.parse(await readFile(path.join(repo, 'docs/parity/headless-native-baseline.json')));
+let baseline;
 const options = {only: undefined, timeoutMs: 15000, providerDelayMs: 0, startupSettleMs: 0};
 const args = process.argv.slice(2);
 for (let index = 0; index < args.length; index++) {
   const flag = args[index];
-  if (!['--execute', '--compare-existing', '--schema-probes', '--lifecycle-probes', '--native-once', '--text-stdin', '--startup-settle-ms', '--harness-config', '--only', '--output', '--rules', '--timeout-ms', '--provider-delay-ms', '--help'].includes(flag)) throw new Error(`Unknown option ${flag}`);
+  if (!['--baseline', '--execute', '--compare-existing', '--schema-probes', '--lifecycle-probes', '--native-once', '--text-stdin', '--startup-settle-ms', '--harness-config', '--only', '--output', '--rules', '--timeout-ms', '--provider-delay-ms', '--help'].includes(flag)) throw new Error(`Unknown option ${flag}`);
   if (flag === '--help') options.help = true;
   else if (flag === '--schema-probes') options.schemaProbes = true;
   else if (flag === '--lifecycle-probes') options.lifecycleProbes = true;
@@ -26,9 +26,10 @@ for (let index = 0; index < args.length; index++) {
   else {
     const value = args[++index];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${flag}`);
-    options[{'--execute': 'native', '--compare-existing': 'existing', '--harness-config': 'harnessConfig', '--only': 'only', '--output': 'output', '--rules': 'rules', '--timeout-ms': 'timeoutMs', '--provider-delay-ms': 'providerDelayMs', '--startup-settle-ms': 'startupSettleMs'}[flag]] = ['--timeout-ms', '--provider-delay-ms', '--startup-settle-ms'].includes(flag) ? Number(value) : value;
+    options[{'--baseline': 'baseline', '--execute': 'native', '--compare-existing': 'existing', '--harness-config': 'harnessConfig', '--only': 'only', '--output': 'output', '--rules': 'rules', '--timeout-ms': 'timeoutMs', '--provider-delay-ms': 'providerDelayMs', '--startup-settle-ms': 'startupSettleMs'}[flag]] = ['--timeout-ms', '--provider-delay-ms', '--startup-settle-ms'].includes(flag) ? Number(value) : value;
   }
 }
+baseline = JSON.parse(await readFile(options.baseline ? path.resolve(options.baseline) : path.join(repo, 'docs/parity/headless-native-baseline.json')));
 if (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1000 || options.timeoutMs > 60000) throw new Error('--timeout-ms must be 1000..60000');
 if (!Number.isInteger(options.providerDelayMs) || options.providerDelayMs < 0 || options.providerDelayMs > 2000) throw new Error('--provider-delay-ms must be 0..2000');
 if (!Number.isInteger(options.startupSettleMs) || options.startupSettleMs < 0 || options.startupSettleMs > 2000) throw new Error('--startup-settle-ms must be 0..2000');
@@ -43,7 +44,7 @@ const selected = validateFixtures(activeFixtures.filter(fixture => (!ids || ids.
 if (options.textStdin && selected.some(fixture => fixture.input === 'stream-json')) throw new Error('--text-stdin cannot be combined with SDK fixtures');
 if (selected.length === 0 || ids?.some(id => !selected.some(fixture => fixture.id === id))) throw new Error('Unknown or empty --only fixture selection');
 if (options.help || !options.native && !options.existing) {
-  console.log(JSON.stringify({mode: 'review-only', native_invoked: false, baseline, fixtures: selected.map(f => f.id), invocation: 'node scripts/tests/headless_native_differential.mjs --execute <pinned-native> [--harness-config <json>] [--only id,id] [--rules <json>] [--output <new-directory>]', harnessConfig: {command: '/absolute/path/to/harness-host', args: [], flags: [], env: {LINGXI_DATA_DIR: '{{state}}'}}, rules: {version: 1, nativeNative: {'fixture-id': {'processes/0/stdout.bin': []}}, nativeHarness: {'fixture-id': {'processes/0/stdout.bin': []}}}, note: 'No default normalization. Native-native runs precede all Native-Harness runs. Every raw byte is retained. A missing Harness host or unresolved native nondeterminism prevents a full parity verdict.'}, null, 2));
+  console.log(JSON.stringify({mode: 'review-only', native_invoked: false, baseline, fixtures: selected.map(f => f.id), invocation: 'node scripts/tests/headless_native_differential.mjs --execute <pinned-native> [--baseline <pinned-json>] [--harness-config <json>] [--only id,id] [--rules <json>] [--output <new-directory>]', harnessConfig: {command: '/absolute/path/to/harness-host', args: [], flags: [], env: {LINGXI_DATA_DIR: '{{state}}'}}, rules: {version: 1, nativeNative: {'fixture-id': {'processes/0/stdout.bin': []}}, nativeHarness: {'fixture-id': {'processes/0/stdout.bin': []}}}, note: 'No default normalization. Native-native runs precede all Native-Harness runs. Every raw byte is retained. A missing Harness host or unresolved native nondeterminism prevents a full parity verdict.'}, null, 2));
   process.exit(0);
 }
 let native;

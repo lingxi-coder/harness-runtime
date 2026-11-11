@@ -1390,6 +1390,7 @@ pub(crate) struct ToolResultFramePublication {
     pub(crate) model_text: Utf16JsonProjection,
     pub(crate) result: Utf16JsonProjection,
     pub(crate) denial_kind: Option<String>,
+    pub(crate) permission_decision: Option<Utf16JsonProjection>,
 }
 
 /// Result side channels staged by W1 and committed only when Native's Tn path
@@ -1450,6 +1451,7 @@ impl ToolResultPublication {
                 model_text: model_text.into(),
                 result,
                 denial_kind: None,
+                permission_decision: None,
             }),
         }
     }
@@ -1519,12 +1521,13 @@ impl ToolResultPublication {
     async fn commit(self, orch: &ConversationOrchestrator) {
         self.commit_metadata(orch).await;
         if let Some(frame) = self.frame {
-            orch.emit_tool_result_frame(
+            orch.emit_tool_result_frame_with_metadata(
                 &self.tool_use_id,
                 &frame.tool,
                 &frame.model_text,
                 &frame.result,
                 frame.denial_kind.as_deref(),
+                frame.permission_decision.as_ref(),
             )
             .await;
         }
@@ -1561,12 +1564,13 @@ impl DeferredToolDispatch {
             }
             if let Some(frame) = &publication.frame {
                 if !fence
-                    .publish_if_current(orch.emit_tool_result_frame(
+                    .publish_if_current(orch.emit_tool_result_frame_with_metadata(
                         &publication.tool_use_id,
                         &frame.tool,
                         &frame.model_text,
                         &frame.result,
                         frame.denial_kind.as_deref(),
+                        frame.permission_decision.as_ref(),
                     ))
                     .await
                 {
@@ -5254,6 +5258,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     model_text: content.clone().into(),
                     result: frame_result,
                     denial_kind: None,
+                    permission_decision: None,
                 }),
             };
             publish_or_defer_tool_result(
@@ -6633,6 +6638,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         //   other (request aborted)    → "user_abort"
         //   mode/classifier/…/no reason→ "config"
         let mut decision_otel_source: &'static str = "config";
+        let mut permission_decision = None;
         let mod_changed_tool_check_decision;
         let decision = if let Some(forced) = forced_decision {
             // `oVo` wraps the ordinary permission evaluator with `LPr` even
@@ -6971,6 +6977,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     } else {
                         rule_decision_otel_source(rule_source.as_deref(), true)
                     };
+                    if rule_source.is_some() && !mod_changed_decision {
+                        permission_decision = Some(Utf16JsonProjection::plain(serde_json::json!({
+                            "decision":"accept", "source":decision_otel_source, "reason_type":"rule"
+                        })));
+                    }
                     PermissionDecision::Allow
                 }
                 PermissionResolution::Deny {
@@ -6987,6 +6998,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     } else {
                         rule_decision_otel_source(rule_source.as_deref(), false)
                     };
+                    let mut fact = serde_json::json!({"decision":"reject", "source":decision_otel_source});
+                    if let Some(reason_type) = &decision_reason_type {
+                        fact.as_object_mut().expect("permission fact").insert("reason_type".into(), serde_json::json!(reason_type));
+                    }
+                    permission_decision = Some(Utf16JsonProjection::plain(fact));
                     // Classify the denial for the stream-json `tool_result_meta`
                     // while the structured provenance is still in scope — the
                     // `PermissionDecision::Deny` this arm returns keeps only `reason`.
@@ -7241,6 +7257,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                         "user_temporary",
                                         lingxi_core::host::permission_gate::ToolDecisionClassification::as_str,
                                     );
+                                        permission_decision = Some(Utf16JsonProjection::plain(serde_json::json!({
+                                            "decision":"accept", "source":decision_otel_source
+                                        })));
                                         if let Some(u) = updated_input {
                                             effective_input = u;
                                         }
@@ -7306,6 +7325,21 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                             } else {
                                                 "user_reject"
                                             };
+                                        permission_decision = Some(Utf16JsonProjection::plain(if orch.perms.has_approval_surface() {
+                                            serde_json::json!({"decision":"reject", "source":decision_otel_source})
+                                        } else {
+                                            serde_json::json!({"decision":"reject", "source":"config", "reason_type":"asyncAgent"})
+                                        }));
+                                        let reason = if !orch.perms.has_approval_surface()
+                                            && orch.output.wants_native_cli_tool_diagnostics()
+                                            && !cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+                                            let ask = tool_permission_result.as_ref().and_then(|result| match result {
+                                                permission::PermissionResult::Ask { prompt, .. } => Some(&prompt.message),
+                                                _ => None,
+                                            }).or(permission_ctx.decision_reason.as_ref());
+                                            orch.perms.native_no_approval_diagnostic(name, &effective_input, &permission_ctx, ask)
+                                                .unwrap_or_else(|| permission::headless_gate::native_no_approval_message(ask))
+                                        } else { reason };
                                         PermissionDecision::Deny { reason }
                                     }
                                 }
@@ -7464,6 +7498,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 publication.tool_use_result = Some(source_text_with(Some(&reason), "Error: ", ""));
                 if let Some(frame) = publication.frame.as_mut() {
                     frame.denial_kind = Some(denial_kind.to_owned());
+                    frame.permission_decision = permission_decision;
                 }
                 publish_or_defer_tool_result(
                     orch,

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "2.1.322",
+  "platform": "darwin-arm64",
+  "pinnedAt": "2026-11-10T15:46:55.836022+00:00",
+  "binary": {
+    "sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+    "size": 323702464
+  },
+  "acceptance": {
+    "fullNativeHarnessParity": false,
+    "scope": "Shared output-format fields; preserve LingXi provider/account extensions. Ignore no dynamic values without an explicit comparison rule."
+  },
+  "historicalBaseline": "headless-native-baseline.json",
+  "contractDocument": "output-format-2.1.322.md"
+}

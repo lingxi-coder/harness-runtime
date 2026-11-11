@@ -1557,6 +1557,7 @@ impl ConversationOrchestrator {
                     );
                 }
             }
+            let mut ready_frame = None;
             if let Some(ContentBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -1572,18 +1573,12 @@ impl ConversationOrchestrator {
                         commit.await;
                     }
                 }
-                let release = self.release_tool_frame_with_publication(
-                    tool_use_id,
-                    &drained.tool,
-                    content,
+                ready_frame = Some((
+                    tool_use_id.clone(),
+                    content.clone(),
                     is_error.unwrap_or(false),
                     publication_frame,
-                );
-                if let Some(guard) = drained.publication_guard.as_ref() {
-                    guard.publish_if_current(Box::pin(release)).await;
-                } else {
-                    release.await;
-                }
+                ));
             }
             let drained_tool_use_id = match &drained.block {
                 Some(ContentBlock::ToolResult { tool_use_id, .. }) => Some(tool_use_id.clone()),
@@ -1622,8 +1617,35 @@ impl ConversationOrchestrator {
                 // query-local `je`. `session.history` remains separately assembled
                 // from K followed by JE after the stream finishes.
                 let stored_result = self
-                    .append_streamed_query_row(&raw_result, drained.publication_guard.clone())
+                    .append_streamed_query_row_counted(
+                        &raw_result,
+                        drained.publication_guard.clone(),
+                        settlement.should_count_tool_user_event(drained.assistant_id),
+                    )
                     .await;
+                if matches!(&stored_result, ConversationMessage::User { .. })
+                    && drained
+                        .publication_guard
+                        .as_ref()
+                        .is_none_or(|guard| guard.is_current())
+                {
+                    settlement.note_tool_user_event(drained.assistant_id);
+                }
+                if let Some((id, model_text, is_error, frame)) = ready_frame.take() {
+                    let release = self.release_tool_frame_with_publication_and_identity(
+                        &id,
+                        &drained.tool,
+                        &model_text,
+                        is_error,
+                        frame,
+                        Some((stored_result.id(), result_timestamp.clone())),
+                    );
+                    if let Some(guard) = drained.publication_guard.as_ref() {
+                        guard.publish_if_current(Box::pin(release)).await;
+                    } else {
+                        release.await;
+                    }
+                }
                 // Native's append-through yields the same accepted user row into
                 // JE; keep query history and the deferred storage journal on that
                 // accepted row while preserving K/JE grouping.

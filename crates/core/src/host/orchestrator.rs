@@ -1055,6 +1055,12 @@ pub struct ModelUsageRow {
     pub cache_read_input_tokens: u64,
     /// Cumulative tokens written into the prompt cache.
     pub cache_creation_input_tokens: u64,
+    /// Cumulative cache writes with a five-minute lifetime.
+    #[serde(default)]
+    pub cache_creation_5m_input_tokens: u64,
+    /// Cumulative cache writes with a one-hour lifetime.
+    #[serde(default)]
+    pub cache_creation_1h_input_tokens: u64,
     /// Cumulative reasoning output from the model's settled ledger slice.
     #[serde(default)]
     pub reasoning_tokens: u64,
@@ -4385,6 +4391,17 @@ pub struct TerminalApiErrorMessage {
 
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// SDK stream transports opt in to the ephemeral result-usage accumulator.
+    fn wants_result_usage(&self) -> bool { false }
+
+    /// Native-compatible CLI sinks request its diagnostic wording. This is a
+    /// presentation fact, not an authorization decision.
+    fn wants_native_cli_tool_diagnostics(&self) -> bool {
+        false
+    }
+
+    /// Bind the session accounting source for SDK usage-since-result stamps.
+    fn set_result_usage_source(&self, _source: std::sync::Arc<dyn super::result_usage::ResultUsageSource>) {}
     /// Observe selected accounts and sanitized aggregate routing failures.
     async fn emit_provider_account_routing(
         &self,
@@ -4462,6 +4479,23 @@ pub trait OutputStream: Send + Sync {
         _row_id: &crate::types::MessageId,
     ) {
     }
+
+    /// Whether accepted assistant rows should precede native block-stop events.
+    fn wants_accepted_assistant_rows(&self) -> bool {
+        false
+    }
+
+    /// Publish an accepted transcript row at its content-block boundary.
+    async fn emit_accepted_assistant_row(
+        &self,
+        _row_id: &crate::types::MessageId,
+        _timestamp: &str,
+        _request_id: Option<&str>,
+        _provider_message_id: &str,
+        _model: &str,
+        _native_event_json: Option<&str>,
+        _content: &[crate::types::ContentBlock],
+    ) {}
 
     /// Emit a native tombstone for a complete row. `display_only` is a native
     /// flag and does not promise presentation-only deletion; native consumers
@@ -4592,6 +4626,31 @@ pub trait OutputStream: Send + Sync {
         result: &Utf16JsonProjection,
         mcp_meta: Option<&Utf16JsonProjection>,
     );
+
+    /// Accepted permission provenance belongs to this result's publication,
+    /// rather than to mutable output-global state. Other sinks keep their
+    /// ordinary result rendering through this default.
+    async fn emit_tool_result_with_metadata(
+        &self,
+        id: &crate::types::ToolUseId,
+        tool: &str,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
+        denial_kind: Option<&str>,
+        _metadata: &ToolResultFrameMetadata,
+    ) {
+        match denial_kind {
+            Some(kind) => {
+                self.emit_tool_result_denied(id, tool, model_text, result, kind, None)
+                    .await
+            }
+            None => {
+                self.emit_tool_result(id, tool, model_text, result, mcp_meta)
+                    .await
+            }
+        }
+    }
 
     /// [`Self::emit_tool_result`] for a tool that was DENIED rather than run.
     ///
@@ -4793,6 +4852,7 @@ pub trait OutputStream: Send + Sync {
     /// **Default no-op**: only the stream-json sink overrides this (and only
     /// re-emits when its `--forward-subagent-text` gate is on); every other sink
     /// (TUI, mocks) ignores it, so they compile unchanged.
+
     async fn emit_forwarded_subagent_message(
         &self,
         _message: &Utf16JsonProjection,
@@ -4974,6 +5034,16 @@ pub trait OutputStream: Send + Sync {
     /// * `model` — the model id that produced this message.
     async fn emit_message_start(&self, _message_id: &str, _model: &str) {}
 
+    /// Begin a response with the source envelope from the same stream, when available.
+    async fn emit_message_start_with_native(
+        &self,
+        message_id: &str,
+        model: &str,
+        _native_event_json: Option<&str>,
+    ) {
+        self.emit_message_start(message_id, model).await;
+    }
+
     /// Signal that one Anthropic API message has completed streaming.
     ///
     /// Called by the streaming loop immediately after [`RouterAction::EndOfStream`]
@@ -5020,6 +5090,11 @@ pub trait OutputStream: Send + Sync {
     /// true.
     fn wants_partial_stream_events(&self) -> bool {
         false
+    }
+
+    /// Whether the sink needs source provider frames even without partial output.
+    fn wants_native_stream_frames(&self) -> bool {
+        self.wants_partial_stream_events()
     }
 
     /// Emit a `system/hook_started` frame for `--include-hook-events`.
@@ -5295,6 +5370,14 @@ mod source_carrier_tests {
 #[cfg(test)]
 #[path = "orchestrator_test.rs"]
 mod orchestrator_test;
+
+/// Identity and permission facts bound to one accepted user result row.
+#[derive(Debug, Clone, Default)]
+pub struct ToolResultFrameMetadata {
+    pub row_id: Option<crate::types::MessageId>,
+    pub timestamp: Option<String>,
+    pub permission_decision: Option<crate::types::utf16_json::Utf16JsonProjection>,
+}
 
 /// Associated exact images of an accepted tool result. Native output uses both
 /// the raw data and the provider-visible content, with no private wire fields.

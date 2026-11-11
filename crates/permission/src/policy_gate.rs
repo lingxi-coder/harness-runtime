@@ -3106,6 +3106,45 @@ fn is_negated_path_rule(spec: &Utf16JsonProjection) -> bool {
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    fn has_approval_surface(&self) -> bool {
+        self.inner.has_approval_surface()
+    }
+
+    fn native_no_approval_diagnostic(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+        ctx: &PermissionCheckContext,
+        ask_message: Option<&Utf16JsonProjection>,
+    ) -> Option<Utf16JsonProjection> {
+        let policy = self.live_policy_with_layers(&self.fold_call_context(ctx));
+        // Preserve a tool/hook's specific explanation. Only the policy's
+        // generic fallback can be refined from its own redirect/path facts.
+        let explicit_reason = ctx.decision_reason_type.as_deref().is_some_and(|kind| kind != "other");
+        let ask_message = if explicit_reason { ctx.decision_reason.as_ref().or(ask_message) } else { ask_message };
+        let generic = !explicit_reason && ask_message.is_none_or(|message| message.string_at("") == Some("This command requires approval"));
+        let specific = if generic && matches!(name, "Bash" | "Shell") {
+            input
+                .string_units("/command")
+                .and_then(|units| String::from_utf16(&units).ok())
+                .and_then(|command| {
+                    policy.roots.as_ref().and_then(|roots| {
+                        crate::path_constraints::native_redirect_approval_message(
+                            &command,
+                            roots,
+                            &policy.additional_working_dirs.paths(),
+                        )
+                    })
+                })
+                .map(Utf16JsonProjection::from)
+        } else {
+            None
+        };
+        Some(crate::headless_gate::native_no_approval_message(
+            specific.as_ref().or(ask_message),
+        ))
+    }
+
     async fn has_pending_request(&self) -> bool {
         self.inner.has_pending_request().await
     }

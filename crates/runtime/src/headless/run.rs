@@ -20,6 +20,9 @@ use crate::headless::stream_json_input::{
     emit_replay_ack_queued, ControlPlaneWriter, StdinControlFrame, StdinReaderStatus, StreamInput,
 };
 use crate::headless::HeadlessRuntime as Runtime;
+#[cfg(test)]
+#[path = "run/live_output_322_test.rs"]
+mod live_output_322_tests;
 use control::{
     dispatch_control_request, flag_settings_fast_mode_opt_in, model_capabilities,
     recover_orphaned_permission, resolve_fast_mode_disabled_reason, resolve_fast_mode_state,
@@ -74,13 +77,21 @@ fn init_host_metadata(runtime: &Runtime) -> StreamJsonInitHostMetadata {
     let essential_only = present(branding::DISABLE_NONESSENTIAL_TRAFFIC_ENV)
         || present("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
     let do_not_track = runtime.services.environment_variable("DO_NOT_TRACK");
-    let cwd = runtime.session_cwd.cwd();
+    let (cwd, trusted_dirs) = runtime.session_cwd.snapshot();
+    let additional_directories = trusted_dirs
+        .into_iter()
+        .filter(|path| path != &cwd)
+        .collect();
     let global = runtime.services.trust_config_path();
     StreamJsonInitHostMetadata {
         mcp_server_errors: crate::headless::stream_json::collect_mcp_server_errors(
             &cwd,
             global.as_deref(),
         ),
+        original_cwd: Some(cwd.clone()),
+        additional_directories: Some(additional_directories),
+        ultrathink_available: Some(false),
+        ultrathink_typed_raises: Some(false),
         cwd,
         analytics_disabled: essential_only
             || present("DISABLE_TELEMETRY")
@@ -321,13 +332,14 @@ impl NativeQueryResultPublisher<'_> {
         let _ = self.stream.flush().await;
     }
 
-    fn begin_query(&mut self) {
+    async fn begin_query(&mut self) {
         self.last_error_published = false;
         self.last_result_failed = false;
         self.runtime
             .execution_interrupted
             .store(false, std::sync::atomic::Ordering::Release);
         self.stream.begin_query_timing();
+        self.stream.begin_query_usage().await;
     }
 
     async fn begin_notification_query(&mut self) {
@@ -335,7 +347,7 @@ impl NativeQueryResultPublisher<'_> {
             .on_command(self.runtime, true, None)
             .await;
         self.suggestion_turn_origin = Some("task_notification");
-        self.begin_query();
+        self.begin_query().await;
         let _ = self.stream.begin_request_markers(None, Vec::new(), false);
         self.stream.emit_init().await;
     }
@@ -369,8 +381,13 @@ impl NativeQueryResultPublisher<'_> {
         queued: usize,
         yielded_query_users: Option<u64>,
     ) {
-        self.publish_with_cancelled_query(result, queued, None, yielded_query_users)
+        let cancelled_query = cancelled_print_query_result(self.runtime, result);
+        let failed = cancelled_query.is_some();
+        self.publish_with_cancelled_query(result, queued, cancelled_query, yielded_query_users)
             .await;
+        // SDK control interruption reports a failed result. The separate
+        // one-shot signal path retains its native successful SIGINT exit.
+        self.last_result_failed |= failed;
     }
 
     /// Publish a one-shot print result using the completed query's typed
@@ -1697,7 +1714,7 @@ async fn run_stream_json_input_loop_inner(
             last_turn_err = Some(orchestrator::OrchestratorError::Internal(error));
             break;
         }
-        publisher.begin_query();
+        publisher.begin_query().await;
         let primary = turn
             .frame_projection
             .subprojection("/uuid")

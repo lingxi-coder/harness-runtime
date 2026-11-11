@@ -415,7 +415,8 @@ impl PricingCatalog {
         // Sonnet 5 — current official $2/$10 rate, including $0.20 cache reads
         // and $2.50 five-minute cache writes.
         c.insert_anthropic("claude-sonnet-5", 2_000, 10_000, 2_500, 200);
-        c.insert_anthropic("claude-sonnet-5-5", 2_000, 10_000, 2_500, 200);
+        // Claude Code 2.1.322 tier_2_10_cache_read_0_10.
+        c.insert_anthropic("claude-sonnet-5-5", 2_000, 10_000, 2_500, 100);
         // $3/$15 tier — prior Sonnet variants (COST_TIER_3_15).
         c.insert_anthropic("claude-sonnet-4-6", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-5", 3_000, 15_000, 3_750, 300);
@@ -1537,10 +1538,10 @@ mod tests {
     }
 
     #[test]
-    fn native_295_model_tiers_include_both_cache_write_durations() {
+    fn native_322_model_tiers_include_both_cache_write_durations() {
         let catalog = PricingCatalog::builtin_reference();
         for (model, input, output, write_5m, write_1h, read) in [
-            ("claude-sonnet-5-5", 2_000, 10_000, 2_500, 4_000, 200),
+            ("claude-sonnet-5-5", 2_000, 10_000, 2_500, 4_000, 100),
             ("claude-opus-5-5", 4_000, 20_000, 5_000, 8_000, 200),
         ] {
             let (pricing, resolution) = catalog

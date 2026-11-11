@@ -37,9 +37,9 @@ pub use sdk_mcp_call::{
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-/// The frozen native distribution documented in headless-native-baseline.json.
+/// The frozen native distribution documented in headless-native-baseline-2.1.322.json.
 /// This identifies the protocol target, not a claim of completed parity.
-pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.295";
+pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.322";
 
 /// Notifications supplied by the embedding host. No process signal handlers
 /// are installed by the service.

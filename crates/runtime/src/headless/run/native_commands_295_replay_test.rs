@@ -231,6 +231,9 @@ fn product_command_names(native: &[&str]) -> Vec<String> {
     names.insert(index, "document-authoring".into());
     names.insert(index + 1, "artifact-design".into());
     names.insert(index + 2, "plan-artifact".into());
+    // Product extensions are preserved when projecting the immutable Native
+    // command fixture onto the current LingXi catalog.
+    names.insert(index + 3, "create-bot".into());
     names
 }
 
@@ -867,6 +870,16 @@ async fn native_295_commands_fixture_replay_body() {
             no_stream: true,
             ..Default::default()
         };
+        let registered_handler_names = {
+            let registry = runtime.inner.shared_command_registry.read().await;
+            registry
+                .list_all()
+                .into_iter()
+                .filter(|command| registry.get_handler(&command.name).is_some())
+                .map(|command| command.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!registered_handler_names.is_empty());
         let code = run_oneshot(&argv, &runtime, &sink).await;
         assert_eq!(code, exit_codes::SUCCESS, "case {}", case.id);
         assert!(
@@ -975,7 +988,9 @@ async fn native_295_commands_fixture_replay_body() {
                 case.id
             );
             let skill_dir = cwd.join(branding::DOT_DIR).join("skills").join(skill_name);
-            let body_prefix = format!("Base directory for this skill: {}\n\n", skill_dir.display());
+            // LingXi retains its asset-resolution guidance after Native's
+            // directory line and before the immutable captured Skill body.
+            let body_prefix = format!("Base directory for this skill: {}\n", skill_dir.display());
             let fixed_body = format!("Return the fixed Skill body for {skill_name}.");
             assert!(
                 captured[0].iter().any(|message| {
@@ -1200,14 +1215,16 @@ async fn native_295_commands_fixture_replay_body() {
                 available_names.len(),
                 current_catalog.available_command_count
             );
-            // `run_oneshot` has completed its shutdown boundary here. Shutdown
-            // retires builtin handler objects but preserves the ordinary
-            // command catalog, so assert only that these LingXi facade rows
-            // remain registered.
-            for name in ["connect", "worktree", "fusion"] {
+            // Shutdown retires executable handlers while retaining the
+            // metadata for commands this headless composition registered.
+            for name in &registered_handler_names {
                 assert!(
-                    command_registry.resolve(&name.into()).is_some(),
-                    "Product facade /{name} command remains in the ordinary registry"
+                    command_registry.resolve(name).is_some(),
+                    "Registered command metadata survives shutdown: {name:?}"
+                );
+                assert!(
+                    command_registry.get_handler(name).is_none(),
+                    "Executable command handler is retired at shutdown: {name:?}"
                 );
             }
             drop(command_registry);
@@ -1218,8 +1235,10 @@ async fn native_295_commands_fixture_replay_body() {
             );
             assert_eq!(
                 current_catalog.available_command_count,
-                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + 3,
-                "the ordinary headless pool adds the document skill and the two hosted-page skills"
+                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT
+                    + product_command_names(NATIVE_AVAILABLE_COMMAND_NAMES).len()
+                    - NATIVE_AVAILABLE_COMMAND_NAMES.len(),
+                "the ordinary headless pool retains every deliberate LingXi extension"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1282,10 +1301,10 @@ async fn native_295_commands_fixture_replay_body() {
                     .replacen("claude-api", "lingxi-api", 1)
                     .replacen(
                         "/plugin-authoring",
-                        "/plugin-authoring, /document-authoring, /artifact-design, /plan-artifact",
+                        "/plugin-authoring, /document-authoring, /artifact-design, /plan-artifact, /create-bot",
                         1
                     ),
-                "unknown-command reminder adds the product API name, document skill, and hosted-page skills"
+                "unknown-command reminder retains the product API name and every LingXi extension"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");

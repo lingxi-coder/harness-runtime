@@ -6810,11 +6810,22 @@ impl ApiService {
             !lingxi_core::host::session_flags::effective_non_interactive_session()
         });
         let native_thinking_display_route = Self::is_main_thinking_display_updates_call(prepared);
+        // The headless host distinguishes terse text/JSON from verbose/stream
+        // output. Only hosts without that policy use the interactive fallback.
+        let omit_default = self
+            .native_thinking_display
+            .as_ref()
+            .map_or(!interactive, |policy| policy.omit_default);
+        let explicit_display = self
+            .native_thinking_display
+            .as_ref()
+            .and_then(|policy| policy.explicit.as_deref())
+            .filter(|value| !value.is_empty());
         let updates_setting = std::env::var(branding::THINKING_DISPLAY_UPDATES_ENV).ok();
         let updates = updates_setting
             .as_deref()
             .map(crate::structured_output::bool_value)
-            .unwrap_or(!(native_thinking_display_route && !interactive));
+            .unwrap_or(!(native_thinking_display_route && omit_default));
         let show_summaries = lingxi_core::host::session_flags::show_thinking_summaries();
         let extra_has_thinking = prepared.extra_body.as_ref().is_some_and(|extra| {
             lingxi_llm_client::providers::anthropic::request_policy::has_field(extra, "thinking")
@@ -6823,7 +6834,8 @@ impl ApiService {
             crate::structured_output::bool_environment("CLAUDE_CODE_SIMULATE_PROXY_USAGE");
         let native_headless_default_omits_display = updates_setting.is_none()
             && native_thinking_display_route
-            && !interactive
+            && omit_default
+            && explicit_display.is_none()
             && !show_summaries
             && !extra_has_thinking
             && !simulated_proxy;
@@ -6836,7 +6848,12 @@ impl ApiService {
             .map_err(crate::upstream::error)?;
             return Ok(false);
         }
-        let mode = thinking_display::connector_mode(None, false, show_summaries, updates);
+        let mode = thinking_display::connector_mode(
+            explicit_display,
+            explicit_display.is_some(),
+            show_summaries,
+            updates,
+        );
         thinking_display::apply_request_updates(
             &mut prepared.provider_request.body_json,
             &mut prepared.provider_request.headers,

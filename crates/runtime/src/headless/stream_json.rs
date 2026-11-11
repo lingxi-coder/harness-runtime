@@ -5,7 +5,7 @@
 //!
 //! 1. `system/init`  — emitted once before the turn (call `emit_init()`).
 //! 2. `system/status` — emitted once before the API call (call `emit_status()`).
-//! 3. `assistant` — accumulated per-message, flushed at `emit_message_boundary()`.
+//! 3. `assistant` — accepted rows stream per block with their durable transcript identity.
 //! 4. `user` — tool_result echo, emitted by `emit_tool_result()`.
 //! 5. `result` — emitted at the end via `emit_result_success()` / `emit_result_error()`.
 //!
@@ -35,6 +35,13 @@
 #[path = "request_markers.rs"]
 mod request_markers;
 use request_markers::RequestMarkers;
+
+#[cfg(test)]
+#[path = "result_usage_tests.rs"]
+mod result_usage_tests;
+#[cfg(test)]
+#[path = "tool_result_322_tests.rs"]
+mod tool_result_322_tests;
 
 use crate::headless::io::Output;
 use async_trait::async_trait;
@@ -112,6 +119,152 @@ fn partial_stream_frame(
             .expect("partial frame has abandoned identity slot");
     }
     frame
+}
+
+/// Remove the six native cc-memory wrapper spellings without changing UTF-16
+/// content, including unpaired surrogates. The native regex limits the text
+/// between a tag name and its closing `>` to 1024 UTF-16 code units.
+fn strip_result_memory_tags(source: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let units = source.string_units("")?;
+    const NAMES: [&str; 6] = [
+        "cc-memory",
+        "cc_memory",
+        "ccmemory",
+        "CC-MEMORY",
+        "CC_MEMORY",
+        "CCMEMORY",
+    ];
+    let mut output = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        let mut end = None;
+        if units[i] == u16::from(b'<') {
+            let start = i + 1 + usize::from(units.get(i + 1) == Some(&u16::from(b'/')));
+            for name in NAMES {
+                let after = start + name.len();
+                if after > units.len()
+                    || !units[start..after]
+                        .iter()
+                        .copied()
+                        .eq(name.bytes().map(u16::from))
+                {
+                    continue;
+                }
+                let Some(&next) = units.get(after) else {
+                    continue;
+                };
+                let whitespace = char::from_u32(u32::from(next))
+                    .is_some_and(lingxi_core::host::effort::javascript_whitespace);
+                if next != u16::from(b'>') && next != u16::from(b'/') && !whitespace {
+                    continue;
+                }
+                let max_end = units.len().min(after.saturating_add(1025));
+                if let Some(offset) = units[after..max_end]
+                    .iter()
+                    .position(|unit| *unit == u16::from(b'>'))
+                {
+                    end = Some(after + offset + 1);
+                    break;
+                }
+            }
+        }
+        if let Some(end) = end {
+            i = end;
+        } else {
+            output.push(units[i]);
+            i += 1;
+        }
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&output), output).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn native_322_result_memory_tag_filter_preserves_utf16() {
+    let pairs = [
+        (
+            "A<cc-memory name=\"x\">inside</cc-memory>B <CC_MEMORY/> C <other>keep</other>"
+                .to_owned(),
+            "AinsideB  C <other>keep</other>".to_owned(),
+        ),
+        (
+            "<Cc-memory>x</Cc-memory>".to_owned(),
+            "<Cc-memory>x</Cc-memory>".to_owned(),
+        ),
+        ("<cc-memoryx>x".to_owned(), "<cc-memoryx>x".to_owned()),
+        (
+            "<cc-memory\u{85}>x".to_owned(),
+            "<cc-memory\u{85}>x".to_owned(),
+        ),
+        ("<cc-memory\u{a0}>x".to_owned(), "x".to_owned()),
+        (format!("<cc-memory{}>x", " ".repeat(1024)), "x".to_owned()),
+        (
+            format!("<cc-memory{}>x", " ".repeat(1025)),
+            format!("<cc-memory{}>x", " ".repeat(1025)),
+        ),
+        ("<cc-memory <cc-memory>x>".to_owned(), "x>".to_owned()),
+    ];
+    for (input, expected) in pairs {
+        let actual = strip_result_memory_tags(&Utf16JsonProjection::from(input)).unwrap();
+        assert_eq!(actual.string_at(""), Some(expected.as_str()));
+    }
+    let mut units: Vec<u16> = "<ccmemory>".encode_utf16().collect();
+    units.push(0xd800);
+    units.extend("</ccmemory>".encode_utf16());
+    let source = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap();
+    assert_eq!(
+        strip_result_memory_tags(&source)
+            .unwrap()
+            .string_units("")
+            .unwrap(),
+        vec![0xd800]
+    );
+}
+
+/// Native 2.1.322 hides these exact synthetic messages from result text.
+/// The sentinel check precedes cc-memory wrapper removal.
+fn project_result_text(source: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    const SENTINELS: [&str; 5] = [
+        "[Request interrupted by user]",
+        "[Request interrupted by user for tool use]",
+        "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+        "No response requested.",
+    ];
+    let text = source.string_at("")?;
+    if SENTINELS.contains(&text) {
+        Some(Utf16JsonProjection::from(""))
+    } else {
+        strip_result_memory_tags(source)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_322_result_sentinels_are_exact_and_checked_before_tag_stripping() {
+    for text in [
+        "[Request interrupted by user]",
+        "[Request interrupted by user for tool use]",
+        "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+        "No response requested.",
+    ] {
+        assert_eq!(project_result_text(&Utf16JsonProjection::from(text)).unwrap().string_at(""), Some(""));
+    }
+    for (input, expected) in [
+        (" No response requested.", " No response requested."),
+        (
+            "<cc-memory>No response requested.</cc-memory>",
+            "No response requested.",
+        ),
+    ] {
+        assert_eq!(
+            project_result_text(&Utf16JsonProjection::from(input))
+                .unwrap()
+                .string_at(""),
+            Some(expected)
+        );
+    }
 }
 
 fn project_json_value(value: &Value) -> Utf16JsonProjection {
@@ -693,6 +846,9 @@ struct MessageAccum {
     message_id: String,
     /// Model id from `message_start`.
     model: String,
+    /// Exact provider message envelope at message_start, when available.
+    native_message_start: Option<Utf16JsonProjection>,
+    accepted_rows_emitted: bool,
     /// Accumulated blocks in observation order.
     blocks: Vec<AccBlock>,
     /// Latest usage snapshot (input/output/cache_read/cache_creation tokens).
@@ -701,6 +857,7 @@ struct MessageAccum {
     usage_cache_read: u64,
     usage_cache_creation: u64,
     new_text_block: bool,
+    last_block_is_text: Option<bool>,
 }
 
 impl MessageAccum {
@@ -758,13 +915,14 @@ impl MessageAccum {
         })
     }
 
-    fn collect_text_units(&self) -> Vec<u16> {
+    fn last_text_units(&self) -> Vec<u16> {
+        if self.last_block_is_text != Some(true) {
+            return Vec::new();
+        }
         self.blocks
-            .iter()
-            .filter_map(AccBlock::as_text)
-            .flatten()
-            .copied()
-            .collect()
+            .last()
+            .and_then(AccBlock::as_text)
+            .map_or_else(Vec::new, |units| units.to_vec())
     }
 }
 
@@ -815,6 +973,14 @@ pub struct StreamJsonInitParams {
     pub product_feedback_disabled: bool,
     /// Optional host-provided memory path metadata; absent when unavailable.
     pub memory_paths: Option<Value>,
+    /// Permission anchor reported by the host.
+    pub original_cwd: Option<String>,
+    /// Additional directories granted to this session.
+    pub additional_directories: Option<Vec<String>>,
+    /// Whether the host supports the ultrathink affordance.
+    pub ultrathink_available: Option<bool>,
+    /// Whether a typed ultrathink marker can raise effort.
+    pub ultrathink_typed_raises: Option<bool>,
     /// Optional host snapshot of whether per-turn effort is active.
     pub per_turn_effort_active: Option<bool>,
     /// Optional current view mode supplied by the host.
@@ -1054,6 +1220,8 @@ pub struct StreamJsonStream {
     account_routing:
         StdMutex<Vec<lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent>>,
     sdk_held_results: StdMutex<SdkHeldResults>,
+    result_usage_source: std::sync::OnceLock<Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>>,
+    result_usage_betas: StdMutex<Vec<String>>,
     text_limits: PrintTextLimits,
     response_timing: StdMutex<QueryResponseTiming>,
     request_markers: StdMutex<RequestMarkers>,
@@ -1133,6 +1301,8 @@ impl StreamJsonStream {
             result_metadata: Mutex::new(StreamJsonResultMetadata::default()),
             account_routing: StdMutex::new(Vec::new()),
             sdk_held_results: StdMutex::new(SdkHeldResults::default()),
+            result_usage_source: std::sync::OnceLock::new(),
+            result_usage_betas: StdMutex::new(Vec::new()),
             text_limits: PrintTextLimits::default(),
             response_timing: StdMutex::new(QueryResponseTiming::default()),
             request_markers: StdMutex::new(RequestMarkers::default()),
@@ -1251,6 +1421,7 @@ impl StreamJsonStream {
         betas: &[String],
         subagent_stats: Option<Value>,
     ) {
+        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
         let mut totals = json!({
             "total_cost_usd": cost.total_usd,
             "duration_api_ms": u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
@@ -1348,8 +1519,12 @@ impl StreamJsonStream {
     /// is dropped (i.e. the drain task panicked — in that case we silently drop
     /// the frame rather than panicking the caller).
     fn enqueue_line(&self, line: String, is_stream_event: bool) {
+        self.try_enqueue_line(line, is_stream_event);
+    }
+
+    fn try_enqueue_line(&self, line: String, is_stream_event: bool) -> bool {
         if is_stream_event && !self.reserve_stream_event() {
-            return;
+            return false;
         }
         let line = {
             let mut markers = self
@@ -1373,7 +1548,7 @@ impl StreamJsonStream {
                             self.pending_stream_events.fetch_sub(1, Ordering::Relaxed);
                         }
                         self.abort_delivery(format!("invalid request marker projection: {error}"));
-                        return;
+                        return false;
                     }
                 }
             }
@@ -1391,7 +1566,9 @@ impl StreamJsonStream {
             if is_stream_event {
                 self.pending_stream_events.fetch_sub(1, Ordering::Relaxed);
             }
+            return false;
         }
+        true
     }
 
     fn reserve_stream_event(&self) -> bool {
@@ -1680,10 +1857,7 @@ impl StreamJsonStream {
                         continue;
                     }
                 }
-                match serialize_projected_ndjson_line(&frame) {
-                    Ok(line) => self.enqueue_line(line, false),
-                    Err(error) => self.abort_delivery(format!("invalid held SDK result: {error}")),
-                }
+                self.enqueue_published_result(&frame);
             }
         });
         if released.is_none() {
@@ -1890,7 +2064,7 @@ impl StreamJsonStream {
                 }
             }
             if let Err(error) = frame
-                .replace_pointer_projection("/toolUseResult", exact.data.clone())
+                .replace_pointer_projection("/tool_use_result", exact.data.clone())
                 .and_then(|()| {
                     frame.replace_pointer_projection(
                         "/message/content/0/content",
@@ -2064,15 +2238,15 @@ impl StreamJsonStream {
     ///
     /// claude-code's stream-json (SDK V2) tool_result block carries the
     /// MODEL-FACING STRING in `content` (what the model/API sees), with the full
-    /// structured result on a SEPARATE top-level `toolUseResult` field on the
-    /// user message (verified vs the 2.1.191 binary, which builds
-    /// `…,toolUseResult:<data>,…` on the SDK user message). LingXi previously put
+    /// structured result on a SEPARATE top-level `tool_use_result` field on the
+    /// user message (verified vs the 2.1.322 binary, which builds
+    /// `…,tool_use_result:<data>,…` on the SDK user message). LingXi previously put
     /// the whole `data` object where the string belongs and omitted
-    /// `toolUseResult`, so an SDK consumer saw a JSON blob instead of the tool's
+    /// `tool_use_result`, so an SDK consumer saw a JSON blob instead of the tool's
     /// output. `model_text` is the EXACT string the model saw (passed by the
     /// orchestrator's dispatch — `result.model_content`, the derived model text,
     /// or the pre-exec error/cancel/deny string), so the frame's `content` is
-    /// byte-faithful to the model wire; `toolUseResult` keeps the pure metadata
+    /// byte-faithful to the model wire; `tool_use_result` keeps the pure metadata
     /// `data`.
     ///
     /// Pure builder (modulo the fresh `uuid`/`timestamp`) — does not write to
@@ -2115,23 +2289,22 @@ impl StreamJsonStream {
         let content_value = model_text
             .string_at("")
             .expect("tool-result model text is a root string");
-        let content_block = json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": content_value,
-            "is_error": is_error
-        });
+        let content_block = if denial_kind.is_some() {
+            json!({"type":"tool_result", "content":content_value, "is_error":is_error, "tool_use_id":tool_use_id})
+        } else {
+            json!({"tool_use_id":tool_use_id, "type":"tool_result", "content":content_value, "is_error":is_error})
+        };
         let mut frame = json!({
             "type": "user",
             "message": {
                 "role": "user",
                 "content": [content_block]
             },
-            "session_id": session_id,
             "parent_tool_use_id": null,
-            "toolUseResult": null,
+            "session_id": session_id,
             "uuid": uuid,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "tool_use_result": null
         });
         let meta = build_tool_result_meta(denial_kind, user_feedback, &frame["message"]["content"]);
         if !meta.is_empty() {
@@ -2140,9 +2313,21 @@ impl StreamJsonStream {
                 .expect("frame is a JSON object")
                 .insert("tool_result_meta".to_string(), Value::Array(meta));
         }
+        let wire_result = if denial_kind.is_some() && result.get_property("error").is_some() {
+            let mut units = "Error: ".encode_utf16().collect::<Vec<_>>();
+            units.extend(
+                model_text
+                    .string_units("")
+                    .expect("tool-result text is a string"),
+            );
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("permission error is a root string")
+        } else {
+            result.clone()
+        };
         let mut projection = project_json_value(&frame);
         projection
-            .replace_pointer_projection("/toolUseResult", result.clone())
+            .replace_pointer_projection("/tool_use_result", wire_result)
             .and_then(|()| {
                 projection
                     .replace_pointer_projection("/message/content/0/content", model_text.clone())
@@ -2255,7 +2440,8 @@ impl StreamJsonStream {
                 let Ok(value) = fields.subprojection(&format!("/{key}")) else {
                     continue;
                 };
-                if let Err(error) = projection.replace_pointer_projection(key, value) {
+                if let Err(error) = projection.replace_pointer_projection(&format!("/{key}"), value)
+                {
                     drop(markers);
                     self.abort_delivery(format!("invalid request marker projection: {error}"));
                     return;
@@ -2263,6 +2449,27 @@ impl StreamJsonStream {
             }
         }
         drop(markers);
+        // Freeze cumulative money before a result can be held. Its interval
+        // stamp still belongs to actual queue admission; later accepted work
+        // must not erase this frame's original floating-point cost spelling.
+        if projection.contains_property("total_cost_usd") {
+            if let (Some(source), Some(session)) = (
+                self.result_usage_source.get(),
+                projection
+                    .string_at("/session_id")
+                    .and_then(lingxi_core::types::SessionId::parse_prefixed),
+            ) {
+                let mut failure = None;
+                source.publish_result_usage(session, &mut |_, totals| {
+                    failure = Self::project_result_costs(&mut projection, totals).err();
+                    false
+                });
+                if let Some(error) = failure {
+                    self.abort_delivery(format!("invalid queued result costs: {error}"));
+                    return;
+                }
+            }
+        }
         let _ = self.with_result_publication(|| {
             let held_frames = {
                 let mut held = self
@@ -2276,15 +2483,289 @@ impl StreamJsonStream {
                 std::mem::take(&mut held.frames)
             };
             for previous in held_frames {
-                self.enqueue_projected(&previous);
+                self.enqueue_published_result(&previous);
             }
-            self.enqueue_projected(&projection);
+            self.enqueue_published_result(&projection);
         });
+    }
+
+    /// Stamp the interval at queue admission, including when held results are
+    /// released. Accounting is reset only after successful outbound admission.
+    fn enqueue_published_result(&self, frame: &Utf16JsonProjection) {
+        let source = self.result_usage_source.get();
+        let sdk_interval = self.output_mode == StreamJsonOutputMode::Ndjson;
+        let Some(source) = source else {
+            self.enqueue_projected(frame);
+            return;
+        };
+        if self.output.error().is_some() {
+            return;
+        }
+        let Some(session_id) = frame
+            .string_at("/session_id")
+            .and_then(lingxi_core::types::SessionId::parse_prefixed)
+        else {
+            self.abort_delivery("result has no canonical session identity");
+            return;
+        };
+        let betas = self
+            .result_usage_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        source.publish_result_usage(session_id, &mut |rows, totals| {
+            let usage =
+                project_json_value(&Value::Object(Self::build_result_usage_block(rows, &betas)));
+            let projected = (|| {
+                let mut frame = frame.clone();
+                Self::project_result_costs(&mut frame, totals)?;
+                let mut fields = Vec::new();
+                let mut inserted = false;
+                for entry in frame
+                    .object_entries()
+                    .ok_or(Utf16JsonProjectionError::ExpectedObject)?
+                {
+                    if entry.display_key == "model_usage_since_last_result" {
+                        continue;
+                    }
+                    fields.push((
+                        entry.code_units.to_vec(),
+                        frame.subprojection_property_units(entry.code_units)?,
+                    ));
+                    if sdk_interval && entry.display_key == "result_index" {
+                        fields.push((
+                            "model_usage_since_last_result".encode_utf16().collect(),
+                            usage.clone(),
+                        ));
+                        inserted = true;
+                    }
+                }
+                if sdk_interval && !inserted {
+                    fields.push((
+                        "model_usage_since_last_result".encode_utf16().collect(),
+                        usage,
+                    ));
+                }
+                Utf16JsonProjection::object_units(fields)
+            })();
+            match projected.and_then(|frame| serialize_projected_ndjson_line(&frame)) {
+                Ok(line) => self.try_enqueue_line(line, false) && sdk_interval,
+                Err(error) => {
+                    self.abort_delivery(format!("invalid result usage stamp: {error}"));
+                    false
+                }
+            }
+        });
+    }
+
+    fn project_result_costs(
+        frame: &mut Utf16JsonProjection,
+        totals: &lingxi_core::host::result_usage::ResultUsageTotals,
+    ) -> Result<(), Utf16JsonProjectionError> {
+        if let Some(total) = &totals.total {
+            // A held frame can precede later accepted mutations. Only replace
+            // the cost when this projection describes that same integer state.
+            if frame.number_at("/total_cost_usd") == Some(total.nano_usd as f64 / 1_000_000_000.0) {
+                frame.replace_pointer_projection(
+                    "/total_cost_usd",
+                    project_json_value(&json!(total.cost_usd)),
+                )?;
+            }
+        }
+        let models = totals
+            .models
+            .iter()
+            .map(|row| lingxi_core::host::result_usage::ResultModelUsage {
+                model: row.model.clone(),
+                provider: row.provider.clone(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let keys = Self::build_result_usage_block(&models, &[]);
+        for (key, model) in keys.keys().zip(&totals.models) {
+            let key = key.replace('~', "~0").replace('/', "~1");
+            let path = format!("/modelUsage/{key}");
+            let cost_path = format!("{path}/costUSD");
+            if frame.number_at(&cost_path) != Some(model.cost.nano_usd as f64 / 1_000_000_000.0) {
+                continue;
+            }
+            frame.replace_pointer_projection(
+                &cost_path,
+                project_json_value(&json!(model.cost.cost_usd)),
+            )?;
+            if model.restored {
+                let row = frame.subprojection(&path)?;
+                let entries = row
+                    .object_entries()
+                    .ok_or(Utf16JsonProjectionError::ExpectedObject)?;
+                let order = [
+                    "inputTokens",
+                    "outputTokens",
+                    "thinkingTokens",
+                    "cacheReadInputTokens",
+                    "cacheCreationInputTokens",
+                    "cacheCreationEphemeral5mInputTokens",
+                    "cacheCreationEphemeral1hInputTokens",
+                    "webSearchRequests",
+                    "costUSD",
+                    "contextWindow",
+                    "maxOutputTokens",
+                    "canonicalModel",
+                    "provider",
+                    "costBasis",
+                ];
+                let mut fields = Vec::new();
+                for key in order {
+                    if let Some(entry) = entries.iter().find(|entry| entry.display_key == key) {
+                        fields.push((
+                            entry.code_units.to_vec(),
+                            row.subprojection_property_units(entry.code_units)?,
+                        ));
+                    }
+                }
+                for entry in entries {
+                    if !order.contains(&entry.display_key) {
+                        fields.push((
+                            entry.code_units.to_vec(),
+                            row.subprojection_property_units(entry.code_units)?,
+                        ));
+                    }
+                }
+                frame.replace_pointer_projection(
+                    &path,
+                    Utf16JsonProjection::object_units(fields)?,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn build_result_usage_block(
+        rows: &[lingxi_core::host::result_usage::ResultModelUsage],
+        betas: &[String],
+    ) -> serde_json::Map<String, Value> {
+        let scaffold = CostSnapshot {
+            by_model: rows
+                .iter()
+                .map(|row| lingxi_core::host::orchestrator::ModelUsageRow {
+                    model: row.model.clone(),
+                    provider: Some(row.provider.clone()),
+                    total_nano_usd: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_creation_5m_input_tokens: 0,
+                    cache_creation_1h_input_tokens: 0,
+                    reasoning_tokens: 0,
+                    web_search_requests: 0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut result = Self::build_model_usage_block(&scaffold, betas);
+        fn number(value: i128) -> Value {
+            if let Ok(value) = i64::try_from(value) {
+                return json!(value);
+            }
+            if let Ok(value) = u64::try_from(value) {
+                return json!(value);
+            }
+            json!(value as f64)
+        }
+        for (entry, row) in result.values_mut().zip(rows) {
+            entry["inputTokens"] = number(row.input_tokens);
+            entry["outputTokens"] = number(row.output_tokens + row.reasoning_tokens);
+            entry["cacheReadInputTokens"] = number(row.cache_read_input_tokens);
+            entry["cacheCreationInputTokens"] = number(row.cache_creation_input_tokens);
+            entry["webSearchRequests"] = number(row.web_search_requests);
+            entry["costUSD"] = json!(row.cost_usd);
+            entry["thinkingTokens"] = number(row.reasoning_tokens);
+            entry["cacheCreationEphemeral5mInputTokens"] =
+                number(row.cache_creation_5m_input_tokens);
+            entry["cacheCreationEphemeral1hInputTokens"] =
+                number(row.cache_creation_1h_input_tokens);
+        }
+        result
     }
 
     /// Replace the metadata snapshot used when constructing result frames.
     pub async fn set_result_metadata(&self, metadata: StreamJsonResultMetadata) {
         *self.result_metadata.lock().await = metadata;
+    }
+
+    /// Query usage is frozen when a result is built. It has a different reset
+    /// boundary from the interval stamped when that result is published.
+    pub async fn begin_query_usage(&self) {
+        if let Some(source) = self.result_usage_source.get() {
+            if let Some(session) =
+                lingxi_core::types::SessionId::parse_prefixed(self.session_id.lock().await.as_str())
+            {
+                source.begin_query(session);
+            }
+        }
+    }
+
+    async fn current_query_usage(&self) -> Option<Value> {
+        let source = self.result_usage_source.get()?;
+        let session = lingxi_core::types::SessionId::parse_prefixed(self.session_id.lock().await.as_str())?;
+        let mut usage = None;
+        source.query_usage(session, &mut |rows| {
+            usage = Some(Self::build_query_usage_block(rows))
+        });
+        usage
+    }
+
+    fn build_query_usage_block(
+        rows: &[lingxi_core::host::result_usage::ResultModelUsage],
+    ) -> Value {
+        fn number(value: i128) -> Value {
+            i64::try_from(value).map_or_else(|_| json!(value as f64), |value| json!(value))
+        }
+        macro_rules! sum {
+            ($field:ident) => {
+                rows.iter().map(|row| row.$field).sum::<i128>()
+            };
+        }
+        let thinking = sum!(reasoning_tokens);
+        let details = json!({"thinking_tokens":number(thinking)});
+        let mut usage = serde_json::Map::new();
+        if rows.is_empty() {
+            usage.insert("output_tokens_details".into(), details.clone());
+        }
+        usage.insert("input_tokens".into(), number(sum!(input_tokens)));
+        usage.insert(
+            "cache_creation_input_tokens".into(),
+            number(sum!(cache_creation_input_tokens)),
+        );
+        usage.insert(
+            "cache_read_input_tokens".into(),
+            number(sum!(cache_read_input_tokens)),
+        );
+        usage.insert(
+            "output_tokens".into(),
+            number(sum!(output_tokens) + thinking),
+        );
+        if !rows.is_empty() {
+            usage.insert("output_tokens_details".into(), details);
+        }
+        usage.insert(
+            "server_tool_use".into(),
+            json!({"web_search_requests":number(sum!(web_search_requests)),"web_fetch_requests":0}),
+        );
+        usage.insert("service_tier".into(), json!("standard"));
+        usage.insert(
+            "cache_creation".into(),
+            json!({
+                "ephemeral_1h_input_tokens":number(sum!(cache_creation_1h_input_tokens)),
+                "ephemeral_5m_input_tokens":number(sum!(cache_creation_5m_input_tokens)),
+            }),
+        );
+        usage.insert("inference_geo".into(), json!(""));
+        usage.insert("iterations".into(), json!([]));
+        usage.insert("speed".into(), json!("standard"));
+        usage.insert("fallback_credit".into(), Value::Null);
+        Value::Object(usage)
     }
 
     /// Begin the finite request-marker owner from actually consumed client
@@ -2454,10 +2935,10 @@ impl StreamJsonStream {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .fill_metadata(&mut metadata);
-        let usage = metadata
-            .usage
-            .clone()
-            .unwrap_or_else(|| Self::build_usage_block(cost));
+        let usage = match metadata.usage.clone() {
+            Some(usage) => usage,
+            None => self.current_query_usage().await.unwrap_or_else(|| Self::build_usage_block(cost)),
+        };
         let model_usage = metadata
             .model_usage
             .clone()
@@ -2558,13 +3039,18 @@ impl StreamJsonStream {
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
-        let Some(text) = result_text
-            .string_at("")
-            .filter(|_| result_text.validate().is_ok())
-        else {
+        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
+        if result_text.validate().is_err() {
+            self.abort_delivery("result text must be a validated string projection");
+            return Value::Null;
+        }
+        let Some(result_text) = project_result_text(result_text) else {
             self.abort_delivery("result text must be a validated string projection");
             return Value::Null;
         };
+        let text = result_text
+            .string_at("")
+            .expect("filtered result is a string");
         let frame = self
             .build_result_success_frame(
                 text,
@@ -2575,7 +3061,7 @@ impl StreamJsonStream {
                 betas,
             )
             .await;
-        self.enqueue_result_frame(&frame, Some(result_text)).await;
+        self.enqueue_result_frame(&frame, Some(&result_text)).await;
         frame
     }
 
@@ -2605,10 +3091,12 @@ impl StreamJsonStream {
         };
 
         let metadata = self.result_metadata.lock().await.clone();
-        let usage = metadata
-            .usage
-            .clone()
-            .unwrap_or_else(|| Self::build_usage_block(cost));
+        let usage = match metadata.usage.clone() {
+            Some(usage) => usage,
+            None if subtype == "error_max_budget_usd" => Self::build_query_usage_block(&[]),
+            None if subtype == "error_max_structured_output_retries" => Self::build_last_response_usage_block(cost),
+            None => self.current_query_usage().await.unwrap_or_else(|| Self::build_usage_block(cost)),
+        };
         let model_usage = metadata
             .model_usage
             .clone()
@@ -2688,6 +3176,7 @@ impl StreamJsonStream {
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
+        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
         let frame = self
             .build_result_error_frame(
                 subtype,
@@ -2706,12 +3195,8 @@ impl StreamJsonStream {
     /// accumulator reset in `emit_message_boundary`).
     pub async fn get_last_result_text(&self) -> Utf16JsonProjection {
         let acc = self.accum.lock().await;
-        if acc
-            .blocks
-            .iter()
-            .any(|block| matches!(block, AccBlock::Text(_)))
-        {
-            let units = acc.collect_text_units();
+        if acc.last_block_is_text.is_some() {
+            let units = acc.last_text_units();
             return Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
                 .expect("accumulated text owns its units");
         }
@@ -2762,6 +3247,24 @@ impl StreamJsonStream {
         self.enqueue(&frame);
     }
 
+    /// Retry exhaustion reports the last response; cumulative models and
+    /// the independently published SDK usage interval retain every attempt.
+    fn build_last_response_usage_block(cost: &CostSnapshot) -> Value {
+        let Some(last) = cost.current_usage else {
+            return Self::build_query_usage_block(&[]);
+        };
+        let mut usage = Self::build_usage_block(cost);
+        let details = cost.current_usage_details.unwrap_or_default();
+        usage["input_tokens"] = json!(last.input_tokens);
+        usage["output_tokens"] = json!(last.output_tokens.saturating_add(details.reasoning_tokens));
+        usage["cache_read_input_tokens"] = json!(last.cache_read_input_tokens);
+        usage["cache_creation_input_tokens"] = json!(last.cache_creation_input_tokens);
+        usage["output_tokens_details"] = json!({"thinking_tokens":details.reasoning_tokens});
+        usage["server_tool_use"] =
+            json!({"web_search_requests":details.web_search_requests,"web_fetch_requests":0});
+        usage
+    }
+
     /// Build the `usage` sub-block (snake_case per GROUND-TRUTH).
     ///
     /// SC-01 (2.1.238): the `result` frame's `usage` is `gXl()` (cc-238.js
@@ -2786,8 +3289,8 @@ impl StreamJsonStream {
     /// already includes thinking tokens, which are also reported separately in
     /// `output_tokens_details`; this projection adds the Rust row's separate
     /// reasoning count to its output count. The base object keeps
-    /// `service_tier` and `speed` at `standard` and both ephemeral
-    /// cache-creation buckets at zero.
+    /// `service_tier` and `speed` at `standard`. As observed in 2.1.322,
+    /// the cache-creation breakdown comes from the latest settled response.
     /// Keep `CurrentUsageSnapshot` as the separate last-response view used by
     /// compaction and status consumers; result usage follows the aggregate
     /// model rows just like Native.
@@ -2845,9 +3348,15 @@ impl StreamJsonStream {
             json!({"web_search_requests":web_search_requests,"web_fetch_requests":0_u64}),
         );
         usage.insert("service_tier".into(), json!("standard"));
+        let (cache_1h, cache_5m) = cost.current_usage_details.map_or((0, 0), |details| {
+            (
+                details.cache_creation_1h_input_tokens,
+                details.cache_creation_5m_input_tokens,
+            )
+        });
         usage.insert(
             "cache_creation".into(),
-            json!({"ephemeral_1h_input_tokens":0_u64,"ephemeral_5m_input_tokens":0_u64}),
+            json!({"ephemeral_1h_input_tokens":cache_1h,"ephemeral_5m_input_tokens":cache_5m}),
         );
         usage.insert("inference_geo".into(), json!(""));
         usage.insert("iterations".into(), json!([]));
@@ -2858,7 +3367,9 @@ impl StreamJsonStream {
 
     /// Build the `modelUsage` sub-map keyed by `model_id` (camelCase per
     /// GROUND-TRUTH). The key is the model id AS-IS (including any `[1m]`
-    /// suffix). `contextWindow` and `maxOutputTokens` are looked up from the
+    /// suffix), except that provider-qualified keys disambiguate duplicate
+    /// names across LingXi providers. `contextWindow` and `maxOutputTokens`
+    /// are looked up from the
     /// llm-runtime catalog via `betas` (so `[1m]`-capable models report 1M).
     /// Empty map when no attributed per-model usage was recorded.
     fn build_model_usage_block(
@@ -2871,7 +3382,34 @@ impl StreamJsonStream {
         // primary: result metadata must name the model that consumed tokens,
         // not merely the configured primary. External aggregate costs have no
         // model attribution and remain only in the overall cost total.
+        // Claude's modelUsage object is keyed by model name. LingXi can use
+        // the same name at multiple providers, so reserve all original names
+        // and qualify colliding rows instead of silently overwriting usage.
+        // Accounts at the same provider are already combined in by_model;
+        // their separate attribution stays in the account ledger.
+        let mut name_counts = std::collections::HashMap::new();
         for row in &cost.by_model {
+            *name_counts.entry(row.model.as_str()).or_insert(0_usize) += 1;
+        }
+        let reserved: std::collections::HashSet<&str> =
+            cost.by_model.iter().map(|row| row.model.as_str()).collect();
+        for row in &cost.by_model {
+            let key = if name_counts[row.model.as_str()] == 1 {
+                row.model.clone()
+            } else {
+                let base = format!(
+                    "{}/{}",
+                    row.provider.as_deref().unwrap_or("unknown"),
+                    row.model
+                );
+                let mut key = base.clone();
+                let mut suffix = 2_u64;
+                while reserved.contains(key.as_str()) || model_usage.contains_key(&key) {
+                    key = format!("{base}#{suffix}");
+                    suffix += 1;
+                }
+                key
+            };
             let ctx_window = context_window_for_model(&row.model, betas);
             let max_output = max_output_tokens_for_model(&row.model);
             // (cc 2.1.218) `n.canonicalModel = yo(r)` — the canonical id the
@@ -2896,6 +3434,8 @@ impl StreamJsonStream {
                 "contextWindow": ctx_window,
                 "maxOutputTokens": max_output,
                 "thinkingTokens": row.reasoning_tokens,
+                "cacheCreationEphemeral5mInputTokens": row.cache_creation_5m_input_tokens,
+                "cacheCreationEphemeral1hInputTokens": row.cache_creation_1h_input_tokens,
                 "canonicalModel": canonical
             });
             if let Some(provider) = &row.provider {
@@ -2908,7 +3448,7 @@ impl StreamJsonStream {
                 .as_object_mut()
                 .expect("modelUsage object")
                 .insert("costBasis".into(), json!("list"));
-            model_usage.insert(row.model.clone(), entry);
+            model_usage.insert(key, entry);
         }
         model_usage
     }
@@ -3027,6 +3567,14 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
+    fn wants_result_usage(&self) -> bool { self.output_mode != StreamJsonOutputMode::LastResultText }
+    fn wants_native_cli_tool_diagnostics(&self) -> bool {
+        true
+    }
+
+    fn set_result_usage_source(&self, source: Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>) {
+        let _ = self.result_usage_source.set(source);
+    }
     async fn emit_provider_account_routing(
         &self,
         event: &lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,
@@ -3194,6 +3742,130 @@ impl OutputStream for StreamJsonStream {
         }
     }
 
+    fn wants_accepted_assistant_rows(&self) -> bool {
+        !self.suppress_frames
+    }
+
+    async fn emit_accepted_assistant_row(
+        &self,
+        row_id: &lingxi_core::types::MessageId,
+        timestamp: &str,
+        request_id: Option<&str>,
+        provider_message_id: &str,
+        model: &str,
+        native_event_json: Option<&str>,
+        content: &[lingxi_core::types::ContentBlock],
+    ) {
+        if self.suppress_frames { return; }
+        let native_message = native_event_json
+            .and_then(|source| Utf16JsonProjection::parse(source).ok())
+            .and_then(|event| event.subprojection("/message").ok())
+            .filter(|message| message.string_at("/id") == Some(provider_message_id)
+                && message.string_at("/model") == Some(model)
+                && message.array_len("/content").is_some());
+        let mut message = match native_message {
+            Some(message) => message,
+            None if native_event_json.is_none() => {
+                let acc = self.accum.lock().await;
+                if acc.message_id != provider_message_id || acc.model != model {
+                    return;
+                }
+                // Other protocols have no Anthropic source envelope. Publish
+                // each accepted row with its own durable identity, using only
+                // the matching active response's canonical message snapshot.
+                project_json_value(&acc.to_message_json(None))
+            }
+            None => return,
+        };
+        let mut blocks = Vec::new();
+        for block in content {
+            use lingxi_core::types::ContentBlock;
+            if self.omit_thinking.load(Ordering::Relaxed)
+                && matches!(block, ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. })
+            {
+                continue;
+            }
+            let projection = match block {
+                ContentBlock::Text { text, citations } | ContentBlock::TextJsUtf16 { text, citations, .. } => {
+                    let units = match block {
+                        ContentBlock::TextJsUtf16 { utf16_code_units, .. } => utf16_code_units.clone(),
+                        _ => text.encode_utf16().collect(),
+                    };
+                    let text = Utf16JsonProjection::root_string(text.clone(), units)
+                        .ok()
+                        .and_then(|text| strip_result_memory_tags(&text));
+                    let Some(text) = text else { self.abort_delivery("invalid accepted text"); return; };
+                    let mut value = project_json_value(&json!({"type":"text", "text":null}));
+                    if value.replace_pointer_projection("/text", text).is_err() {
+                        self.abort_delivery("invalid accepted text projection"); return;
+                    }
+                    if let Some(citations) = citations {
+                        let value_to_insert = citations.clone().unwrap_or_else(|| Utf16JsonProjection::plain(Value::Null));
+                        if value.set_field("citations", value_to_insert).is_err() {
+                            self.abort_delivery("invalid accepted citations"); return;
+                        }
+                    }
+                    value
+                }
+                ContentBlock::ProviderContent { value, .. } => value.clone(),
+                ContentBlock::Thinking { thinking, signature } => {
+                    let Some(thinking) = strip_result_memory_tags(&Utf16JsonProjection::from(thinking.as_str())) else {
+                        self.abort_delivery("invalid accepted thinking"); return;
+                    };
+                    let mut value = project_json_value(&json!({"type":"thinking", "thinking":null, "signature":signature}));
+                    if value.replace_pointer_projection("/thinking", thinking).is_err() {
+                        self.abort_delivery("invalid accepted thinking projection"); return;
+                    }
+                    value
+                }
+                ContentBlock::ToolUse { id, name, input, provider_id } => {
+                    let mut value = project_json_value(&json!({"type":"tool_use", "id":provider_id.as_deref().unwrap_or(id.as_str()), "name":name, "input":null}));
+                    if value.replace_pointer_projection("/input", input.clone()).is_err() {
+                        self.abort_delivery("invalid accepted tool input"); return;
+                    }
+                    value
+                }
+                _ => match serde_json::to_string(block).ok().and_then(|value| Utf16JsonProjection::parse(&value).ok()) {
+                    Some(value) => value,
+                    None => { self.abort_delivery("invalid accepted assistant block"); return; }
+                },
+            };
+            blocks.push(projection);
+        }
+        if blocks.is_empty() { return; }
+        let Ok(content) = Utf16JsonProjection::array(blocks) else {
+            self.abort_delivery("invalid accepted assistant content"); return;
+        };
+        if message.set_pointer("/content", content).is_err() {
+            self.abort_delivery("invalid accepted assistant message"); return;
+        }
+        if !message.contains_property("context_management")
+            && message.set_field("context_management", Utf16JsonProjection::plain(Value::Null)).is_err()
+        {
+            self.abort_delivery("invalid accepted assistant context"); return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let mut frame = project_json_value(&json!({
+            "type":"assistant", "message":null, "parent_tool_use_id":null,
+            "session_id":session_id, "uuid":row_id.as_uuid().to_string(), "timestamp":timestamp
+        }));
+        if frame.replace_pointer_projection("/message", message).is_err() {
+            self.abort_delivery("invalid accepted assistant frame"); return;
+        }
+        if let Some(request_id) = request_id {
+            if frame.set_field("request_id", Utf16JsonProjection::from(request_id)).is_err() {
+                self.abort_delivery("invalid accepted assistant request id"); return;
+            }
+        }
+        {
+            let mut acc = self.accum.lock().await;
+            if acc.message_id == provider_message_id && acc.model == model {
+                acc.accepted_rows_emitted = true;
+            }
+        }
+        self.enqueue_projected(&frame);
+    }
+
     async fn emit_assistant_block_start(&self, _block_key: u64) {
         self.accum.lock().await.new_text_block = true;
     }
@@ -3204,6 +3876,7 @@ impl OutputStream for StreamJsonStream {
             return;
         };
         let mut acc = self.accum.lock().await;
+        acc.last_block_is_text = Some(true);
         if !acc.new_text_block {
             if let Some(AccBlock::Text(last)) = acc.blocks.last_mut() {
                 last.extend(units);
@@ -3289,6 +3962,7 @@ impl OutputStream for StreamJsonStream {
         name: &str,
         input: &Utf16JsonProjection,
     ) {
+        self.accum.lock().await.last_block_is_text = Some(false);
         if self.suppress_frames {
             return;
         }
@@ -3343,6 +4017,62 @@ impl OutputStream for StreamJsonStream {
             )
             .await;
         self.enqueue_tool_result_frame(frame, model_text, result, _projection, None);
+    }
+
+    async fn emit_tool_result_with_metadata(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        _tool: &str,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
+        denial_kind: Option<&str>,
+        metadata: &lingxi_core::host::orchestrator::ToolResultFrameMetadata,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        let mut frame = self
+            .build_tool_result_frame_with_denial(id.as_str(), model_text, result, denial_kind, None)
+            .await;
+        if let Some(id) = metadata.row_id {
+            if frame
+                .replace_pointer_projection(
+                    "/uuid",
+                    Utf16JsonProjection::from(id.as_uuid().to_string()),
+                )
+                .is_err()
+            {
+                self.abort_delivery("invalid tool-result row identity");
+                return;
+            }
+        }
+        if let Some(timestamp) = &metadata.timestamp {
+            if frame
+                .replace_pointer_projection(
+                    "/timestamp",
+                    Utf16JsonProjection::from(timestamp.clone()),
+                )
+                .is_err()
+            {
+                self.abort_delivery("invalid tool-result row timestamp");
+                return;
+            }
+        }
+        if let Some(decision) = &metadata.permission_decision {
+            let meta = (|| {
+                let mut entry = frame
+                    .subprojection("/tool_result_meta/0")
+                    .unwrap_or_else(|_| project_json_value(&json!({"id":id.as_str()})));
+                entry.set_field("permission_decision", decision.clone())?;
+                frame.set_field("tool_result_meta", Utf16JsonProjection::array(vec![entry])?)
+            })();
+            if let Err(error) = meta {
+                self.abort_delivery(format!("invalid tool permission metadata: {error}"));
+                return;
+            }
+        }
+        self.enqueue_tool_result_frame(frame, model_text, result, None, mcp_meta);
     }
 
     async fn emit_tool_heartbeat(
@@ -3466,6 +4196,7 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        self.accum.lock().await.last_block_is_text = Some(false);
         if self.suppress_frames || self.omit_thinking.load(Ordering::Relaxed) {
             return;
         }
@@ -3517,6 +4248,15 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_message_start(&self, message_id: &str, model: &str) {
+        self.emit_message_start_with_native(message_id, model, None).await;
+    }
+
+    async fn emit_message_start_with_native(
+        &self,
+        message_id: &str,
+        model: &str,
+        native_event_json: Option<&str>,
+    ) {
         {
             let mut metadata = self.result_metadata.lock().await;
             metadata.is_error = false;
@@ -3524,25 +4264,36 @@ impl OutputStream for StreamJsonStream {
             metadata.stop_reason = None;
             metadata.api_error_status = None;
         }
+        let native_message = native_event_json
+            .and_then(|source| Utf16JsonProjection::parse(source).ok())
+            .and_then(|event| event.subprojection("/message").ok());
         let mut acc = self.accum.lock().await;
         acc.reset();
         acc.message_id = message_id.to_string();
         acc.model = model.to_string();
+        // A failed stream may leave a source frame pending. Never attach it to
+        // a later provider response with a different message identity.
+        acc.native_message_start = native_message.filter(|message| {
+            message.string_at("/id") == Some(message_id)
+                && message.string_at("/model") == Some(model)
+                && message.array_len("/content").is_some()
+        });
     }
 
     async fn emit_message_boundary(&self, stop_reason: Option<&str>, request_id: Option<&str>) {
         // Before resetting, capture the last assistant text for the result frame.
         {
             let acc = self.accum.lock().await;
-            let units = acc.collect_text_units();
+            let units = acc.last_text_units();
             let text = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
                 .expect("accumulated text owns its units");
             drop(acc);
             *self.last_result_text.lock().await = text;
         }
 
-        if self.suppress_frames {
-            // Still need to reset the accumulator even in suppressed mode.
+        let rows_emitted = self.accum.lock().await.accepted_rows_emitted;
+        if self.suppress_frames || rows_emitted {
+            // Still need to reset the accumulator after accepted rows were emitted.
             let mut acc = self.accum.lock().await;
             acc.reset();
             return;
@@ -3553,15 +4304,45 @@ impl OutputStream for StreamJsonStream {
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
         let message = acc.to_message_json(stop_reason);
-        let frame = json!({
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut frame = json!({
             "type": "assistant",
             "message": message,
             "parent_tool_use_id": null,
             "session_id": session_id,
             "uuid": uuid,
-            "request_id": request_id
+            "timestamp": timestamp
         });
+        if let Some(request_id) = request_id {
+            frame
+                .as_object_mut()
+                .expect("assistant frame")
+                .insert("request_id".into(), json!(request_id));
+        }
         let mut projection = project_json_value(&frame);
+        if let Some(native_message) = &acc.native_message_start {
+            let mut message = native_message.clone();
+            if let Err(error) = message.set_pointer(
+                "/content",
+                project_json_value(&acc.to_content_json()),
+            ) {
+                self.abort_delivery(format!("invalid native assistant content: {error}"));
+                return;
+            }
+            if !message.contains_property("context_management") {
+                if let Err(error) = message.set_field(
+                    "context_management",
+                    Utf16JsonProjection::plain(Value::Null),
+                ) {
+                    self.abort_delivery(format!("invalid native assistant context: {error}"));
+                    return;
+                }
+            }
+            if let Err(error) = projection.replace_pointer_projection("/message", message) {
+                self.abort_delivery(format!("invalid native assistant message: {error}"));
+                return;
+            }
+        }
         for (index, block) in acc.blocks.iter().enumerate() {
             if let AccBlock::Text(units) = block {
                 let text = Utf16JsonProjection::root_string(
@@ -3569,6 +4350,7 @@ impl OutputStream for StreamJsonStream {
                     units.clone(),
                 )
                 .expect("accumulated text owns its units");
+                let text = strip_result_memory_tags(&text).expect("text projection remains valid");
                 if let Err(error) = projection
                     .replace_pointer_projection(&format!("/message/content/{index}/text"), text)
                 {
@@ -3616,6 +4398,10 @@ impl OutputStream for StreamJsonStream {
     /// NOT byte-for-byte identical (e.g. field ordering, default values).
     fn wants_partial_stream_events(&self) -> bool {
         self.include_partial_messages.load(Ordering::Relaxed) && !self.suppress_frames
+    }
+
+    fn wants_native_stream_frames(&self) -> bool {
+        !self.suppress_frames
     }
 
     async fn emit_stream_event(&self, event_json: &str, is_message_start: bool) {
@@ -3855,6 +4641,12 @@ fn build_init_frame_scaffold(session_id: &str, uuid: &str, p: &StreamJsonInitPar
     if let Some(paths) = &p.memory_paths {
         o.insert("memory_paths".into(), paths.clone());
     }
+    if let Some(value) = &p.original_cwd {
+        o.insert("original_cwd".into(), json!(value));
+    }
+    if let Some(value) = &p.additional_directories {
+        o.insert("additional_directories".into(), json!(value));
+    }
     o.insert("fast_mode_state".into(), json!(p.fast_mode_state));
     // 2.1.220: `n.fast_mode_disabled_reason=e.fastModeDisabledReason` — an
     // `undefined` reason serializes to NO key, so `None` omits it.
@@ -3863,6 +4655,12 @@ fn build_init_frame_scaffold(session_id: &str, uuid: &str, p: &StreamJsonInitPar
     }
     if let Some(active) = p.per_turn_effort_active {
         o.insert("per_turn_effort_active".into(), json!(active));
+    }
+    if let Some(value) = p.ultrathink_available {
+        o.insert("ultrathink_available".into(), json!(value));
+    }
+    if let Some(value) = p.ultrathink_typed_raises {
+        o.insert("ultrathink_typed_raises".into(), json!(value));
     }
     if let Some(mode) = &p.view_mode {
         o.insert("view_mode".into(), json!(mode));
@@ -3934,6 +4732,14 @@ pub fn collect_mcp_server_errors(
 pub struct StreamJsonInitHostMetadata {
     /// Host-resolved working directory to report in the init frame.
     pub cwd: std::path::PathBuf,
+    /// Permission anchor and extra file-access roots.
+    pub original_cwd: Option<std::path::PathBuf>,
+    /// Additional directories granted to the session.
+    pub additional_directories: Option<Vec<std::path::PathBuf>>,
+    /// Whether ultrathink is available.
+    pub ultrathink_available: Option<bool>,
+    /// Whether a typed marker raises effort.
+    pub ultrathink_typed_raises: Option<bool>,
     /// MCP configuration entries skipped during validation, for init diagnostics.
     pub mcp_server_errors: Vec<Value>,
     /// Host privacy setting for analytics collection.
@@ -4037,6 +4843,12 @@ pub fn build_init_params(
         // unavailable and the init frame must advertise that fact.
         product_feedback_disabled: host.product_feedback_disabled,
         memory_paths,
+        original_cwd: host.original_cwd.map(|p| p.to_string_lossy().into_owned()),
+        additional_directories: host.additional_directories.map(|paths| {
+            paths.into_iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        }),
+        ultrathink_available: host.ultrathink_available,
+        ultrathink_typed_raises: host.ultrathink_typed_raises,
         per_turn_effort_active: host.per_turn_effort_active,
         view_mode: host.view_mode,
         fast_mode_state: fast_mode_state.to_string(),
@@ -4111,14 +4923,28 @@ mod canonical_model_tests {
             output_tokens: 20,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_5m_input_tokens: 7,
+            cache_creation_1h_input_tokens: 11,
             reasoning_tokens: 0,
             web_search_requests: 0,
         }];
+        per_model.current_usage_details = Some(lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
+            cache_creation_1h_input_tokens: 3,
+            cache_creation_5m_input_tokens: 5,
+            ..Default::default()
+        });
+        assert_eq!(
+            StreamJsonStream::build_usage_block(&per_model)["cache_creation"],
+            json!({"ephemeral_1h_input_tokens":3,"ephemeral_5m_input_tokens":5})
+        );
         let block = StreamJsonStream::build_model_usage_block(&per_model, &[]);
         let row = block
             .get("us.anthropic.claude-opus-4-7-v1:0")
             .expect("per-model row");
         assert_eq!(row["canonicalModel"], "claude-opus-4-7");
+        assert_eq!(row["cacheCreationEphemeral5mInputTokens"], 7);
+        assert_eq!(row["cacheCreationEphemeral1hInputTokens"], 11);
+
         // (cc 2.1.218) `n.provider=n_(r)` — sibling of canonicalModel, keyed
         // AFTER it (preserve_order map mirrors the oracle's assignment order).
         assert_eq!(row["provider"], "bedrock");
@@ -4581,6 +5407,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sdk_result_publication_preserves_request_marker_sources() {
+        for is_error in [false, true] {
+            let captured = Arc::new(StdMutex::new(Vec::new()));
+            let stream = StreamJsonStream::new_placeholder(Output::new(
+                super::verbose_json_tests::CapturedWriter(captured.clone()),
+            ));
+            let client = Utf16JsonProjection::parse(r#""client-\ud800""#).unwrap();
+            stream
+                .begin_request_markers(Some(client.clone()), vec![client.clone()], false)
+                .unwrap();
+            if is_error {
+                stream
+                    .emit_result_error(
+                        "error_during_execution",
+                        vec!["fixture failure".into()],
+                        &CostSnapshot::default(),
+                        "off",
+                        None,
+                        &[],
+                    )
+                    .await;
+            } else {
+                stream
+                    .emit_result_success(
+                        &Utf16JsonProjection::from("done"),
+                        "end_turn",
+                        &CostSnapshot::default(),
+                        "off",
+                        None,
+                        &[],
+                    )
+                    .await;
+            }
+            stream.finish().await.unwrap();
+            let output = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+            assert_eq!(output.lines().count(), 1);
+            let frame = Utf16JsonProjection::parse(output.trim_end_matches('\n')).unwrap();
+            assert_eq!(frame.string_at("/type"), Some("result"));
+            assert_eq!(frame.subprojection("/user_message_uuid").unwrap(), client);
+            assert_eq!(frame.array_len("/user_message_uuids"), Some(1));
+            assert_eq!(frame.subprojection("/user_message_uuids/0").unwrap(), client);
+        }
+    }
+
+    #[tokio::test]
     async fn request_marker_dispatch_facts_latch_first_real_observations_and_omit_unavailable() {
         let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
         let client = Utf16JsonProjection::from("client");
@@ -4668,6 +5539,8 @@ mod tests {
                 output_tokens: 40,
                 cache_read_input_tokens: 5,
                 cache_creation_input_tokens: 10,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 8,
                 web_search_requests: 4,
             }],
@@ -4682,7 +5555,7 @@ mod tests {
         assert_eq!(usage["server_tool_use"]["web_search_requests"], 4);
         assert_eq!(
             usage["cache_creation"],
-            json!({"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0})
+            json!({"ephemeral_1h_input_tokens":4,"ephemeral_5m_input_tokens":6})
         );
         assert_eq!(usage["service_tier"], "standard");
         assert_eq!(usage["speed"], "standard");
@@ -4690,6 +5563,42 @@ mod tests {
         assert_eq!(models["claude-sonnet-5-5"]["thinkingTokens"], 8);
         assert_eq!(models["claude-sonnet-5-5"]["outputTokens"], 48);
         assert_eq!(models["claude-sonnet-5-5"]["webSearchRequests"], 4);
+    }
+
+    #[test]
+    fn model_usage_preserves_identically_named_models_from_distinct_providers() {
+        let row = |model: &str, provider: &str, input_tokens| {
+            lingxi_core::host::orchestrator::ModelUsageRow {
+                model: model.into(),
+                provider: Some(provider.into()),
+                total_nano_usd: input_tokens,
+                input_tokens,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+            }
+        };
+        let cost = CostSnapshot {
+            by_model: vec![
+                row("shared", "firstParty", 3),
+                row("shared", "other", 5),
+                // A real model name must not be overwritten by a qualified key.
+                row("firstParty/shared", "third", 7),
+                row("claude-sonnet-5-5", "firstParty", 11),
+            ],
+            ..Default::default()
+        };
+        let models = StreamJsonStream::build_model_usage_block(&cost, &[]);
+        assert_eq!(models.len(), 4);
+        assert_eq!(models["firstParty/shared#2"]["inputTokens"], 3);
+        assert_eq!(models["other/shared"]["inputTokens"], 5);
+        assert_eq!(models["firstParty/shared"]["inputTokens"], 7);
+        assert_eq!(models["claude-sonnet-5-5"]["inputTokens"], 11);
+        assert_eq!(models["other/shared"]["provider"], "other");
     }
 
     #[tokio::test]
@@ -4721,6 +5630,8 @@ mod tests {
                 output_tokens: 8,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],
@@ -5374,7 +6285,7 @@ mod tests {
 
     /// The tool_result `user` frame carries the MODEL-FACING STRING in
     /// `content` (not a JSON dump of the data) and the full structured result on
-    /// a separate top-level `toolUseResult` field — 1:1 with claude-code's SDK
+    /// a separate top-level `tool_use_result` field — 1:1 with claude-code's SDK
     /// user message.
     #[tokio::test]
     async fn tool_result_frame_uses_model_text_and_carries_tooluseresult() {
@@ -5382,7 +6293,7 @@ mod tests {
         let tuid = "toolu_x";
 
         // WebFetch-shaped: the orchestrator passes the model text explicitly;
-        // the full structured `data` lands on `toolUseResult`.
+        // the full structured `data` lands on `tool_use_result`.
         let data = json!({
             "bytes": 5, "code": 200, "codeText": "OK",
             "result": "# Page\n\nbody", "durationMs": 3, "url": "https://e/"
@@ -5405,12 +6316,12 @@ mod tests {
         );
         assert_eq!(tr["is_error"], false);
         assert_eq!(
-            frame["toolUseResult"], data,
+            frame["tool_use_result"], data,
             "full structured result on the top-level field"
         );
 
         // Bash-shaped: the model text is whatever the dispatch computed; `data`
-        // stays pure metadata on `toolUseResult`.
+        // stays pure metadata on `tool_use_result`.
         let bash = json!({ "model_content": "out\n", "stdout": "out\n", "exit_code": 0 });
         let f2 = projected_value(
             &stream
@@ -5422,7 +6333,7 @@ mod tests {
                 .await,
         );
         assert_eq!(f2["message"]["content"][0]["content"], "out\n");
-        assert_eq!(f2["toolUseResult"], bash);
+        assert_eq!(f2["tool_use_result"], bash);
 
         // Error wrapper `{error}`: content is the model text + is_error derives
         // from the `error` key on `data`.
@@ -5441,7 +6352,7 @@ mod tests {
             "Permission to use Bash has been denied."
         );
         assert_eq!(f3["message"]["content"][0]["is_error"], true);
-        assert_eq!(f3["toolUseResult"], err);
+        assert_eq!(f3["tool_use_result"], err);
     }
 
     /// A denied tool result carries `tool_result_meta` on the user frame
@@ -5945,6 +6856,8 @@ mod tests {
                 output_tokens: 10,
                 cache_read_input_tokens: 50,
                 cache_creation_input_tokens: 5,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],
@@ -7047,6 +7960,8 @@ mod tests {
                 output_tokens: 10,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],
@@ -7144,6 +8059,8 @@ mod tests {
                 output_tokens: 5,
                 cache_read_input_tokens: 3,
                 cache_creation_input_tokens: 2,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],
@@ -7307,6 +8224,8 @@ mod tests {
                 output_tokens: 4,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],
@@ -7983,7 +8902,7 @@ mod verbose_json_tests {
             .at_pointer("/0/mcpMeta/structuredContent")
             .is_some_and(|value| value.is_null()));
         assert_eq!(
-            wire.subprojection("/0/toolUseResult")
+            wire.subprojection("/0/tool_use_result")
                 .unwrap()
                 .to_json_string()
                 .unwrap(),
@@ -8156,6 +9075,10 @@ mod verbose_json_tests {
     fn init_collector_uses_only_supplied_host_snapshot() {
         let host = StreamJsonInitHostMetadata {
             cwd: std::path::PathBuf::from("/injected/session/workspace"),
+            original_cwd: Some(std::path::PathBuf::from("/injected/session/workspace")),
+            additional_directories: Some(vec![std::path::PathBuf::from("/injected/extra")]),
+            ultrathink_available: Some(false),
+            ultrathink_typed_raises: Some(false),
             mcp_server_errors: vec![
                 json!({"path":"mcpServers.broken","message":"supplied diagnostic"}),
             ],
@@ -8182,6 +9105,25 @@ mod verbose_json_tests {
             host,
         );
         assert_eq!(params.cwd, "/injected/session/workspace");
+        let frame = build_init_frame_scaffold("session", "uuid", &params);
+        assert_eq!(frame["original_cwd"], "/injected/session/workspace");
+        assert_eq!(frame["additional_directories"], json!(["/injected/extra"]));
+        assert_eq!(frame["ultrathink_available"], false);
+        assert_eq!(frame["ultrathink_typed_raises"], false);
+        let keys: Vec<_> = frame
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let anchor = keys.iter().position(|key| *key == "original_cwd").unwrap();
+        assert_eq!(keys[anchor + 1], "additional_directories");
+        let ultra = keys
+            .iter()
+            .position(|key| *key == "ultrathink_available")
+            .unwrap();
+        assert_eq!(keys[ultra + 1], "ultrathink_typed_raises");
+
         assert!(params.analytics_disabled);
         assert!(!params.product_feedback_disabled);
         assert_eq!(params.mcp_server_errors.len(), 1);
@@ -8285,6 +9227,224 @@ mod verbose_json_tests {
         assert!(!output.contains("utf16_code_units"), "{output}");
     }
 
+    #[derive(Default)]
+    struct BufferedStopOutput(StdMutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl OutputStream for BufferedStopOutput {
+        async fn emit_text(&self, _: &Utf16JsonProjection) {}
+        async fn emit_tool_call(&self, _: &lingxi_core::types::ToolUseId, _: &str, _: &Utf16JsonProjection) {}
+        async fn emit_tool_result(&self, _: &lingxi_core::types::ToolUseId, _: &str, _: &Utf16JsonProjection, _: &Utf16JsonProjection, _: Option<&Utf16JsonProjection>) {}
+        async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
+        fn wants_partial_stream_events(&self) -> bool { true }
+        fn wants_accepted_assistant_rows(&self) -> bool { true }
+        async fn emit_stream_event_with_metadata(
+            &self, event: &str, _: bool, _: &PartialStreamEventMetadata,
+        ) {
+            self.0.lock().unwrap().push(event.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn unmatched_native_block_stop_is_forwarded_at_eof() {
+        use futures::StreamExt;
+        let output = Arc::new(BufferedStopOutput::default());
+        let out: Arc<dyn OutputStream> = output.clone();
+        let raw = [
+            r#"{"type":"message_start","message":{"id":"msg","model":"model","content":[]}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+        ];
+        let events = raw.iter().map(|source| Ok(llm_runtime::HistoryEvent::NativeStreamFrame {
+            event: lingxi_llm_client::protocol::JsonPayload::parse(source).unwrap(),
+            thinking_display: None,
+        })).collect::<Vec<_>>();
+        let result = orchestrator::streaming_loop::pump_stream(futures::stream::iter(events).boxed(), &out).await;
+        assert!(result.is_err());
+        assert_eq!(*output.0.lock().unwrap(), raw.map(str::to_owned));
+    }
+
+    #[tokio::test]
+    async fn accepted_rows_emit_separately_with_transcript_identity() {
+        use lingxi_core::types::{ContentBlock, MessageId};
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("accepted-rows"),
+            Output::new(CapturedWriter(bytes.clone())),
+        );
+        stream.set_flags(true, false);
+        let source = r#"{"type":"message_start","message":{"id":"msg","type":"message","role":"assistant","model":"model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}"#;
+        stream.emit_message_start_with_native("msg", "model", Some(source)).await;
+        let first = MessageId::new();
+        let second = MessageId::new();
+        for (index, (id, text)) in [(first, "first"), (second, "second")].into_iter().enumerate() {
+            stream.emit_assistant_block_start(index as u64).await;
+            stream.emit_text(&Utf16JsonProjection::from(text)).await;
+            stream.emit_accepted_assistant_row(&id, "2026-01-01T00:00:00.000Z", None,
+                "msg", "model", Some(source), &[ContentBlock::Text { text: text.into(), citations: None }]).await;
+            stream.emit_stream_event(&format!(r#"{{"type":"content_block_stop","index":{index}}}"#), false).await;
+        }
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream.finish().await.unwrap();
+        let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0]["uuid"], first.as_uuid().to_string());
+        assert_eq!(frames[0]["message"]["content"][0]["text"], "first");
+        assert_eq!(frames[1]["event"]["index"], 0);
+        assert_eq!(frames[2]["uuid"], second.as_uuid().to_string());
+        assert_eq!(frames[2]["message"]["content"][0]["text"], "second");
+        assert_eq!(frames[3]["event"]["index"], 1);
+        assert_eq!(stream.get_last_result_text().await.string_at(""), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn accepted_row_without_native_envelope_uses_transcript_identity() {
+        use lingxi_core::types::{ContentBlock, MessageId};
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("non-native"), Output::new(CapturedWriter(bytes.clone())),
+        );
+        stream.emit_message_start("other-id", "other-model").await;
+        stream.emit_assistant_block_start(0).await;
+        stream.emit_text(&Utf16JsonProjection::from("answer")).await;
+        let accepted_id = MessageId::new();
+        stream.emit_accepted_assistant_row(
+            &accepted_id, "2026-01-01T00:00:00.000Z", None,
+            "other-id", "other-model", None,
+            &[ContentBlock::Text { text: "answer".into(), citations: None }],
+        ).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream.finish().await.unwrap();
+        let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["uuid"], accepted_id.as_uuid().to_string());
+        assert_eq!(frames[0]["timestamp"], "2026-01-01T00:00:00.000Z");
+        assert_eq!(frames[0]["message"]["model"], "other-model");
+        assert_eq!(frames[0]["message"]["content"][0]["text"], "answer");
+    }
+
+    #[tokio::test]
+    async fn non_native_blocks_keep_identity_and_utf16_across_reused_response_ids() {
+        use lingxi_core::types::{ContentBlock, MessageId};
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("provider-blocks"), Output::new(CapturedWriter(bytes.clone())),
+        );
+        let mut expected = Vec::new();
+        for model in ["provider-a", "provider-b"] {
+            stream.emit_message_start("reused-response", model).await;
+            for (index, source) in [r#""first""#, r#""\ud800""#].into_iter().enumerate() {
+                let text = Utf16JsonProjection::parse(source).unwrap();
+                let units = text.string_units("").unwrap();
+                let id = MessageId::new();
+                stream.emit_assistant_block_start(index as u64).await;
+                stream.emit_text(&text).await;
+                stream.emit_accepted_assistant_row(
+                    &id, "2026-01-01T00:00:00.000Z", Some("request"),
+                    "reused-response", model, None,
+                    &[ContentBlock::TextJsUtf16 {
+                        text: String::from_utf16_lossy(&units), utf16_code_units: units.clone(), citations: None,
+                    }],
+                ).await;
+                expected.push((id, model, units));
+            }
+            stream.emit_message_boundary(Some("end_turn"), Some("request")).await;
+        }
+        stream.finish().await.unwrap();
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let frames = output.lines().map(|line| Utf16JsonProjection::parse(line).unwrap()).collect::<Vec<_>>();
+        assert_eq!(frames.len(), expected.len(), "accepted blocks have no merged duplicate");
+        for (frame, (id, model, units)) in frames.iter().zip(expected) {
+            assert_eq!(frame.string_at("/uuid"), Some(id.as_uuid().to_string().as_str()));
+            assert_eq!(frame.string_at("/message/model"), Some(model));
+            assert_eq!(frame.string_units("/message/content/0/text"), Some(units));
+            assert_eq!(frame.string_at("/timestamp"), Some("2026-01-01T00:00:00.000Z"));
+            assert_eq!(frame.string_at("/request_id"), Some("request"));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_message_start_envelope_is_preserved_on_completed_assistant_frame() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("native-envelope"),
+            Output::new(CapturedWriter(bytes.clone())),
+        );
+        stream.set_flags(false, false);
+        stream.emit_message_start_with_native("msg_native", "provider-model", Some(r#"{"type":"message_start","message":{"id":"msg_native","type":"message","role":"assistant","model":"provider-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#)).await;
+        stream.emit_assistant_block_start(0).await;
+        stream.emit_text(&Utf16JsonProjection::from("hello")).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream.finish().await.unwrap();
+        let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let assistant = raw.lines().next().unwrap();
+        let frame = Utf16JsonProjection::parse(assistant).unwrap();
+        assert_eq!(frame.subprojection("/message").unwrap().to_json_string().unwrap(),
+            r#"{"id":"msg_native","type":"message","role":"assistant","model":"provider-model","content":[{"type":"text","text":"hello"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0},"context_management":null}"#);
+    }
+
+    #[tokio::test]
+    async fn native_start_from_a_failed_attempt_is_not_attached_to_another_response() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("different-provider"),
+            Output::new(CapturedWriter(bytes.clone())),
+        );
+        stream.set_flags(true, false);
+        stream.emit_stream_event(
+            r#"{"type":"message_start","message":{"id":"new-response","model":"old","content":[]}}"#,
+            true,
+        ).await;
+        stream.emit_message_start_with_native("new-response", "new-provider-model", Some(r#"{"type":"message_start","message":{"id":"new-response","model":"old","content":[]}}"#)).await;
+        stream.emit_assistant_block_start(0).await;
+        stream.emit_text(&Utf16JsonProjection::from("new")).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream.finish().await.unwrap();
+        let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let assistant: Value = serde_json::from_str(raw.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(assistant["message"]["id"], "new-response");
+        assert_eq!(assistant["message"]["model"], "new-provider-model");
+        assert_eq!(assistant["message"]["content"][0]["text"], "new");
+    }
+
+    #[tokio::test]
+    async fn memory_tags_are_removed_from_completed_output_but_not_partial_events() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let stream = StreamJsonStream::new(
+            super::tests::make_params("memory-tags"),
+            Output::new(CapturedWriter(bytes.clone())),
+        );
+        stream.set_flags(true, false);
+        stream.emit_message_start("msg", "model").await;
+        stream.emit_assistant_block_start(1).await;
+        stream.emit_text(&Utf16JsonProjection::from("A<cc-memory>x</cc-memory>B")).await;
+        stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A<cc-memory>x</cc-memory>B"}}"#, false).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let text = stream.get_last_result_text().await;
+        stream.emit_result_success(&text, "end_turn", &CostSnapshot::default(), "off", None, &[]).await;
+        stream.finish().await.unwrap();
+        let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(frames[0]["event"]["delta"]["text"], "A<cc-memory>x</cc-memory>B");
+        assert_eq!(frames[1]["message"]["content"][0]["text"], "AxB");
+        assert_eq!(frames[2]["result"], "AxB");
+    }
+
+    #[tokio::test]
+    async fn suppressed_thinking_as_last_block_yields_empty_result() {
+        let stream = StreamJsonStream::new_json_mode_placeholder(Output::new(tokio::io::sink()));
+        stream.emit_message_start("msg", "model").await;
+        stream.emit_assistant_block_start(1).await;
+        stream.emit_text(&Utf16JsonProjection::from("first")).await;
+        stream.emit_assistant_block_start(2).await;
+        stream.emit_thinking("reason", Some("signature")).await;
+        assert_eq!(stream.get_last_result_text().await.string_at(""), Some(""));
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        assert_eq!(stream.get_last_result_text().await.string_at(""), Some(""));
+    }
+
     #[tokio::test]
     async fn assistant_distinct_text_blocks_keep_individual_lone_surrogates() {
         let bytes = Arc::new(StdMutex::new(Vec::new()));
@@ -8307,8 +9467,11 @@ mod verbose_json_tests {
                 .await
                 .to_json_string()
                 .unwrap(),
-            "\"😀\""
+            "\"\\ude00\""
         );
+        stream.emit_assistant_block_start(3).await;
+        stream.emit_thinking("reason", Some("signature")).await;
+        assert_eq!(stream.get_last_result_text().await.string_at(""), Some(""));
         stream.emit_message_boundary(Some("end_turn"), None).await;
         stream.finish().await.unwrap();
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();

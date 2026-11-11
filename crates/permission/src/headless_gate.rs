@@ -41,8 +41,26 @@ pub fn headless_deny_message(name: &str) -> String {
     format!("Permission to use {name} has been denied. {DENIAL_WORKAROUND_GUIDANCE}")
 }
 
+/// 2.1.322's no-approval diagnostic on the compatibility CLI surface. The
+/// authorization result is already a deny; this preserves the exact ask text.
+pub fn native_no_approval_message(ask: Option<&Utf16JsonProjection>) -> Utf16JsonProjection {
+    const BASE: &str = "Permission for this tool use was denied. It requires approval, and this session has no approval surface — nobody can answer a permission prompt here — so it was denied automatically. The action was NOT performed; do not claim it succeeded, and do not retry it: this action, and anything else that requires approval, will be denied the same way for the rest of this session. Tell the user what was blocked and why you needed it, then continue with the parts of the task that do not require approval.";
+    let mut parts = vec![crate::source_input::TextPart::Generated(BASE)];
+    if let Some(ask) = ask.filter(|ask| ask.string_units("").is_some_and(|units| !units.is_empty()))
+    {
+        parts.push(crate::source_input::TextPart::Generated(
+            " What required approval: ",
+        ));
+        parts.push(crate::source_input::TextPart::Source(ask));
+    }
+    crate::source_input::joined_text(&parts)
+}
 #[async_trait]
 impl PermissionGate for DenyOnAskGate {
+    fn has_approval_surface(&self) -> bool {
+        false
+    }
+
     async fn check(&self, name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: headless_deny_message(name).into(),

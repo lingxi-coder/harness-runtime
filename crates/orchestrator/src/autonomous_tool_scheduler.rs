@@ -793,12 +793,20 @@ impl ToolScheduler {
         response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
+    pub(crate) fn progress_waiter(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), SchedulerStopped>> + Send + 'static {
+        let tx = self.tx.clone();
+        async move {
+            let (reply, response) = oneshot::channel();
+            tx.send(Command::Wait(reply))
+                .map_err(|_| SchedulerStopped::Unavailable)?;
+            response.await.map_err(|_| SchedulerStopped::Unavailable)?
+        }
+    }
+
     pub(crate) async fn wait_for_progress(&self) -> Result<(), SchedulerStopped> {
-        let (reply, response) = oneshot::channel();
-        self.tx
-            .send(Command::Wait(reply))
-            .map_err(|_| SchedulerStopped::Unavailable)?;
-        response.await.map_err(|_| SchedulerStopped::Unavailable)?
+        self.progress_waiter().await
     }
 
     pub(crate) async fn finish_normal(
@@ -1018,6 +1026,7 @@ impl Actor {
                             self.wake_waiters();
                         }
                         Command::Wait(reply) => {
+                            self.waiters.retain(|waiter| !waiter.is_closed());
                             if self.has_tn_ready() || self.is_idle() {
                                 let _ = reply.send(Ok(()));
                             } else {

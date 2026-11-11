@@ -2383,6 +2383,10 @@ pub async fn build_with_credential_stack(
             .map_err(|error| BuildError::DurableSession(error.to_string()))?,
         )
     };
+    if output.wants_result_usage() {
+        cost_tracker.enable_result_usage();
+        output.set_result_usage_source(cost_tracker.clone());
+    }
     let subagent_usage_recorder = Arc::new(session_agents::DesktopSubagentUsageRecorder::new(
         cost_tracker.clone(),
     ));

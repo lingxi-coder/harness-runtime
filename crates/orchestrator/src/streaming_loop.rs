@@ -302,6 +302,8 @@ impl PumpedTurn {
     }
 }
 
+type ToolResponseGroup = (Option<MessageId>, Option<String>, String, String);
+
 /// Query-local result collection for Native's post-event `Tn()` poll.
 ///
 /// `query_rows` is the raw `je` sequence used to build the next model request;
@@ -311,6 +313,10 @@ impl PumpedTurn {
 /// groups all assistant rows before all tool-result rows.
 #[derive(Default)]
 pub(crate) struct StreamToolSettlement {
+    /// Accepted assistant rows can be separate public frames while their tool
+    /// results form one query-user batch for the same provider response.
+    pub(crate) assistant_responses: HashMap<MessageId, ToolResponseGroup>,
+    pub(crate) counted_tool_response_users: HashSet<ToolResponseGroup>,
     pub(crate) query_rows: Vec<(ConversationMessage, Option<ToolUseId>)>,
     pub(crate) journal: Vec<StreamEventJournalEntry>,
     pub(crate) journal_cursor: usize,
@@ -361,6 +367,35 @@ impl std::fmt::Debug for StreamHookAttachment {
 }
 
 impl StreamToolSettlement {
+    pub(crate) fn record_assistant_response(&mut self, row: &CompletedAssistantRow) {
+        if !row.provider_message_id.is_empty() {
+            // A provider response name alone is not a global identity. Retain
+            // the host call and frozen route/model scope across fallback.
+            self.assistant_responses.insert(
+                row.row_id,
+                (
+                    row.logical_message_id,
+                    row.model_profile.clone(),
+                    row.model.clone(),
+                    row.provider_message_id.clone(),
+                ),
+            );
+        }
+        self.record_assistant_row(row.row_id);
+    }
+
+    pub(crate) fn should_count_tool_user_event(&self, row_id: MessageId) -> bool {
+        self.assistant_responses
+            .get(&row_id)
+            .is_none_or(|response| !self.counted_tool_response_users.contains(response))
+    }
+
+    pub(crate) fn note_tool_user_event(&mut self, row_id: MessageId) {
+        if let Some(response) = self.assistant_responses.get(&row_id) {
+            self.counted_tool_response_users.insert(response.clone());
+        }
+    }
+
     pub(crate) fn record_assistant_row(&mut self, row_id: MessageId) {
         self.journal
             .push(StreamEventJournalEntry::AssistantRow(row_id));
@@ -1628,7 +1663,7 @@ pub(crate) struct ExecutorPump<'a, 'e> {
     /// retains the provider-signed original in history.
     pub(crate) suppress_live_thinking: bool,
     /// Live main-query path only. Ready tool results are accepted into the
-    /// query result sequence and event journal after each provider event; a
+    /// query result sequence when tools are ready and no provider event is ready; a
     /// plain pump leaves this absent and continues to buffer until its caller's
     /// final drain.
     pub(crate) settlement: Option<&'a mut StreamToolSettlement>,
@@ -1672,7 +1707,7 @@ async fn poll_ready_stream_tool_results(pump: &mut Option<ExecutorPump<'_, '_>>)
 /// `query.ts:659/837-844`.
 ///
 /// With a main-query settlement state, ready results are emitted and added to
-/// query-local `je` after each stream event. The event-order writer journal is
+/// query-local `je` when provider input is pending; ready provider events win. The event-order writer journal is
 /// flushed separately after assistant terminal fields are known; the final
 /// driver drain waits for only the remaining tools.
 /// Return the stream tail after one assistant response. A Mod may yield more
@@ -1742,6 +1777,10 @@ async fn pump_stream_inner(
     let mut completion = StreamCompletionState::default();
     let mut any_event = false;
     let mut authoritative_partial_frames = false;
+    // Scoped to this physical stream; never share envelopes across accounts.
+    let mut native_message_start: Option<String> = None;
+    let mut active_native_message_start: Option<String> = None;
+    let mut pending_native_stops: std::collections::VecDeque<(u32, String, lingxi_core::host::orchestrator::PartialStreamEventMetadata)> = std::collections::VecDeque::new();
     // Providers close tool blocks before reporting why generation stopped.
     // Do not abort on incomplete JSON until the terminal reason is available.
     let mut pending_tool_json_error = None;
@@ -1755,6 +1794,9 @@ async fn pump_stream_inner(
     macro_rules! stop_on_transcript_error {
         ($result:expr) => {
             if let Err(error) = $result {
+                while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                }
                 return Err(build_failure(
                     turn,
                     &acc,
@@ -1783,6 +1825,9 @@ async fn pump_stream_inner(
         check_transcript_owner!();
         if pending_events.is_empty() {
             if let Some(error) = pending_failure.take() {
+                while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                }
                 return Err(build_failure(
                     turn,
                     &acc,
@@ -1795,12 +1840,19 @@ async fn pump_stream_inner(
             }
         }
         // Owned dispatches continue independently while the provider waits.
-        // Completion advances the scheduler immediately; results become
-        // query-visible only at the post-event Tn poll below.
-        let next = match pump.as_ref().and_then(|p| p.user_cancel) {
-            Some(cancel) => tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
+        // Ready provider events take precedence; otherwise a completed tool
+        // wakes this loop without waiting for the provider's next event.
+        let user_cancel = pump.as_ref().and_then(|p| p.user_cancel).cloned();
+        let progress = pump.as_ref().filter(|p| p.settlement.is_some())
+            .and_then(|p| p.executor.progress_waiter());
+        let next = tokio::select! {
+            biased;
+            () = async {
+                match user_cancel {
+                    Some(cancel) => cancel.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                     // A user interrupt aborts the response, as Claude Code's
                     // request AbortSignal and Codex's turn cancellation do.
                     // Dropping the stream ends the request; only completed
@@ -1816,15 +1868,28 @@ async fn pump_stream_inner(
                         &mut pump,
                     )
                     .await);
+                    while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                        output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                    }
                     partial_close.close(output.as_ref()).await;
                     poll_ready_stream_tool_results(&mut pump).await;
                     return Ok((turn, futures::stream::empty().boxed()));
+            }
+            next = next_stream_event(&mut stream, &mut pending_events) => next,
+            () = async {
+                match progress {
+                    Some(waiter) => waiter.await,
+                    None => std::future::pending::<()>().await,
                 }
-                next = next_stream_event(&mut stream, &mut pending_events) => next,
-            },
-            None => next_stream_event(&mut stream, &mut pending_events).await,
+            } => {
+                poll_ready_stream_tool_results(&mut pump).await;
+                continue;
+            }
         };
         let Some(item) = next else {
+            while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+            }
             poll_ready_stream_tool_results(&mut pump).await;
             if pending_tool_json_error.is_none()
                 && !turn.assistant_rows.is_empty()
@@ -1848,6 +1913,9 @@ async fn pump_stream_inner(
         ) = match item {
             Ok(ev) => (ev, std::time::Instant::now()),
             Err(e) => {
+                while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                }
                 poll_ready_stream_tool_results(&mut pump).await;
                 if completion.message_started
                     && completion.is_complete(&turn)
@@ -1963,9 +2031,15 @@ async fn pump_stream_inner(
             thinking_display,
         } = &event
         {
+            while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+            }
             authoritative_partial_frames = true;
+            let message_start = event.string_at("/type").as_deref() == Some("message_start");
+            if message_start {
+                native_message_start = Some(event.as_json_source().to_owned());
+            }
             if output.wants_partial_stream_events() {
-                let message_start = event.string_at("/type").as_deref() == Some("message_start");
                 if message_start {
                     output.note_response_timing(
                         lingxi_core::host::orchestrator::ResponseTimingEvent::MessageStart,
@@ -1974,15 +2048,24 @@ async fn pump_stream_inner(
                 }
                 let metadata =
                     partial_close.observe_native_frame(event, thinking_display.as_deref());
-                output
-                    .emit_stream_event_with_metadata(
-                        event.as_json_source(),
-                        message_start,
-                        &metadata,
-                    )
-                    .await;
+                let stop_index = if output.wants_accepted_assistant_rows()
+                    && event.string_at("/type").as_deref() == Some("content_block_stop")
+                {
+                    serde_json::from_str::<serde_json::Value>(event.as_json_source())
+                        .ok()
+                        .and_then(|value| value.get("index").and_then(serde_json::Value::as_u64))
+                        .and_then(|index| u32::try_from(index).ok())
+                } else {
+                    None
+                };
+                if let Some(index) = stop_index {
+                    pending_native_stops.push_back((index, event.as_json_source().to_owned(), metadata));
+                } else {
+                    output
+                        .emit_stream_event_with_metadata(event.as_json_source(), message_start, &metadata)
+                        .await;
+                }
             }
-            poll_ready_stream_tool_results(&mut pump).await;
             continue;
         }
         if matches!(
@@ -2004,12 +2087,15 @@ async fn pump_stream_inner(
             // `lingxi_observation` carries host metadata through the existing
             // content-block seam when a stream has no usage report. It is not
             // assistant content and must not be emitted or persisted.
-            poll_ready_stream_tool_results(&mut pump).await;
             continue;
         }
         if let HistoryEvent::ContentBlockStop { index } = &event {
             if observation_block_indices.remove(index) {
-                poll_ready_stream_tool_results(&mut pump).await;
+                if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| id == index) {
+                    if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
+                        output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                    }
+                }
                 continue;
             }
         }
@@ -2025,7 +2111,6 @@ async fn pump_stream_inner(
                 turn.response_message_id = Some(response_id.clone());
             }
             turn.served_model = Some(model.clone());
-            poll_ready_stream_tool_results(&mut pump).await;
             continue;
         }
         if let HistoryEvent::CostQuoteObserved {
@@ -2042,7 +2127,6 @@ async fn pump_stream_inner(
             } else {
                 turn.native_cost_model = None;
             }
-            poll_ready_stream_tool_results(&mut pump).await;
             continue;
         }
         if let HistoryEvent::ServerFallback {
@@ -2060,7 +2144,6 @@ async fn pump_stream_inner(
             let user_visible = matches!(event.reason.as_str(), "refusal" | "sticky");
             if !user_visible {
                 turn.server_fallback_events.push(observation);
-                poll_ready_stream_tool_results(&mut pump).await;
                 continue;
             }
             let discarded_row_ids =
@@ -2445,6 +2528,14 @@ async fn pump_stream_inner(
             acc.replace_completed_block(index, block)
                 .expect("registering a terminal block cannot fail");
         }
+        let source_start = if matches!(&event, HistoryEvent::MessageStart { .. }) {
+            native_message_start.take()
+        } else {
+            None
+        };
+        if matches!(&event, HistoryEvent::MessageStart { .. }) {
+            active_native_message_start = source_start.clone();
+        }
         let action = match dispatch_event_with_metadata(
             event,
             &mut acc,
@@ -2453,6 +2544,7 @@ async fn pump_stream_inner(
             suppress_live_thinking,
             &partial_metadata,
             authoritative_partial_frames,
+            source_start.as_deref(),
         )
         .await
         {
@@ -2466,6 +2558,9 @@ async fn pump_stream_inner(
                 RouterAction::Continue
             }
             Err(e) => {
+                while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
+                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                }
                 poll_ready_stream_tool_results(&mut pump).await;
                 return Err(build_failure(
                     turn,
@@ -2591,8 +2686,19 @@ async fn pump_stream_inner(
                         );
                     }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
-                        settlement.record_assistant_row(row_id);
+                        if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
+                            settlement.record_assistant_response(row);
+                        } else {
+                            settlement.record_assistant_row(row_id);
+                        }
                     }
+                }
+                if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
+                    output.emit_accepted_assistant_row(
+                        &row.row_id, &row.timestamp, row.request_id.as_deref(),
+                        &row.provider_message_id, &row.model,
+                        active_native_message_start.as_deref(), &row.content,
+                    ).await;
                 }
             }
             RouterAction::DispatchToolUse {
@@ -2649,7 +2755,7 @@ async fn pump_stream_inner(
                         Some(llm_runtime::stream_content_order(api_block_index)),
                     );
                     if let Some(settlement) = p.settlement.as_deref_mut() {
-                        settlement.record_assistant_row(row_id);
+                        settlement.record_assistant_response(&row);
                     }
                 }
                 if let Some(block_key) = completed_block_key {
@@ -2658,6 +2764,16 @@ async fn pump_stream_inner(
                         .await;
                 }
                 check_transcript_owner!();
+                output.emit_accepted_assistant_row(
+                    &row.row_id, &row.timestamp, row.request_id.as_deref(),
+                    &row.provider_message_id, &row.model,
+                    active_native_message_start.as_deref(), &row.content,
+                ).await;
+                if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| *id == api_block_index) {
+                    if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
+                        output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                    }
+                }
                 // Register the completed source row at content_block_stop.
                 // Known tools are eagerly dispatched by the owned scheduler;
                 // query-visible results still wait for the event-boundary Tn.
@@ -2834,7 +2950,13 @@ async fn pump_stream_inner(
                 return Ok((turn, stream));
             }
         }
-        poll_ready_stream_tool_results(&mut pump).await;
+        if let Some(index) = completed_block_index {
+            if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| *id == index) {
+                if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
+                    output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                }
+            }
+        }
     }
     // A terminal message_delta completes the response even when the final
     // message_stop is lost. Later block events invalidate that terminal state.

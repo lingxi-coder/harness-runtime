@@ -109,6 +109,7 @@ pub async fn dispatch_event(
         suppress_live_thinking,
         &PartialStreamEventMetadata::default(),
         false,
+        None,
     )
     .await
 }
@@ -121,6 +122,7 @@ pub(crate) async fn dispatch_event_with_metadata(
     suppress_live_thinking: bool,
     metadata: &PartialStreamEventMetadata,
     authoritative_frames: bool,
+    native_message_start: Option<&str>,
 ) -> Result<RouterAction, StreamingError> {
     match event {
         // Hosted search consumers inspect this semantic event separately. Main
@@ -162,7 +164,7 @@ pub(crate) async fn dispatch_event_with_metadata(
                     .await;
             }
             output
-                .emit_message_start(&response.id, &response.model)
+                .emit_message_start_with_native(&response.id, &response.model, native_message_start)
                 .await;
             emit_usage_if_present(output, &response.usage).await;
             Ok(RouterAction::Continue)

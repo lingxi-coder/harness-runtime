@@ -641,6 +641,40 @@ fn compound_has_cd(subs: &[String]) -> bool {
     })
 }
 
+/// Explain a plain in-scope output redirect after the permission owner has
+/// already required approval. This helper never authorizes or reclassifies the
+/// command; it only supplies facts for the Native CLI no-approval diagnostic.
+pub(crate) fn native_redirect_approval_message(
+    command: &str,
+    roots: &FsRoots,
+    additional: &[PathBuf],
+) -> Option<String> {
+    let subs = crate::shell_command::split_command(command);
+    if compound_has_cd(&subs) || has_process_substitution(command) {
+        return None;
+    }
+    let work_dirs = working_dir_paths(roots, additional);
+    for sub in subs {
+        for redirect in extract_redirections(&sub) {
+            if redirect.kind != RedirectKind::Output
+                || redirect.target == "/dev/null"
+                || redirect.dangerous
+                || redirect.brace
+                || crate::command_path_containment::dotdot_after_directory_segment(
+                    strip_surrounding_quotes(&redirect.target),
+                )
+            {
+                continue;
+            }
+            let resolved = expand_redirect_target(&redirect.target, roots);
+            if path_in_allowed_working_path(&resolved, &work_dirs, roots) {
+                let dirs = format_directory_list(&all_working_directories(roots, additional));
+                return Some(format!("Output redirection to '{}' needs approval. The path is inside the working directories for this session ({dirs}), and Claude Code asks before a shell command creates, changes or removes files there.", resolved.to_string_lossy()));
+            }
+        }
+    }
+    None
+}
 /// Check a bash `command` for path-constraint violations that must ASK even when
 /// an allow rule matches. Returns the FIRST violation in TS evaluation order, or
 /// `None` if the command stays within the working dirs.

@@ -353,6 +353,15 @@ impl CostTracker {
                 "cost projection changed outside the attempt durability turn".into(),
             ));
         }
+        // Couple the interval update to the acknowledged state publication.
+        // Replayed receipt revisions leave the interval untouched.
+        let mut result_usage = (acknowledged.applied
+            && self.ledger.result_usage_enabled.load(std::sync::atomic::Ordering::Acquire))
+            .then(|| authority.result_usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let previous = result_usage.as_mut().map(|ledger| {
+            ledger.initialize_models(&state.per_model_usage);
+            (state.total_nano_usd, state.per_model_usage.clone())
+        });
         if let Some(publication) = publication {
             let receipt = output_receipt.as_ref().ok_or_else(|| {
                 CostPersistError::Storage("output publication requires a receipt".into())
@@ -368,6 +377,10 @@ impl CostTracker {
             publication.publish(receipt, output, &mut state, projected)?;
         } else {
             *state = projected;
+        }
+        if let (Some(ledger), Some((before_total, previous_models))) = (result_usage.as_mut(), previous) {
+            ledger.record_transition(before_total, state.total_nano_usd,
+                &previous_models, &state.per_model_usage, &self.catalog);
         }
         Ok(CostAttemptSettlement {
             persistence: acknowledged.persistence,
@@ -513,6 +526,34 @@ mod tests {
             }),
             applied: true,
         }
+    }
+
+    #[tokio::test]
+    async fn acknowledged_attempt_usage_enters_one_result_interval_only_once() {
+        use lingxi_core::host::result_usage::ResultUsageSource;
+        let (tracker, mut requests) = tracker();
+        tracker.enable_result_usage();
+        let session = tracker.selected_entry().session_id;
+        let mutation = observation(session);
+        let receipt = tracker.submit_attempt_mutation(mutation.clone()).unwrap();
+        let request = requests.recv().await.unwrap();
+        let mut ack = acknowledgment(&request);
+        ack.state.external_nano_usd = 0;
+        ack.state.per_model_usage.push(ModelUsage {
+            model_ref: ModelRef { provider: crate::ProviderId::OpenAI, model: "shared".into() },
+            usage: Usage { tokens: crate::TokenUsage { input: 9, ..Default::default() }, ..Default::default() },
+            cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_nano_usd: 42,
+        });
+        request.ack.send(Ok(ack)).unwrap();
+        receipt.settle().await.unwrap();
+        tracker.publish_result_usage(session, &mut |rows, _| {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].provider, "openai");
+            assert_eq!(rows[0].input_tokens, 9);
+            true
+        });
+        tracker.submit_attempt_mutation(mutation).unwrap().settle().await.unwrap();
+        tracker.publish_result_usage(session, &mut |rows, _| { assert!(rows.is_empty()); true });
     }
 
     #[tokio::test]

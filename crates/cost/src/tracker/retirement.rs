@@ -44,6 +44,15 @@ impl CostTracker {
         if entry.persistence.is_none() || entry.missing_durable_authority || !authority.is_idle() {
             return Ok(None);
         }
+        // Held SDK results still own this session's unpublished usage slice.
+        if !entry
+            .result_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            return Ok(None);
+        }
         let retirement = match authority.retention_gate().try_begin_retirement() {
             Ok(Some(token)) => token,
             Ok(None) | Err(lingxi_core::host::SessionRetentionError::Unavailable) => {
@@ -57,6 +66,11 @@ impl CostTracker {
         // Registering a mutation takes a pin before its durability ticket.
         // Recheck after blocking new pins, with no synchronous guard at await.
         if !authority.is_idle()
+            || !entry
+                .result_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
             || !entry
                 .response_settlements
                 .lock()
@@ -254,6 +268,47 @@ mod tests {
                 .activate(),
         );
         (tracker, budget, session, gate, persistence)
+    }
+
+    #[tokio::test]
+    async fn pending_sdk_usage_keeps_an_inactive_session_until_result_publication() {
+        use crate::ProviderId;
+        use lingxi_core::host::result_usage::ResultUsageSource;
+
+        let (tracker, budget, session, gate, _) = fixture().await;
+        let entry = tracker.ledger.existing_entry(session).unwrap();
+        let model = ModelUsage {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "shared".into(),
+            },
+            usage: Usage::default(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cost_nano_usd: 1,
+        };
+        entry.result_usage.lock().unwrap().record(None, &model);
+        assert!(tracker
+            .prepare_session_retirement(session, &gate, budget.clone())
+            .await
+            .unwrap()
+            .is_none());
+        tracker.publish_result_usage(session, &mut |_, _| false);
+        assert!(tracker
+            .prepare_session_retirement(session, &gate, budget.clone())
+            .await
+            .unwrap()
+            .is_none());
+        tracker.publish_result_usage(session, &mut |rows, _| {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].nano_usd, 1);
+            true
+        });
+        assert!(tracker
+            .prepare_session_retirement(session, &gate, budget)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

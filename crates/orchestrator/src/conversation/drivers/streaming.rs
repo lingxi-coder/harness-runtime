@@ -501,7 +501,7 @@ fn mod_turn_step_stream(
                 let request_capture = source_request_capture.clone();
                 let request_dispatch_observer =
                     observe_main_dispatch(source_dispatch_observer.clone(), &source_output);
-                let capture_native_frames = source_output.wants_partial_stream_events();
+                let capture_native_frames = source_output.wants_native_stream_frames();
                 let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
                 let native_anthropic_request_context =
                     source_native_anthropic_request_context.clone();
@@ -869,7 +869,7 @@ fn mod_turn_step_stream(
                         let stream = fallback_retry_scope
                             .run(fallback_request_capture.scope(
                                 llm_runtime::native_stream_capture::scope_requested(
-                                    fallback_output.wants_partial_stream_events(),
+                                    fallback_output.wants_native_stream_frames(),
                                     fallback_api.stream_with_effort_override(
                                         &fallback_model,
                                         fallback_profile.as_deref(),
@@ -1739,7 +1739,7 @@ impl StreamingTurnDriver<'_> {
                 Box::pin(
                     retry_scope.run(orch.model_runtime.prompt_cache_capture.scope(
                         llm_runtime::native_stream_capture::scope_requested(
-                            orch.output.wants_partial_stream_events(),
+                            orch.output.wants_native_stream_frames(),
                             orch.streaming_api.stream_with_effort_override(
                                 &model,
                                 model_profile.as_deref(),
@@ -2966,7 +2966,7 @@ impl StreamingTurnDriver<'_> {
                                     retry_scope.run(
                                         orch.model_runtime.prompt_cache_capture.scope(
                                             llm_runtime::native_stream_capture::scope_requested(
-                                                orch.output.wants_partial_stream_events(),
+                                                orch.output.wants_native_stream_frames(),
                                                 orch.streaming_api.stream_with_effort_override(
                                                     &re_model,
                                                     re_profile.as_deref(),

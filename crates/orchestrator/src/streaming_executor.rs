@@ -744,6 +744,18 @@ impl<'a> StreamingToolExecutor<'a> {
     /// Wait for autonomous task progress until Native Tn has ready data or the
     /// generation becomes idle. Queue promotion is owned by the actor and does
     /// not depend on this provider-loop poll.
+    /// Cancellation-safe readiness signal; provider frames can win without
+    /// consuming a completed tool result or pausing autonomous execution.
+    pub(crate) fn progress_waiter(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
+        if self.scheduler_failed.load(Ordering::Acquire)
+            || !self.tools.iter().any(|tool| tool.status != ToolStatus::Yielded)
+        {
+            return None;
+        }
+        let waiter = self.scheduler.progress_waiter();
+        Some(Box::pin(async move { let _ = waiter.await; }))
+    }
+
     pub(crate) async fn drain_one(&mut self) -> Option<usize> {
         loop {
             if self.scheduler.wait_for_progress().await.is_err() {

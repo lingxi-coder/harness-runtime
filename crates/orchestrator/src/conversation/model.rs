@@ -2596,6 +2596,8 @@ impl ConversationOrchestrator {
                     output_tokens: mu.usage.tokens.output,
                     cache_read_input_tokens: mu.cache_read_input_tokens,
                     cache_creation_input_tokens: mu.cache_creation_input_tokens,
+                    cache_creation_5m_input_tokens: mu.usage.tokens.cache_write,
+                    cache_creation_1h_input_tokens: mu.usage.tokens.cache_write_1h,
                     reasoning_tokens: mu.usage.tokens.reasoning_output,
                     web_search_requests: mu
                         .usage

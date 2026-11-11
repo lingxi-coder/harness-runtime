@@ -1698,6 +1698,7 @@ pub(crate) struct PendingToolFrame {
     pub(crate) model_text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     pub(crate) result: lingxi_core::types::utf16_json::Utf16JsonProjection,
     pub(crate) denial_kind: Option<String>,
+    pub(crate) permission_decision: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// only when the live `SessionId` changes (`/clear` mints a new one; in-place

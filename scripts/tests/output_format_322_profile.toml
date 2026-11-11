@@ -1,0 +1,9 @@
+# Comparison builds suppress runtime development diagnostics and retain the
+# CLI entrypoint's larger stack for unoptimized request processing.
+[profile.dev]
+debug = 0
+incremental = false
+debug-assertions = false
+
+[profile.dev.package.cli]
+debug-assertions = true

@@ -306,6 +306,17 @@ impl Tool for StructuredOutputTool {
                 }
             }
             JsonSchemaValidation::Invalid { detail, .. } => {
+                const PREFIX: &str = "Output does not match required schema: ";
+                let prefix = PREFIX.encode_utf16().collect::<Vec<_>>();
+                let units = detail.string_units("").expect("schema validation detail is a source string");
+                let detail = if units.starts_with(&prefix) {
+                    detail
+                } else {
+                    let mut joined = prefix;
+                    joined.extend_from_slice(&units);
+                    Utf16JsonProjection::root_string(String::from_utf16_lossy(&joined), joined)
+                        .expect("schema error is a source string")
+                };
                 return Err(ToolError::InvalidInput(detail));
             }
         }
@@ -385,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_call_returns_exact_validator_detail_without_replacing_capture() {
+    async fn invalid_call_wraps_native_validator_detail_without_replacing_capture() {
         let schema = parse(r#"{"type":"object"}"#);
         let previous = parse(r#"{"answer":42}"#);
         let detail = parse(r#""invalid \ud800 output""#);
@@ -405,7 +416,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.model_facing_message(), detail);
+        assert_eq!(error.model_facing_message(), parse(r#""Output does not match required schema: invalid \ud800 output""#));
         assert_eq!(slot.lock().unwrap().as_ref(), Some(&previous));
     }
 }

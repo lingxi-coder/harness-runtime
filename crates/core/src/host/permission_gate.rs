@@ -1092,6 +1092,25 @@ pub enum HandoffReview {
 
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
+    /// Whether this transport can present an unresolved approval request.
+    /// Policy wrappers forward the underlying surface fact; this does not
+    /// authorize a tool or bypass a rule/classifier decision.
+    fn has_approval_surface(&self) -> bool {
+        true
+    }
+
+    /// Describe an already-denied no-approval request for the Native CLI
+    /// compatibility surface, using this gate's own path/context facts.
+    fn native_no_approval_diagnostic(
+        &self,
+        _name: &str,
+        _input: &Utf16JsonProjection,
+        _ctx: &PermissionCheckContext,
+        _ask_message: Option<&Utf16JsonProjection>,
+    ) -> Option<Utf16JsonProjection> {
+        None
+    }
+
     /// Whether an interactive permission request is awaiting a user decision.
     async fn has_pending_request(&self) -> bool {
         false
