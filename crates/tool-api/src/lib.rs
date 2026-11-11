@@ -34,6 +34,7 @@ pub mod nested_memory_triggers;
 pub mod output_schema;
 pub mod persistent_chat;
 pub mod progress;
+pub mod read_context_room;
 pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;

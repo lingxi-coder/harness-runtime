@@ -36,6 +36,8 @@ pub const EDIT_MODE_INSERT: &str = "insert";
 /// Allowed `edit_mode` value: delete the named cell.
 pub const EDIT_MODE_DELETE: &str = "delete";
 
+const MAX_NOTEBOOK_BYTES: usize = 100 * 1024 * 1024;
+
 /// `NotebookEditTool` — mutate one cell of a Jupyter notebook.
 pub struct NotebookEditTool {
     ctx: BuiltinToolContext,
@@ -120,6 +122,13 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     }))
 });
 
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/notebookedit-output-schema.json"
+    ))
+    .expect("pinned NotebookEdit output schema is valid JSON")
+});
+
 /// Parse a `cell-N` id into its numeric index, mirroring the TS `parseCellId`
 /// helper (`utils/notebook.ts`): matches `^cell-(\d+)$` and returns N, else
 /// `None`. Used as the fallback when an exact cell-`id` lookup misses.
@@ -129,6 +138,202 @@ fn parse_cell_id(cell_id: &str) -> Option<usize> {
         return None;
     }
     digits.parse::<usize>().ok()
+}
+
+const INVALID_NOTEBOOK: &str = "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\").";
+
+struct NotebookMutation {
+    new_source: Utf16JsonProjection,
+    old_source: Option<Utf16JsonProjection>,
+    language: Utf16JsonProjection,
+    cell_id: Option<String>,
+    model_content: Utf16JsonProjection,
+}
+
+fn notebook_error(message: impl Into<String>) -> ToolError {
+    ToolError::InvalidInput(message.into().into())
+}
+
+fn joined_cell_source(cell: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
+    if cell.string_units("/source").is_some() {
+        return cell
+            .subprojection("/source")
+            .map_err(|_| notebook_error(INVALID_NOTEBOOK));
+    }
+    let count = cell
+        .array_len("/source")
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    let mut units = Vec::new();
+    for index in 0..count {
+        units.extend(
+            cell.string_units(&format!("/source/{index}"))
+                .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?,
+        );
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .map_err(|_| notebook_error(INVALID_NOTEBOOK))
+}
+
+fn mutate_notebook(
+    notebook: &mut Utf16JsonProjection,
+    input: &Utf16JsonProjection,
+    cell_id: Option<&str>,
+    edit_mode: &str,
+    cell_type: Option<&str>,
+    insert_id: impl FnOnce() -> String,
+) -> Result<NotebookMutation, ToolError> {
+    let count = notebook
+        .array_len("/cells")
+        .ok_or_else(|| notebook_error(INVALID_NOTEBOOK))?;
+    let mut cells = (0..count)
+        .map(|index| {
+            let cell = notebook
+                .subprojection(&format!("/cells/{index}"))
+                .map_err(|_| notebook_error(INVALID_NOTEBOOK))?;
+            if cell.object_entries().is_none() {
+                return Err(notebook_error(INVALID_NOTEBOOK));
+            }
+            joined_cell_source(&cell)?;
+            Ok(cell)
+        })
+        .collect::<Result<Vec<_>, ToolError>>()?;
+    let cell_id = cell_id.filter(|id| !id.is_empty());
+    let index = match cell_id {
+        None if edit_mode == EDIT_MODE_INSERT => 0,
+        None => {
+            return Err(notebook_error(
+                "Cell ID must be specified when not inserting a new cell.",
+            ))
+        }
+        Some(id) => {
+            let found = cells
+                .iter()
+                .position(|cell| cell.string_at("/id") == Some(id));
+            let index = if let Some(index) = found {
+                index
+            } else if let Some(index) = parse_cell_id(id) {
+                if index >= count {
+                    return Err(notebook_error(format!(
+                        "Cell with index {index} does not exist in notebook."
+                    )));
+                }
+                index
+            } else {
+                return Err(notebook_error(format!(
+                    "Cell with ID \"{id}\" not found in notebook."
+                )));
+            };
+            index + usize::from(edit_mode == EDIT_MODE_INSERT)
+        }
+    };
+    let new_source = input
+        .subprojection("/new_source")
+        .ok()
+        .filter(|source| source.string_units("").is_some())
+        .unwrap_or_else(|| "".into());
+    let language = notebook
+        .subprojection("/metadata/language_info/name")
+        .ok()
+        .filter(|name| !name.at_pointer("").is_some_and(|value| value.is_null()))
+        .unwrap_or_else(|| "python".into());
+    let supports_ids = notebook.number_at("/nbformat").is_some_and(|format| {
+        format > 4.0
+            || (format == 4.0
+                && notebook
+                    .number_at("/nbformat_minor")
+                    .is_some_and(|minor| minor >= 5.0))
+    });
+    let result_id = if edit_mode == EDIT_MODE_INSERT {
+        supports_ids.then(|| insert_id().chars().take(8).collect::<String>())
+    } else {
+        cell_id.map(str::to_owned)
+    };
+    let old_source = match edit_mode {
+        EDIT_MODE_DELETE => Some(joined_cell_source(&cells.remove(index))?),
+        EDIT_MODE_INSERT => {
+            let kind = cell_type.unwrap_or("code");
+            let mut fields = vec![("cell_type".into(), kind.into())];
+            if let Some(id) = &result_id {
+                fields.push(("id".into(), id.as_str().into()));
+            }
+            fields.extend([
+                ("source".into(), new_source.clone()),
+                ("metadata".into(), crate::generated_result(&json!({}))),
+            ]);
+            if kind != "markdown" {
+                fields.extend([
+                    (
+                        "execution_count".into(),
+                        crate::generated_result(&Value::Null),
+                    ),
+                    ("outputs".into(), crate::generated_result(&json!([]))),
+                ]);
+            }
+            cells.insert(
+                index,
+                Utf16JsonProjection::object(fields)
+                    .map_err(|error| notebook_error(error.to_string()))?,
+            );
+            None
+        }
+        _ => {
+            let cell = &mut cells[index];
+            let old_source = joined_cell_source(cell)?;
+            if cell.string_at("/cell_type") == Some("code") {
+                cell.set_field("execution_count", crate::generated_result(&Value::Null))
+                    .map_err(|error| notebook_error(error.to_string()))?;
+                cell.set_field("outputs", crate::generated_result(&json!([])))
+                    .map_err(|error| notebook_error(error.to_string()))?;
+            }
+            cell.set_field("source", new_source.clone())
+                .map_err(|error| notebook_error(error.to_string()))?;
+            if let Some(kind) = cell_type {
+                cell.set_field("cell_type", kind.into())
+                    .map_err(|error| notebook_error(error.to_string()))?;
+            }
+            Some(old_source)
+        }
+    };
+    notebook
+        .set_field(
+            "cells",
+            Utf16JsonProjection::array(cells).map_err(|error| notebook_error(error.to_string()))?,
+        )
+        .map_err(|error| notebook_error(error.to_string()))?;
+    let display_id = result_id.as_deref().unwrap_or("undefined");
+    let prefix = match edit_mode {
+        EDIT_MODE_DELETE => format!("Deleted cell {display_id}"),
+        EDIT_MODE_INSERT if result_id.is_none() => "Inserted a new cell with ".into(),
+        EDIT_MODE_INSERT => format!("Inserted cell {display_id} with "),
+        _ => format!("Updated cell {display_id} with "),
+    };
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    if edit_mode != EDIT_MODE_DELETE {
+        units.extend(new_source.string_units("").unwrap_or_default());
+    }
+    let model_content = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .map_err(|error| notebook_error(error.to_string()))?;
+    Ok(NotebookMutation {
+        new_source,
+        old_source,
+        language,
+        cell_id: result_id,
+        model_content,
+    })
+}
+
+fn serialize_notebook(notebook: &Utf16JsonProjection) -> Result<String, ToolError> {
+    let pretty = notebook
+        .to_pretty_json_string()
+        .map_err(|error| ToolError::Io(error.to_string().into()))?;
+    Ok(pretty
+        .split('\n')
+        .map(|line| {
+            let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+            format!("{}{}", " ".repeat(spaces / 2), &line[spaces..])
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 #[async_trait]
@@ -147,6 +352,15 @@ impl Tool for NotebookEditTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        crate::output_contract::parse(TOOL_NAME, output)
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
         crate::input_repair_metadata()
@@ -228,12 +442,10 @@ Usage:\n\
         // newly-honored insert/replace cell kind.
         let cell_id = crate::input_string(&input, "cell_id");
         let edit_mode = crate::input_string(&input, "edit_mode").unwrap_or(EDIT_MODE_REPLACE);
-        let mut cell_type =
+        let cell_type =
             crate::input_string(&input, "cell_type").map(std::string::ToString::to_string);
-        let new_source =
-            crate::input_string(&input, "new_source").map(std::string::ToString::to_string);
 
-        let requested_path = crate::normalize_model_file_path(notebook_path, &self.ctx.cwd());
+        let requested_path = crate::checked_model_file_path(notebook_path, &self.ctx.cwd())?;
         let path = requested_path.clone();
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
@@ -255,22 +467,18 @@ Usage:\n\
                 "Edit mode must be replace, insert, or delete.".into(),
             ));
         }
+        // Native NotebookEdit validates the extension case-sensitively.
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("ipynb") {
+            self.emit_failed(&invocation_id, "not_a_notebook").await;
+            return Err(ToolError::InvalidInput(
+                "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool.".into(),
+            ));
+        }
+
         if edit_mode == EDIT_MODE_INSERT && cell_type.is_none() {
             self.emit_failed(&invocation_id, "cell_type_required").await;
             return Err(ToolError::InvalidInput(
                 "Cell type is required when using edit_mode=insert.".into(),
-            ));
-        }
-        // The path must be a Jupyter notebook (`NotebookEditTool.ts:189-196`,
-        // `extname(fullPath) !== '.ipynb'`). Case-insensitive on the extension.
-        if path
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_none_or(|ext| !ext.eq_ignore_ascii_case("ipynb"))
-        {
-            self.emit_failed(&invocation_id, "not_a_notebook").await;
-            return Err(ToolError::InvalidInput(
-                "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool.".into(),
             ));
         }
 
@@ -294,282 +502,83 @@ Usage:\n\
             }
         };
 
-        let raw = match tokio::fs::read_to_string(&canon).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.emit_failed(&invocation_id, "io_read").await;
-                return Err(ToolError::Io(e.to_string().into()));
-            }
-        };
-
-        // Read-before-write staleness guard (Batch F). The notebook always
-        // exists here (the `read_to_string` above errors otherwise), so a prior
-        // full read + unchanged-mtime is required (TS
-        // `NotebookEditTool.ts:221-237`). We reuse the shared
-        // `check_read_before_write` helper for uniformity with Edit/Write,
-        // which also applies the isPartialView + content-equality fallback —
-        // TS's NotebookEdit guard is the simpler `!lastRead` / `mtime >
-        // timestamp` form without those.
-        //
-        // The Rust `Read` tool DOES read `.ipynb` (read.rs ipynb branch) and
-        // records the read into `read_file_state` — with the serialized CELLS
-        // JSON as the entry `content` (mirroring TS `FileReadTool.ts:842-847`).
-        // So a plain Read→NotebookEdit satisfies this guard via the mtime
-        // check. The content-equality fallback compares the RAW on-disk bytes
-        // (`raw`) against that recorded cells JSON and thus never matches for a
-        // notebook — which collapses the shared helper to exactly TS's
-        // no-fallback `mtime > timestamp` NotebookEdit guard.
         let current_mtime_ms = tokio::fs::metadata(&canon)
             .await
             .ok()
             .and_then(|m| m.modified().ok())
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        if let Err(e) = crate::check_read_before_write(
-            &self.ctx.read_file_state,
-            &requested_path,
-            current_mtime_ms,
-            &raw,
-            // Oracle `X_n(S)`: notebooks are excluded from the waiver
-            // outright — their read guard is cell-structured, so "the model
-            // could have read it" does not establish that it saw the cell.
-            false,
-        ) {
-            self.emit_failed(&invocation_id, "stale_read").await;
-            return Err(e);
-        }
-
-        let mut nb: Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => {
-                // SOFT return (not an error): claude-code returns a result whose
-                // `data` carries `error: 'Notebook is not valid JSON.'` rather
-                // than throwing (`NotebookEditTool.ts:331-348`). Mirror that
-                // data shape so the model sees the soft error.
-                self.emit_failed(&invocation_id, "json_parse").await;
-                return Ok(ToolCallResult {
-                    data: crate::generated_result(&json!({
-                        "new_source": new_source,
-                        "cell_type": cell_type.clone().unwrap_or_else(|| "code".to_string()),
-                        "language": "python",
-                        "edit_mode": "replace",
-                        "error": "Notebook is not valid JSON.",
-                        "cell_id": cell_id,
-                        "notebook_path": canon.display().to_string(),
-                        "original_file": "",
-                        "updated_file": "",
-                    })),
-                    // The soft error rides on `model_content` (the data carries no
-                    // content/model_content key, so the fallback would JSON-dump).
-                    model_content: Some("Notebook is not valid JSON.".into()),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                    subagent_hooks_fired: false,
-                });
-            }
-        };
-
-        // Only nbformat >= 4.5 notebooks carry stable cell ids
-        // (`NotebookEditTool.ts:381-384`). Read this before borrowing `cells`
-        // mutably below.
-        let supports_cell_ids = {
-            let nbformat = nb.get("nbformat").and_then(Value::as_i64).unwrap_or(0);
-            let nbformat_minor = nb
-                .get("nbformat_minor")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            nbformat > 4 || (nbformat == 4 && nbformat_minor >= 5)
-        };
-
-        let cells = nb
-            .get_mut("cells")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                // Binary `readNotebook` (atl): byte-locked invalid-cells error.
-                ToolError::InvalidInput(
-                    "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\").".into(),
-                )
-            })?;
-        let cells_len = cells.len();
-
-        // A missing `cell_id` is only valid for `insert` (TS validateInput
-        // `NotebookEditTool.ts:260-267`, errorCode 7).
-        if cell_id.is_none() && edit_mode != EDIT_MODE_INSERT {
-            self.emit_failed(&invocation_id, "cell_id_required").await;
+        // NotebookEdit's guard has no full-content equality fallback. Even a
+        // byte-identical file with an advanced mtime must be read again.
+        let entry = tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+            .ok_or_else(|| ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()))?;
+        if current_mtime_ms > entry.mtime_ms {
             return Err(ToolError::InvalidInput(
-                "Cell ID must be specified when not inserting a new cell.".into(),
+                crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
             ));
         }
 
-        // Resolve the target index, mirroring TS `call` (`NotebookEditTool.ts:
-        // 350-368`): exact `id` match first, then the `cell-N` index form
-        // (`parseCellId`). The not-found / out-of-bounds rejections are folded
-        // in from TS `validateInput` (lines 268-290) since the Rust tool has no
-        // separate validate phase.
-        let mut cell_index: usize = match cell_id {
-            // No cell_id → default to inserting at the beginning (ts:351-352).
-            None => 0,
-            Some(id) => {
-                if let Some(i) = cells
-                    .iter()
-                    .position(|c| c.get("id").and_then(Value::as_str) == Some(id))
-                {
-                    i
-                } else if let Some(n) = parse_cell_id(id) {
-                    if n >= cells_len {
-                        self.emit_failed(&invocation_id, "cell_not_found").await;
-                        return Err(ToolError::InvalidInput(
-                            format!("Cell with index {n} does not exist in notebook.").into(),
-                        ));
-                    }
-                    n
-                } else {
-                    self.emit_failed(&invocation_id, "cell_not_found").await;
-                    return Err(ToolError::InvalidInput(
-                        format!("Cell with ID \"{id}\" not found in notebook.").into(),
-                    ));
-                }
-            }
-        };
-
-        // Insert lands AFTER the anchor when a cell_id was supplied (ts:365-367).
-        if edit_mode == EDIT_MODE_INSERT && cell_id.is_some() {
-            cell_index += 1;
+        if tokio::fs::metadata(&canon)
+            .await
+            .is_ok_and(|metadata| metadata.len() > MAX_NOTEBOOK_BYTES as u64)
+        {
+            return Err(ToolError::InvalidInput(
+                crate::notebook_read::notebook_too_large_message().into(),
+            ));
         }
-
-        // A `replace` that targets one past the end becomes an `insert`,
-        // defaulting cell_type to code (ts:370-377).
-        let mut effective_mode = edit_mode;
-        if effective_mode == EDIT_MODE_REPLACE && cell_index == cells_len {
-            effective_mode = EDIT_MODE_INSERT;
-            if cell_type.is_none() {
-                cell_type = Some("code".to_string());
+        let bytes = match tokio::fs::read(&canon).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolError::InvalidInput(
+                    "Notebook file does not exist.".into(),
+                ));
             }
-        }
-
-        // New-cell id (ts:380-390): inserts mint a FRESH id (never the anchor's,
-        // which previously produced duplicates); replace/delete reuse the
-        // supplied cell_id. Both only when the notebook supports cell ids.
-        let new_cell_id: Option<String> = if supports_cell_ids {
-            if effective_mode == EDIT_MODE_INSERT {
-                Some(tool_api::util::ids::ulid_or_uuid())
-            } else {
-                cell_id.map(std::string::ToString::to_string)
-            }
-        } else {
-            None
+            Err(error) => return Err(ToolError::Io(error.to_string().into())),
         };
-        // The model-facing message renders this id; an absent id prints
-        // "undefined" exactly as the TS template literal would (ts:148-162).
-        let display_id = new_cell_id.as_deref().unwrap_or("undefined");
-
-        // Model-facing result string per edit mode — byte-faithful to
-        // claude-code's `NotebookEditTool` mapper (`NotebookEditTool.ts:145-170`).
-        // FILE.A's serialization rule emits `data["content"]` verbatim to the
-        // model (`cells_edited` below remains the structured TUI payload).
-        // The result record echoes the new source even on delete (binary `t`).
-        let new_source_result = new_source.clone().unwrap_or_default();
-        // Capture the cell's prior source for the result `old_source` (binary
-        // NotebookEdit field); stays `None` on insert (no prior cell).
-        let mut old_source: Option<String> = None;
-        let content = match effective_mode {
-            EDIT_MODE_DELETE => {
-                // `cell_id` was required + resolved above, so the index is valid.
-                old_source = cells[cell_index]
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                cells.remove(cell_index);
-                format!("Deleted cell {display_id}")
-            }
-            EDIT_MODE_INSERT => {
-                let src = new_source.ok_or_else(|| {
-                    ToolError::InvalidInput("new_source required for insert".into())
-                })?;
-                // Build the message before `src` is moved into the new cell.
-                let msg = format!("Inserted cell {display_id} with {src}");
-                let is_markdown = cell_type.as_deref() == Some("markdown");
-                // Key order matches the TS object literals (ts:396-413).
-                let mut new_cell = serde_json::Map::new();
-                new_cell.insert(
-                    "cell_type".to_string(),
-                    json!(if is_markdown { "markdown" } else { "code" }),
-                );
-                // `id: undefined` is dropped by `JSON.stringify`, so only emit
-                // the key when the notebook supports cell ids.
-                if let Some(id) = &new_cell_id {
-                    new_cell.insert("id".to_string(), json!(id));
-                }
-                new_cell.insert("source".to_string(), json!(src));
-                new_cell.insert("metadata".to_string(), json!({}));
-                if !is_markdown {
-                    new_cell.insert("execution_count".to_string(), Value::Null);
-                    new_cell.insert("outputs".to_string(), json!([]));
-                }
-                cells.insert(cell_index, Value::Object(new_cell));
-                msg
-            }
-            EDIT_MODE_REPLACE => {
-                let src = new_source.ok_or_else(|| {
-                    ToolError::InvalidInput("new_source required for replace".into())
-                })?;
-                let msg = format!("Updated cell {display_id} with {src}");
-                let target = &mut cells[cell_index];
-                old_source = target
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let was_code = target.get("cell_type").and_then(Value::as_str) == Some("code");
-                target["source"] = json!(src);
-                // A modified CODE cell drops its now-stale outputs +
-                // execution_count (ts:420-424).
-                if was_code {
-                    target["execution_count"] = Value::Null;
-                    target["outputs"] = json!([]);
-                }
-                // An explicit cell_type that differs switches the cell's type
-                // (ts:425-427).
-                if let Some(ct) = &cell_type {
-                    if target.get("cell_type").and_then(Value::as_str) != Some(ct.as_str()) {
-                        target["cell_type"] = json!(ct);
-                    }
-                }
-                msg
-            }
-            // `edit_mode` was validated to the three modes above, and the
-            // replace→insert conversion only yields `insert`.
-            _ => unreachable!("edit_mode validated above"),
-        };
-
-        // claude-code writes the notebook with `IPYNB_INDENT = 1` (ONE space) —
-        // `jsonStringify(notebook, null, 1)` (NotebookEditTool.ts:430-431).
-        // serde_json's `to_string_pretty` uses TWO spaces, which would write
-        // divergent on-disk bytes (different file hash / noisier git diffs for a
-        // round-tripped notebook). Serialize with a 1-space pretty formatter.
-        let serialized = {
-            use serde::Serialize as _;
-            let mut buf = Vec::new();
-            let mut ser = serde_json::Serializer::with_formatter(
-                &mut buf,
-                serde_json::ser::PrettyFormatter::with_indent(b" "),
-            );
-            match nb.serialize(&mut ser) {
-                Ok(()) => String::from_utf8(buf).expect("serde_json emits valid UTF-8"),
-                Err(e) => {
-                    self.emit_failed(&invocation_id, "json_emit").await;
-                    return Err(ToolError::Io(e.to_string().into()));
-                }
-            }
-        };
-        // (/rewind) Back up the pre-edit notebook before writing.
-        if let Some(fh) = ctx.file_history.as_ref() {
-            fh.track_edit(&canon.to_string_lossy()).await;
+        if bytes.len() > MAX_NOTEBOOK_BYTES {
+            return Err(ToolError::InvalidInput(
+                crate::notebook_read::notebook_too_large_message().into(),
+            ));
         }
-        if let Err(e) = tokio::fs::write(&canon, serialized.as_bytes()).await {
-            self.emit_failed(&invocation_id, "io_write").await;
-            return Err(ToolError::Io(e.to_string().into()));
+        if let Some(kind) = crate::file_meta::classify_not_text(&bytes) {
+            return Err(ToolError::InvalidInput(
+                kind.mutation_refusal_message().into(),
+            ));
         }
+        let (raw, encoding, line_ending) = crate::file_meta::read_with_metadata(&bytes);
+        let mut notebook = Utf16JsonProjection::parse(&raw)
+            .map_err(|_| ToolError::InvalidInput("Notebook is not valid JSON.".into()))?;
+        let root = notebook.at_pointer("").expect("parsed JSON has a root");
+        if root.is_null()
+            || root.as_bool() == Some(false)
+            || root.as_number() == Some(0.0)
+            || root.code_units().is_some_and(<[u16]>::is_empty)
+        {
+            return Err(notebook_error("Notebook is not valid JSON."));
+        }
+        let mutation = mutate_notebook(
+            &mut notebook,
+            &input,
+            cell_id,
+            edit_mode,
+            cell_type.as_deref(),
+            || uuid::Uuid::new_v4().to_string(),
+        )?;
+        // The flat JSON stringifier preserves ECMAScript key order, numeric
+        // spelling, and lone UTF-16 surrogates. Halving its structural indent
+        // implements JSON.stringify(notebook, null, 1).
+        let serialized = serialize_notebook(&notebook)?;
+        let output = crate::file_meta::encode_with_metadata(&serialized, encoding, line_ending);
+        if output.len() > MAX_NOTEBOOK_BYTES {
+            return Err(ToolError::InvalidInput(
+                "Edit rejected: the updated notebook would exceed the maximum size this tool can read (100MB). The file was left unchanged.".into(),
+            ));
+        }
+        if let Some(history) = ctx.file_history.as_ref() {
+            history.track_edit(&canon.to_string_lossy()).await;
+        }
+        tokio::fs::write(&canon, output)
+            .await
+            .map_err(|error| ToolError::Io(error.to_string().into()))?;
 
         // Post-write: update the read-state registry so an immediate second
         // NotebookEdit succeeds and the staleness guard sees the new mtime (TS
@@ -602,38 +611,35 @@ Usage:\n\
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, 1, duration_ms).await;
 
-        // claude-code NotebookEditTool result data (2.1.191): the full edit record
-        // `{new_source, old_source?, cell_type, language, edit_mode, cell_id?,
-        // error, notebook_path, original_file, updated_file}` (preserve_order).
-        // `old_source`/`cell_id` are omitted when absent (binary `void 0`); `error`
-        // is "" on success. The model-facing message rides on `model_content`.
-        let mut nb_data = serde_json::Map::new();
-        nb_data.insert("new_source".to_string(), json!(new_source_result));
-        if let Some(os) = &old_source {
-            nb_data.insert("old_source".to_string(), json!(os));
+        let mut fields = vec![("new_source".to_string(), mutation.new_source.clone())];
+        if let Some(old_source) = mutation.old_source {
+            fields.push(("old_source".into(), old_source));
         }
-        nb_data.insert(
-            "cell_type".to_string(),
-            json!(cell_type.as_deref().unwrap_or("code")),
-        );
-        nb_data.insert("language".to_string(), json!("python"));
-        // Binary success data: `edit_mode:T??"replace"` where T is the EFFECTIVE
-        // mode — a replace targeting one-past-the-end is reported as "insert"
-        // (the conversion at the cell_index==cells_len check above).
-        nb_data.insert("edit_mode".to_string(), json!(effective_mode));
-        if let Some(cid) = cell_id {
-            nb_data.insert("cell_id".to_string(), json!(cid));
+        fields.extend([
+            (
+                "cell_type".into(),
+                cell_type.as_deref().unwrap_or("code").into(),
+            ),
+            ("language".into(), mutation.language),
+            ("edit_mode".into(), edit_mode.into()),
+        ]);
+        if let Some(id) = mutation.cell_id {
+            fields.push(("cell_id".into(), id.into()));
         }
-        nb_data.insert("error".to_string(), json!(""));
-        nb_data.insert(
-            "notebook_path".to_string(),
-            json!(canon.display().to_string()),
-        );
-        nb_data.insert("original_file".to_string(), json!(raw));
-        nb_data.insert("updated_file".to_string(), json!(serialized));
+        fields.extend([
+            ("error".into(), "".into()),
+            (
+                "notebook_path".into(),
+                requested_path.to_string_lossy().as_ref().into(),
+            ),
+            ("original_file".into(), raw.into()),
+            ("updated_file".into(), serialized.into()),
+        ]);
+        let data = Utf16JsonProjection::object(fields)
+            .map_err(|error| ToolError::Io(error.to_string().into()))?;
         Ok(ToolCallResult {
-            data: crate::generated_result(&Value::Object(nb_data)),
-            model_content: Some(content.into()),
+            data,
+            model_content: Some(mutation.model_content),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -729,6 +735,166 @@ mod tests {
     #[test]
     fn tool_name_is_notebook_edit() {
         assert_eq!(TOOL_NAME, "NotebookEdit");
+    }
+
+    #[test]
+    fn native_322_notebook_mutation_fixtures() {
+        let fixture = Utf16JsonProjection::parse(include_str!(
+            "../../../../scripts/tests/fixtures/file_notebook_path_322.json"
+        ))
+        .unwrap();
+        for index in 0..fixture.array_len("/notebooks").unwrap() {
+            let case = fixture
+                .subprojection(&format!("/notebooks/{index}"))
+                .unwrap();
+            let name = case.string_at("/name").unwrap();
+            let mut notebook =
+                Utf16JsonProjection::parse(case.string_at("/notebookJson").unwrap()).unwrap();
+            let input = case.subprojection("/input").unwrap();
+            let result = mutate_notebook(
+                &mut notebook,
+                &input,
+                crate::input_string(&input, "cell_id"),
+                crate::input_string(&input, "edit_mode").unwrap_or("replace"),
+                crate::input_string(&input, "cell_type"),
+                || "native123456".into(),
+            );
+            if let Some(expected) = case.string_at("/expected/error") {
+                assert_eq!(
+                    result.err().unwrap().model_facing_message().string_at(""),
+                    Some(expected),
+                    "{name}"
+                );
+                continue;
+            }
+            let result = result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let mut fields = vec![("new_source".into(), result.new_source)];
+            if let Some(old) = result.old_source {
+                fields.push(("old_source".into(), old));
+            }
+            fields.extend([
+                (
+                    "cell_type".into(),
+                    crate::input_string(&input, "cell_type")
+                        .unwrap_or("code")
+                        .into(),
+                ),
+                ("language".into(), result.language),
+                (
+                    "edit_mode".into(),
+                    crate::input_string(&input, "edit_mode")
+                        .unwrap_or("replace")
+                        .into(),
+                ),
+            ]);
+            if let Some(id) = result.cell_id {
+                fields.push(("cell_id".into(), id.into()));
+            }
+            fields.push(("error".into(), "".into()));
+            assert_eq!(
+                Utf16JsonProjection::object(fields)
+                    .unwrap()
+                    .to_json_string()
+                    .unwrap(),
+                case.subprojection("/expected/data")
+                    .unwrap()
+                    .to_json_string()
+                    .unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                serialize_notebook(&notebook).unwrap(),
+                case.string_at("/expected/updatedFile").unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                result.model_content.string_units(""),
+                case.string_units("/expected/model"),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_notebook_validation_fixtures() {
+        let fixture = Utf16JsonProjection::parse(include_str!(
+            "../../../../scripts/tests/fixtures/file_notebook_path_322.json"
+        ))
+        .unwrap();
+        for index in 0..fixture.array_len("/validations").unwrap() {
+            let case = fixture
+                .subprojection(&format!("/validations/{index}"))
+                .unwrap();
+            let tmp = TempDir::new().unwrap();
+            let filename = std::path::Path::new(case.string_at("/configuration/file").unwrap())
+                .file_name()
+                .unwrap();
+            let target = tmp.path().join(filename);
+            let raw = case.string_at("/configuration/raw").unwrap();
+            std::fs::write(&target, raw).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            if case
+                .at_pointer("/configuration/read")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                seed_full_read(&ctx, &target);
+                let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+                let mut entry = tool_api::read_file_state::get(&ctx.read_file_state, &key).unwrap();
+                let timestamp = case.number_at("/configuration/timestamp").unwrap() as i64;
+                let mtime = case.number_at("/configuration/mtime").unwrap() as i64;
+                entry.mtime_ms += timestamp - mtime;
+                tool_api::read_file_state::set(&ctx.read_file_state, key, entry);
+            }
+            let error = NotebookEditTool::new(ctx).call(crate::generated_result(&json!({
+                "notebook_path": target.to_str().unwrap(), "cell_id": "c1", "new_source": "x"
+            })), fresh_ctx(), fresh_tx()).await.unwrap_err();
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                case.string_at("/expected/message"),
+                "{}",
+                case.string_at("/name").unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), raw);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_notebook_input_size_guard_precedes_loading() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("large.ipynb");
+        std::fs::File::create(&target)
+            .unwrap()
+            .set_len(MAX_NOTEBOOK_BYTES as u64 + 1)
+            .unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            target.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: i64::MAX,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+        let error = NotebookEditTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({
+                    "notebook_path": target.to_str().unwrap(), "cell_id": "c1", "new_source": "x"
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some(crate::notebook_read::notebook_too_large_message().as_str())
+        );
     }
 
     /// A REAL `Read` of the notebook satisfies the read-before-write guard —
@@ -1320,37 +1486,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_json_returns_soft_error_not_err() {
-        // claude-code returns a SOFT result with `error: 'Notebook is not valid
-        // JSON.'` (NotebookEditTool.ts:331-348), NOT a thrown error.
+    async fn invalid_json_is_a_hard_error_before_mutation() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("bad.ipynb");
         std::fs::write(&target, "this is not json").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
+        let (ctx, _) = make_ctx(&tmp);
         seed_full_read(&ctx, &target);
-        let tool = NotebookEditTool::new(ctx);
-        let result = tool
+        let error = NotebookEditTool::new(ctx)
             .call(
                 crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
-                    "cell_id": "c1",
-                    "edit_mode": "delete"
+                    "cell_id": "c1", "edit_mode": "delete", "new_source": ""
                 })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect("malformed JSON is a soft Ok result, not an Err");
+            .unwrap_err();
         assert_eq!(
-            crate::test_data(&result.data)["error"],
-            "Notebook is not valid JSON."
+            error.model_facing_message().string_at(""),
+            Some("Notebook is not valid JSON.")
         );
-        // The soft data shape mirrors TS: edit_mode normalized to "replace",
-        // cell_type defaulted to "code", the original cell_id echoed.
-        assert_eq!(crate::test_data(&result.data)["edit_mode"], "replace");
-        assert_eq!(crate::test_data(&result.data)["cell_type"], "code");
-        assert_eq!(crate::test_data(&result.data)["cell_id"], "c1");
-        assert_eq!(crate::test_data(&result.data)["language"], "python");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "this is not json");
     }
 
     #[tokio::test]

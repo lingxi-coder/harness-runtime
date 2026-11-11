@@ -11,17 +11,9 @@
 //! target, and [`preserve_quote_style`] re-applies the file's curly typography
 //! to `new_string` so the rewrite does not silently strip curly quotes.
 //!
-//! ## 1:1 fidelity / divergence note
-//!
-//! Byte-faithful for BMP text and the contraction heuristic. The one **close**
-//! (not byte-faithful) edge: TS slices the recovered substring with
-//! `fileContent.substring(idx, idx + searchString.length)` where JS `.length`
-//! is a count of **UTF-16 code units**. Rust here uses **char** counts. For
-//! astral-plane chars (emoji, etc.) in `old_string`, a single char is one Rust
-//! char but two UTF-16 code units, so the recovered window length differs from
-//! TS. This only affects `old_string`s containing astral chars whose match
-//! relied on quote normalization — pure-BMP text (the overwhelmingly common
-//! case, and all curly-quote text) is byte-faithful.
+//! Matching and escape preservation follow the native UTF-16 representation.
+//! Rust display strings replace unpaired surrogate units; valid surrogate pairs
+//! and escaped surrogate-pair text are preserved by the helpers below.
 
 /// Left single curly quote (U+2018). Mirrors `LEFT_SINGLE_CURLY_QUOTE`.
 pub const LEFT_SINGLE_CURLY_QUOTE: char = '\u{2018}';
@@ -150,13 +142,13 @@ pub fn contains_unicode_escape(s: &str) -> bool {
     false
 }
 
-/// `Slo.test(e)` where `Slo=/[-￿]/` — true if `e` contains any char
-/// in the range U+0080..=U+FFFF (a non-ASCII Basic-Multilingual-Plane char).
-/// Astral-plane chars (> U+FFFF) do NOT satisfy `Slo` (the binary's regex range
-/// caps at U+FFFF), so they are excluded here for fidelity.
+/// Native non-Unicode regex `/[\u0080-\uffff]/`: tests UTF-16 units,
+/// including both surrogate units of an astral scalar.
 #[must_use]
 pub fn contains_non_ascii_bmp(s: &str) -> bool {
-    s.chars().any(|c| ('\u{0080}'..='\u{ffff}').contains(&c))
+    // The native regex has no `u` flag, so an astral scalar contributes two
+    // matching surrogate units too.
+    s.encode_utf16().any(|unit| unit >= 128)
 }
 
 /// `pUa(e)=Tlo.test(e)||Slo.test(e)` (offset 201326520): true when `e` either
@@ -179,31 +171,33 @@ pub fn has_escape_or_non_ascii(s: &str) -> bool {
 /// UTF-16 code unit — for the BMP this is one Rust char). Any text not matching
 /// either alternative is copied unchanged.
 fn decode_unicode_escapes(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len());
+    let chars: Vec<u16> = s.encode_utf16().collect();
+    let mut out = Vec::with_capacity(chars.len());
     let mut i = 0;
     while i < chars.len() {
         // Alternative 1: a literal doubled backslash `\\` — copy verbatim,
         // consuming both backslashes so a following `uXXXX` is left literal.
-        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '\\' {
-            out.push('\\');
-            out.push('\\');
+        if chars[i] == u16::from(b'\\') && i + 1 < chars.len() && chars[i + 1] == u16::from(b'\\') {
+            out.push(u16::from(b'\\'));
+            out.push(u16::from(b'\\'));
             i += 2;
             continue;
         }
         // Alternative 2: `\uXXXX` — decode the 4 hex digits to a char.
-        if chars[i] == '\\'
+        if chars[i] == u16::from(b'\\')
             && i + 6 <= chars.len()
-            && chars[i + 1] == 'u'
-            && chars[i + 2..i + 6].iter().all(char::is_ascii_hexdigit)
+            && chars[i + 1] == u16::from(b'u')
+            && chars[i + 2..i + 6].iter().all(|unit| {
+                char::from_u32(u32::from(*unit)).is_some_and(|ch| ch.is_ascii_hexdigit())
+            })
         {
-            let hex: String = chars[i + 2..i + 6].iter().collect();
+            let hex = String::from_utf16_lossy(&chars[i + 2..i + 6]);
             // `String.fromCharCode(parseInt(hex,16))` — a single UTF-16 code
             // unit. For the BMP this is a valid scalar value; a lone surrogate
             // (D800..DFFF) is not a Rust char, so fall back to copying the raw
             // escape text unchanged (faithful in practice: surrogate escapes in
             // an `old_string` would not match a real file char either).
-            if let Some(code) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+            if let Ok(code) = u16::from_str_radix(&hex, 16) {
                 out.push(code);
                 i += 6;
                 continue;
@@ -212,7 +206,7 @@ fn decode_unicode_escapes(s: &str) -> String {
         out.push(chars[i]);
         i += 1;
     }
-    out
+    String::from_utf16_lossy(&out)
 }
 
 /// Build the per-char escaped-or-literal pattern of `dUa` (offset 201326362) and
@@ -229,17 +223,53 @@ fn decode_unicode_escapes(s: &str) -> String {
 /// it matches that char literally. Returns the matched run (the captured `s[0]`
 /// of `e.match(new RegExp(dUa(t)))`), or `None`.
 fn match_escaped_form(file: &str, search: &str) -> Option<String> {
+    if search
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count()
+        % 2
+        == 1
+    {
+        return None;
+    }
     // Compile `search` into a sequence of single-char matchers.
-    let pattern: Vec<PatternUnit> = search.chars().map(PatternUnit::for_char).collect();
+    let pattern: Vec<PatternUnit> = search.encode_utf16().map(PatternUnit::for_unit).collect();
     if pattern.is_empty() {
         // `new RegExp("")` matches the empty string at position 0; `s[0]` == "".
         return Some(String::new());
     }
     let file_chars: Vec<char> = file.chars().collect();
+    let mut boundaries = Vec::new();
+    if search.starts_with('\\') {
+        boundaries.push(0);
+    }
+    let mut offset = 0;
+    for unit in search.encode_utf16() {
+        if unit >= 128 {
+            boundaries.push(offset);
+            offset += 6;
+        } else {
+            offset += 1;
+        }
+    }
     // Try every start position (regex `.match` finds the leftmost match).
     for start in 0..=file_chars.len() {
         if let Some(end) = try_match_at(&file_chars, start, &pattern) {
-            return Some(file_chars[start..end].iter().collect());
+            if !boundaries.iter().all(|offset| {
+                file_chars[..start + offset]
+                    .iter()
+                    .rev()
+                    .take_while(|ch| **ch == '\\')
+                    .count()
+                    % 2
+                    == 0
+            }) {
+                continue;
+            }
+            let actual: String = file_chars[start..end].iter().collect();
+            let first = file.find(&actual)?;
+            return (file[..first].chars().count() == start).then_some(actual);
         }
     }
     None
@@ -256,8 +286,7 @@ enum PatternUnit {
 }
 
 impl PatternUnit {
-    fn for_char(c: char) -> Self {
-        let code = c as u32;
+    fn for_unit(code: u16) -> Self {
         if code >= 128 {
             // `r.toString(16).padStart(4,"0")` — but `charCodeAt` yields UTF-16
             // code units (<= 0xFFFF for the BMP). Non-ASCII BMP chars are the
@@ -271,7 +300,7 @@ impl PatternUnit {
             }
             PatternUnit::Escaped { hex }
         } else {
-            PatternUnit::Literal(c)
+            PatternUnit::Literal(char::from_u32(u32::from(code)).expect("ASCII unit"))
         }
     }
 
@@ -363,6 +392,57 @@ pub fn preserve_quote_style(old_string: &str, actual_old_string: &str, new_strin
     result
 }
 
+/// Native `qSr`: a match recovered by exchanging Unicode escapes and literal
+/// characters preserves that representation in the replacement as well.
+#[must_use]
+pub fn preserve_escape_style(old: &str, actual: &str, replacement: &str) -> String {
+    if old == actual {
+        return replacement.to_owned();
+    }
+    if contains_non_ascii_bmp(old) && match_escaped_form(actual, old).as_deref() == Some(actual) {
+        let mut spellings = std::collections::HashMap::new();
+        let mut actual_position = 0usize;
+        let mut uppercase = 0usize;
+        let mut lowercase = 0usize;
+        for unit in old.encode_utf16() {
+            if unit >= 128 {
+                let Some(hex) = actual.get(actual_position + 2..actual_position + 6) else {
+                    return replacement.to_owned();
+                };
+                for byte in hex.bytes() {
+                    uppercase += usize::from((b'A'..=b'F').contains(&byte));
+                    lowercase += usize::from((b'a'..=b'f').contains(&byte));
+                }
+                spellings.insert(unit, hex);
+                actual_position += 6;
+            } else {
+                actual_position += 1;
+            }
+        }
+        if actual_position != actual.len() {
+            return replacement.to_owned();
+        }
+        let mut output = String::new();
+        for unit in replacement.encode_utf16() {
+            if unit < 128 {
+                output.push(char::from_u32(u32::from(unit)).expect("ASCII unit"));
+            } else if let Some(hex) = spellings.get(&unit) {
+                output.push_str("\\u");
+                output.push_str(hex);
+            } else if uppercase > lowercase {
+                output.push_str(&format!("\\u{unit:04X}"));
+            } else {
+                output.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+        return output;
+    }
+    if contains_unicode_escape(old) && decode_unicode_escapes(old) == actual {
+        return decode_unicode_escapes(replacement);
+    }
+    replacement.to_owned()
+}
+
 /// A quote character preceded by whitespace, start of string, or opening
 /// punctuation is treated as an opening quote. Port of `isOpeningContext`
 /// (`utils.ts:138-154`).
@@ -435,6 +515,39 @@ fn apply_curly_single_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_322_matching_and_replacement_representation() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_mutation_322.json"
+        ))
+        .unwrap();
+        for case in fixture["edits"].as_array().unwrap() {
+            let file = case["file"].as_str().unwrap();
+            let old = case["old"].as_str().unwrap();
+            let actual = find_actual_string(file, old);
+            let expected = &case["expected"];
+            assert_eq!(
+                actual.as_deref(),
+                expected["actual"].as_str(),
+                "{}",
+                case["name"]
+            );
+            if let Some(actual) = actual {
+                let replacement = preserve_escape_style(
+                    old,
+                    &actual,
+                    &preserve_quote_style(old, &actual, case["replacement"].as_str().unwrap()),
+                );
+                assert_eq!(
+                    replacement,
+                    expected["replacement"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
 
     #[test]
     fn normalize_quotes_maps_curly_to_straight() {
@@ -567,7 +680,7 @@ mod tests {
         assert!(contains_non_ascii_bmp("\u{2018}")); // curly quote is BMP non-ASCII
         assert!(!contains_non_ascii_bmp("plain ascii"));
         // Astral-plane (> U+FFFF) does NOT satisfy Slo.
-        assert!(!contains_non_ascii_bmp("\u{1F600}"));
+        assert!(contains_non_ascii_bmp("\u{1F600}"));
     }
 
     #[test]

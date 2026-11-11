@@ -27,6 +27,9 @@ grep-regex = "=0.1.13"
 grep-searcher = "=0.1.14"
 grep-matcher = "=0.1.7"
 thiserror.workspace = true
+dirs = "5"
+unicode-normalization = "=0.1.25"
+uuid = { version = "1.10", features = ["v4"] }
 # Image decode/resize/re-encode for FileRead image reading (claude-code's image
 # path). Optional + gated behind `image-read`; matches codex (no defaults, the
 # four codecs only). base64 encodes the processed image for the Anthropic source.

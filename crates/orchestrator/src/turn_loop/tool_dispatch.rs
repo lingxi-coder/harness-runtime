@@ -2416,6 +2416,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             available_tool_names: None,
             options: ToolUseOptions {
+                read_context_room: None,
                 session_interactive: Some(self.prompt_is_interactive()),
                 prompt_policy,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
@@ -4032,6 +4033,149 @@ mod dispatch_facts_tests {
     }
 }
 
+async fn read_context_room_for_query(
+    orch: &ConversationOrchestrator,
+    model: &str,
+    profile: Option<&str>,
+    messages: &[ConversationMessage],
+) -> Option<std::sync::Arc<tool_api::read_context_room::ReadContextRoom>> {
+    // Unknown provider limits cannot authorize a larger read. Production route
+    // resolution supplies the same concrete input ceiling used by compaction.
+    let resolved = orch.api.context_budget(model, profile).ok().flatten()?;
+    resolved.effective_input_budget?;
+    let (enabled, settings_window) = orch.auto_compact_settings_for(model, profile);
+    let input_budget = orch
+        .api
+        .compact_input_budget(model, profile, settings_window, enabled)
+        .ok()
+        .flatten()?;
+    let threshold = orch.api.compact_threshold(model, profile, input_budget);
+    let held = orch.current_live_context_usage_for(messages).await;
+    Some(std::sync::Arc::new(
+        tool_api::read_context_room::ReadContextRoom::new(threshold, held)
+            .with_route(model.to_owned(), profile.map(str::to_owned)),
+    ))
+}
+
+#[cfg(test)]
+mod read_context_room_host_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::sync::Arc;
+
+    struct RouteApi;
+
+    #[async_trait::async_trait]
+    impl crate::OrchestratorApiClient for RouteApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            Err(llm_runtime::LlmError::Transport {
+                message: "unused request".into(),
+            })
+        }
+
+        fn context_budget(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<Option<llm_runtime::ResolvedContext>, llm_runtime::LlmError> {
+            if model != "known" || profile != Some("provider") {
+                return Ok(None);
+            }
+            let route: lingxi_llm_client::protocol::ProviderProfile =
+                serde_json::from_value(serde_json::json!({
+                    "provider_id":"custom", "profile_name":"provider",
+                    "base_url":"https://example.test", "protocol":"open_ai_chat", "auth":"none",
+                    "models":[{"request_model":model,"display_model":model,"billing_model":model,
+                        "metadata":{"contextWindowTokens":100000}}]
+                }))
+                .unwrap();
+            Ok(Some(
+                lingxi_llm_client::client::context::resolve_context(
+                    &route,
+                    &route.models[0],
+                    &Default::default(),
+                    None,
+                    &Default::default(),
+                )
+                .unwrap(),
+            ))
+        }
+
+        fn compact_input_budget(
+            &self,
+            _model: &str,
+            _profile: Option<&str>,
+            _settings_window: Option<u64>,
+            _enabled: bool,
+        ) -> Result<Option<u64>, llm_runtime::LlmError> {
+            Ok(Some(80_000))
+        }
+
+        fn compact_threshold(&self, _model: &str, _profile: Option<&str>, budget: u64) -> u64 {
+            budget - 13_000
+        }
+    }
+
+    fn orchestrator(api: Arc<dyn crate::OrchestratorApiClient>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[tokio::test]
+    async fn read_context_room_unknown_route_is_unavailable() {
+        let orch = orchestrator(Arc::new(MockApiClient::new(Vec::new())));
+        assert!(read_context_room_for_query(&orch, "unknown", None, &[])
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn read_context_room_uses_host_threshold_and_clones_share_claims() {
+        let orch = orchestrator(Arc::new(RouteApi));
+        let messages = vec![ConversationMessage::user(
+            MessageId::new(),
+            "held input".into(),
+        )];
+        let held = orch.current_live_context_usage_for(&messages).await;
+        let room = read_context_room_for_query(&orch, "known", Some("provider"), &messages)
+            .await
+            .unwrap();
+        let expected = tool_api::read_context_room::ReadContextRoom::new(67_000, held);
+        assert_eq!(room.room_tokens(0), expected.room_tokens(0));
+        assert!(room.matches_route("known", Some("provider")));
+        assert!(!room.matches_route("known", Some("another account")));
+        let mut context = ToolUseContext::model_seed("known".into());
+        context.options.read_context_room = Some(room);
+        let sibling = context.clone();
+        sibling
+            .options
+            .read_context_room
+            .as_ref()
+            .unwrap()
+            .claim(1_000);
+        assert_eq!(context.options.read_context_room.unwrap().claimed(), 1_000);
+        assert!(
+            read_context_room_for_query(&orch, "unknown", Some("provider"), &messages)
+                .await
+                .is_none()
+        );
+    }
+}
+
 fn main_thread_fork_effort(orch: &ConversationOrchestrator) -> Option<serde_json::Value> {
     orch.model_runtime
         .current_effort
@@ -4053,10 +4197,14 @@ pub(crate) async fn streaming_tool_context_base(
         ),
         None => orch.current_prompt_route().await,
     };
+    let read_context_room =
+        read_context_room_for_query(orch, &main_loop_model, model_profile.as_deref(), &messages)
+            .await;
     ToolUseContext {
         is_scheduled_turn: crate::scheduled_turn::current().is_some(),
         available_tool_names: None,
         options: ToolUseOptions {
+            read_context_room,
             session_interactive: Some(orch.prompt_is_interactive()),
             prompt_policy,
             output_style_is_default: Some(orch.active_output_style_is_default().await),
@@ -4212,6 +4360,22 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
         {
             return Ok(DeferredToolDispatch::default());
         }
+        let read_context_room = if let Some(context) = inherited_context.as_ref() {
+            context.options.read_context_room.clone()
+        } else {
+            let (model, profile) = match orch.current_prompt_policy().await.ok() {
+                Some(policy) => (
+                    policy.target.request_model.clone(),
+                    policy.target.profile_name.clone(),
+                ),
+                None => orch.current_prompt_route().await,
+            };
+            let messages = match dispatch_facts.as_ref() {
+                Some(facts) => facts.query_history.to_vec(),
+                None => orch.session.lock().await.model_context_history(),
+            };
+            read_context_room_for_query(orch, &model, profile.as_deref(), &messages).await
+        };
         let mod_host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
         } else {
@@ -4229,6 +4393,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 None,
                 prepared_tool.clone(),
                 inherited_context.clone(),
+                read_context_room.clone(),
                 publication_fence.clone(),
             )
             .await;
@@ -4279,6 +4444,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         None,
                         prepared_tool.clone(),
                         inherited_context.clone(),
+                        read_context_room.clone(),
                         publication_fence.clone(),
                     )
                     .await?,
@@ -4311,6 +4477,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             let dispatch_facts_for_core = per_tool_facts.clone();
             let prepared_tool_for_core = prepared_tool.clone();
             let inherited_context_for_core = inherited_context.clone();
+            let read_context_room_for_core = read_context_room.clone();
             let publication_fence_for_core = publication_fence.clone();
             let mod_log_output = orch.output.clone();
             let mod_toast_output = orch.output.clone();
@@ -4351,6 +4518,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         let dispatch_facts = dispatch_facts_for_core.clone();
                         let prepared_tool = prepared_tool_for_core.clone();
                         let inherited_context = inherited_context_for_core.clone();
+                        let read_context_room = read_context_room_for_core.clone();
                         let publication_fence = publication_fence_for_core.clone();
                         async move {
                             let Some(next_event) = next_event else {
@@ -4388,6 +4556,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                     None,
                                     prepared_tool,
                                     inherited_context,
+                                    read_context_room,
                                     publication_fence,
                                 )
                                 .await?;
@@ -4529,6 +4698,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         None,
                         prepared_tool.clone(),
                         inherited_context.clone(),
+                        read_context_room.clone(),
                         publication_fence.clone(),
                     )
                     .await?;
@@ -4791,6 +4961,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         None,
                         prepared_tool.clone(),
                         inherited_context.clone(),
+                        read_context_room.clone(),
                         publication_fence.clone(),
                     )
                     .await?,
@@ -5181,6 +5352,7 @@ async fn dispatch_tool_uses_tracked_deferred_core(
     agent_spawn_provenance: Option<lingxi_core::host::subagent_spawn::AgentSpawnProvenance>,
     prepared_tool: Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>>,
     inherited_context: Option<ToolUseContext>,
+    read_context_room: Option<std::sync::Arc<tool_api::read_context_room::ReadContextRoom>>,
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) -> Result<DeferredToolDispatch, OrchestratorError> {
     // The core holds the full hook/permission/execution state machine. Keep
@@ -5197,6 +5369,7 @@ async fn dispatch_tool_uses_tracked_deferred_core(
             agent_spawn_provenance,
             prepared_tool,
             inherited_context,
+            read_context_room,
             publication_fence,
         )
     })
@@ -5227,6 +5400,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_with_tool(
             agent_spawn_provenance,
             Some(prepared_tool),
             inherited_context,
+            None,
             publication_fence,
         )
     })
@@ -5249,6 +5423,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
     agent_spawn_provenance: Option<lingxi_core::host::subagent_spawn::AgentSpawnProvenance>,
     prepared_tool: Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>>,
     inherited_context: Option<ToolUseContext>,
+    read_context_room: Option<std::sync::Arc<tool_api::read_context_room::ReadContextRoom>>,
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) -> Result<DeferredToolDispatch, OrchestratorError> {
     if publication_fence
@@ -5465,6 +5640,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             )
         };
         let mut ctx = streaming_tool_context_base(orch, messages).await;
+        ctx.options.read_context_room = read_context_room.clone();
         if let Some(consent) = permission_consent.as_ref() {
             ctx.messages
                 .push(ConversationMessage::user(MessageId::new(), consent.clone()));
@@ -5489,6 +5665,20 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             inherited.cancel = ctx.cancel;
             inherited.agent_spawn_provenance = ctx.agent_spawn_provenance;
             ctx = inherited;
+        }
+        if let Some(room) = ctx.options.read_context_room.as_ref() {
+            let measured = orch
+                .model_runtime
+                .main_loop_latest_assistant_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|usage| Some(usage.message_id) == ctx.assistant_message_id)
+                .map(|usage| usage.context_tokens);
+            if let Some(tokens) = measured.filter(|tokens| tokens.is_finite() && *tokens > 0.0) {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                room.observe_usage(tokens.ceil() as u64);
+            }
         }
         ctx.native_query_depth = tool_dispatch_facts
             .as_ref()

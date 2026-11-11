@@ -304,12 +304,8 @@ pub(crate) fn rooted_location(
         .max_by_key(|(root, _)| root.components().count())
 }
 
-/// Window size for binary detection — spec §7 lock.
-///
-/// Matches claude-code's `src/tools/FileReadTool/utils.ts` first-pass
-/// NUL-byte scan. A file whose first 8 KB contain any `0x00` byte is
-/// classified as binary and rejected.
-pub const NUL_SCAN_WINDOW: usize = 8 * 1024;
+/// Native 2.1.322's decimal 8 KB window for the first-pass NUL scan.
+pub const NUL_SCAN_WINDOW: usize = 8000;
 
 /// True iff `prefix` (capped at [`NUL_SCAN_WINDOW`]) contains a NUL byte.
 #[must_use]

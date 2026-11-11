@@ -56,7 +56,9 @@ use tool_api::util::path_validation::{
 };
 use tool_api::BuiltinToolContext;
 
-use crate::grep::{is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG};
+use crate::grep::{
+    is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG, SEARCH_INCOMPLETE_NOTE,
+};
 use crate::shared::{
     open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
     search_path_is_read_denied, search_read_deny_policy, ReadDenyPolicy, SearchResolutionError,
@@ -87,10 +89,24 @@ fn map_glob_result_text(data: &Utf16JsonProjection) -> Option<Utf16JsonProjectio
     let filenames = (0..count)
         .map(|index| data.string_units(&format!("/filenames/{index}")))
         .collect::<Option<Vec<_>>>()?;
+    let mut units = if data
+        .at_pointer("/timedOut")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        format!("{SEARCH_INCOMPLETE_NOTE}\n\n")
+            .encode_utf16()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if filenames.is_empty() {
-        return Some(NO_FILES_FOUND.into());
+        units.extend(NO_FILES_FOUND.encode_utf16());
+        return Some(
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("Glob model text remains a root-string projection"),
+        );
     }
-    let mut units = Vec::new();
     for (index, filename) in filenames.iter().enumerate() {
         if index > 0 {
             units.push(b'\n' as u16);
@@ -203,6 +219,53 @@ fn extract_glob_base_directory(pattern: &str) -> (String, String) {
     }
 }
 
+/// Native `Mar`: remove a redundant literal prefix that repeats the end of
+/// the selected search directory. A leading slash anchors the remaining glob.
+fn repeated_root_pattern(pattern: &str, root: &str) -> String {
+    let pieces: Vec<_> = pattern.split('/').collect();
+    let literal_count = pieces
+        .iter()
+        .take(pieces.len().saturating_sub(1))
+        .take_while(|piece| {
+            !piece.is_empty() && !piece.contains(['*', '?', '[', ']', '{', '}', '!'])
+        })
+        .count();
+    let root_pieces: Vec<_> = root
+        .split(['/', '\\'])
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    for count in (1..=literal_count).rev() {
+        if count <= root_pieces.len() && pieces[..count] == root_pieces[root_pieces.len() - count..]
+        {
+            return format!("/{}", pieces[count..].join("/"));
+        }
+    }
+    pattern.to_string()
+}
+
+/// Keep the original interpretation when its literal prefix actually names a
+/// nested directory. Native `Iar` uses lstat and refuses symlink directories.
+fn literal_prefix_is_directory(root: &Path, pattern: &str, stripped: &str) -> bool {
+    let pieces: Vec<_> = pattern.split('/').collect();
+    let remaining = stripped
+        .strip_prefix('/')
+        .unwrap_or(stripped)
+        .split('/')
+        .count();
+    let count = pieces.len().saturating_sub(remaining).max(1);
+    let mut candidate = root.to_path_buf();
+    for piece in pieces.iter().take(count) {
+        candidate.push(piece);
+        let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
+            return false;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return false;
+        }
+    }
+    count > 0
+}
+
 /// `GlobTool` — pattern walker.
 pub struct GlobTool {
     ctx: BuiltinToolContext,
@@ -259,16 +322,47 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type":"object",
-        "required":["durationMs","numFiles","filenames","truncated"],
-        "properties":{
-            "durationMs":{"type":"number"},
-            "numFiles":{"type":"number"},
-            "filenames":{"type":"array","items":{"type":"string"}},
-            "truncated":{"type":"boolean"},
-            "totalMatches":{"type":"number"},
-            "countIsComplete":{"type":"boolean"}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "durationMs",
+        "numFiles",
+        "filenames",
+        "truncated"
+      ],
+      "properties": {
+        "durationMs": {
+          "type": "number",
+          "description": "Time taken to execute the search in milliseconds"
+        },
+        "numFiles": {
+          "type": "number",
+          "description": "Number of file paths returned (after any truncation)"
+        },
+        "filenames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of file paths that match the pattern"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Whether results were truncated (limited to 100 files)"
+        },
+        "totalMatches": {
+          "type": "number",
+          "description": "Total number of matching files before truncation. A lower bound when countIsComplete is false. Absent on results persisted by CLI versions predating this field."
+        },
+        "countIsComplete": {
+          "type": "boolean",
+          "description": "Whether totalMatches is the exact total (true) or a floor because the underlying search truncated its own output (false). Absent on results persisted by CLI versions predating this field."
+        },
+        "timedOut": {
+          "type": "boolean",
+          "description": "True when the time limit stopped the search after these paths were read, so more matches may exist. Absent otherwise."
         }
+      }
     }))
 });
 
@@ -331,6 +425,11 @@ impl Tool for GlobTool {
                 },
                 OutputField {
                     name: "countIsComplete",
+                    kind: OutputFieldType::Boolean,
+                    required: false,
+                },
+                OutputField {
+                    name: "timedOut",
                     kind: OutputFieldType::Boolean,
                     required: false,
                 },
@@ -451,9 +550,15 @@ impl Tool for GlobTool {
         // fallback (`cwd_now()`==`ctx.workspace`) equals the former
         // `trusted_dirs.first()` boot cwd, so behavior is byte-identical until a
         // Bash `cd` moves the shared cell.
-        let base = crate::input_string(&input, "path")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.cwd_now());
+        let absolute_pattern = Path::new(pattern).is_absolute();
+        let base = if absolute_pattern {
+            self.cwd_now()
+        } else {
+            match crate::input_string(&input, "path").filter(|path| !path.is_empty()) {
+                Some(path) => crate::checked_model_file_path(path, &self.cwd_now())?,
+                None => self.cwd_now(),
+            }
+        };
 
         let started = Instant::now();
 
@@ -461,18 +566,19 @@ impl Tool for GlobTool {
         // base dir + relative remainder — ripgrep's `--glob` only works with
         // relative patterns (`utils/glob.ts:76-84`). The OverrideBuilder is
         // anchored at the (re-rooted) base, so the remainder is what we register.
-        let (base, pattern): (PathBuf, String) = if Path::new(pattern).is_absolute() {
+        let (base, mut pattern): (PathBuf, String) = if absolute_pattern {
             let (base_dir, relative_pattern) = extract_glob_base_directory(pattern);
             if base_dir.is_empty() {
                 (base, pattern.to_string())
             } else {
-                (PathBuf::from(base_dir), relative_pattern)
+                (
+                    crate::checked_model_file_path(&base_dir, &self.cwd_now())?,
+                    relative_pattern,
+                )
             }
         } else {
             (base, pattern.to_string())
         };
-        let pattern = pattern.as_str();
-
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
@@ -502,6 +608,15 @@ impl Tool for GlobTool {
                 return Err(ToolError::PathBlocked { path: base });
             }
         };
+
+        if !absolute_pattern {
+            let stripped = repeated_root_pattern(&pattern, &base.to_string_lossy());
+            if stripped != pattern && !literal_prefix_is_directory(&canon_base, &pattern, &stripped)
+            {
+                pattern = stripped;
+            }
+        }
+        let pattern = pattern.as_str();
 
         // --- Build the `--glob <pattern>` whitelist override (`utils/glob.ts:100-107`) ---
         // In OverrideBuilder, a bare glob is a whitelist and (gitignore/ripgrep
@@ -629,50 +744,24 @@ impl Tool for GlobTool {
             .map(|(p, _)| to_relative_path(p, &cwd_for_rel))
             .collect();
 
-        // Model-facing string (`mapToolResultToToolResultBlockParam`,
-        // `GlobTool.ts:177-197`): "No files found" when empty, else the joined
-        // paths plus the truncation advisory when capped.
-        let content = if matches.is_empty() {
-            NO_FILES_FOUND.to_string()
-        } else if truncated {
-            // Binary GlobTool `zem(e)`: the live walk always sets
-            // `totalMatches` (defined) and `countIsComplete=true`, so the
-            // truncation notice is the DYNAMIC count message, not the static
-            // "(Results are truncated…)" fallback (which only fires when
-            // `totalMatches===undefined` — never on this path).
-            let shown = matches.len();
-            let remaining = total - shown;
-            format!(
-                "{}\n(Showing {shown} of {total} matching files; {remaining} more are not listed. Narrow the pattern or path to see the rest.)",
-                matches.join("\n")
-            )
-        } else {
-            matches.join("\n")
-        };
-
-        // `data` is the structured metadata block, byte-1:1 with claude-code's
-        // Glob `call()` return (`GlobTool.ts`): `{filenames, durationMs, numFiles,
-        // truncated, totalMatches, countIsComplete}`, in this field order/casing.
-        // - `filenames` (was `matches`): the cwd-relative paths.
-        // - `durationMs`: wall-clock since `started` (TS `Date.now()-o`).
-        // - `numFiles`: `filenames.len()` (after truncation), TS `u.length`.
-        // - `totalMatches`: total hits BEFORE the 100-cap (TS `h.length`).
-        // - `countIsComplete`: `true` — the in-process walk never truncates its
-        //   own output upstream (TS `!f`, where `f` is always `false` here).
-        // The model-facing string moves OUT of `data` onto `model_content` so the
-        // model text is the tool's STRING, not a JSON dump of `data`.
         let duration_ms = started.elapsed().as_millis() as u64;
         let num_files = matches.len();
+        let mut data = crate::generated_result(&json!({
+            "filenames": matches,
+            "durationMs": duration_ms,
+            "numFiles": num_files,
+            "truncated": truncated,
+            "totalMatches": total,
+            "countIsComplete": !timed_out,
+        }));
+        if timed_out {
+            data.set_field("timedOut", "true".into())
+                .expect("Glob result is an object");
+        }
+        let model_content = map_glob_result_text(&data);
         Ok(ToolCallResult {
-            data: crate::generated_result(&json!({
-                "filenames": matches,
-                "durationMs": duration_ms,
-                "numFiles": num_files,
-                "truncated": truncated,
-                "totalMatches": total,
-                "countIsComplete": true,
-            })),
-            model_content: Some(content.into()),
+            data,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -757,6 +846,104 @@ fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_322_glob_projections_and_repeated_roots() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../scripts/tests/fixtures/file_search_322.json"
+        )))
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        for case in fixture["projections"].as_array().unwrap() {
+            if case["tool"] != "glob" {
+                continue;
+            }
+            let input = crate::generated_result(&case["input"]);
+            assert_eq!(
+                mapped_display(&input).as_deref(),
+                case["expected"]["content"].as_str(),
+                "{}",
+                case["name"]
+            );
+            let mut valid = input.clone();
+            valid.set_field("durationMs", "0".into()).unwrap();
+            valid.set_field("numFiles", "0".into()).unwrap();
+            let parsed = tool.parse_output(&valid).await.unwrap();
+            assert_eq!(
+                parsed
+                    .at_pointer("/timedOut")
+                    .and_then(|value| value.as_bool()),
+                input
+                    .at_pointer("/timedOut")
+                    .and_then(|value| value.as_bool())
+            );
+        }
+        for case in fixture["repeatedRoots"].as_array().unwrap() {
+            let input = &case["input"];
+            let pattern = input["pattern"].as_str().unwrap();
+            let root = input["root"].as_str().unwrap();
+            let real_root = tmp.path().join("project");
+            std::fs::create_dir_all(&real_root).unwrap();
+            let nested = real_root.join("project");
+            if nested.symlink_metadata().is_ok() {
+                if nested.is_symlink() {
+                    std::fs::remove_file(&nested).unwrap();
+                } else {
+                    std::fs::remove_dir(&nested).unwrap();
+                }
+            }
+            if let Some(directories) = input["directories"].as_object() {
+                for (directory, kind) in directories {
+                    let relative = directory
+                        .strip_prefix(root)
+                        .unwrap()
+                        .trim_start_matches('/');
+                    let path = real_root.join(relative);
+                    if kind == "directory" {
+                        std::fs::create_dir_all(path).unwrap();
+                    } else {
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(&real_root, path).unwrap();
+                    }
+                }
+            }
+            let candidate = repeated_root_pattern(pattern, root);
+            let actual = if candidate != pattern
+                && !literal_prefix_is_directory(&real_root, pattern, &candidate)
+            {
+                candidate
+            } else {
+                pattern.to_string()
+            };
+            assert_eq!(actual, case["expected"].as_str().unwrap(), "{pattern}");
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_glob_repeated_root_searches_existing_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.rs"), "fn main() {}").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let result = GlobTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"pattern":"project/**/*.rs", "path":root})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data.number_at("/numFiles"), Some(1.0));
+        assert!(result
+            .data
+            .string_at("/filenames/0")
+            .unwrap()
+            .ends_with("project/a.rs"));
+    }
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {

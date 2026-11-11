@@ -1788,6 +1788,7 @@ impl ConversationOrchestrator {
             system_context: Default::default(),
             user_context_message: None,
             tool_use_options: tool_api::ToolUseOptions {
+                read_context_room: None,
                 session_interactive: None,
                 prompt_policy: None,
                 output_style_is_default: Some(self.active_output_style_is_default().await),
@@ -2276,6 +2277,7 @@ impl ConversationOrchestrator {
             system_context: std::collections::HashMap::new(),
             user_context_message,
             tool_use_options: tool_api::ToolUseOptions {
+                read_context_room: None,
                 session_interactive: None,
                 prompt_policy: Some(prompt_policy),
                 output_style_is_default: Some(self.active_output_style_is_default().await),

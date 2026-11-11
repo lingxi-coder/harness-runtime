@@ -1,0 +1,148 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "filePath",
+    "content",
+    "structuredPatch",
+    "originalFile"
+  ],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "create",
+        "update"
+      ],
+      "description": "Whether a new file was created or an existing file was updated"
+    },
+    "filePath": {
+      "type": "string",
+      "description": "The path to the file that was written"
+    },
+    "content": {
+      "type": "string",
+      "description": "The content that was written to the file"
+    },
+    "structuredPatch": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "oldStart",
+          "oldLines",
+          "newStart",
+          "newLines",
+          "lines"
+        ],
+        "properties": {
+          "oldStart": {
+            "type": "number"
+          },
+          "oldLines": {
+            "type": "number"
+          },
+          "newStart": {
+            "type": "number"
+          },
+          "newLines": {
+            "type": "number"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Diff patch showing the changes (empty when nothing changed, the diff timed out, or — with originalFile null on an update — the previous content was too large to diff)"
+    },
+    "originalFile": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The original file content before the write (null for new files, or when the previous content was too large to include)"
+    },
+    "gitDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "status",
+        "additions",
+        "deletions",
+        "changes",
+        "patch"
+      ],
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "modified",
+            "added"
+          ]
+        },
+        "additions": {
+          "type": "number"
+        },
+        "deletions": {
+          "type": "number"
+        },
+        "changes": {
+          "type": "number"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "GitHub owner/repo when available"
+        }
+      }
+    },
+    "userModified": {
+      "type": "boolean",
+      "description": "True when the user edited the proposed content in the permission dialog before accepting"
+    },
+    "staged": {
+      "type": "boolean",
+      "description": "True when the write was held for the machine owner to review instead of written; the file is unchanged"
+    },
+    "stagedWording": {
+      "type": "string",
+      "enum": [
+        "review",
+        "card",
+        "cloud",
+        "linked",
+        "policy"
+      ],
+      "description": "@internal Which message a staged result gave (see stagedResultWording); absent unless staged"
+    },
+    "memdirStamped": {
+      "type": "boolean",
+      "description": "LingXi retained native across-process metadata"
+    },
+    "syncedSkillNext": {
+      "type": "string",
+      "enum": [
+        "save_tool",
+        "propose_tool",
+        "send_file",
+        "no_save_tool",
+        "report_unsaved"
+      ],
+      "description": "LingXi retained native across-process metadata"
+    }
+  }
+}

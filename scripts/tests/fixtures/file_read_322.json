@@ -1,0 +1,2685 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "UTF-16 token estimates",
+      "start": 270089174,
+      "end": 270089590,
+      "sha256": "edf93f4bb07cc165d37bda0ca9e0c708df3556f677e17d9560f99ba64661cc05"
+    },
+    {
+      "name": "line numbering",
+      "start": 261794014,
+      "end": 261794374,
+      "sha256": "4a70600099a3637da8664777392955d9c6ff0944c54bb746872d023aded608a5"
+    },
+    {
+      "name": "UTF-16 identity copy",
+      "start": 260462017,
+      "end": 260462323,
+      "sha256": "bfb3e4e6e725909a3e13582d6543d1621c15793b92a29d303029b85ef1c5ed94"
+    },
+    {
+      "name": "buffered text range selection",
+      "start": 270507280,
+      "end": 270508328,
+      "sha256": "27a9a0fad3acc466e59634b90f5c30ea74345830ce14d107141dbe18afd66d57"
+    },
+    {
+      "name": "partial view prefix",
+      "start": 265923500,
+      "end": 265923542,
+      "sha256": "50e844d87129a30d63809a320998b0568cb1e9320366567354d9e161e3b42356"
+    },
+    {
+      "name": "full-read token overflow shrink",
+      "start": 274321023,
+      "end": 274322396,
+      "sha256": "ba628f8588a1d50ebb431985201fb98b63efab9d776fb891a81dc935ffb225ea"
+    },
+    {
+      "name": "text result mapper",
+      "start": 274306205,
+      "end": 274306973,
+      "sha256": "ca2c77e3bb1ca8a0c864c126409051d59acfe8b401667142c3901906665dac5f"
+    },
+    {
+      "name": "Read call always dispatches fresh I/O",
+      "start": 274306979,
+      "end": 274309041,
+      "sha256": "feb5c0d2f6596b7b8fc4a713fda43e6d2f7636bdc05335d737cea33106642dd2"
+    },
+    {
+      "name": "large-read room and raised limits",
+      "start": 274311224,
+      "end": 274311772,
+      "sha256": "91974909516b5a573a0793b85d27a0d845333c3d114dad4c8c842b7d4371f1e7"
+    },
+    {
+      "name": "large-read room guidance",
+      "start": 274311944,
+      "end": 274312156,
+      "sha256": "78536dc634dbf5c145511a124656408ae35a6bb4e9ea9251651dd6ca19fa07b1"
+    },
+    {
+      "name": "model bytes per token",
+      "start": 264401421,
+      "end": 264401792,
+      "sha256": "3dd66de3c2006f1b333c44bec9df221d9f3784908e8ea6694e867500fbd67e0f"
+    },
+    {
+      "name": "large-read guidance constants",
+      "start": 264884607,
+      "end": 264885037,
+      "sha256": "995fc7ff9d0bec66297a3eee866b729bf7436d5b5f9bbda55d0a4e4f13ad042d"
+    },
+    {
+      "name": "token overflow error",
+      "start": 264885045,
+      "end": 264885406,
+      "sha256": "bbcf7ea631876f23b241a527e86237f47cc31a6625b3d03dfb0616c5c19751d0"
+    },
+    {
+      "name": "Read token validation with offline fallback",
+      "start": 274312734,
+      "end": 274313018,
+      "sha256": "a9e74c56e607fd1bf2af6190031e6db778ec1bcac296fb1d09ef1de5d592e585"
+    },
+    {
+      "name": "Read prompt renderer",
+      "start": 265923950,
+      "end": 265926023,
+      "sha256": "30db86a214f3b2ff5ab022484bd714c51af530814148bf9eeb40c241acb6f9b5"
+    },
+    {
+      "name": "Read prompt constants",
+      "start": 265923500,
+      "end": 265923950,
+      "sha256": "66220555f91956c91c9ddd5dca76b402d8a51bd34783086cb325b64b0fad5696"
+    },
+    {
+      "name": "Read verification guidance",
+      "start": 265922856,
+      "end": 265923017,
+      "sha256": "b07e1f44f0de219eaba6217f5850088ddd2c02767d3c608c01ee2d9f4d99d730"
+    },
+    {
+      "name": "Read rewritten verification guidance",
+      "start": 265896443,
+      "end": 265896701,
+      "sha256": "9ae929df2cb1077b6c752e54247bbfae55b8b5a661845f8094a3fd2ca37da442"
+    },
+    {
+      "name": "default Read byte limit",
+      "start": 261789877,
+      "end": 261789892,
+      "sha256": "3e3ec3ff73b63361271820d28cb935d02d7560b8b5c3e771f5644d5b4b62524d"
+    },
+    {
+      "name": "Read input schema",
+      "start": 274292273,
+      "end": 274293172,
+      "sha256": "2ab9e1dc6c6c6b5ef2814b55a247a89a0cc5c9e0f467aaa30e8e98fc9ac816e2"
+    }
+  ],
+  "tokenCases": [
+    {
+      "input": {
+        "content": "",
+        "ext": "txt"
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "",
+        "ext": "json"
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "",
+        "ext": "jsonl"
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "",
+        "ext": "jsonc"
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "a",
+        "ext": "txt"
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "a",
+        "ext": "json"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "a",
+        "ext": "jsonl"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "a",
+        "ext": "jsonc"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "ab",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "ab",
+        "ext": "json"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "ab",
+        "ext": "jsonl"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "ab",
+        "ext": "jsonc"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "abc",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "abc",
+        "ext": "json"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "abc",
+        "ext": "jsonl"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "abc",
+        "ext": "jsonc"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "abcde",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "abcde",
+        "ext": "json"
+      },
+      "expected": 3
+    },
+    {
+      "input": {
+        "content": "abcde",
+        "ext": "jsonl"
+      },
+      "expected": 3
+    },
+    {
+      "input": {
+        "content": "abcde",
+        "ext": "jsonc"
+      },
+      "expected": 3
+    },
+    {
+      "input": {
+        "content": "中文",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "中文",
+        "ext": "json"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "中文",
+        "ext": "jsonl"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "中文",
+        "ext": "jsonc"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "😀",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "😀",
+        "ext": "json"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "😀",
+        "ext": "jsonl"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "😀",
+        "ext": "jsonc"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "中😀文",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "中😀文",
+        "ext": "json"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "中😀文",
+        "ext": "jsonl"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "中😀文",
+        "ext": "jsonc"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "éééé",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "éééé",
+        "ext": "json"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "éééé",
+        "ext": "jsonl"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "éééé",
+        "ext": "jsonc"
+      },
+      "expected": 2
+    },
+    {
+      "input": {
+        "content": "  ",
+        "ext": "txt"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "  ",
+        "ext": "json"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "  ",
+        "ext": "jsonl"
+      },
+      "expected": 1
+    },
+    {
+      "input": {
+        "content": "  ",
+        "ext": "jsonc"
+      },
+      "expected": 1
+    }
+  ],
+  "rangeCases": [
+    {
+      "input": {
+        "content": "",
+        "offset": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (2). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (2). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a\n",
+        "numLines": 2,
+        "totalLines": 2,
+        "numberedContent": "1\ta\n2\t",
+        "modelContent": "1\ta\n2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a\nb\n",
+        "numLines": 3,
+        "totalLines": 3,
+        "numberedContent": "1\ta\n2\tb\n3\t",
+        "modelContent": "1\ta\n2\tb\n3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "b",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "2\tb",
+        "modelContent": "2\tb"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 3 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\nb\r\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 3 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a\r\n",
+        "numLines": 2,
+        "totalLines": 2,
+        "numberedContent": "1\ta\n2\t",
+        "modelContent": "1\ta\n2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a\r",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\r\r\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 1
+      },
+      "expected": {
+        "content": "\r\n",
+        "numLines": 2,
+        "totalLines": 2,
+        "numberedContent": "1\t\n2\t",
+        "modelContent": "1\t\n2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "\r",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "1\t",
+        "modelContent": "1\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\r\r\n\r",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "\n",
+        "numLines": 2,
+        "totalLines": 2,
+        "numberedContent": "1\t\n2\t",
+        "modelContent": "1\t\n2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "1\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "2\t"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 2,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 2 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a\rb",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "1\ta\rb",
+        "modelContent": "1\ta\rb"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a\rb",
+        "numLines": 1,
+        "totalLines": 1,
+        "numberedContent": "1\ta\rb",
+        "modelContent": "1\ta\rb"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (2). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (3). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "a\rb\r",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 1,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 1 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "a\nb\n",
+        "numLines": 3,
+        "totalLines": 3,
+        "numberedContent": "1\ta\n2\tb\n3\t",
+        "modelContent": "1\ta\n2\tb\n3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "a",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "1\ta",
+        "modelContent": "1\ta"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "b",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "2\tb",
+        "modelContent": "2\tb"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 3 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿a\nb\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 3 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 1
+      },
+      "expected": {
+        "content": "中\n😀\n",
+        "numLines": 3,
+        "totalLines": 3,
+        "numberedContent": "1\t中\n2\t😀\n3\t",
+        "modelContent": "1\t中\n2\t😀\n3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 1,
+        "limit": 1
+      },
+      "expected": {
+        "content": "中",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "1\t中",
+        "modelContent": "1\t中"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 2,
+        "limit": 1
+      },
+      "expected": {
+        "content": "😀",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "2\t😀",
+        "modelContent": "2\t😀"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 3,
+        "limit": 2
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "3\t"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 99,
+        "limit": 3
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (99). The file has 3 lines.</system-reminder>"
+      }
+    },
+    {
+      "input": {
+        "content": "中\n😀\n",
+        "offset": 1,
+        "limit": 0
+      },
+      "expected": {
+        "content": "",
+        "numLines": 0,
+        "totalLines": 3,
+        "numberedContent": "",
+        "modelContent": "<system-reminder>Warning: the file exists but is shorter than the provided offset (1). The file has 3 lines.</system-reminder>"
+      }
+    }
+  ],
+  "truncationCases": [
+    {
+      "input": {
+        "content": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 20,
+        "maxTokens": 3,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "中中中中中中中中中中",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 10 of 80 characters (20 tokens, cap 3); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 20,
+        "maxTokens": 7,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "中中中中中中中中中中中中中中中中中中中中中中中",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 23 of 80 characters (20 tokens, cap 7); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "tokenCount": 20,
+        "maxTokens": 3,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "😀😀😀😀😀",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 10 of 80 characters (20 tokens, cap 3); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "tokenCount": 20,
+        "maxTokens": 7,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "😀😀😀😀😀😀😀😀😀😀😀",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 22 of 80 characters (20 tokens, cap 7); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀",
+        "tokenCount": 25,
+        "maxTokens": 3,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "abc😀abc😀",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 10 of 100 characters (25 tokens, cap 3); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀abc😀",
+        "tokenCount": 25,
+        "maxTokens": 7,
+        "totalLines": 1,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "abc😀abc😀abc😀abc😀abc",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 23 of 100 characters (25 tokens, cap 7); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "first\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n",
+        "tokenCount": 27,
+        "maxTokens": 3,
+        "totalLines": 22,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "first\n中文😀",
+        "numLines": 2,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-2 of 22 total (27 tokens, cap 3). Call Read with offset=3 limit=2 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "first\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n",
+        "tokenCount": 27,
+        "maxTokens": 7,
+        "totalLines": 22,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "first\n中文😀\n中文😀\n中文😀",
+        "numLines": 4,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-4 of 22 total (27 tokens, cap 7). Call Read with offset=5 limit=4 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "   \n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 3,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "   \n中中中中中中",
+        "numLines": 2,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 10 of 104 characters (26 tokens, cap 3); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "   \n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 7,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "   \n中中中中中中中中中中中中中中中中中中中",
+        "numLines": 2,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 23 of 104 characters (26 tokens, cap 7); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n",
+        "tokenCount": 30,
+        "maxTokens": 3,
+        "totalLines": 41,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "😀\n😀\n😀",
+        "numLines": 3,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-3 of 41 total (30 tokens, cap 3). Call Read with offset=4 limit=3 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀\n",
+        "tokenCount": 30,
+        "maxTokens": 7,
+        "totalLines": 41,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "😀\n😀\n😀\n😀\n😀\n😀\n😀\n😀",
+        "numLines": 8,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-8 of 41 total (30 tokens, cap 7). Call Read with offset=9 limit=8 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "\n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 3,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-1 of 2 total (26 tokens, cap 3). Call Read with offset=2 limit=1 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "\n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 7,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "",
+        "numLines": 1,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing lines 1-1 of 2 total (26 tokens, cap 7). Call Read with offset=2 limit=1 for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿\n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 3,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "﻿\n中中中中中中中中",
+        "numLines": 2,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 10 of 102 characters (26 tokens, cap 3); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    },
+    {
+      "input": {
+        "content": "﻿\n中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "tokenCount": 26,
+        "maxTokens": 7,
+        "totalLines": 2,
+        "filePath": "/workspace/文件.txt"
+      },
+      "expected": {
+        "content": "﻿\n中中中中中中中中中中中中中中中中中中中中中",
+        "numLines": 2,
+        "note": "[Truncated: PARTIAL view — /workspace/文件.txt: showing the first 23 of 102 characters (26 tokens, cap 7); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or Read with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]"
+      }
+    }
+  ],
+  "roomCases": [
+    {
+      "input": {
+        "threshold": 100000,
+        "held": 10000,
+        "usage": 0,
+        "claimed": 0
+      },
+      "expected": 62999
+    },
+    {
+      "input": {
+        "threshold": 100000,
+        "held": 10000,
+        "usage": 20000,
+        "claimed": 0
+      },
+      "expected": 56000
+    },
+    {
+      "input": {
+        "threshold": 100000,
+        "held": 10000,
+        "usage": 20000,
+        "claimed": 5000
+      },
+      "expected": 52500
+    },
+    {
+      "input": {
+        "threshold": 100000,
+        "held": 10000,
+        "usage": 100000,
+        "claimed": 0
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "threshold": 200000,
+        "held": 25000,
+        "usage": 30000,
+        "claimed": 40000
+      },
+      "expected": 91000
+    },
+    {
+      "input": {
+        "threshold": 1,
+        "held": 0,
+        "usage": 0,
+        "claimed": 0
+      },
+      "expected": 0
+    }
+  ],
+  "allowanceCases": [
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-sonnet-4-6",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 4,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 755988
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "claude-opus-5",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": ""
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": null,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " allow_large is not available where this read runs; read it in parts with offset and limit."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 10000,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": null,
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": false,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 20000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 50000
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    },
+    {
+      "input": {
+        "model": "other-model",
+        "roomTokens": 62999,
+        "optedIn": true,
+        "tokens": 999999
+      },
+      "expected": {
+        "modelBytesPerToken": 3,
+        "raised": {
+          "maxTokens": 62999,
+          "maxSizeBytes": 566991
+        },
+        "hint": " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room)."
+      }
+    }
+  ],
+  "countCases": [
+    {
+      "input": {
+        "content": "",
+        "raised": false,
+        "offset": 1
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "",
+        "raised": true,
+        "offset": 1
+      },
+      "expected": 0
+    },
+    {
+      "input": {
+        "content": "中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n",
+        "raised": false,
+        "offset": 1
+      },
+      "expected": 10
+    },
+    {
+      "input": {
+        "content": "中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n中文😀\n",
+        "raised": true,
+        "offset": 1
+      },
+      "expected": 53
+    },
+    {
+      "input": {
+        "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "raised": false,
+        "offset": 1
+      },
+      "expected": 10
+    },
+    {
+      "input": {
+        "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "raised": true,
+        "offset": 1
+      },
+      "expected": 22
+    }
+  ],
+  "rereadCases": [
+    {
+      "input": {
+        "entry": null
+      },
+      "expected": {
+        "data": {
+          "type": "text",
+          "file": {
+            "filePath": "/workspace/file.txt",
+            "content": "fresh"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "entry": {
+          "content": "prior",
+          "timestamp": 42,
+          "offset": 1
+        }
+      },
+      "expected": {
+        "data": {
+          "type": "text",
+          "file": {
+            "filePath": "/workspace/file.txt",
+            "content": "fresh"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "entry": {
+          "content": "prior",
+          "timestamp": 42,
+          "seededFromContext": true
+        }
+      },
+      "expected": {
+        "data": {
+          "type": "text",
+          "file": {
+            "filePath": "/workspace/file.txt",
+            "content": "fresh"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "entry": {
+          "content": "prior",
+          "timestamp": 42,
+          "isPartialView": true,
+          "offset": 1,
+          "limit": 3
+        }
+      },
+      "expected": {
+        "data": {
+          "type": "text",
+          "file": {
+            "filePath": "/workspace/file.txt",
+            "content": "fresh"
+          }
+        }
+      }
+    }
+  ],
+  "promptCases": [
+    {
+      "input": {
+        "lean": false,
+        "rewrite": false
+      },
+      "expected": "Reads a file from the local filesystem. You can access any file directly by using this tool.\nAssume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to 2000 lines starting from the beginning of the file\n- When you already know which part of the file you need, only read that part. This can be important for larger files.\n- Results are returned using cat -n format, with line numbers starting at 1\n- This tool reads images (eg PNG, JPG, etc). When reading an image file, the contents are presented visually to the selected model.\n- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.\n- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.\n- This tool can only read files, not directories. To list files in a directory, use the registered shell tool.\n- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.\n- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.\n- Do NOT re-read a file you just edited to verify — Edit/Write would have errored if the change failed, and the harness tracks file state for you.",
+      "sha256": "04af40d3d3d84d11922516c738d9b80a00d600a3dc33738f2aead2866cefaba1"
+    },
+    {
+      "input": {
+        "lean": true,
+        "rewrite": false
+      },
+      "expected": "Reads a file from the local filesystem.\n\n- `file_path` must be an absolute path.\n- Reads up to 2000 lines by default.\n- When you already know which part of the file you need, only read that part. This can be important for larger files.\n- Results are returned using cat -n format, with line numbers starting at 1\n- Reads images (PNG, JPG, …) and presents them visually. Reads PDFs via the `pages` parameter (e.g. \"1-5\", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.\n- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.\n- Do NOT re-read a file you just edited to verify — Edit/Write would have errored if the change failed, and the harness tracks file state for you.",
+      "sha256": "80fb15d2d15c76b0a3429b5831a1e68c57fb5d541063e7ee27c527da7bc0bee3"
+    },
+    {
+      "input": {
+        "lean": true,
+        "rewrite": true
+      },
+      "expected": "Reads a file from the local filesystem.\n\n- `file_path` must be an absolute path.\n- Reads up to 2000 lines by default.\n- When you already know which part of the file you need, only read that part. This can be important for larger files.\n- Results are returned using cat -n format, with line numbers starting at 1\n- Reads images (PNG, JPG, …) and presents them visually. Reads PDFs via the `pages` parameter (e.g. \"1-5\", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.\n- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.\n- If you just edited a file, you *do not* need to re-read it in order to verify that your edit worked. This is because the Edit/Write tools will throw an error if your change failed, and the harness you are running in already tracks file state for you.",
+      "sha256": "8eb803b12121d3208dea567e5b1ca61aac1106dbd6990022ea206a04027d6c52"
+    }
+  ],
+  "schemaCase": {
+    "maxSizeBytes": 262144,
+    "allowLargeDescription": "Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it."
+  }
+}

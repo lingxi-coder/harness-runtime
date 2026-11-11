@@ -1422,6 +1422,7 @@ mod tests {
 
     fn tool_use_options() -> ToolUseOptions {
         ToolUseOptions {
+            read_context_room: None,
             session_interactive: None,
             prompt_policy: None,
             output_style_is_default: None,

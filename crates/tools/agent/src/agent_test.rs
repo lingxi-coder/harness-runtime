@@ -364,6 +364,7 @@ mod tests {
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
+                read_context_room: None,
                 session_interactive: None,
                 prompt_policy: None,
                 output_style_is_default: None,

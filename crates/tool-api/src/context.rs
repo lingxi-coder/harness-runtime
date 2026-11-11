@@ -392,6 +392,7 @@ impl ToolUseContext {
     pub fn model_seed(main_loop_model: String) -> Self {
         Self {
             options: ToolUseOptions {
+                read_context_room: None,
                 session_interactive: None,
                 prompt_policy: None,
                 output_style_is_default: None,
@@ -464,6 +465,9 @@ mod tests {
 /// Per-call options that travel inside [`ToolUseContext`].
 #[derive(Clone)]
 pub struct ToolUseOptions {
+    /// Trusted per-query Read allowance. Shared clones retain successful Read
+    /// claims; hosts without an authoritative context ceiling leave it absent.
+    pub read_context_room: Option<Arc<crate::read_context_room::ReadContextRoom>>,
     /// Owning session's interactivity, independent of background tool approval
     /// behavior. `None` uses `is_non_interactive_session` for legacy callers.
     pub session_interactive: Option<bool>,

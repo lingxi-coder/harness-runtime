@@ -140,6 +140,15 @@ pub fn patch_truncation_suffix(n: usize) -> String {
 /// (the current-state suffix).
 #[must_use]
 pub fn edit_result_message(path: &str, replace_all: bool, stale_recovered: bool) -> String {
+    edit_result_message_with_context(path, replace_all, stale_recovered, false)
+}
+
+fn edit_result_message_with_context(
+    path: &str,
+    replace_all: bool,
+    stale_recovered: bool,
+    content_not_in_model_context: bool,
+) -> String {
     let base = if replace_all {
         format!("The file {path} has been updated. All occurrences were successfully replaced.")
     } else {
@@ -147,6 +156,8 @@ pub fn edit_result_message(path: &str, replace_all: bool, stale_recovered: bool)
     };
     let suffix = if stale_recovered {
         STALE_RECOVERED_NOTE
+    } else if content_not_in_model_context {
+        ""
     } else {
         crate::FILE_STATE_CURRENT_SUFFIX
     };
@@ -374,6 +385,13 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     }))
 });
 
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/edit-output-schema.json"
+    ))
+    .expect("pinned Edit output schema is valid JSON")
+});
+
 #[async_trait]
 impl Tool for FileEditTool {
     fn supports_persistent_chat(&self) -> bool {
@@ -390,6 +408,15 @@ impl Tool for FileEditTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        crate::output_contract::parse(TOOL_NAME, output)
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
         crate::input_repair_metadata()
@@ -522,7 +549,7 @@ impl Tool for FileEditTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
+        let requested_path = crate::checked_model_file_path(file_path, &self.ctx.cwd())?;
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
@@ -622,6 +649,7 @@ impl Tool for FileEditTool {
         // its content, so the read-before-write staleness guard (Batch F) can
         // compare like with like.
         #[allow(clippy::type_complexity)]
+        let mut not_text = None;
         let existing: Option<(
             String,
             crate::file_meta::Encoding,
@@ -631,6 +659,7 @@ impl Tool for FileEditTool {
         )> = match initial_snapshot {
             Some(snapshot) => {
                 let bytes = snapshot.bytes;
+                not_text = crate::file_meta::classify_not_text(&bytes);
                 // Current mtime (floored ms) comes from the same opened handle
                 // as the bytes; `None` falls back to epoch `0`.
                 let mtime_ms = snapshot
@@ -642,9 +671,11 @@ impl Tool for FileEditTool {
                 // content-equality fallback; falls back to the LF view if the
                 // file is not strict UTF-8 (e.g. UTF-16LE), in which case the
                 // mtime check alone governs.
-                let raw_decoded = crate::shared::decode_utf8_strict(&bytes).ok();
                 let (content, enc, ending) = crate::file_meta::read_with_metadata(&bytes);
-                let raw_for_cmp = raw_decoded.unwrap_or_else(|| content.clone());
+                let raw_for_cmp = content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&content)
+                    .to_owned();
                 Some((content, enc, ending, mtime_ms, raw_for_cmp))
             }
             None => None,
@@ -670,6 +701,9 @@ impl Tool for FileEditTool {
         // `staleRecovered` (claude `xTg` → `D`): set when the flag-gated
         // stale-recovery lets a stale-but-cleanly-applying edit proceed.
         let mut stale_recovered = false;
+        let prior_partial_view = existing.is_some()
+            && tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+                .is_some_and(|entry| entry.is_partial_view);
         let (before, after, replacements): (String, String, u32) = match existing {
             // File does not exist.
             None => {
@@ -690,6 +724,23 @@ impl Tool for FileEditTool {
             }
             // File exists.
             Some(before) => {
+                if old_string.is_empty()
+                    && !lingxi_core::host::effort::trim_js_whitespace(&before).is_empty()
+                {
+                    self.emit_failed(&invocation_id, "file_exists").await;
+                    return Err(ToolError::InvalidInput(
+                        "Cannot create new file - file already exists.".into(),
+                    ));
+                }
+                let waived =
+                    crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon);
+                if !waived
+                    && !old_string.is_empty()
+                    && tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+                        .is_some_and(|entry| entry.is_partial_view)
+                {
+                    return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
+                }
                 // Read-before-write staleness guard (Batch F). The file exists,
                 // so a prior full `Read` is required and the file must not have
                 // changed on disk since (TS `FileEditTool.ts:275-311` validate +
@@ -698,13 +749,17 @@ impl Tool for FileEditTool {
                 // `result:true`). `guard_raw_content` is the current on-disk
                 // content decoded the same way `Read` records it, for the
                 // full-read content-equality fallback.
-                if let Err(e) = crate::check_read_before_write(
-                    &self.ctx.read_file_state,
-                    &requested_path,
-                    guard_mtime_ms,
-                    &guard_raw_content,
-                    crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
-                ) {
+                if let Err(e) = if old_string.is_empty() {
+                    Ok(())
+                } else {
+                    crate::check_read_before_write(
+                        &self.ctx.read_file_state,
+                        &requested_path,
+                        guard_mtime_ms,
+                        &guard_raw_content,
+                        waived,
+                    )
+                } {
                     // Stale-recovery (claude `xTg`'s `TEu(ZVi(...))` branch,
                     // flag-gated `tengu_cedar_sundial`, default-OFF): only the
                     // CONTENT-CHANGED error is recoverable — a never-read
@@ -744,16 +799,20 @@ impl Tool for FileEditTool {
                     }
                 }
 
+                if let Some(kind) = not_text {
+                    self.emit_failed(&invocation_id, "unsupported_encoding")
+                        .await;
+                    return Err(ToolError::InvalidInput(
+                        kind.mutation_refusal_message().into(),
+                    ));
+                }
+
                 if old_string.is_empty() {
                     // Empty `old_string` is only valid for an (effectively) empty
                     // file — otherwise it's a creation attempt on existing content.
-                    if !before.trim().is_empty() {
-                        self.emit_failed(&invocation_id, "file_exists").await;
-                        return Err(ToolError::InvalidInput(
-                            "Cannot create new file - file already exists.".into(),
-                        ));
-                    }
-                    (before, new_string.to_string(), 1)
+                    let replacement =
+                        crate::file_meta::preserve_bom(&before, new_string).into_owned();
+                    (before, replacement, 1)
                 } else {
                     // Edit must not corrupt notebooks — route to NotebookEdit.
                     if std::path::Path::new(file_path)
@@ -787,8 +846,11 @@ impl Tool for FileEditTool {
                     // `if(!f){…errorCode 8…}` does.
                     let actual_old = crate::quotes::find_actual_string(&before, old_string)
                         .unwrap_or_else(|| old_string.to_string());
-                    let actual_new =
-                        crate::quotes::preserve_quote_style(old_string, &actual_old, new_string);
+                    let actual_new = crate::quotes::preserve_escape_style(
+                        old_string,
+                        &actual_old,
+                        &crate::quotes::preserve_quote_style(old_string, &actual_old, new_string),
+                    );
                     let count = before.matches(actual_old.as_str()).count();
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
@@ -896,14 +958,15 @@ impl Tool for FileEditTool {
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
-                content: after.clone(),
+                content: after.strip_prefix('\u{feff}').unwrap_or(&after).to_owned(),
                 mtime_ms: new_mtime_ms,
                 offset: None,
                 limit: None,
                 // Post-edit entry — not a Read; the dedup gate skips it.
                 from_read: false,
                 seeded_from_context: false,
-                is_partial_view: false,
+                // Editing a known slice does not expose the rest of the file.
+                is_partial_view: prior_partial_view,
             },
             true,
             vec![requested_path.clone(), path.clone()],
@@ -935,7 +998,12 @@ impl Tool for FileEditTool {
         // not the canonicalized path. Batch A's serialization rule emits
         // `data["content"]` verbatim to the model; `replacements` /
         // `patch_preview` remain for the TUI diff render only.
-        let content = edit_result_message(file_path, replace_all, stale_recovered);
+        let content = edit_result_message_with_context(
+            file_path,
+            replace_all,
+            stale_recovered,
+            prior_partial_view,
+        );
 
         // claude-code FileEditTool result data (2.1.191): {filePath, oldString,
         // newString, originalFile, structuredPatch, userModified, replaceAll}
@@ -958,6 +1026,9 @@ impl Tool for FileEditTool {
         });
         if stale_recovered {
             data["staleRecovered"] = json!(true);
+        }
+        if prior_partial_view {
+            data["contentNotInModelContext"] = json!(true);
         }
         Ok(ToolCallResult {
             data: crate::generated_result(&data),

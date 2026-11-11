@@ -8,7 +8,7 @@
 //! - Errors carry byte-locked human strings (see [`format_too_large`],
 //!   [`format_binary`]).
 
-use crate::shared::{decode_utf8_strict, looks_binary, NUL_SCAN_WINDOW};
+use crate::shared::NUL_SCAN_WINDOW;
 use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -22,8 +22,8 @@ use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
-    FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED,
-    READ_STARTED, SESSION_FILE_READ,
+    FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED, READ_STARTED,
+    SESSION_FILE_READ,
 };
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -59,6 +59,100 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 pub const MAX_OUTPUT_TOKENS_ENV: &str = "LINGXI_FILE_READ_MAX_OUTPUT_TOKENS";
 
 const STREAMING_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+const ALLOW_LARGE_HINT: &str = " To read it anyway, up to what still fits in your context, call Read again with allow_large: true — only if you genuinely need all of it or the user asked for the whole file.";
+const CONTEXT_ROOM_HINT: &str = " Even with allow_large, this is more than fits in the context you have left this turn (other large reads in the same turn share that room).";
+const ALLOW_LARGE_UNAVAILABLE_HINT: &str =
+    " allow_large is not available where this read runs; read it in parts with offset and limit.";
+
+#[derive(Clone, Copy)]
+struct ReadLimits {
+    max_size_bytes: u64,
+    max_tokens: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ReadRoom {
+    room_tokens: Option<u64>,
+    raised: Option<ReadLimits>,
+}
+
+struct ReadAllowance<'a> {
+    room: Option<&'a tool_api::read_context_room::ReadContextRoom>,
+    base: ReadLimits,
+    model_bytes_per_token: u64,
+    opted_in: bool,
+}
+
+impl ReadAllowance<'_> {
+    fn current_room(&self) -> ReadRoom {
+        let room_tokens = self.room.map(|room| room.room_tokens(0));
+        ReadRoom {
+            room_tokens,
+            raised: room_tokens
+                .filter(|tokens| *tokens > self.base.max_tokens)
+                .map(|tokens| ReadLimits {
+                    max_tokens: tokens,
+                    max_size_bytes: self.base.max_size_bytes.max(
+                        tokens
+                            .saturating_mul(self.model_bytes_per_token)
+                            .saturating_mul(3),
+                    ),
+                }),
+        }
+    }
+
+    fn hint(&self, bytes: Option<u64>, tokens: Option<u64>) -> &'static str {
+        let room = self.current_room();
+        if room.room_tokens.is_none() {
+            return if self.opted_in {
+                ALLOW_LARGE_UNAVAILABLE_HINT
+            } else {
+                ""
+            };
+        }
+        if self.opted_in || room.raised.is_none() {
+            return CONTEXT_ROOM_HINT;
+        }
+        let raised = room.raised.expect("checked above");
+        if bytes.is_none_or(|bytes| bytes <= raised.max_size_bytes)
+            && tokens.is_none_or(|tokens| tokens <= raised.max_tokens)
+        {
+            ALLOW_LARGE_HINT
+        } else {
+            CONTEXT_ROOM_HINT
+        }
+    }
+}
+
+fn model_bytes_per_token(model: &str) -> u64 {
+    if model.is_empty() {
+        return 4;
+    }
+    let canonical =
+        lingxi_core::host::model_capabilities::normalize_model_id(model).replace(['.', '_'], "-");
+    if matches!(
+        canonical.as_str(),
+        "claude-3-opus"
+            | "claude-3-sonnet"
+            | "claude-3-haiku"
+            | "claude-3-5-sonnet"
+            | "claude-3-5-haiku"
+            | "claude-3-7-sonnet"
+            | "claude-opus-4-0"
+            | "claude-opus-4-1"
+            | "claude-opus-4-5"
+            | "claude-opus-4-6"
+            | "claude-sonnet-4-0"
+            | "claude-sonnet-4-5"
+            | "claude-sonnet-4-6"
+            | "claude-haiku-4-5"
+    ) {
+        4
+    } else {
+        3
+    }
+}
 
 /// Effective per-call token budget. Invalid, missing, or zero env values preserve
 /// the byte-locked default.
@@ -109,16 +203,44 @@ fn bytes_per_token_for_file_type(ext: Option<&str>) -> u64 {
 
 /// `roughTokenCountEstimationForFileType(content, ext)` — `Math.round(len /
 /// bytesPerToken)` (`tokenEstimation.ts:203-242`). Round-half-up over a
-/// nonnegative byte length is `(len + bpt/2) / bpt`. Uses the UTF-8 byte length
-/// (TS uses the UTF-16 string `.length`); identical for ASCII, the same
-/// convention the microcompact / mcp-output ports already use.
+/// nonnegative UTF-16 length is `(len + bpt/2) / bpt`. JavaScript string length
+/// counts UTF-16 code units, including two units for supplementary characters.
 #[must_use]
 fn rough_token_count_estimation_for_file_type(content: &str, ext: Option<&str>) -> u64 {
     let bpt = bytes_per_token_for_file_type(ext);
-    u64::try_from(content.len())
+    u64::try_from(content.encode_utf16().count())
         .unwrap_or(u64::MAX)
         .saturating_add(bpt / 2)
         / bpt
+}
+
+fn count_read_tokens(content: &str, ext: Option<&str>, offset: u64, raised: bool) -> u64 {
+    if !raised {
+        return rough_token_count_estimation_for_file_type(content, ext);
+    }
+    let numbered = add_line_numbers(content, offset.max(1));
+    let estimated = rough_token_count_estimation_for_file_type(&numbered, ext);
+    if estimated == 0 {
+        return 0;
+    }
+    estimated.max((numbered.len() as u64).div_ceil(2))
+}
+
+fn admit_read_tokens(
+    allowance: &ReadAllowance<'_>,
+    initial: ReadLimits,
+    raised: bool,
+    tokens: u64,
+) -> Result<(), u64> {
+    if tokens > initial.max_tokens {
+        return Err(initial.max_tokens);
+    }
+    if raised && tokens > 0 {
+        if let Some(room) = allowance.room {
+            return room.try_claim(tokens, initial.max_tokens, allowance.base.max_tokens);
+        }
+    }
+    Ok(())
 }
 
 /// Build the byte-locked max-tokens-exceeded error — 1:1 with
@@ -194,9 +316,8 @@ struct GracefulTruncation {
 ///   6 iterations of `V *= 0.7`; guard against splitting a UTF-16 surrogate
 ///   (here: never split inside a Rust `char`, which is the same intent).
 ///
-/// `content_len`/substring lengths use UTF-8 byte length to match LingXi's token
-/// model (`rough_token_count_estimation_for_file_type` divides byte length), so
-/// `O(U)` is consistent with the estimate that produced `token_count`.
+/// Lengths and slices use JavaScript's UTF-16 units, with the native high
+/// surrogate guard preventing a prefix from splitting a surrogate pair.
 fn truncate_to_token_budget(
     content: &str,
     token_count: u64,
@@ -206,11 +327,11 @@ fn truncate_to_token_budget(
 ) -> GracefulTruncation {
     let cap = max_tokens as f64;
     let token_count_f = token_count.max(1) as f64;
-    let content_len = content.len() as f64;
+    let content_len = content.encode_utf16().count() as f64;
     // `N = Math.max(0.5, f.length / Math.max(1, tokenCount))`.
     let n_ratio = (content_len / token_count_f).max(0.5);
-    // `O(V) = V.length / N` — token estimate for a substring of byte length `len`.
-    let est_tokens = |byte_len: usize| (byte_len as f64) / n_ratio;
+    // `O(V) = V.length / N` — JavaScript's UTF-16 length.
+    let est_tokens = |text: &str| (text.encode_utf16().count() as f64) / n_ratio;
 
     // Split into lines for the line-based shrink (`D = f.split("\n")`). This is a
     // plain (non-inclusive) split, matching claude-code's `f.split("\n")`.
@@ -226,7 +347,7 @@ fn truncate_to_token_budget(
 
     // Up to 6 iterations of `$ *= 0.7` until it fits or `$ <= 1`.
     for _ in 0..6 {
-        if est_tokens(head.len()) <= cap || line_n <= 1 {
+        if est_tokens(&head) <= cap || line_n <= 1 {
             break;
         }
         line_n = ((line_n as f64) * 0.7).floor().max(1.0) as usize;
@@ -235,15 +356,15 @@ fn truncate_to_token_budget(
 
     let mut char_based = false;
     // Char-based fallback when the line shrink couldn't fit / produced blank.
-    if est_tokens(head.len()) > cap || head.trim().is_empty() {
-        // `V = max(1, floor(l * N * 0.85))` byte budget.
-        let mut byte_v: usize = (cap * n_ratio * 0.85).floor().max(1.0) as usize;
+    if est_tokens(&head) > cap || lingxi_core::host::effort::trim_js_whitespace(&head).is_empty() {
+        // `V = max(1, floor(l * N * 0.85))` UTF-16 budget.
+        let mut unit_budget: usize = (cap * n_ratio * 0.85).floor().max(1.0) as usize;
         for _ in 0..6 {
-            head = slice_bytes_on_char_boundary(content, byte_v);
-            if est_tokens(head.len()) <= cap {
+            head = slice_utf16_on_char_boundary(content, unit_budget);
+            if est_tokens(&head) <= cap {
                 break;
             }
-            byte_v = ((byte_v as f64) * 0.7).floor().max(1.0) as usize;
+            unit_budget = ((unit_budget as f64) * 0.7).floor().max(1.0) as usize;
         }
         char_based = true;
     }
@@ -270,8 +391,8 @@ fn truncate_to_token_budget(
     } else {
         format!(
             "{PARTIAL_VIEW_PREFIX}{full_file_path}: showing the first {shown} of {full} characters ({token_count} tokens, cap {max_tokens}); this file has very long lines and cannot be paginated by line. Use {grep_name} to find a specific section, or {read_name} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
-            shown = head.len(),
-            full = content.len(),
+            shown = head.encode_utf16().count(),
+            full = content.encode_utf16().count(),
             grep_name = GREP_TOOL_NAME,
             read_name = TOOL_NAME,
         )
@@ -284,17 +405,43 @@ fn truncate_to_token_budget(
     }
 }
 
-/// Slice `content` to at most `byte_budget` bytes, backing off to the previous
-/// UTF-8 character boundary — the safe analogue of claude-code's surrogate-pair
-/// guard (`if(Q>=55296&&Q<=56319) U=U.slice(0,-1)`), which avoids splitting a
-/// multi-unit character. Rust strings are UTF-8, so we simply refuse to slice
-/// mid-`char`.
-fn slice_bytes_on_char_boundary(content: &str, byte_budget: usize) -> String {
-    let mut end = byte_budget.min(content.len());
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
+/// Native `slice(0, unit_budget)` followed by its trailing-high-surrogate guard.
+fn slice_utf16_on_char_boundary(content: &str, unit_budget: usize) -> String {
+    let mut units = 0;
+    let mut end = 0;
+    for character in content.chars() {
+        let next_units = units + character.len_utf16();
+        if next_units > unit_budget {
+            break;
+        }
+        units = next_units;
+        end += character.len_utf8();
     }
     content[..end].to_string()
+}
+
+/// The native buffered range reader splits on LF, strips one CR from each
+/// selected line and joins the selected lines with LF. Its terminal empty line
+/// is a real range entry, so both empty files and trailing-LF files count it.
+fn select_text_range(content: &str, offset: u64, limit: Option<u64>) -> StreamedTextRange {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let offset = offset.max(1);
+    let mut total_lines = 0;
+    let mut selected = Vec::new();
+    let end_line = limit.map(|limit| offset.saturating_add(limit));
+    for (index, line) in content.split('\n').enumerate() {
+        let line_number = index as u64 + 1;
+        total_lines += 1;
+        if line_number >= offset && end_line.is_none_or(|end| line_number < end) {
+            selected.push(line.strip_suffix('\r').unwrap_or(line));
+        }
+    }
+    StreamedTextRange {
+        content: selected.join("\n"),
+        total_lines,
+        read_lines: selected.len() as u64,
+        not_text: None,
+    }
 }
 
 /// The Grep tool name byte-lock — claude-code `$c` resolves to this in the
@@ -336,136 +483,186 @@ struct StreamedTextRange {
     content: String,
     total_lines: u64,
     read_lines: u64,
+    not_text: Option<crate::file_meta::NotText>,
 }
 
-fn format_line_too_long(path: &Path, line: u64) -> String {
-    format!(
-        "File {} contains a line longer than {} at or after requested line {line}. Use Grep to find a smaller section, or use a registered shell tool that can stream the file.",
-        path.display(),
-        format_file_size(MAX_FILE_READ_SIZE),
-    )
+/// Incremental Node-compatible UTF-8/UTF-16LE decoding. Keep incomplete scalar
+/// bytes between chunks so a split code point never creates a spurious warning.
+#[derive(Default)]
+struct NativeTextDecoder {
+    pending: Vec<u8>,
+    started: bool,
+    utf16le: bool,
+    emitted: bool,
+    invalid_utf8: bool,
+}
+
+fn check_selected_range_size(bytes: usize, limit: usize) -> Result<(), ToolError> {
+    if bytes <= limit {
+        return Ok(());
+    }
+    Err(ToolError::Io(format!(
+        "The requested line range contains over {} of text, more than a read can return. Use a smaller limit — or, if a single line is this large, no limit will fit it: search for specific content instead.",
+        format_file_size(limit as u64),
+    ).into()))
+}
+
+impl NativeTextDecoder {
+    fn decode(&mut self, chunk: &[u8], eof: bool) -> String {
+        self.pending.extend_from_slice(chunk);
+        if !self.started {
+            if self.pending.len() < 2 && !eof {
+                return String::new();
+            }
+            self.started = true;
+            self.utf16le = self.pending.starts_with(&[0xff, 0xfe]);
+        }
+        let mut text = String::new();
+        if self.utf16le {
+            let mut consumed = self.pending.len() / 2 * 2;
+            if !eof && consumed >= 2 {
+                let last =
+                    u16::from_le_bytes([self.pending[consumed - 2], self.pending[consumed - 1]]);
+                if (0xd800..=0xdbff).contains(&last) {
+                    consumed -= 2;
+                }
+            }
+            let units = self.pending[..consumed]
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+            text.extend(
+                char::decode_utf16(units).map(|value| value.unwrap_or(char::REPLACEMENT_CHARACTER)),
+            );
+            self.pending.drain(..consumed);
+            if eof {
+                self.pending.clear();
+            }
+        } else {
+            let mut consumed = 0;
+            while consumed < self.pending.len() {
+                match std::str::from_utf8(&self.pending[consumed..]) {
+                    Ok(valid) => {
+                        text.push_str(valid);
+                        consumed = self.pending.len();
+                    }
+                    Err(error) => {
+                        let valid_end = consumed + error.valid_up_to();
+                        text.push_str(
+                            std::str::from_utf8(&self.pending[consumed..valid_end])
+                                .expect("validated prefix"),
+                        );
+                        if let Some(length) = error.error_len() {
+                            self.invalid_utf8 = true;
+                            text.push(char::REPLACEMENT_CHARACTER);
+                            consumed = valid_end + length;
+                        } else if eof {
+                            self.invalid_utf8 = true;
+                            text.push(char::REPLACEMENT_CHARACTER);
+                            consumed = self.pending.len();
+                        } else {
+                            consumed = valid_end;
+                            break;
+                        }
+                    }
+                }
+            }
+            self.pending.drain(..consumed);
+        }
+        if !self.emitted && !text.is_empty() {
+            self.emitted = true;
+            if text.starts_with('\u{feff}') {
+                text.remove(0);
+            }
+        }
+        text
+    }
 }
 
 async fn read_text_range_streaming<R: Read>(
     mut reader: R,
-    canon: &Path,
+    _canon: &Path,
     offset: u64,
     limit: u64,
-    ext: Option<&str>,
-    max_output_tokens: u64,
+    _ext: Option<&str>,
+    max_selected_bytes: u64,
 ) -> Result<StreamedTextRange, ToolError> {
+    let offset = offset.max(1);
     let end_line = offset.saturating_add(limit);
-    let max_line_bytes = MAX_FILE_READ_SIZE as usize;
-    let bytes_per_token = bytes_per_token_for_file_type(ext);
-    let max_selected_bytes = usize::try_from(max_output_tokens.saturating_mul(bytes_per_token))
-        .unwrap_or(usize::MAX)
-        .max(max_line_bytes.saturating_add(1));
-
+    let max_selected_bytes = usize::try_from(max_selected_bytes).unwrap_or(usize::MAX);
     let mut selected = Vec::new();
     let mut current_line = 1_u64;
-    let mut selected_line_bytes = 0_usize;
-    let mut read_lines = 0_u64;
-    let mut newline_count = 0_u64;
-    let mut total_bytes_read = 0_usize;
-    let mut nul_scan_remaining = NUL_SCAN_WINDOW;
-    let mut utf8_tail: Vec<u8> = Vec::new();
+    let mut line = String::new();
+    let mut selected_bytes = 0_usize;
+    let mut prefix = Vec::with_capacity(NUL_SCAN_WINDOW);
+    let mut decoder = NativeTextDecoder::default();
     let mut buf = vec![0u8; STREAMING_READ_CHUNK_BYTES];
-
     loop {
         let n = reader
             .read(&mut buf)
             .map_err(|error| ToolError::Io(error.to_string().into()))?;
+        let chunk = &buf[..n];
+        prefix.extend_from_slice(
+            &chunk[..chunk
+                .len()
+                .min(NUL_SCAN_WINDOW.saturating_sub(prefix.len()))],
+        );
+        let decoded = decoder.decode(chunk, n == 0);
+        for character in decoded.chars() {
+            let selecting = current_line >= offset && current_line < end_line;
+            if character == '\n' {
+                if selecting {
+                    if line.ends_with('\r') {
+                        line.pop();
+                        selected_bytes = selected_bytes.saturating_sub(1);
+                    }
+                    check_selected_range_size(
+                        selected_bytes.saturating_add(selected.len()),
+                        max_selected_bytes,
+                    )?;
+                    selected.push(std::mem::take(&mut line));
+                }
+                current_line = current_line.saturating_add(1);
+            } else if selecting {
+                selected_bytes = selected_bytes.saturating_add(character.len_utf8());
+                check_selected_range_size(
+                    selected_bytes.saturating_add(selected.len()),
+                    max_selected_bytes,
+                )?;
+                line.push(character);
+            }
+        }
         if n == 0 {
             break;
         }
-        let chunk = &buf[..n];
-        total_bytes_read += n;
-
-        let scan = nul_scan_remaining.min(n);
-        if scan > 0 {
-            if looks_binary(&chunk[..scan]) {
-                return Err(ToolError::Io(format_binary(canon).into()));
-            }
-            nul_scan_remaining -= scan;
+    }
+    if current_line >= offset && current_line < end_line {
+        if line.ends_with('\r') {
+            line.pop();
+            selected_bytes = selected_bytes.saturating_sub(1);
         }
-
-        validate_utf8_stream_chunk(&mut utf8_tail, chunk).map_err(|()| {
-            ToolError::Io(format!("File {} is not valid UTF-8", canon.display()).into())
-        })?;
-
-        for &byte in chunk {
-            let selecting = current_line >= offset && current_line < end_line;
-            if selecting {
-                selected.push(byte);
-                selected_line_bytes += 1;
-                if selected_line_bytes > max_line_bytes {
-                    return Err(ToolError::Io(
-                        format_line_too_long(canon, current_line).into(),
-                    ));
-                }
-                if selected.len() > max_selected_bytes {
-                    let estimate = u64::try_from(selected.len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(bytes_per_token / 2)
-                        / bytes_per_token;
-                    return Err(ToolError::Io(
-                        format_max_tokens_exceeded(estimate, max_output_tokens).into(),
-                    ));
-                }
-            }
-            if byte == b'\n' {
-                newline_count += 1;
-                if selecting {
-                    read_lines += 1;
-                }
-                current_line += 1;
-                selected_line_bytes = 0;
-            }
-        }
+        check_selected_range_size(
+            selected_bytes.saturating_add(selected.len()),
+            max_selected_bytes,
+        )?;
+        selected.push(line);
     }
-
-    if !utf8_tail.is_empty() {
-        return Err(ToolError::Io(
-            format!("File {} is not valid UTF-8", canon.display()).into(),
-        ));
-    }
-    if selected_line_bytes > 0 && current_line >= offset && current_line < end_line {
-        read_lines += 1;
-    }
-
-    let content = String::from_utf8(selected).map_err(|_| {
-        ToolError::Io(format!("File {} is not valid UTF-8", canon.display()).into())
-    })?;
-    let total_lines = if total_bytes_read == 0 {
-        0
+    let not_text = if decoder.utf16le {
+        None
+    } else if prefix.starts_with(&[0xfe, 0xff]) {
+        Some(crate::file_meta::NotText::Utf16Be)
+    } else if prefix.contains(&0) {
+        Some(crate::file_meta::NotText::Nul)
+    } else if decoder.invalid_utf8 {
+        Some(crate::file_meta::NotText::NotUtf8)
     } else {
-        newline_count + 1
+        None
     };
     Ok(StreamedTextRange {
-        content,
-        total_lines,
-        read_lines,
+        content: selected.join("\n"),
+        total_lines: current_line,
+        read_lines: selected.len() as u64,
+        not_text,
     })
-}
-
-fn validate_utf8_stream_chunk(tail: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ()> {
-    tail.extend_from_slice(chunk);
-    match std::str::from_utf8(tail) {
-        Ok(_) => {
-            tail.clear();
-            Ok(())
-        }
-        Err(e) if e.error_len().is_none() => {
-            let valid = e.valid_up_to();
-            let suffix = tail[valid..].to_vec();
-            if suffix.len() > 4 {
-                return Err(());
-            }
-            *tail = suffix;
-            Ok(())
-        }
-        Err(_) => Err(()),
-    }
 }
 
 /// Turn rendered page JPEGs into (image sources, tool-result data). Each page is
@@ -523,10 +720,14 @@ pub(crate) fn build_pages_payload(
 /// signature so existing call sites need no change.
 #[must_use]
 pub fn format_too_large(_path: &std::path::Path, size: u64) -> String {
+    format_too_large_for_limit(size, MAX_FILE_READ_SIZE)
+}
+
+fn format_too_large_for_limit(size: u64, limit: u64) -> String {
     format!(
         "File content ({}) exceeds maximum allowed size ({}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
         format_file_size(size),
-        format_file_size(MAX_FILE_READ_SIZE),
+        format_file_size(limit),
     )
 }
 
@@ -1294,31 +1495,6 @@ impl FileReadTool {
         self.ctx.bus.log_event(READ_FAILED, md).await;
     }
 
-    /// `tengu_file_read_dedup` (`FileReadTool.ts:559-561`) — fired in the dedup
-    /// short-circuit (the `file_unchanged` path). Metadata: `ext` ONLY when
-    /// present (TS spreads `...(analyticsExt !== undefined && { ext })`); the
-    /// analytics ext comes from [`get_file_extension_for_analytics`].
-    ///
-    /// `source` is `Some("seeded")` for the SEEDED branch (@235741459:
-    /// `{source:Te("seeded"), ...b!==void 0&&{ext:b}}` — BOTH keys) and `None`
-    /// for the ordinary Read→Read branch, whose payload is `{...ext}` only.
-    async fn emit_file_read_dedup(&self, path: &std::path::Path, source: Option<&'static str>) {
-        let mut md: LogEventMetadata = HashMap::new();
-        if let Some(source) = source {
-            md.insert(
-                "source".to_string(),
-                AnalyticsValue::String(Verified::assert_safe(source.to_string()).into_inner()),
-            );
-        }
-        if let Some(ext) = get_file_extension_for_analytics(path) {
-            md.insert(
-                "ext".to_string(),
-                AnalyticsValue::String(Verified::assert_safe(ext).into_inner()),
-            );
-        }
-        self.ctx.bus.log_event(FILE_READ_DEDUP, md).await;
-    }
-
     /// `tengu_file_read_reread` (#13) — fired when reading a file that already
     /// has a read-file-state entry, BEFORE the dedup short-circuit. 2.1.220
     /// @235740900:
@@ -1824,7 +2000,8 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
             "file_path": { "type": "string", "description": "The absolute path to the file to read" },
             "offset": { "type": "integer", "minimum": 0, "description": "The line number to start reading from. Only provide if the file is too large to read at once" },
             "limit":  { "type": "integer", "minimum": 1, "description": "The number of lines to read. Only provide if the file is too large to read at once." },
-            "pages":  { "type": "string", "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request." }
+            "pages":  { "type": "string", "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request." },
+            "allow_large": { "type": "boolean", "description": "Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it." }
         }
     }))
 });
@@ -1945,7 +2122,23 @@ impl Tool for FileReadTool {
         let input_offset = crate::input_u64(&input, "offset");
         let input_limit = crate::input_u64(&input, "limit");
         let offset = input_offset.unwrap_or(1);
-        let limit = input_limit;
+        let allowance = ReadAllowance {
+            room: ctx.options.read_context_room.as_deref().filter(|room| {
+                room.matches_route(
+                    &ctx.options.main_loop_model,
+                    ctx.options.model_profile.as_deref(),
+                )
+            }),
+            base: ReadLimits {
+                max_size_bytes: MAX_FILE_READ_SIZE,
+                max_tokens: effective_max_output_tokens(),
+            },
+            model_bytes_per_token: model_bytes_per_token(&ctx.options.main_loop_model),
+            opted_in: crate::input_bool(&input, "allow_large").unwrap_or(false),
+        };
+        let initial_room = allowance.current_room();
+        let raised = allowance.opted_in.then_some(initial_room.raised).flatten();
+        let limits = raised.unwrap_or(allowance.base);
 
         let started = Instant::now();
         // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
@@ -1953,9 +2146,17 @@ impl Tool for FileReadTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
+        let requested_path = crate::checked_model_file_path(file_path, &self.ctx.cwd())?;
+        let is_notebook = requested_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"));
+        let offset = if is_notebook { 1 } else { offset };
+        let input_limit = if is_notebook { None } else { input_limit };
+        let limit = input_limit;
         let task_output_id = if let Some(registry) = self.ctx.task_registry.as_ref() {
             registry.task_output_directory().await.and_then(|root| {
-                lingxi_core::host::task_output::output_id(Path::new(&root), Path::new(file_path))
+                lingxi_core::host::task_output::output_id(Path::new(&root), &requested_path)
                     .map(str::to_owned)
             })
         } else {
@@ -1965,7 +2166,6 @@ impl Tool for FileReadTool {
         // normalizes dot segments without following symlinks. Use that lexical
         // route as the read-state key and capture it beside any translated host
         // spelling. `canon` below remains the permission/I/O identity.
-        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
@@ -1983,7 +2183,7 @@ impl Tool for FileReadTool {
         // validateInput, BEFORE symlink resolution). Checked on the supplied
         // path string (device/proc paths are absolute, so no ~/cwd expansion is
         // needed). `${e}` is the original `file_path`.
-        if is_device_file(file_path) {
+        if is_device_file(requested_path.to_str().unwrap_or(file_path)) {
             self.emit_failed(&invocation_id, "device_file").await;
             return Err(ToolError::InvalidInput(format!(
                 "Cannot read '{file_path}': this device file would block or produce infinite output."
@@ -2028,12 +2228,9 @@ impl Tool for FileReadTool {
         // no-follow handle and stream lines. Anything else falls through to
         // the existing snapshot path.
         let skip_full_load = input_limit.is_some()
-            && !is_image_path(&canon)
-            && !is_pdf_path(&canon)
-            && !std::path::Path::new(file_path)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
+            && !is_image_path(Path::new(file_path))
+            && !is_pdf_path(Path::new(file_path))
+            && !is_notebook
             && std::fs::metadata(&canon)
                 .map(|metadata| metadata.len() > MAX_FILE_READ_SIZE)
                 .unwrap_or(false);
@@ -2042,7 +2239,28 @@ impl Tool for FileReadTool {
             if skip_full_load {
                 if let Ok(file) = open_rooted_file(&path, &canon, &trusted_dirs) {
                     if let Ok(metadata) = file.metadata() {
-                        if metadata.len() > MAX_FILE_READ_SIZE {
+                        let extensionless_image = {
+                            #[cfg(feature = "image-read")]
+                            {
+                                use std::io::{Seek, SeekFrom};
+                                let mut held = &file;
+                                let mut header = [0; 16];
+                                let image = Path::new(file_path)
+                                    .extension()
+                                    .is_none_or(|ext| ext.is_empty())
+                                    && held.read(&mut header).ok().is_some_and(|length| {
+                                        crate::image_read::sniff_image_media_type(&header[..length])
+                                            .is_some()
+                                    });
+                                let _ = held.seek(SeekFrom::Start(0));
+                                image
+                            }
+                            #[cfg(not(feature = "image-read"))]
+                            {
+                                false
+                            }
+                        };
+                        if metadata.len() > MAX_FILE_READ_SIZE && !extensionless_image {
                             let size = metadata.len();
                             let modified = metadata.modified().ok();
                             stream_source = Some(file);
@@ -2109,12 +2327,7 @@ impl Tool for FileReadTool {
                         symlink_resolution_changed_message(file_path).into(),
                     ));
                 }
-                Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile)
-                    if std::path::Path::new(file_path)
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb")) =>
-                {
+                Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile) if is_notebook => {
                     self.emit_failed(&invocation_id, "notebook_not_regular_file")
                         .await;
                     return Err(ToolError::Io(
@@ -2142,52 +2355,11 @@ impl Tool for FileReadTool {
             .map(tool_api::read_file_state::mtime_ms_floor)
             .unwrap_or(0);
 
-        // Read dedup (`FileReadTool.ts:536-573`): if this EXACT range was
-        // already read (a prior `Read`, full view, same offset+limit) and the
-        // file's mtime is unchanged on disk, return the byte-locked
-        // `file_unchanged` stub instead of re-sending the content. The earlier
-        // Read tool_result is still in context; two full copies waste
-        // cache_creation tokens on every later turn. Gated on:
-        //   * a recorded entry that came from a `Read` (`from_read`; TS
-        //     `existingState.offset !== undefined`) — never an Edit/Write
-        //     post-write entry, whose content/mtime reflect the post-edit
-        //     state and would misdirect the model;
-        //   * a FULL view (`offset`/`limit` both `None`; TS
-        //     `!existingState.isPartialView`, approximated as in the staleness
-        //     guard);
-        //   * the SAME range (`entry.offset == input_offset &&
-        //     entry.limit == input_limit`; TS `rangeMatch`);
-        //   * unchanged mtime (`mtime_ms == entry.mtime_ms`; TS
-        //     `mtimeMs === existingState.timestamp`).
-        // The GB killswitch (`tengu_read_dedup_killswitch`) is unported — LingXi
-        // has no GrowthBook; dedup is always enabled (3P default = killswitch
-        // off).
-        //
-        // The SEEDED branch (@235741459) runs FIRST and is a different shape:
-        //   if(_&&_.seededFromContext&&!_.isPartialView&&t===1&&r===void 0)
-        //     if(await b0e(f)===_.timestamp) → {type:"file_unchanged", …,
-        //                                      source:"seeded"}
-        // It covers memory files (LINGXI.md / rules) seeded into the registry at
-        // session start by `ConversationOrchestrator::seed_memory_read_state` —
-        // content the model already received inside the system prompt's memory
-        // block, so re-sending it is pure waste. Two deltas from the branch
-        // below, both deliberate:
-        //   * it does NOT consult `from_read` — a seeded entry has
-        //     `from_read: false` by construction, and the oracle's gate never
-        //     mentions `offset`/`rangeMatch` here;
-        //   * it gates on the DEFAULTED `offset` (`t===1`), not the raw
-        //     `input_offset`, so an explicit `offset: 1` still dedups — whereas
-        //     the non-seeded `range_match` below would refuse it.
+        // 2.1.322 always performs the read; existing state is retained only
+        // for operation attribution. Legacy file_unchanged rows remain readable.
         if let Some(entry) =
             tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
         {
-            // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a
-            // read-state entry (the `if(m)` in claude-code), BEFORE the dedup
-            // short-circuit. `priorOp` is a THREE-way (@235740900:
-            // `m.seededFromContext?"seeded":m.offset===void 0?"edit_write":"read"`)
-            // with `seeded` tested FIRST; LingXi's `from_read` flag is the
-            // faithful Read-vs-Edit/Write discriminator for the other two arms
-            // (a full Read also has `offset==None`, so `offset` alone is wrong).
             self.emit_file_read_reread(if entry.seeded_from_context {
                 "seeded"
             } else if entry.from_read {
@@ -2196,92 +2368,28 @@ impl Tool for FileReadTool {
                 "edit_write"
             })
             .await;
-            if entry.seeded_from_context
-                && !entry.is_partial_view
-                && offset == 1
-                && input_limit.is_none()
-                && mtime_ms == entry.mtime_ms
-            {
-                self.emit_file_read_dedup(&requested_path, Some("seeded"))
-                    .await;
-                self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
-                    .await;
-                return Ok(ToolCallResult {
-                    // binary `{type:"file_unchanged", file:{filePath:f},
-                    // source:"seeded"}` (@235741583) — `f` is `fullFilePath`,
-                    // the normalized session-cwd route on the Rust side.
-                    data: crate::generated_result(&json!({
-                        "type": "file_unchanged",
-                        "file": { "filePath": requested_path.display().to_string() },
-                        "source": "seeded",
-                    })),
-                    // Renderer @235742950:
-                    // `content = e.source==="seeded" ? vou(e.file.filePath) : Eou()`.
-                    // The stub names the LEXICAL path, not `canon`. The oracle's
-                    // `f` here is `Li(e)` (@226620214), which is pure
-                    // `path.normalize`/`path.resolve` — it does NOT resolve
-                    // symlinks. LingXi's `canonicalize_and_validate` does, for
-                    // sandbox containment, so under a symlinked cwd `canon`
-                    // would read `/private/var/...` while the memory block that
-                    // this stub points at printed `/var/...`. Since the whole
-                    // point of the stub is "see the block above", it has to name
-                    // the path the block used.
-                    model_content: Some(format_file_unchanged_seeded(&requested_path).into()),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    subagent_hooks_fired: false,
-                    mcp_meta: None,
-                });
-            }
-            let is_full_view = entry.offset.is_none() && entry.limit.is_none();
-            let range_match = entry.offset == input_offset && entry.limit == input_limit;
-            if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {
-                // `tengu_file_read_dedup` (`FileReadTool.ts:559-561`) — fired in
-                // the dedup short-circuit, before returning the `file_unchanged`
-                // stub. Metadata: `ext` only when present (the analytics ext of
-                // the resolved path). TS uses `fullFilePath` (`expandPath`); the
-                // Rust analog is the normalized session-cwd route.
-                self.emit_file_read_dedup(&requested_path, None).await;
-                // Behaves like the TS early return: the model sees the stub via
-                // `model_content`; the TUI payload `content` mirrors it (there
-                // is no fresh file body to render). `total_lines`/`line_range`
-                // are omitted — this is the `file_unchanged` result variant.
-                self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
-                    .await;
-                return Ok(ToolCallResult {
-                    // binary `{type:"file_unchanged", file:{filePath}}` (@235741168);
-                    // the stub rides on `model_content`, not inside `data`. The
-                    // oracle's third field `source:"seeded"` is set ONLY by the
-                    // seeded branch above, so it is omitted here — matching the
-                    // oracle's non-seeded return exactly.
-                    data: crate::generated_result(&json!({
-                        "type": "file_unchanged",
-                        "file": { "filePath": file_path },
-                    })),
-                    // Renderer @235742950 picks `Eou()` = `Sou` for a non-seeded
-                    // `file_unchanged`. The long form `FOg` has no producer in
-                    // 2.1.220 — see [`FILE_UNCHANGED_STUB`].
-                    model_content: Some(FILE_UNCHANGED_SHORT.into()),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    subagent_hooks_fired: false,
-                    mcp_meta: None,
-                });
-            }
         }
 
         // Image files route to the multimodal image path (claude-code routes by
         // extension to readImageWithTokenBudget, bypassing the text size cap).
-        let is_image = cfg!(feature = "image-read") && is_image_path(&canon);
+        #[cfg(feature = "image-read")]
+        let is_image = is_image_path(Path::new(file_path))
+            || (Path::new(file_path)
+                .extension()
+                .is_none_or(|ext| ext.is_empty())
+                && crate::image_read::sniff_image_media_type(
+                    &snapshot.bytes[..snapshot.bytes.len().min(16)],
+                )
+                .is_some());
+        #[cfg(not(feature = "image-read"))]
+        let is_image = false;
 
         // PDF files route to the document path (claude-code routes by extension
         // to the PDF reader, which applies its own PDF size gates — 20MB inline /
         // 100MB extraction — not the 256KB text cap). Gated on the feature so the
         // cap still applies — and PDFs still hit the binary guard — when
         // `pdf-read` is off.
-        let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(&canon);
+        let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(Path::new(file_path));
 
         // Binary-extension gate (`FileReadTool.ts:469-482`). A file whose
         // extension is in `BINARY_EXTENSIONS` is rejected as binary *before* any
@@ -2295,7 +2403,10 @@ impl Tool for FileReadTool {
         // the PRIMARY binary detection (by extension); the NUL-scan below is the
         // fallback for extensionless / non-listed binaries (`FileReadTool.ts` reads
         // the bytes then scans — here `looks_binary`).
-        if has_binary_extension(&canon) && !is_image_path(&canon) && !is_pdf_path(&canon) {
+        if has_binary_extension(&requested_path)
+            && !is_image_path(&requested_path)
+            && !is_pdf_path(&requested_path)
+        {
             self.emit_failed(&invocation_id, "binary_file").await;
             return Err(ToolError::Io(format_binary(&canon).into()));
         }
@@ -2317,12 +2428,7 @@ impl Tool for FileReadTool {
         // check further down). LingXi still applies the generic cap to `.ipynb`
         // at `size > MAX_FILE_READ_SIZE` below; realigning that ordering is a
         // separate finding.
-        if std::path::Path::new(file_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
-            && size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE
-        {
+        if is_notebook && size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE {
             self.emit_failed(&invocation_id, "notebook_too_large").await;
             return Err(ToolError::Io(
                 crate::notebook_read::notebook_too_large_message().into(),
@@ -2335,20 +2441,36 @@ impl Tool for FileReadTool {
         // must succeed and return just the requested lines, so the cap is gated
         // on `input_limit.is_none()`. A no-limit oversize read still errors with
         // the byte-locked template (fixture-pinned `error_template`).
-        if !is_image && !is_pdf && input_limit.is_none() && size > MAX_FILE_READ_SIZE {
+        if !is_image
+            && !is_pdf
+            && !is_notebook
+            && input_limit.is_none()
+            && size > limits.max_size_bytes
+        {
             self.emit_failed(&invocation_id, "file_too_large").await;
-            return Err(ToolError::Io(format_too_large(&canon, size).into()));
+            return Err(ToolError::Io(
+                format!(
+                    "{}{}",
+                    format_too_large_for_limit(size, limits.max_size_bytes),
+                    allowance.hint(Some(size), None)
+                )
+                .into(),
+            ));
         }
 
         let ext = std::path::Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase);
-        let max_output_tokens = effective_max_output_tokens();
+        let max_selected_bytes = allowance
+            .base
+            .max_tokens
+            .saturating_mul(128)
+            .max(raised.map_or(0, |limits| limits.max_size_bytes));
 
         if !is_image
             && !is_pdf
-            && ext.as_deref() != Some("ipynb")
+            && !is_notebook
             && input_limit.is_some()
             && size > MAX_FILE_READ_SIZE
         {
@@ -2359,7 +2481,7 @@ impl Tool for FileReadTool {
                     offset,
                     input_limit.expect("checked is_some"),
                     ext.as_deref(),
-                    max_output_tokens,
+                    max_selected_bytes,
                 )
                 .await
             } else {
@@ -2369,7 +2491,7 @@ impl Tool for FileReadTool {
                     offset,
                     input_limit.expect("checked is_some"),
                     ext.as_deref(),
-                    max_output_tokens,
+                    max_selected_bytes,
                 )
                 .await
             } {
@@ -2381,19 +2503,25 @@ impl Tool for FileReadTool {
                 }
             };
 
+            let not_text = streamed.not_text;
             let mut slice = streamed.content;
             let total_lines = streamed.total_lines;
             let line_range_start = offset;
             let read_lines = streamed.read_lines;
-            let token_estimate = rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
-            if token_estimate != 0
-                && token_estimate > max_output_tokens / 4
-                && token_estimate > max_output_tokens
+            let token_estimate =
+                count_read_tokens(&slice, ext.as_deref(), offset, raised.is_some());
+            if let Err(token_cap) =
+                admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate)
             {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
                 return Err(ToolError::Io(
-                    format_max_tokens_exceeded(token_estimate, max_output_tokens).into(),
+                    format!(
+                        "{}{}",
+                        format_max_tokens_exceeded(token_estimate, token_cap),
+                        allowance.hint(None, Some(token_estimate))
+                    )
+                    .into(),
                 ));
             }
 
@@ -2406,7 +2534,7 @@ impl Tool for FileReadTool {
                 tool_api::read_file_state::ReadFileEntry {
                     content: slice.clone(),
                     mtime_ms,
-                    offset: input_offset,
+                    offset: Some(offset),
                     limit: input_limit,
                     from_read: true,
                     seeded_from_context: false,
@@ -2426,8 +2554,10 @@ impl Tool for FileReadTool {
             )
             .await;
 
-            let model_content = if slice.is_empty() {
-                if total_lines == 0 {
+            let mut model_content = if slice.is_empty() {
+                if read_lines >= 1 && total_lines > 1 {
+                    format!("{offset}\t")
+                } else if read_lines >= 1 || total_lines == 0 {
                     EMPTY_FILE_WARNING.to_string()
                 } else {
                     format_offset_beyond_eof(offset, total_lines)
@@ -2435,6 +2565,10 @@ impl Tool for FileReadTool {
             } else {
                 add_line_numbers(&slice, offset)
             };
+            if let Some(kind) = not_text {
+                model_content.push_str("\n\n");
+                model_content.push_str(&kind.read_warning());
+            }
             let mut file = json!({
                 "filePath": file_path,
                 "content": std::mem::take(&mut slice),
@@ -2488,21 +2622,8 @@ impl Tool for FileReadTool {
             return result;
         }
 
-        let head = &bytes[..bytes.len().min(NUL_SCAN_WINDOW)];
-        if looks_binary(head) {
-            self.emit_failed(&invocation_id, "binary_file").await;
-            return Err(ToolError::Io(format_binary(&canon).into()));
-        }
-
-        let content = match decode_utf8_strict(&bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                self.emit_failed(&invocation_id, "non_utf8").await;
-                return Err(ToolError::Io(
-                    format!("File {} is not valid UTF-8", canon.display()).into(),
-                ));
-            }
-        };
+        let not_text = crate::file_meta::classify_not_text(&bytes);
+        let content = crate::file_meta::decode_native_text(&bytes);
 
         // Notebook (`.ipynb`) structured-cell read (`FileReadTool.ts:822-863`).
         // A notebook is parsed into an ARRAY of structured cells — NOT the
@@ -2515,8 +2636,9 @@ impl Tool for FileReadTool {
         // the same case-insensitive `.ipynb` test FileEditTool uses to route to
         // NotebookEdit. A parse failure surfaces the JSON error (TS's
         // `jsonParse` throws → propagates out of `call`).
-        if ext.as_deref() == Some("ipynb") {
-            let cells = match crate::notebook_read::read_notebook(&content) {
+        if is_notebook {
+            let notebook_content = String::from_utf8_lossy(&bytes);
+            let cells = match crate::notebook_read::read_notebook(&notebook_content) {
                 Ok(c) => c,
                 Err(e) => {
                     self.emit_failed(&invocation_id, "notebook_parse").await;
@@ -2564,7 +2686,8 @@ impl Tool for FileReadTool {
             // (`FileReadTool.ts:838`) on the notebook path too, after the
             // byte-size check and before recording state. `ext` is `"ipynb"`
             // (bytesPerToken 4).
-            if let Err(msg) = validate_content_tokens(&cells_json, Some("ipynb"), max_output_tokens)
+            if let Err(msg) =
+                validate_content_tokens(&cells_json, Some("ipynb"), allowance.base.max_tokens)
             {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
@@ -2590,8 +2713,8 @@ impl Tool for FileReadTool {
                 tool_api::read_file_state::ReadFileEntry {
                     content: cells_json,
                     mtime_ms,
-                    offset: input_offset,
-                    limit: input_limit,
+                    offset: Some(1),
+                    limit: None,
                     from_read: true,
                     seeded_from_context: false,
                     is_partial_view: false,
@@ -2618,38 +2741,11 @@ impl Tool for FileReadTool {
             });
         }
 
-        let all_lines: Vec<&str> = content.split_inclusive('\n').collect();
-        // FILE.4: `total_lines` must match TS `readFileInRange.totalLines`
-        // (`utils/readFileInRange.ts:188`) = (number of '\n') + 1. TS does an
-        // UNCONDITIONAL post-loop `lineIndex++` that counts the (possibly empty)
-        // final fragment after the last newline, so a TRAILING newline adds a
-        // phantom final line (e.g. "a\nb\nc\n" => 4, not the natural 3). The prior
-        // `split_inclusive().len()` undercounted trailing-newline files by one in
-        // the model-facing `total_lines` field + the offset-beyond-EOF warning.
-        // An empty file stays 0 so the byte-locked EMPTY_FILE_WARNING branch still
-        // fires (TS's empty path is upstream of readFileInRange and not reproduced
-        // here). NOTE: `all_lines` (split_inclusive) is what the range SLICING below
-        // uses — only this model-facing count is TS-aligned.
-        let total_lines = if content.is_empty() {
-            0
-        } else {
-            content.bytes().filter(|&b| b == b'\n').count() as u64 + 1
-        };
-        let start_idx = (offset.saturating_sub(1) as usize).min(all_lines.len());
-        // NO line cap. claude-code's runtime passes `maxLines = limit` VERBATIM
-        // (no `?? MAX_LINES_TO_READ` default), so an UNDEFINED `limit` reads to
-        // EOF; only an explicit `limit` bounds the end index. The "up to 2000
-        // lines" wording in the prompt is advisory text, NOT a runtime cap.
-        let end_idx = match limit {
-            Some(l) => (start_idx + l as usize).min(all_lines.len()),
-            None => all_lines.len(),
-        };
-        let mut slice: String = all_lines[start_idx..end_idx].concat();
+        let selected = select_text_range(&content, offset, limit);
+        let total_lines = selected.total_lines;
+        let mut slice = selected.content;
         let line_range_start = offset;
-        // `read_lines` is the model-facing line count of the returned slice; it
-        // starts as the raw slice line count and is overwritten by a graceful
-        // truncation (`S` in claude-code).
-        let mut read_lines = (end_idx - start_idx) as u64;
+        let mut read_lines = selected.read_lines;
 
         // Token-budget gate — `validateContentTokens(content, ext, maxTokens)`
         // (`FileReadTool.ts`). LingXi has no `fileReadingLimits`, so the budget
@@ -2661,14 +2757,13 @@ impl Tool for FileReadTool {
         //
         // `pages` is never set on the text path (it's a PDF-only input), so the
         // `k` flag here is `offset <= 1 && limit is None`.
-        let token_estimate = rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
+        let token_estimate = count_read_tokens(&slice, ext.as_deref(), offset, raised.is_some());
         let mut partial_note: Option<String> = None;
         // Mirror `validateContentTokens`'s early-pass band: skip when 0 or
         // `<= maxTokens/4`; otherwise the offline fallback is `effectiveCount ==
         // estimate`, over budget iff `estimate > maxTokens`.
-        if token_estimate != 0
-            && token_estimate > max_output_tokens / 4
-            && token_estimate > max_output_tokens
+        if let Err(token_cap) =
+            admit_read_tokens(&allowance, limits, raised.is_some(), token_estimate)
         {
             let is_full_read = offset <= 1 && limit.is_none();
             if is_full_read {
@@ -2676,18 +2771,35 @@ impl Tool for FileReadTool {
                 let trunc = truncate_to_token_budget(
                     &slice,
                     token_estimate,
-                    max_output_tokens,
+                    allowance.base.max_tokens,
                     total_lines,
                     &requested_path.display().to_string(),
                 );
                 slice = trunc.content;
                 read_lines = trunc.line_count;
-                partial_note = Some(trunc.note);
+                let cap_label = if raised.is_some() && token_cap > allowance.base.max_tokens {
+                    format!("allow_large had room for {token_cap} tokens this turn")
+                } else {
+                    format!("cap {}", allowance.base.max_tokens)
+                };
+                let note = trunc.note.replace(
+                    &format!(" tokens, cap {}", allowance.base.max_tokens),
+                    &format!(" tokens, {cap_label}"),
+                );
+                partial_note = Some(note.replace(
+                    ". Do NOT",
+                    &format!(".{} Do NOT", allowance.hint(None, Some(token_estimate))),
+                ));
             } else {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
                 return Err(ToolError::Io(
-                    format_max_tokens_exceeded(token_estimate, max_output_tokens).into(),
+                    format!(
+                        "{}{}",
+                        format_max_tokens_exceeded(token_estimate, token_cap),
+                        allowance.hint(None, Some(token_estimate))
+                    )
+                    .into(),
                 ));
             }
         }
@@ -2711,8 +2823,12 @@ impl Tool for FileReadTool {
             tool_api::read_file_state::ReadFileEntry {
                 content: slice.clone(),
                 mtime_ms,
-                offset: input_offset,
-                limit: input_limit,
+                offset: Some(offset),
+                limit: if partial_note.is_some() {
+                    Some(read_lines)
+                } else {
+                    input_limit
+                },
                 // This entry is the product of a `Read` — the dedup gate
                 // (`FileReadTool.ts:550` `offset !== undefined`) only short-
                 // circuits against Read-sourced entries.
@@ -2769,8 +2885,10 @@ impl Tool for FileReadTool {
         // `<system-reminder>` warning otherwise. This mirrors
         // claude-code's `FileReadTool` mapper (`FileReadTool.ts:692-714`), where
         // the model string diverges from the UI chrome.
-        let model_content = if slice.is_empty() {
-            if total_lines == 0 {
+        let mut model_content = if slice.is_empty() {
+            if read_lines >= 1 && total_lines > 1 {
+                format!("{offset}\t")
+            } else if read_lines >= 1 || total_lines == 0 {
                 EMPTY_FILE_WARNING.to_string()
             } else {
                 format_offset_beyond_eof(offset, total_lines)
@@ -2799,6 +2917,10 @@ impl Tool for FileReadTool {
             // defensive-security guidance lives in the system-prompt body instead.
             add_line_numbers(&slice, offset)
         };
+        if let Some(kind) = not_text {
+            model_content.push_str("\n\n");
+            model_content.push_str(&kind.read_warning());
+        }
 
         // claude-code FileRead result `data` (2.1.191): `{type, file:{…}}` — pure
         // metadata; the cat -n model render rides on `model_content`. The text
@@ -3194,6 +3316,22 @@ mod tests {
             result.content.len()
         );
         assert!(result.total_lines >= 5_000);
+    }
+
+    #[tokio::test]
+    async fn streaming_empty_lines_enforce_selection_byte_budget() {
+        for content in ["\n\n\n", "\r\n\r\n\r\n"] {
+            let error =
+                read_text_range_streaming(content.as_bytes(), Path::new("text.txt"), 1, 4, None, 2)
+                    .await
+                    .err()
+                    .expect("three separators exceed two selected bytes");
+            assert!(error
+                .model_facing_message()
+                .string_at("")
+                .unwrap()
+                .contains("over 2 bytes of text"));
+        }
     }
 
     #[test]
@@ -4473,89 +4611,72 @@ mod tests {
         }
     }
 
-    // ───────────────────────── Read dedup (file_unchanged) ──────────────────
-
     #[tokio::test]
-    async fn unchanged_reread_returns_file_unchanged_stub() {
-        // A full Read, then an immediate identical re-read with no on-disk
-        // change → the dedup short-circuit returns the byte-locked stub.
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("dedup.txt");
-        std::fs::write(&target, "alpha\nbeta\n").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let tool = FileReadTool::new(ctx);
-        // First read populates the registry.
-        let first = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            crate::test_data(&first.data)["file"]["content"],
-            "alpha\nbeta\n"
-        );
-        // Second identical read → file_unchanged stub.
-        let second = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
-        // file_unchanged data = {type, file:{filePath}}; the stub rides on the
-        // model_content channel, not inside data.
-        assert!(crate::test_data(&second.data).get("content").is_none());
-        assert!(crate::test_data(&second.data)["file"]["filePath"].is_string());
-        assert_eq!(
-            crate::test_model_text(second.model_content.as_ref()),
-            Some(FILE_UNCHANGED_SHORT)
-        );
-    }
-
-    #[tokio::test]
-    async fn dedup_returns_the_short_form_wasted_call_stub() {
-        // 2.1.220 result renderer (binary @235742950):
-        //   case"file_unchanged": content = e.source==="seeded" ? vou(...) : Eou()
-        // and `function Eou(){return Sou}` (@229139080), where
-        //   Sou = "Wasted call — file unchanged since your last Read. …" (@229141759).
-        // The long form `FOg` (@229141593 = FILE_UNCHANGED_STUB) has NO PRODUCER in
-        // 2.1.220: `LC_ALL=C grep -abo -F 'FOg'` over the binary yields exactly two
-        // JS-region hits — its definition (@229141593) and the detector
-        // `joo(e){return e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)}`
-        // (@229139264/@229139291). It survives only to recognise stubs written by
-        // older versions, so the non-seeded dedup branch must emit `Sou`.
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("short-stub.txt");
-        std::fs::write(&target, "one\ntwo\n").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let tool = FileReadTool::new(ctx);
-        tool.call(
-            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
+    async fn native_322_rereads_always_return_fresh_content_and_attribution() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_read_322.json"
+        ))
         .unwrap();
-        let second = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
-        assert_eq!(
-            crate::test_model_text(second.model_content.as_ref()),
-            Some(
-                "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead."
-            )
-        );
+        for case in fixture["rereadCases"].as_array().unwrap() {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("file.txt");
+            std::fs::write(&target, "fresh").unwrap();
+            let (ctx, sink) = make_ctx(&tmp);
+            ctx.bus.attach_sink(sink.clone()).await;
+            if !case["input"]["entry"].is_null() {
+                let input = &case["input"]["entry"];
+                let mtime_ms = std::fs::metadata(&target)
+                    .unwrap()
+                    .modified()
+                    .map(tool_api::read_file_state::mtime_ms_floor)
+                    .unwrap();
+                let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+                tool_api::read_file_state::set_with_model_context(
+                    &ctx.read_file_state,
+                    route,
+                    tool_api::read_file_state::ReadFileEntry {
+                        content: "prior".into(),
+                        mtime_ms,
+                        offset: input["offset"].as_u64(),
+                        limit: input["limit"].as_u64(),
+                        from_read: input["offset"].as_u64().is_some(),
+                        seeded_from_context: input["seededFromContext"].as_bool().unwrap_or(false),
+                        is_partial_view: input["isPartialView"].as_bool().unwrap_or(false),
+                    },
+                    true,
+                );
+            }
+            let tool = FileReadTool::new(ctx);
+            for input in [
+                json!({"file_path":target}),
+                json!({"file_path":target,"offset":1}),
+            ] {
+                let result = tool
+                    .call(crate::generated_result(&input), fresh_ctx(), fresh_tx())
+                    .await
+                    .unwrap();
+                let data = crate::test_data(&result.data);
+                assert_eq!(data["type"], case["expected"]["data"]["type"]);
+                assert_eq!(
+                    data["file"]["content"],
+                    case["expected"]["data"]["file"]["content"]
+                );
+                assert_eq!(
+                    crate::test_model_text(result.model_content.as_ref()),
+                    Some("1\tfresh")
+                );
+            }
+            let events = sink.events().await;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.name == "tengu_session_file_read")
+                    .count(),
+                2
+            );
+            assert!(find_event(&events, "tengu_file_read_reread").is_some());
+            assert!(find_event(&events, "tengu_file_read_dedup").is_none());
+        }
     }
 
     #[tokio::test]
@@ -4700,6 +4821,471 @@ mod tests {
             rough_token_count_estimation_for_file_type(&"a".repeat(50_000), Some("json")),
             25_000
         );
+    }
+
+    #[test]
+    fn native_322_read_helper_fixtures() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_read_322.json"
+        ))
+        .unwrap();
+        for case in fixture["tokenCases"].as_array().unwrap() {
+            let input = &case["input"];
+            assert_eq!(
+                rough_token_count_estimation_for_file_type(
+                    input["content"].as_str().unwrap(),
+                    input["ext"].as_str(),
+                ),
+                case["expected"].as_u64().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["rangeCases"].as_array().unwrap() {
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let start = input["offset"].as_u64().unwrap();
+            let selected = select_text_range(
+                input["content"].as_str().unwrap(),
+                start,
+                input["limit"].as_u64(),
+            );
+            assert_eq!(
+                selected.content,
+                expected["content"].as_str().unwrap(),
+                "{input}"
+            );
+            assert_eq!(
+                selected.read_lines,
+                expected["numLines"].as_u64().unwrap(),
+                "{input}"
+            );
+            assert_eq!(
+                selected.total_lines,
+                expected["totalLines"].as_u64().unwrap(),
+                "{input}"
+            );
+            assert_eq!(
+                add_line_numbers(&selected.content, start),
+                expected["numberedContent"].as_str().unwrap()
+            );
+            let result = crate::generated_result(&json!({
+                "type": "text", "file": {"content": selected.content,
+                    "numLines":selected.read_lines,"totalLines":selected.total_lines,
+                    "startLine":start}
+            }));
+            assert_eq!(
+                map_read_result_text(&result)
+                    .unwrap()
+                    .string_at("")
+                    .unwrap(),
+                expected["modelContent"].as_str().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["truncationCases"].as_array().unwrap() {
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let truncated = truncate_to_token_budget(
+                input["content"].as_str().unwrap(),
+                input["tokenCount"].as_u64().unwrap(),
+                input["maxTokens"].as_u64().unwrap(),
+                input["totalLines"].as_u64().unwrap(),
+                input["filePath"].as_str().unwrap(),
+            );
+            assert_eq!(
+                truncated.content,
+                expected["content"].as_str().unwrap(),
+                "{input}"
+            );
+            assert_eq!(
+                truncated.line_count,
+                expected["numLines"].as_u64().unwrap(),
+                "{input}"
+            );
+            assert_eq!(
+                truncated.note,
+                expected["note"].as_str().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["roomCases"].as_array().unwrap() {
+            let input = &case["input"];
+            let room = tool_api::read_context_room::ReadContextRoom::new(
+                input["threshold"].as_u64().unwrap(),
+                input["held"].as_u64().unwrap(),
+            );
+            room.claim(input["claimed"].as_u64().unwrap());
+            assert_eq!(
+                room.room_tokens(input["usage"].as_u64().unwrap()),
+                case["expected"].as_u64().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["allowanceCases"].as_array().unwrap() {
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let room = input["roomTokens"].as_u64().map(|tokens| {
+                tool_api::read_context_room::ReadContextRoom::new(
+                    tokens.saturating_mul(10).div_ceil(7),
+                    0,
+                )
+            });
+            let allowance = ReadAllowance {
+                room: room.as_ref(),
+                base: ReadLimits {
+                    max_tokens: 25_000,
+                    max_size_bytes: MAX_FILE_READ_SIZE,
+                },
+                opted_in: input["optedIn"].as_bool().unwrap(),
+                model_bytes_per_token: model_bytes_per_token(input["model"].as_str().unwrap()),
+            };
+            assert_eq!(
+                allowance.model_bytes_per_token,
+                expected["modelBytesPerToken"].as_u64().unwrap()
+            );
+            let raised = allowance.current_room().raised.map(|limits|
+                json!({"maxTokens":limits.max_tokens,"maxSizeBytes":limits.max_size_bytes}));
+            assert_eq!(
+                raised.unwrap_or(serde_json::Value::Null),
+                expected["raised"],
+                "{input}"
+            );
+            assert_eq!(
+                allowance.hint(None, input["tokens"].as_u64()),
+                expected["hint"].as_str().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["countCases"].as_array().unwrap() {
+            let input = &case["input"];
+            assert_eq!(
+                count_read_tokens(
+                    input["content"].as_str().unwrap(),
+                    Some("txt"),
+                    input["offset"].as_u64().unwrap(),
+                    input["raised"].as_bool().unwrap()
+                ),
+                case["expected"].as_u64().unwrap(),
+                "{input}"
+            );
+        }
+        for case in fixture["promptCases"].as_array().unwrap() {
+            let expected = match (
+                case["input"]["lean"].as_bool().unwrap(),
+                case["input"]["rewrite"].as_bool().unwrap(),
+            ) {
+                (false, _) => READ_PROMPT_LONG,
+                (true, false) => READ_PROMPT_SHORT,
+                (true, true) => READ_PROMPT_SHORT_REWRITE,
+            };
+            assert_eq!(expected, case["expected"].as_str().unwrap());
+        }
+        assert_eq!(
+            MAX_FILE_READ_SIZE,
+            fixture["schemaCase"]["maxSizeBytes"].as_u64().unwrap()
+        );
+        assert_eq!(
+            INPUT_SCHEMA.string_at("/properties/allow_large/description"),
+            fixture["schemaCase"]["allowLargeDescription"].as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_322_allow_large_uses_shared_trusted_room_and_unavailable_guidance() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("large.txt");
+        let body = "x".repeat(300_000);
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let room = Arc::new(tool_api::read_context_room::ReadContextRoom::new(
+            600_000, 0,
+        ));
+        let mut call = fresh_ctx();
+        call.options.main_loop_model = "claude-opus-5".into();
+        call.options.read_context_room = Some(room.clone());
+        let ordinary = tool
+            .call(
+                crate::generated_result(&json!({"file_path":target})),
+                call.clone(),
+                fresh_tx(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(ordinary
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .ends_with(ALLOW_LARGE_HINT));
+        for _ in 0..3 {
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"file_path":target,"allow_large":true})),
+                    call.clone(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            let data = crate::test_data(&result.data);
+            assert_eq!(data["file"]["content"], body);
+            assert!(data["file"].get("truncatedByTokenCap").is_none());
+        }
+        assert!(room.claimed() > 450_000);
+        let partial = tool
+            .call(
+                crate::generated_result(&json!({"file_path":target,"allow_large":true})),
+                call,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::test_data(&partial.data)["file"]["truncatedByTokenCap"],
+            true
+        );
+        assert_eq!(partial.new_messages.len(), 1);
+        let unavailable = tool
+            .call(
+                crate::generated_result(&json!({"file_path":target,"allow_large":true})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(unavailable
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .ends_with(ALLOW_LARGE_UNAVAILABLE_HINT));
+    }
+
+    #[tokio::test]
+    async fn native_322_disk_reads_preserve_range_and_encoding_contracts() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        for (name, bytes, expected, warning) in [
+            ("cr.txt", b"a\r\r\n".to_vec(), "a\r\n", false),
+            ("utf16.txt", vec![0xff, 0xfe, b'a', 0, 10, 0], "a\n", false),
+            ("nul.txt", vec![b'a', 0, b'b'], "a\0b", true),
+            ("legacy.txt", vec![b'a', 0xff, b'b'], "a\u{fffd}b", true),
+        ] {
+            let target = tmp.path().join(name);
+            std::fs::write(&target, bytes).unwrap();
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"file_path":target})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(crate::test_data(&result.data)["file"]["content"], expected);
+            assert_eq!(
+                crate::test_model_text(result.model_content.as_ref())
+                    .unwrap()
+                    .contains("Edit and Write will refuse it"),
+                warning
+            );
+        }
+        let target = tmp.path().join("cjk.txt");
+        let content = "中".repeat(80_000);
+        std::fs::write(&target, &content).unwrap();
+        let result = tool
+            .call(
+                crate::generated_result(&json!({"file_path":target})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], content);
+        assert!(
+            result.new_messages.is_empty(),
+            "UTF-8 bytes must not inflate native token estimate"
+        );
+        let target = tmp.path().join("range.txt");
+        std::fs::write(&target, "中文\n".repeat(50_000)).unwrap();
+        let result = tool
+            .call(
+                crate::generated_result(&json!({"file_path":target,"limit":30_000})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&result.data)["file"]["numLines"], 30_000);
+        assert!(!crate::test_data(&result.data)["file"]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn native_322_normalized_notebook_and_raw_token_extension_routes() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
+        let tmp = TempDir::new().unwrap();
+        let notebook = tmp.path().join("book.ipynb");
+        std::fs::write(&notebook, sample_ipynb()).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                crate::generated_result(
+                    &json!({"file_path":format!(" {} ",notebook.display()),"offset":99,"limit":1}),
+                ),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&result.data)["type"], "notebook");
+        let json_file = tmp.path().join("data.json");
+        std::fs::write(&json_file, "中".repeat(70_000)).unwrap();
+        let result = tool
+            .call(
+                crate::generated_result(
+                    &json!({"file_path":format!(" {} ",json_file.display()),"limit":1}),
+                ),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            70_000
+        );
+        assert!(tool
+            .call(
+                crate::generated_result(&json!({"file_path":json_file,"limit":1})),
+                fresh_ctx(),
+                fresh_tx()
+            )
+            .await
+            .is_err());
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn native_322_image_dispatch_uses_raw_extension_or_extensionless_magic() {
+        let tmp = TempDir::new().unwrap();
+        let named = tmp.path().join("image.png");
+        std::fs::write(&named, "plain text").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let plain = tool
+            .call(
+                crate::generated_result(&json!({"file_path":format!(" {} ",named.display())})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&plain.data)["type"], "text");
+        let extensionless = tmp.path().join("image");
+        let image = image::DynamicImage::new_rgb8(2, 2);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut png, image::ImageOutputFormat::Png)
+            .unwrap();
+        std::fs::write(&extensionless, png.into_inner()).unwrap();
+        let decoded = tool
+            .call(
+                crate::generated_result(&json!({"file_path":extensionless})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&decoded.data)["type"], "image");
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn native_322_pdf_dispatch_uses_raw_extension() {
+        let tmp = TempDir::new().unwrap();
+        let named = tmp.path().join("document.pdf");
+        std::fs::write(&named, "plain text").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let result = FileReadTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"file_path":format!(" {} ",named.display())})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crate::test_data(&result.data)["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn native_322_streamed_ranges_match_buffered_range_fixtures() {
+        struct ChunkReader<'a> {
+            data: &'a [u8],
+            chunk: usize,
+        }
+        impl Read for ChunkReader<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let count = output.len().min(self.chunk).min(self.data.len());
+                output[..count].copy_from_slice(&self.data[..count]);
+                self.data = &self.data[count..];
+                Ok(count)
+            }
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_read_322.json"
+        ))
+        .unwrap();
+        for case in fixture["rangeCases"].as_array().unwrap() {
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let content = input["content"].as_str().unwrap();
+            let bommed = if content.starts_with('\u{feff}') {
+                content.to_string()
+            } else {
+                format!("\u{feff}{content}")
+            };
+            let utf16: Vec<u8> = bommed.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            for bytes in [content.as_bytes(), utf16.as_slice()] {
+                for chunk in [1, 3, 7, STREAMING_READ_CHUNK_BYTES] {
+                    let selected = read_text_range_streaming(
+                        ChunkReader { data: bytes, chunk },
+                        Path::new("/workspace/text.txt"),
+                        input["offset"].as_u64().unwrap(),
+                        input["limit"].as_u64().unwrap_or(u64::MAX),
+                        Some("txt"),
+                        DEFAULT_MAX_OUTPUT_TOKENS,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        selected.content,
+                        expected["content"].as_str().unwrap(),
+                        "{input}; chunk={chunk}"
+                    );
+                    assert_eq!(
+                        selected.read_lines,
+                        expected["numLines"].as_u64().unwrap(),
+                        "{input}; chunk={chunk}"
+                    );
+                    assert_eq!(
+                        selected.total_lines,
+                        expected["totalLines"].as_u64().unwrap(),
+                        "{input}; chunk={chunk}"
+                    );
+                    assert!(selected.not_text.is_none(), "valid text must not warn");
+                }
+            }
+        }
     }
 
     #[test]
@@ -5148,72 +5734,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeded_full_read_returns_the_seeded_stub() {
-        // T1: seeded + not partial + no offset/limit + unchanged mtime.
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("LINGXI.md");
-        std::fs::write(&target, "# rules\nbe good\n").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
-        seed_entry(&ctx, &route, "# rules\nbe good\n", false);
-        let tool = FileReadTool::new(ctx);
-
-        let r = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&r.data)["type"], "file_unchanged");
-        assert_eq!(crate::test_data(&r.data)["source"], "seeded");
-        // The stub names the LEXICAL path (`target`), not `canon`. The oracle's
-        // `f` is `Li(e)` (@226620214) — `path.normalize`/`resolve`, no symlink
-        // resolution — and the stub has to name the same path the memory block
-        // above it printed. This expectation previously used `canon`, which only
-        // agreed because the fixture happened to sit under a resolved path.
-        assert_eq!(
-            crate::test_model_text(r.model_content.as_ref()),
-            Some(
-                format!(
-                    "<system-reminder>This file is already in your context (see \"Contents of {}\" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>",
-                    target.display()
-                )
-                .as_str()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn seeded_dedup_fires_on_explicit_offset_one() {
-        // T2: the DEFAULTED-offset gate. `offset: 1` is what the oracle's
-        // `t=1` default produces, so an explicit `offset:1` must still dedup —
-        // even though the non-seeded branch's `rangeMatch` (which compares the
-        // raw, un-defaulted `input_offset`) would refuse it.
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("LINGXI.md");
-        std::fs::write(&target, "# rules\n").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
-        seed_entry(&ctx, &route, "# rules\n", false);
-        let tool = FileReadTool::new(ctx);
-
-        let r = tool
-            .call(
-                crate::generated_result(
-                    &json!({ "file_path": target.to_str().unwrap(), "offset": 1 }),
-                ),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&r.data)["type"], "file_unchanged");
-        assert_eq!(crate::test_data(&r.data)["source"], "seeded");
-    }
-
-    #[tokio::test]
     async fn seeded_dedup_refuses_ranged_reads() {
         // T3: `t===1 && r===void 0` — any other offset, or ANY limit, skips
         // the seeded branch and returns the full/ranged content.
@@ -5298,124 +5818,6 @@ mod tests {
             .unwrap();
         assert_ne!(crate::test_data(&r.data)["type"], "file_unchanged");
         assert_eq!(crate::test_data(&r.data)["file"]["content"], "v2\n");
-    }
-
-    #[tokio::test]
-    async fn seeded_dedup_telemetry_carries_source_and_ext_and_prior_op() {
-        // T6: `{source:Te("seeded"), ...b!==void 0&&{ext:b}}` — BOTH keys; and
-        // the sibling `tengu_file_read_reread` picks `priorOp:"seeded"`
-        // (@235740900: `m.seededFromContext?"seeded":…`).
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("LINGXI.md");
-        std::fs::write(&target, "# rules\n").unwrap();
-        let (ctx, sink) = make_ctx(&tmp);
-        ctx.bus.attach_sink(sink.clone()).await;
-        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
-        seed_entry(&ctx, &route, "# rules\n", false);
-        let tool = FileReadTool::new(ctx);
-
-        tool.call(
-            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
-        .unwrap();
-
-        let events = sink.events().await;
-        let md = &find_event(&events, "tengu_file_read_dedup")
-            .expect("seeded dedup must fire tengu_file_read_dedup")
-            .metadata;
-        assert!(matches!(md.get("source"), Some(AnalyticsValue::String(s)) if s == "seeded"));
-        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "md"));
-        let rr = &find_event(&events, "tengu_file_read_reread")
-            .expect("reread fires whenever an entry already exists")
-            .metadata;
-        assert!(matches!(rr.get("priorOp"), Some(AnalyticsValue::String(s)) if s == "seeded"));
-    }
-
-    #[tokio::test]
-    async fn non_seeded_dedup_still_omits_source() {
-        // T7 (regression): the ordinary Read→Read dedup keeps the SHORT form
-        // and emits NO `source` key (the oracle's non-seeded return is
-        // `{data:{type:"file_unchanged",file:{filePath:e}}}` — no third field).
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("plain.rs");
-        std::fs::write(&target, "alpha\n").unwrap();
-        let (ctx, sink) = make_ctx(&tmp);
-        ctx.bus.attach_sink(sink.clone()).await;
-        let tool = FileReadTool::new(ctx);
-        tool.call(
-            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
-        .unwrap();
-        sink.clear().await;
-        let second = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
-        assert!(crate::test_data(&second.data).get("source").is_none());
-        assert_eq!(
-            crate::test_model_text(second.model_content.as_ref()),
-            Some(FILE_UNCHANGED_SHORT)
-        );
-        let events = sink.events().await;
-        let md = &find_event(&events, "tengu_file_read_dedup")
-            .expect("non-seeded dedup still fires")
-            .metadata;
-        assert!(md.get("source").is_none(), "non-seeded dedup has no source");
-        let rr = &find_event(&events, "tengu_file_read_reread")
-            .unwrap()
-            .metadata;
-        assert!(matches!(rr.get("priorOp"), Some(AnalyticsValue::String(s)) if s == "read"));
-    }
-
-    #[tokio::test]
-    async fn dedup_path_fires_file_read_dedup_with_ext() {
-        // The dedup short-circuit (file_unchanged) fires tengu_file_read_dedup
-        // (and NOT a second tengu_session_file_read on the deduped read).
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("dedup.rs");
-        std::fs::write(&target, "alpha\nbeta\n").unwrap();
-        let (ctx, sink) = make_ctx(&tmp);
-        ctx.bus.attach_sink(sink.clone()).await;
-        let tool = FileReadTool::new(ctx);
-        // First read populates the registry + fires session_file_read.
-        tool.call(
-            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
-        .unwrap();
-        sink.clear().await;
-        // Second identical read → dedup stub.
-        let second = tool
-            .call(
-                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
-        let events = sink.events().await;
-        let md = &find_event(&events, "tengu_file_read_dedup")
-            .expect("dedup short-circuit must fire tengu_file_read_dedup")
-            .metadata;
-        // ext present (only-if-present): "rs".
-        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "rs"));
-        // The deduped read does NOT fire session_file_read (it returns the stub
-        // before the text-read site).
-        assert!(find_event(&events, "tengu_session_file_read").is_none());
     }
 
     #[tokio::test]

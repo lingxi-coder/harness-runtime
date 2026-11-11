@@ -1,0 +1,857 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "incomplete search notice",
+      "start": 272417437,
+      "end": 272417614,
+      "sha256": "21928496d807844d29e6eb75c3b1e411e24bdb21b458cab5499edbf428438c45"
+    },
+    {
+      "name": "glob truncation notice",
+      "start": 272420656,
+      "end": 272421111,
+      "sha256": "7f763065ff25a1205a32bbe3b05039be74a0d99d6da22e6925d2c37dd230535d"
+    },
+    {
+      "name": "glob result mapper",
+      "start": 272423426,
+      "end": 272423699,
+      "sha256": "aacfd2f167da79aecbdc83e665d8059fa99831ec9db6c7e84479cd46309493ac"
+    },
+    {
+      "name": "head limit and pagination",
+      "start": 272427250,
+      "end": 272427522,
+      "sha256": "0337a4210ad22846f5c46af9f41ce9d3ec777503a9900e12b422055c2ede252b"
+    },
+    {
+      "name": "grep result mapper",
+      "start": 272428949,
+      "end": 272429990,
+      "sha256": "2c63bf54f1d41f3e58fde102d9737f726528c0471db6d6a4c249d56fcba9d52c"
+    },
+    {
+      "name": "ripgrep JSON event parser and line offset",
+      "start": 272437708,
+      "end": 272439143,
+      "sha256": "065088479b8a096cd28db5a129e287697c9ac6ada984f48a1b310065e745c40b"
+    },
+    {
+      "name": "grep call result and search arguments",
+      "start": 272431723,
+      "end": 272437053,
+      "sha256": "9439a554d7f647124784fff88f1a0d46fe12b83d7c7b2041d5c96cd352a042ad"
+    },
+    {
+      "name": "grep lexical result paths",
+      "start": 272437053,
+      "end": 272437415,
+      "sha256": "a4693203413cda874aba360e9752a0391524fab185749c920d3987e2abdb2b35"
+    },
+    {
+      "name": "one suffix removal",
+      "start": 260463926,
+      "end": 260463995,
+      "sha256": "ebc95b8712d8d2875533b7d0885bc7cf4386ef983718267912d7e3fc42955774"
+    },
+    {
+      "name": "glob repeated-root prefix and real-directory probe",
+      "start": 272416874,
+      "end": 272417437,
+      "sha256": "5af63c94a9d336bb08b1a45e5f8c7335de213b65dd908050efb0a4e94eb10fb7"
+    }
+  ],
+  "nativeProcessMode": "ARGV0=rg",
+  "projections": [
+    {
+      "tool": "glob",
+      "name": "empty",
+      "input": {
+        "filenames": [],
+        "truncated": false
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "No files found"
+      }
+    },
+    {
+      "tool": "glob",
+      "name": "empty timeout",
+      "input": {
+        "filenames": [],
+        "truncated": false,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo files found"
+      }
+    },
+    {
+      "tool": "glob",
+      "name": "paths with newline and Unicode",
+      "input": {
+        "filenames": [
+          "a\nb.txt",
+          "中文😀.txt"
+        ],
+        "truncated": false
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "a\nb.txt\n中文😀.txt"
+      }
+    },
+    {
+      "tool": "glob",
+      "name": "complete truncated",
+      "input": {
+        "filenames": [
+          "a",
+          "b"
+        ],
+        "truncated": true,
+        "totalMatches": 5,
+        "countIsComplete": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "a\nb\n(Showing 2 of 5 matching files; 3 more are not listed. Narrow the pattern or path to see the rest.)"
+      }
+    },
+    {
+      "tool": "glob",
+      "name": "incomplete truncated timeout",
+      "input": {
+        "filenames": [
+          "a",
+          "b"
+        ],
+        "truncated": true,
+        "totalMatches": 5,
+        "countIsComplete": false,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\na\nb\n(Showing the first 2 files; there are more than 5 matches. Narrow the pattern or path to see the rest.)"
+      }
+    },
+    {
+      "tool": "glob",
+      "name": "legacy truncation",
+      "input": {
+        "filenames": [
+          "a"
+        ],
+        "truncated": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "a\n(Results are truncated. Consider using a more specific path or pattern.)"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "content empty",
+      "input": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": []
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "No matches found"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "content empty timeout",
+      "input": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo matches found"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "content past end timeout",
+      "input": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "appliedOffset": 9,
+        "numMatches": 1,
+        "totalFiles": 1,
+        "totalLines": 1,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo entries at this offset\n\n[Showing results with pagination = offset: 9]"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "count empty",
+      "input": {
+        "mode": "count",
+        "numFiles": 0,
+        "filenames": []
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "No matches found\n\nFound 0 total occurrences across 0 files."
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "count empty timeout",
+      "input": {
+        "mode": "count",
+        "numFiles": 0,
+        "filenames": [],
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo matches found\n\nFound 0 total occurrences across 0 files."
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "count past end timeout",
+      "input": {
+        "mode": "count",
+        "numFiles": 0,
+        "filenames": [],
+        "appliedOffset": 9,
+        "numMatches": 1,
+        "totalFiles": 1,
+        "totalLines": 1,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo entries at this offset\n\nFound 1 total occurrence across 0 files. with pagination = offset: 9"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "files_with_matches empty",
+      "input": {
+        "mode": "files_with_matches",
+        "numFiles": 0,
+        "filenames": []
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "No files found"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "files_with_matches empty timeout",
+      "input": {
+        "mode": "files_with_matches",
+        "numFiles": 0,
+        "filenames": [],
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo files found"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "files_with_matches past end timeout",
+      "input": {
+        "mode": "files_with_matches",
+        "numFiles": 0,
+        "filenames": [],
+        "appliedOffset": 9,
+        "numMatches": 1,
+        "totalFiles": 1,
+        "totalLines": 1,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nNo entries at this offset. [Showing results with pagination = offset: 9]"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "content timeout with pagination",
+      "input": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a:1:hit",
+        "numLines": 1,
+        "totalLines": 8,
+        "appliedLimit": 1,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\na:1:hit\n\n[Showing results with pagination = limit: 1]"
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "count singular timeout",
+      "input": {
+        "mode": "count",
+        "numFiles": 1,
+        "filenames": [],
+        "content": "a:1",
+        "numMatches": 1,
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\na:1\n\nFound 1 total occurrence across 1 file."
+      }
+    },
+    {
+      "tool": "grep",
+      "name": "files timeout",
+      "input": {
+        "numFiles": 2,
+        "filenames": [
+          "a",
+          "b"
+        ],
+        "timedOut": true
+      },
+      "expected": {
+        "tool_use_id": "tool-1",
+        "type": "tool_result",
+        "content": "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.\n\nFound 2 files\na\nb"
+      }
+    }
+  ],
+  "headLimits": [
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "offset": 0
+      },
+      "expected": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "limit": 0,
+        "offset": 2
+      },
+      "expected": {
+        "items": [
+          3,
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "limit": 2,
+        "offset": 0
+      },
+      "expected": {
+        "items": [
+          1,
+          2
+        ],
+        "appliedLimit": 2
+      }
+    },
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "limit": 2,
+        "offset": 4
+      },
+      "expected": {
+        "items": [
+          5
+        ]
+      }
+    },
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "limit": 9,
+        "offset": 1
+      },
+      "expected": {
+        "items": [
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "input": {
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "offset": 300
+      },
+      "expected": {
+        "items": []
+      }
+    }
+  ],
+  "searches": [
+    {
+      "name": "exactly 500 ASCII",
+      "contents": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "options": {
+        "pattern": ".",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "501 ASCII",
+      "contents": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "options": {
+        "pattern": ".",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:[Omitted long matching line]",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:[Omitted long matching line]"
+    },
+    {
+      "name": "250 astral characters",
+      "contents": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\n",
+      "options": {
+        "pattern": ".",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    },
+    {
+      "name": "251 astral characters",
+      "contents": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\n",
+      "options": {
+        "pattern": ".",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:[Omitted long matching line]",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:[Omitted long matching line]"
+    },
+    {
+      "name": "400 three-byte characters",
+      "contents": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中\n",
+      "options": {
+        "pattern": ".",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中"
+    },
+    {
+      "name": "context gaps",
+      "contents": "before\nhit\nafter\ngap\ngap\ngap\nlead\nhit\ntail\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content",
+        "-C": 1
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt-1-before\na.txt:2:hit\na.txt-3-after\n--\na.txt-7-lead\na.txt:8:hit\na.txt-9-tail",
+        "numLines": 7,
+        "totalLines": 7
+      },
+      "modelText": "a.txt-1-before\na.txt:2:hit\na.txt-3-after\n--\na.txt-7-lead\na.txt:8:hit\na.txt-9-tail"
+    },
+    {
+      "name": "single file without filename",
+      "contents": "hit\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content"
+      },
+      "singleFile": true,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "1:hit",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "1:hit"
+    },
+    {
+      "name": "single file context without line numbers",
+      "contents": "before\nhit\nafter\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content",
+        "-C": 1,
+        "-n": false
+      },
+      "singleFile": true,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "before\nhit\nafter",
+        "numLines": 3,
+        "totalLines": 3
+      },
+      "modelText": "before\nhit\nafter"
+    },
+    {
+      "name": "multiline normal output",
+      "contents": "first\nhit\nlast\n",
+      "options": {
+        "pattern": "first\\nhit",
+        "output_mode": "content",
+        "multiline": true
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:first\na.txt:2:hit",
+        "numLines": 2,
+        "totalLines": 2
+      },
+      "modelText": "a.txt:1:first\na.txt:2:hit"
+    },
+    {
+      "name": "multiline only matching line offsets",
+      "contents": "first\nhit\nlast\n",
+      "options": {
+        "pattern": "first\\nhit",
+        "output_mode": "content",
+        "multiline": true,
+        "-o": true
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:first\na.txt:2:hit",
+        "numLines": 2,
+        "totalLines": 2
+      },
+      "modelText": "a.txt:1:first\na.txt:2:hit"
+    },
+    {
+      "name": "context pagination includes group break",
+      "contents": "before\nhit\nafter\ngap\ngap\ngap\nlead\nhit\ntail\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content",
+        "-C": 1,
+        "head_limit": 2,
+        "offset": 3
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "--\na.txt-7-lead",
+        "numLines": 2,
+        "totalLines": 7,
+        "appliedLimit": 2,
+        "appliedOffset": 3
+      },
+      "modelText": "--\na.txt-7-lead\n\n[Showing results with pagination = limit: 2, offset: 3]"
+    },
+    {
+      "name": "unterminated double carriage return",
+      "contents": "hit\r\r",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:hit\r",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:hit\r"
+    },
+    {
+      "name": "empty matching line",
+      "contents": "\n",
+      "options": {
+        "pattern": "^$",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "modelText": "a.txt:1:"
+    },
+    {
+      "name": "context override retains raw grouping gate",
+      "contents": "hit\ngap\nhit\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content",
+        "context": 0,
+        "-B": 1
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "a.txt:1:hit\n--\na.txt:3:hit",
+        "numLines": 3,
+        "totalLines": 3
+      },
+      "modelText": "a.txt:1:hit\n--\na.txt:3:hit"
+    },
+    {
+      "name": "NUL separates matching lines and adds binary notice",
+      "contents": "hit\nnone\u0000hit\nhit\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "",
+        "numLines": 0,
+        "totalLines": 0
+      },
+      "modelText": "No matches found"
+    },
+    {
+      "name": "single file binary notice",
+      "contents": "hit\u0000rest\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content"
+      },
+      "singleFile": true,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "1:hit\nbinary file matches (found \"\\0\" byte around offset 3)",
+        "numLines": 2,
+        "totalLines": 2
+      },
+      "modelText": "1:hit\nbinary file matches (found \"\\0\" byte around offset 3)"
+    },
+    {
+      "name": "NUL without matches stays empty",
+      "contents": "none\u0000rest\n",
+      "options": {
+        "pattern": "hit",
+        "output_mode": "content"
+      },
+      "singleFile": false,
+      "expected": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "",
+        "numLines": 0,
+        "totalLines": 0
+      },
+      "modelText": "No matches found"
+    }
+  ],
+  "repeatedRoots": [
+    {
+      "input": {
+        "pattern": "project/**/*.rs",
+        "root": "/workspace/project"
+      },
+      "expected": "/**/*.rs"
+    },
+    {
+      "input": {
+        "pattern": "workspace/project/**/*.rs",
+        "root": "/workspace/project"
+      },
+      "expected": "/**/*.rs"
+    },
+    {
+      "input": {
+        "pattern": "project/*.rs",
+        "root": "/workspace/project",
+        "directories": {
+          "/workspace/project/project": "directory"
+        }
+      },
+      "expected": "project/*.rs"
+    },
+    {
+      "input": {
+        "pattern": "project/*.rs",
+        "root": "/workspace/project",
+        "directories": {
+          "/workspace/project/project": "symlink"
+        }
+      },
+      "expected": "/*.rs"
+    },
+    {
+      "input": {
+        "pattern": "*.rs",
+        "root": "/workspace/project"
+      },
+      "expected": "*.rs"
+    },
+    {
+      "input": {
+        "pattern": "other/**/*.rs",
+        "root": "/workspace/project"
+      },
+      "expected": "other/**/*.rs"
+    },
+    {
+      "input": {
+        "pattern": "project/file.rs",
+        "root": "/workspace/project"
+      },
+      "expected": "/file.rs"
+    }
+  ]
+}

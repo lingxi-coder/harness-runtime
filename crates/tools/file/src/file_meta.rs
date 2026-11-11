@@ -12,27 +12,9 @@
 //! read into an LF-normalized in-memory string, match/replace on that, then
 //! write back re-applying the file's ORIGINAL encoding + line endings.
 //!
-//! # Divergences from TS (1:1 notes)
-//! - **UTF-16BE is NOT handled.** TS only inspects the little-endian BOM
-//!   `FF FE` (`FileEditTool.ts:209-213` / `fileRead.ts:34`); a big-endian
-//!   `FE FF` BOM is treated as UTF-8 there, so we match that exactly. (A
-//!   leading `FE FF` is therefore decoded as lossy UTF-8, same as TS.)
-//! - **UTF-8 BOM (`EF BB BF`).** TS classifies it as `utf8` and reads via
-//!   Node's `'utf8'` decoder, which does NOT strip the BOM — the U+FEFF
-//!   survives into `content`. We mirror that: encoding is `Utf8` and the BOM
-//!   bytes are decoded as the U+FEFF char (preserved through round-trip).
-//! - **Line-ending classification adds `Cr`.** TS `detectLineEndingsForString`
-//!   only ever returns `'CRLF' | 'LF'` (it counts CRLF vs bare-LF and never
-//!   classifies a CR-only file — such a file decodes to `'LF'` and is written
-//!   back with its lone `\r`s lost). We additionally count bare `\r` and can
-//!   classify a dominant-CR file as `Cr`, preserving it on write. For the
-//!   CRLF-vs-LF tie-break we match TS exactly (`crlf > lf` ⇒ CRLF, else LF),
-//!   so any file TS would call CRLF/LF we also call CRLF/LF.
-//! - **Detection sample size.** TS samples the first 4096 code units of the
-//!   decoded head for line-ending detection (`fileRead.ts:92`). We scan the
-//!   full decoded content; for the dominant-ending decision this only differs
-//!   on pathological files whose ending style flips after 4 KB, which the
-//!   parity fixtures do not exercise.
+//! Claude Code 2.1.322 preserves BOMs in the decoded view, normalizes CRLF
+//! only, and samples the first 4096 UTF-16 units for line-ending detection.
+//! Mutations reject unsupported encodings before they can replace their bytes.
 
 use std::io;
 use std::path::Path;
@@ -49,10 +31,72 @@ pub enum Encoding {
     Utf16Le,
 }
 
+/// Native `got` classifications. A UTF-16LE BOM is the only binary-looking
+/// prefix which the mutation tools accept as writable text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotText {
+    NotUtf8,
+    Nul,
+    Utf16Be,
+}
+
+impl NotText {
+    fn description(self) -> &'static str {
+        match self {
+            Self::NotUtf8 => "is not valid UTF-8: it uses a legacy encoding such as Windows-1252, Shift-JIS or GBK, or it is binary",
+            Self::Nul => "has NUL bytes in its first 8 KB: binary data, UTF-16/UTF-32 without a byte-order mark, or text with embedded NULs",
+            Self::Utf16Be => "is UTF-16 big-endian (it starts FE FF), which these tools cannot write",
+        }
+    }
+
+    #[must_use]
+    pub fn mutation_refusal_message(self) -> String {
+        format!("File {}. These tools write UTF-8 (or UTF-16LE behind its byte-order mark) and never convert a file's encoding on their own, so nothing was written. If the file is text, make the change with a shell command that reads and writes it in its own encoding (iconv, or PowerShell Get-Content/Set-Content -Encoding), or ask the user whether to convert it to UTF-8 first. To replace the whole file with new UTF-8 text anyway, delete it first, then Write it.", self.description())
+    }
+
+    #[must_use]
+    pub fn read_warning(self) -> String {
+        let undecodable = if self == Self::NotUtf8 {
+            " Its undecodable bytes show above as U+FFFD."
+        } else {
+            ""
+        };
+        format!("[This file {}.{undecodable} Edit and Write will refuse it: change it with a shell command that keeps its encoding, or ask the user whether to convert it to UTF-8.]", self.description())
+    }
+}
+
+#[must_use]
+pub fn classify_not_text(bytes: &[u8]) -> Option<NotText> {
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        None
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        Some(NotText::Utf16Be)
+    } else if bytes[..bytes.len().min(8000)].contains(&0) {
+        Some(NotText::Nul)
+    } else if std::str::from_utf8(bytes).is_err() {
+        Some(NotText::NotUtf8)
+    } else {
+        None
+    }
+}
+
+/// Native `gjr`: retain an existing BOM for a nonempty whole-file replacement.
+#[must_use]
+pub fn preserve_bom<'a>(previous: &str, replacement: &'a str) -> std::borrow::Cow<'a, str> {
+    if !replacement.is_empty()
+        && previous.starts_with('\u{feff}')
+        && !replacement.starts_with('\u{feff}')
+    {
+        format!("\u{feff}{replacement}").into()
+    } else {
+        replacement.into()
+    }
+}
+
 /// Line-ending style detected from (or to be applied to) a file's content.
 ///
-/// `Crlf`/`Lf` match TS `LineEndingType`; `Cr` is a Rust-only extension (see
-/// the module-doc divergence note).
+/// `Crlf`/`Lf` match TS `LineEndingType`. `Cr` is retained for callers that
+/// explicitly request it; native detection never selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
     /// `\n` — the LF-normalized in-memory form is written back as-is.
@@ -74,26 +118,18 @@ impl LineEnding {
     }
 }
 
-/// Decode `bytes` into an LF-normalized string given the detected encoding.
+/// Decode `bytes` with Node-compatible encoding selection, retaining its BOM.
 ///
-/// For `Utf16Le` the leading `FF FE` BOM (2 bytes) is consumed and the
-/// remaining little-endian `u16` code units are decoded manually (no external
-/// crate). For `Utf8` the bytes are decoded lossily (matching Node's tolerant
-/// decode — invalid sequences become U+FFFD rather than erroring).
+/// UTF-16LE code units include the leading BOM; an odd trailing byte is ignored.
+/// UTF-8 decoding replaces malformed sequences for Read diagnostics. Mutations
+/// use `classify_not_text` to reject those bytes before writing.
 fn decode(bytes: &[u8], encoding: Encoding) -> String {
     match encoding {
         Encoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
         Encoding::Utf16Le => {
-            // Strip the leading FF FE BOM if present (detection guarantees it
-            // for `Utf16Le`, but guard anyway).
-            let body = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-                &bytes[2..]
-            } else {
-                bytes
-            };
             // Read little-endian u16 code units; a trailing odd byte is
             // dropped (Node would also be unable to form a code unit from it).
-            let units: Vec<u16> = body
+            let units: Vec<u16> = bytes
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
@@ -103,15 +139,9 @@ fn decode(bytes: &[u8], encoding: Encoding) -> String {
     }
 }
 
-/// Normalize CRLF and lone CR to LF in `content` (matching TS
-/// `replaceAll('\r\n','\n')` plus our CR handling).
-///
-/// TS only collapses `\r\n`; we also map a bare `\r` to `\n` so that a
-/// CR-only file presents a clean LF view for matching (the original ending is
-/// re-applied on write via [`LineEnding`]).
+/// Normalize only CRLF pairs; a lone CR is literal native file content.
 fn normalize_to_lf(content: &str) -> String {
-    // First collapse CRLF, then any remaining lone CR.
-    content.replace("\r\n", "\n").replace('\r', "\n")
+    content.replace("\r\n", "\n")
 }
 
 /// Count CRLF / bare-LF / bare-CR occurrences in `content`.
@@ -151,14 +181,18 @@ fn count_endings(content: &str) -> (usize, usize, usize) {
 /// Classify the dominant line ending of `content`.
 ///
 /// TS-faithful for the CRLF-vs-LF decision (`crlf > lf` ⇒ `Crlf`, else `Lf`).
-/// `Cr` is only chosen when bare CRs strictly dominate both CRLF and LF (a
-/// case TS never produces — see module doc).
+/// Only the first 4096 UTF-16 code units participate in detection.
 fn detect_line_ending(content: &str) -> LineEnding {
-    let (crlf, lf, cr) = count_endings(content);
-    // CR wins only if it strictly dominates both others (Rust-only extension).
-    if cr > crlf && cr > lf {
-        return LineEnding::Cr;
-    }
+    let sample_end = content
+        .char_indices()
+        .scan(0usize, |units, (index, ch)| {
+            *units += ch.len_utf16();
+            Some((index + ch.len_utf8(), *units))
+        })
+        .take_while(|(_, units)| *units <= 4096)
+        .last()
+        .map_or(0, |(end, _)| end);
+    let (crlf, lf, _) = count_endings(&content[..sample_end]);
     // TS tie-break: CRLF iff crlf > lf, else LF.
     if crlf > lf {
         LineEnding::Crlf
@@ -180,11 +214,17 @@ fn detect_encoding(bytes: &[u8]) -> Encoding {
     }
 }
 
+/// Node's BOM-selected text decoding before line-ending normalization.
+#[must_use]
+pub fn decode_native_text(bytes: &[u8]) -> String {
+    decode(bytes, detect_encoding(bytes))
+}
+
 /// Read raw `bytes` into an LF-normalized content string plus the detected
 /// encoding and line-ending style — the Rust analogue of TS
 /// `readFileSyncWithMetadata` (`fileRead.ts:75-98`).
 ///
-/// The returned `content` has CRLF (and lone CR) collapsed to LF, so callers
+/// The returned `content` has CRLF collapsed to LF, so callers
 /// can match `old_string` across line breaks; the [`Encoding`]/[`LineEnding`]
 /// are fed back into [`write_with_metadata`] to round-trip the original bytes.
 #[must_use]
@@ -206,22 +246,19 @@ pub fn read_with_metadata(bytes: &[u8]) -> (String, Encoding, LineEnding) {
 /// re-apply CR so a CR-only file round-trips.
 #[must_use]
 pub fn encode_with_metadata(content_lf: &str, enc: Encoding, ending: LineEnding) -> Vec<u8> {
-    // Re-apply line endings. `content_lf` is already LF-normalized, but guard
-    // against stray CRLF in model output the same way TS does (collapse first,
-    // then expand) so we never emit `\r\r\n`.
-    let normalized = normalize_to_lf(content_lf);
+    // Native BUe leaves LF mode untouched, and collapses then expands CRLF
+    // only when the original file selected that ending.
     let with_endings = match ending {
-        LineEnding::Lf => normalized,
-        LineEnding::Crlf | LineEnding::Cr => normalized.replace('\n', ending.sequence()),
+        LineEnding::Lf => content_lf.to_owned(),
+        LineEnding::Crlf | LineEnding::Cr => {
+            normalize_to_lf(content_lf).replace('\n', ending.sequence())
+        }
     };
 
     match enc {
         Encoding::Utf8 => with_endings.into_bytes(),
         Encoding::Utf16Le => {
-            // Emit the FF FE BOM followed by little-endian u16 code units.
-            let mut out = Vec::with_capacity(2 + with_endings.len() * 2);
-            out.push(0xFF);
-            out.push(0xFE);
+            let mut out = Vec::with_capacity(with_endings.len() * 2);
             for unit in with_endings.encode_utf16() {
                 out.extend_from_slice(&unit.to_le_bytes());
             }
@@ -248,6 +285,95 @@ pub fn write_with_metadata(
 mod tests {
     use super::*;
 
+    fn oracle() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_mutation_322.json"
+        ))
+        .unwrap()
+    }
+
+    fn hex_bytes(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn native_322_encoding_metadata_and_write_bytes() {
+        let fixture = oracle();
+        for case in fixture["classifications"].as_array().unwrap() {
+            let bytes = hex_bytes(case["inputHex"].as_str().unwrap());
+            let kind = classify_not_text(&bytes);
+            let expected = &case["expected"];
+            let name = case["name"].as_str().unwrap();
+            let kind_name = kind.map(|kind| match kind {
+                NotText::NotUtf8 => "not_utf8",
+                NotText::Nul => "nul",
+                NotText::Utf16Be => "utf16be",
+            });
+            assert_eq!(kind_name, expected["notText"].as_str(), "{name}");
+            assert_eq!(
+                kind.map(NotText::mutation_refusal_message).as_deref(),
+                expected["refusal"].as_str(),
+                "{name}"
+            );
+            assert_eq!(
+                kind.map(NotText::read_warning).as_deref(),
+                expected["warning"].as_str(),
+                "{name}"
+            );
+        }
+        for case in fixture["metadata"].as_array().unwrap() {
+            let (content, encoding, ending) =
+                read_with_metadata(&hex_bytes(case["inputHex"].as_str().unwrap()));
+            let expected = &case["expected"];
+            let name = case["name"].as_str().unwrap();
+            assert_eq!(content, expected["content"].as_str().unwrap(), "{name}");
+            assert_eq!(
+                match encoding {
+                    Encoding::Utf8 => "utf8",
+                    Encoding::Utf16Le => "utf16le",
+                },
+                expected["encoding"].as_str().unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                match ending {
+                    LineEnding::Crlf => "CRLF",
+                    _ => "LF",
+                },
+                expected["lineEndings"].as_str().unwrap(),
+                "{name}"
+            );
+        }
+        for case in fixture["writes"].as_array().unwrap() {
+            let bytes = hex_bytes(case["originalHex"].as_str().unwrap());
+            let (original, encoding, _) = read_with_metadata(&bytes);
+            let content = preserve_bom(&original, case["replacement"].as_str().unwrap());
+            let expected = &case["expected"];
+            assert_eq!(
+                original,
+                expected["originalFile"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                content.as_ref(),
+                expected["content"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                encode_with_metadata(&content, encoding, LineEnding::Lf),
+                hex_bytes(expected["bytesHex"].as_str().unwrap()),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     #[test]
     fn detects_lf_plain() {
         let (content, enc, ending) = read_with_metadata(b"a\nb\nc\n");
@@ -268,8 +394,8 @@ mod tests {
     #[test]
     fn detects_cr_only() {
         let (content, _enc, ending) = read_with_metadata(b"a\rb\rc\r");
-        assert_eq!(content, "a\nb\nc\n");
-        assert_eq!(ending, LineEnding::Cr);
+        assert_eq!(content, "a\rb\rc\r");
+        assert_eq!(ending, LineEnding::Lf);
     }
 
     #[test]
@@ -291,7 +417,7 @@ mod tests {
         // "Hi" in UTF-16LE with BOM: FF FE 48 00 69 00
         let bytes = [0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00];
         let (content, enc, ending) = read_with_metadata(&bytes);
-        assert_eq!(content, "Hi");
+        assert_eq!(content, "\u{feff}Hi");
         assert_eq!(enc, Encoding::Utf16Le);
         assert_eq!(ending, LineEnding::Lf);
     }
@@ -304,7 +430,7 @@ mod tests {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         let (content, enc, ending) = read_with_metadata(&bytes);
-        assert_eq!(content, "a\nb");
+        assert_eq!(content, "\u{feff}a\nb");
         assert_eq!(enc, Encoding::Utf16Le);
         assert_eq!(ending, LineEnding::Crlf);
         // Round-trip the unchanged content back to identical bytes.

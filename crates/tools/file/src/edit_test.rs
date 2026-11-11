@@ -3,6 +3,84 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_322_edit_result_message_respects_partial_context() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_tool_contract_322.json"
+        ))
+        .unwrap();
+        for case in fixture["editResultMessages"].as_array().unwrap() {
+            let input = &case["input"];
+            assert_eq!(
+                edit_result_message_with_context(
+                    input["filePath"].as_str().unwrap(),
+                    input["replaceAll"].as_bool().unwrap(),
+                    input["staleRecovered"].as_bool().unwrap(),
+                    input["contentNotInModelContext"].as_bool().unwrap()
+                ),
+                case["output"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_edit_preserves_unicode_escape_representation_on_disk() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_mutation_322.json"
+        ))
+        .unwrap();
+        for case in fixture["edits"].as_array().unwrap() {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("escaped.txt");
+            let original = case["file"].as_str().unwrap();
+            std::fs::write(&target, original).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            let tool = FileEditTool::new(ctx);
+            let result = tool.call(crate::generated_result(&json!({
+                "file_path": target.to_str().unwrap(), "old_string": case["old"], "new_string": case["replacement"],
+            })), fresh_ctx(), fresh_tx()).await;
+            if let Some(expected) = case["expected"]["updated"].as_str() {
+                result.unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    expected,
+                    "{}",
+                    case["name"]
+                );
+            } else {
+                assert!(result.is_err(), "{}", case["name"]);
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_edit_refuses_unsupported_encoding_without_changing_bytes() {
+        for bytes in [
+            vec![0xfe, 0xff, 0, b'a'],
+            vec![b'a', 0, b'b'],
+            vec![b'c', b'a', b'f', 0xe9],
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("encoded.txt");
+            std::fs::write(&target, &bytes).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            let tool = FileEditTool::new(ctx);
+            let err = tool.call(crate::generated_result(&json!({
+                "file_path": target.to_str().unwrap(), "old_string": "a", "new_string": "replacement",
+            })), fresh_ctx(), fresh_tx()).await.unwrap_err();
+            let expected = crate::file_meta::classify_not_text(&bytes)
+                .unwrap()
+                .mutation_refusal_message();
+            assert!(
+                matches!(err, ToolError::InvalidInput(message) if message.string_at("") == Some(expected.as_str()))
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        }
+    }
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {
@@ -49,11 +127,11 @@ mod tests {
         let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
-        // Decode the SAME way the guard compares (raw UTF-8, BOM-stripped),
-        // falling back to lossy for non-UTF-8 fixtures (e.g. UTF-16LE), where
-        // the mtime check alone governs.
-        let content = crate::shared::decode_utf8_strict(&bytes)
-            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+        let decoded = crate::file_meta::read_with_metadata(&bytes).0;
+        let content = decoded
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&decoded)
+            .to_owned();
         let mtime_ms = std::fs::metadata(&canon)
             .ok()
             .and_then(|m| m.modified().ok())

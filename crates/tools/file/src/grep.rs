@@ -10,12 +10,9 @@
 //! - Engine is `ignore::WalkBuilder` + `grep_searcher`, not the `rg` process.
 //! - `--type` coverage is whatever `ignore::types::TypesBuilder::add_defaults`
 //!   ships — may be a sub/superset of the bundled `rg` type list.
-//! - Context lines (`-A`/`-B`/`-C`) are gathered via a custom `Sink`; they are
-//!   relativized and use the same `relpath:line:text` field separator as match
-//!   lines (the `rg` CLI uses `-` separators + keeps absolute paths for context
-//!   lines because of a TS relativize quirk). No `--` group separators emitted.
-//! - `--max-columns 500` is approximated by hard-truncating emitted text to 500
-//!   chars (`rg` prints an omission marker instead).
+//! - Content formatting follows the 2.1.322 JSON-output parser: context uses
+//!   `-` separators and `--` group breaks, and long lines are replaced only
+//!   after they exceed 500 UTF-16 code units.
 //! - gitignore-relative `--glob` negation nuance (`GrepTool.ts:417-427`) is
 //!   approximated via `ignore::overrides::OverrideBuilder`.
 //! - mtime-desc file sort falls back to a pure filename sort under `cfg!(test)`
@@ -40,7 +37,9 @@ use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
+};
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
@@ -91,6 +90,9 @@ const VCS_DIRECTORIES_TO_EXCLUDE: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".
 
 /// `--max-columns 500` equivalent (`GrepTool.ts:338`).
 const MAX_COLUMNS: usize = 500;
+
+/// Native partial-search notice, shared with Glob (Claude Code 2.1.322).
+pub(crate) const SEARCH_INCOMPLETE_NOTE: &str = "The search stopped before it finished, most likely at its time limit, so these results are incomplete: more matches may exist. Search a more specific path or pattern.";
 
 /// `Uve.maxResultSizeChars` = `20000` (binary 2.1.238 @289933813). Grep's own
 /// cap — five times smaller than Glob's, and not the shared default.
@@ -193,30 +195,37 @@ fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
     a.chars().count().cmp(&b.chars().count())
 }
 
-/// `rg -o` / `--only-matching`: the matched substrings within `text`, in order
-/// (a line with N matches yields N entries). Uses the SAME `grep_regex` matcher
-/// the search ran with, so the extracted spans are byte-identical to ripgrep's.
-fn only_matching_spans(matcher: &RegexMatcher, text: &str) -> Vec<String> {
+/// Native JSON submatch offsets are byte offsets, while output line numbers
+/// advance at LF bytes before each match (the native `elr` helper).
+fn only_matching_spans_with_line_numbers(
+    matcher: &RegexMatcher,
+    text: &str,
+    first_line: u64,
+) -> Vec<(u64, String)> {
     let bytes = text.as_bytes();
-    let mut out = Vec::new();
+    let mut output = Vec::new();
     let mut at = 0;
     while at <= bytes.len() {
-        match matcher.find_at(bytes, at) {
-            Ok(Some(m)) => {
-                if let Ok(s) = std::str::from_utf8(&bytes[m.start()..m.end()]) {
-                    out.push(s.to_string());
-                }
-                // Advance past the match; bump zero-width matches by one to
-                // avoid looping on the same position.
-                at = m.end();
-                if m.start() == m.end() {
-                    at += 1;
-                }
-            }
-            _ => break,
+        let Ok(Some(matched)) = matcher.find_at(bytes, at) else {
+            break;
+        };
+        let offset = bytes[..matched.start()]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() as u64;
+        if let Ok(part) = std::str::from_utf8(&bytes[matched.start()..matched.end()]) {
+            output.extend(
+                part.split('\n')
+                    .enumerate()
+                    .map(|(index, line)| (first_line + offset + index as u64, line.to_string())),
+            );
+        }
+        at = matched.end();
+        if matched.is_empty() {
+            at += 1;
         }
     }
-    out
+    output
 }
 
 /// `formatLimitInfo` (`GrepTool.ts:134-142`). `appliedLimit` is only set when
@@ -241,6 +250,22 @@ fn text_projection(units: Vec<u16>) -> Utf16JsonProjection {
 }
 
 fn map_grep_result_text(data: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let body = map_grep_result_body(data)?;
+    if data
+        .at_pointer("/timedOut")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return Some(body);
+    }
+    let mut units = format!("{SEARCH_INCOMPLETE_NOTE}\n\n")
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(body.string_units("")?);
+    Some(text_projection(units))
+}
+
+fn map_grep_result_body(data: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
     let limit = crate::unsigned_integer_at(data, "/appliedLimit")
         .and_then(|value| usize::try_from(value).ok());
     let offset = crate::unsigned_integer_at(data, "/appliedOffset")
@@ -430,32 +455,18 @@ fn split_glob_patterns(glob: &str) -> Vec<String> {
 fn decode_line(bytes: &[u8]) -> String {
     let cow = String::from_utf8_lossy(bytes);
     let s = cow.as_ref();
-    let s = s.strip_suffix('\n').unwrap_or(s);
-    let s = s.strip_suffix('\r').unwrap_or(s);
+    let s = s
+        .strip_suffix('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .unwrap_or(s);
     s.to_string()
 }
 
-/// ST-13 — the real `--max-columns 500` behaviour. The oracle pushes
-/// `"--max-columns","500"` (`Nhv`, @289928728) and ripgrep 14.1.1 does NOT
-/// truncate an over-long line: it REPLACES the text with a marker, a different
-/// one for matching vs. context lines. Verified against the ripgrep the oracle
-/// ships (`ARGV0=rg ~/.local/bin/claude -n --max-columns 500 …`):
-///
-/// ```text
-/// 1:short MATCH here
-/// 2:[Omitted long matching line]
-/// 1-[Omitted long context line]
-/// ```
-///
-/// The port used to slice the line to its first 500 CHARS, which both invented
-/// text ripgrep never prints and (for multi-byte input) applied the wrong
-/// threshold — rg measures BYTES, including the line terminator, so a 500-byte
-/// line with its newline is 501 and is omitted while a 499-byte one is kept.
-/// Under `-o` the rule applies to each emitted MATCH, not to its source line
-/// (`rg -n -o --max-columns 500 MATCH` on a 1200-byte line whose match is at
-/// column 900 prints `1:MATCH`), which is why callers pass the emitted text.
+/// The 2.1.322 JSON parser applies its omission marker after stripping line
+/// endings and splitting multiline events. JavaScript `.length` counts UTF-16
+/// units and the boundary is strictly greater than 500.
 fn apply_max_columns(text: String, is_context: bool) -> String {
-    if text.len() < MAX_COLUMNS {
+    if text.encode_utf16().take(MAX_COLUMNS + 1).count() <= MAX_COLUMNS {
         return text;
     }
     if is_context {
@@ -607,10 +618,16 @@ struct GrepSink {
     record_lines: bool,
     /// Stop after the first match (`files_with_matches`, mirrors `rg -l`).
     first_match_only: bool,
+    binary_offset: Option<u64>,
 }
 
 impl Sink for GrepSink {
     type Error = std::io::Error;
+
+    fn finish(&mut self, _searcher: &Searcher, finish: &SinkFinish) -> Result<(), Self::Error> {
+        self.binary_offset = finish.binary_byte_offset();
+        Ok(())
+    }
 
     fn matched(&mut self, _s: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         // Always count first — counting is never limited (TS / `rg` have no
@@ -731,20 +748,55 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     tool_api::tool_trait::generated_builtin_schema(&json!({
-        "type":"object",
-        "required":["numFiles","filenames"],
-        "properties":{
-            "mode":{"type":"string","enum":["content","files_with_matches","count"]},
-            "numFiles":{"type":"number"},
-            "filenames":{"type":"array","items":{"type":"string"}},
-            "content":{"type":"string"},
-            "numLines":{"type":"number"},
-            "numMatches":{"type":"number"},
-            "totalFiles":{"type":"number"},
-            "totalLines":{"type":"number"},
-            "appliedLimit":{"type":"number"},
-            "appliedOffset":{"type":"number"}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numFiles",
+        "filenames"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "content",
+            "files_with_matches",
+            "count"
+          ]
+        },
+        "numFiles": {
+          "type": "number"
+        },
+        "filenames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "content": {
+          "type": "string"
+        },
+        "numLines": {
+          "type": "number"
+        },
+        "numMatches": {
+          "type": "number"
+        },
+        "totalFiles": {
+          "type": "number"
+        },
+        "totalLines": {
+          "type": "number"
+        },
+        "appliedLimit": {
+          "type": "number"
+        },
+        "appliedOffset": {
+          "type": "number"
+        },
+        "timedOut": {
+          "type": "boolean"
         }
+      }
     }))
 });
 
@@ -765,6 +817,7 @@ struct GrepWalkArgs {
     multiline: bool,
     ctx_before: Option<usize>,
     ctx_after: Option<usize>,
+    context_breaks: bool,
 }
 
 struct GrepWalkResult {
@@ -793,6 +846,7 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
         multiline,
         ctx_before,
         ctx_after,
+        context_breaks,
     } = args;
 
     search_resolution.verify()?;
@@ -808,6 +862,8 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
     let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
     let mut total_matches: u64 = 0;
     let mut timed_out = false;
+    let single_file = canon_base.is_file();
+    let mut previous_line: Option<(PathBuf, u64)> = None;
 
     for entry in wb.build() {
         search_resolution.verify()?;
@@ -839,7 +895,8 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
 
         let mut sb = SearcherBuilder::new();
         sb.multi_line(multiline);
-        sb.line_number(content_mode && show_line_numbers);
+        sb.line_number(content_mode);
+        sb.binary_detection(BinaryDetection::convert(0));
         if let Some(b) = ctx_before {
             sb.before_context(b);
         }
@@ -854,6 +911,7 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
             overflow: false,
             record_lines: content_mode,
             first_match_only: files_mode,
+            binary_offset: None,
         };
         if searcher
             .search_reader(&matcher, &mut file, &mut sink)
@@ -870,34 +928,49 @@ fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError
         if content_mode {
             let rel = to_relative_path(path, &cwd_for_rel);
             for (lnum, text, is_context) in &sink.records {
-                // ST-14: `-o` applies to MATCHING lines only. The oracle
-                // pushes `-o` and the `-C/-B/-A` block independently
-                // (`if(d&&o==="content")_.push("-o")` … `if(o==="content"){…}`,
-                // @289928728), and ripgrep prints context lines in full
-                // under `-o` — verified:
-                //   `rg -n -o -C 1 'MATCH[0-9]?'` → `2-bbb`, `3:MATCH`,
-                //   `3:MATCH2`, `4-ccc`.
-                if only_matching && !*is_context {
-                    // rg -o: one matched substring per output line (a line
-                    // with multiple matches yields multiple output lines).
-                    // ST-13: `--max-columns` measures the EMITTED match here,
-                    // not its source line.
-                    for m in only_matching_spans(&matcher, text) {
-                        let m = apply_max_columns(m, false);
-                        let line = match (show_line_numbers, lnum) {
-                            (true, Some(n)) => format!("{rel}:{n}:{m}"),
-                            _ => format!("{rel}:{m}"),
-                        };
-                        content_lines.push(line);
-                    }
-                } else {
-                    let text = apply_max_columns(text.clone(), *is_context);
-                    let line = match (show_line_numbers, lnum) {
-                        (true, Some(n)) => format!("{rel}:{n}:{text}"),
-                        _ => format!("{rel}:{text}"),
-                    };
-                    content_lines.push(line);
+                let first_line = lnum.unwrap_or(0);
+                if context_breaks
+                    && previous_line.as_ref().is_some_and(|(previous_path, line)| {
+                        previous_path != path || first_line > line.saturating_add(1)
+                    })
+                {
+                    content_lines.push("--".to_string());
                 }
+                let mut last_line = first_line;
+                let pieces = if only_matching && !*is_context {
+                    only_matching_spans_with_line_numbers(&matcher, text, first_line)
+                } else {
+                    text.split('\n')
+                        .enumerate()
+                        .map(|(index, line)| (first_line + index as u64, line.to_string()))
+                        .collect()
+                };
+                for (line_number, line) in pieces {
+                    let line = line.strip_suffix('\r').unwrap_or(&line).to_string();
+                    let line = apply_max_columns(line, *is_context);
+                    let separator = if *is_context { '-' } else { ':' };
+                    let numbered = if show_line_numbers {
+                        format!("{line_number}{separator}{line}")
+                    } else {
+                        line
+                    };
+                    content_lines.push(if single_file {
+                        numbered
+                    } else {
+                        format!("{rel}{separator}{numbered}")
+                    });
+                    last_line = line_number;
+                }
+                previous_line = Some((path.to_path_buf(), last_line));
+            }
+            if let Some(offset) = sink.binary_offset.filter(|_| !sink.records.is_empty()) {
+                let message =
+                    format!("binary file matches (found \"\\0\" byte around offset {offset})");
+                content_lines.push(if single_file {
+                    message
+                } else {
+                    format!("{rel}:{message}")
+                });
             }
         } else if count_mode {
             let rel = to_relative_path(path, &cwd_for_rel);
@@ -1015,6 +1088,11 @@ impl Tool for GrepTool {
                 OutputField {
                     name: "appliedOffset",
                     kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "timedOut",
+                    kind: OutputFieldType::Boolean,
                     required: false,
                 },
             ],
@@ -1146,9 +1224,10 @@ impl Tool for GrepTool {
         // the LIVE cwd (`Ct()`). The no-cell fallback (`cwd_now()`==
         // `ctx.workspace`) equals the former `trusted_dirs.first()` boot cwd, so
         // behavior is byte-identical until a Bash `cd` moves the shared cell.
-        let base = crate::input_string(&input, "path")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.cwd_now());
+        let base = match crate::input_string(&input, "path").filter(|path| !path.is_empty()) {
+            Some(path) => crate::checked_model_file_path(path, &self.cwd_now())?,
+            None => self.cwd_now(),
+        };
         let glob_filter = crate::input_string(&input, "glob");
         let type_filter = crate::input_string(&input, "type");
         let output_mode = crate::input_string(&input, "output_mode")
@@ -1167,8 +1246,7 @@ impl Tool for GrepTool {
             .and_then(value_as_bool)
             .unwrap_or(false);
         // `-o` / `--only-matching` (rg -o): emit only the matched substrings, one
-        // per line. Only meaningful in content mode (claude-code: "Requires
-        // output_mode: content") and ignores -A/-B/-C context (like rg -o).
+        // per line. Context lines are preserved independently in content mode.
         let only_matching = input
             .get_property("-o")
             .and_then(value_as_bool)
@@ -1355,6 +1433,11 @@ impl Tool for GrepTool {
             (None, None)
         };
 
+        let context_breaks = content_mode
+            && [context_param, context_c, context_before, context_after]
+                .into_iter()
+                .any(|value| value.is_some_and(|n| n > 0));
+
         // --- Walk + search (sync CPU/IO; run off the async runtime) ---
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
@@ -1397,6 +1480,7 @@ impl Tool for GrepTool {
                 multiline,
                 ctx_before,
                 ctx_after,
+                context_breaks,
             })
         })
         .await
@@ -1584,9 +1668,19 @@ impl Tool for GrepTool {
             mc_channel = Some(model);
         }
 
+        if timed_out {
+            data.insert("timedOut".to_string(), json!(true));
+        }
         Ok(ToolCallResult {
             data: crate::generated_result(&Value::Object(data)),
-            model_content: mc_channel.map(Into::into),
+            model_content: mc_channel.map(|body| {
+                if timed_out {
+                    format!("{SEARCH_INCOMPLETE_NOTE}\n\n{body}")
+                } else {
+                    body
+                }
+                .into()
+            }),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -1599,6 +1693,88 @@ impl Tool for GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_322_fixture() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../scripts/tests/fixtures/file_search_322.json"
+        )))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_322_search_projections_and_pagination() {
+        let fixture = native_322_fixture();
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        for case in fixture["projections"].as_array().unwrap() {
+            if case["tool"] != "grep" {
+                continue;
+            }
+            let input = crate::generated_result(&case["input"]);
+            assert_eq!(
+                mapped_display(&input).as_deref(),
+                case["expected"]["content"].as_str(),
+                "{}",
+                case["name"]
+            );
+            let parsed = tool.parse_output(&input).await.unwrap();
+            assert_eq!(
+                parsed
+                    .at_pointer("/timedOut")
+                    .and_then(|value| value.as_bool()),
+                input
+                    .at_pointer("/timedOut")
+                    .and_then(|value| value.as_bool())
+            );
+        }
+        for case in fixture["headLimits"].as_array().unwrap() {
+            let input = &case["input"];
+            let (items, applied) = apply_head_limit(
+                input["items"].as_array().unwrap().clone(),
+                input["limit"].as_u64().map(|n| n as usize),
+                input["offset"].as_u64().unwrap() as usize,
+            );
+            assert_eq!(json!(items), case["expected"]["items"]);
+            assert_eq!(
+                applied.map(|n| n as u64),
+                case["expected"]["appliedLimit"].as_u64()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_search_real_file_results() {
+        let fixture = native_322_fixture();
+        for case in fixture["searches"].as_array().unwrap() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("a.txt");
+            std::fs::write(&file_path, case["contents"].as_str().unwrap()).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            let tool = GrepTool::new(ctx);
+            let mut input = case["options"].clone();
+            if case["singleFile"] == true {
+                input["path"] = json!(file_path);
+            }
+            let result = tool
+                .call(crate::generated_result(&input), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            assert_eq!(
+                crate::test_data(&result.data),
+                case["expected"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                content_str(&result),
+                case["modelText"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {
@@ -2671,9 +2847,9 @@ mod tests {
             .await
             .unwrap();
         let c = content_str(&result);
-        assert!(c.contains("a.txt:1:line1"), "before context: {c}");
+        assert!(c.contains("a.txt-1-line1"), "before context: {c}");
         assert!(c.contains("a.txt:2:match here"), "match line: {c}");
-        assert!(c.contains("a.txt:3:line3"), "after context: {c}");
+        assert!(c.contains("a.txt-3-line3"), "after context: {c}");
     }
 
     #[tokio::test]
@@ -2692,7 +2868,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(content_str(&result), "a.txt:2:l2\na.txt:3:hit\na.txt:4:l4");
+        assert_eq!(content_str(&result), "a.txt-2-l2\na.txt:3:hit\na.txt-4-l4");
     }
 
     #[tokio::test]
@@ -2718,7 +2894,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             content_str(&before_after),
-            "a.txt:1:line1\na.txt:2:match\na.txt:3:line3"
+            "a.txt-1-line1\na.txt:2:match\na.txt-3-line3"
         );
 
         let context_param = tool
@@ -2736,7 +2912,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             content_str(&context_param),
-            "a.txt:1:line1\na.txt:2:match\na.txt:3:line3"
+            "a.txt-1-line1\na.txt:2:match\na.txt-3-line3"
         );
     }
 

@@ -1,0 +1,631 @@
+{
+  "schemaVersion": 1,
+  "claudeCodeVersion": "2.1.322",
+  "nativeSha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "sourceByteRanges": [
+    {
+      "name": "path NFC",
+      "start": 260574571,
+      "end": 260574612,
+      "sha256": "9fcd04e31340b326cfb10c35bcf77fa79183f51464cca2488de5349155ef0a04"
+    },
+    {
+      "name": "path normalization and validation",
+      "start": 261777606,
+      "end": 261778525,
+      "sha256": "c67bdac14f531f7345a61bd5601417db4acc752ea7afd7f540dbdd3f0b0bb5f0"
+    },
+    {
+      "name": "notebook and cell selector validation",
+      "start": 274283692,
+      "end": 274284312,
+      "sha256": "48f000978c73c70e517dbdccd94a7fe1084eed59b282e1963150bcb5d17de025"
+    },
+    {
+      "name": "notebook cell mutation and file serialization",
+      "start": 275888610,
+      "end": 275889388,
+      "sha256": "bd24accdcb9671920d8d0f9962018bd81e5917c977ad39abf14b41a1881c4e17"
+    },
+    {
+      "name": "notebook model result renderer",
+      "start": 275884972,
+      "end": 275885500,
+      "sha256": "4ce528e11e9bb5ffa7cc14b5069c34082d7958c5f8156e6f19b88892708e5222"
+    },
+    {
+      "name": "notebook input validation",
+      "start": 275885813,
+      "end": 275887504,
+      "sha256": "a064b72b6e277ba6119b30dbe89965c7b13f1221762ffbb848ab4a2d40a264a0"
+    }
+  ],
+  "cwd": "/workspace/project",
+  "home": "/home/tester",
+  "paths": [
+    {
+      "input": "",
+      "expected": {
+        "path": "/workspace/project"
+      }
+    },
+    {
+      "input": "  ",
+      "expected": {
+        "path": "/workspace/project"
+      }
+    },
+    {
+      "input": ".",
+      "expected": {
+        "path": "/workspace/project"
+      }
+    },
+    {
+      "input": "..",
+      "expected": {
+        "path": "/workspace"
+      }
+    },
+    {
+      "input": "a/../source.txt",
+      "expected": {
+        "path": "/workspace/project/source.txt"
+      }
+    },
+    {
+      "input": "/../../tmp/source.txt",
+      "expected": {
+        "path": "/tmp/source.txt"
+      }
+    },
+    {
+      "input": "/tmp/one//two/./",
+      "expected": {
+        "path": "/tmp/one/two/"
+      }
+    },
+    {
+      "input": "/tmp/one/.",
+      "expected": {
+        "path": "/tmp/one"
+      }
+    },
+    {
+      "input": "nested/",
+      "expected": {
+        "path": "/workspace/project/nested"
+      }
+    },
+    {
+      "input": "/tmp/",
+      "expected": {
+        "path": "/tmp/"
+      }
+    },
+    {
+      "input": "~",
+      "expected": {
+        "path": "/home/tester"
+      }
+    },
+    {
+      "input": "~/notes/../file.txt",
+      "expected": {
+        "path": "/home/tester/file.txt"
+      }
+    },
+    {
+      "input": "~someone/file",
+      "expected": {
+        "path": "/workspace/project/~someone/file"
+      }
+    },
+    {
+      "input": "  file.txt\n",
+      "expected": {
+        "path": "/workspace/project/file.txt"
+      }
+    },
+    {
+      "input": "﻿name.txt ",
+      "expected": {
+        "path": "/workspace/project/name.txt"
+      }
+    },
+    {
+      "input": "name.txt",
+      "expected": {
+        "path": "/workspace/project/name.txt"
+      }
+    },
+    {
+      "input": "café.txt",
+      "expected": {
+        "path": "/workspace/project/café.txt"
+      }
+    },
+    {
+      "input": "/tmp/café.txt",
+      "expected": {
+        "path": "/tmp/café.txt"
+      }
+    },
+    {
+      "input": "日本語/😀.txt",
+      "expected": {
+        "path": "/workspace/project/日本語/😀.txt"
+      }
+    },
+    {
+      "input": "a /.",
+      "expected": {
+        "error": "Path ends in white space once its \".\" and \"..\" are resolved"
+      }
+    },
+    {
+      "input": "a /b/..",
+      "expected": {
+        "error": "Path ends in white space once its \".\" and \"..\" are resolved"
+      }
+    },
+    {
+      "input": "a\u0000b",
+      "expected": {
+        "error": "Path contains null bytes"
+      }
+    }
+  ],
+  "notebooks": [
+    {
+      "name": "replace array source",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "new",
+        "cell_id": "c1"
+      },
+      "expected": {
+        "data": {
+          "new_source": "new",
+          "old_source": "a\nb",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "c1",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": \"new\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Updated cell c1 with new"
+      }
+    },
+    {
+      "name": "delete array source",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "delete",
+        "new_source": "",
+        "cell_id": "c1"
+      },
+      "expected": {
+        "data": {
+          "new_source": "",
+          "old_source": "a\nb",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "delete",
+          "cell_id": "c1",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Deleted cell c1"
+      }
+    },
+    {
+      "name": "replace type",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "# new",
+        "cell_id": "c1",
+        "cell_type": "markdown"
+      },
+      "expected": {
+        "data": {
+          "new_source": "# new",
+          "old_source": "a\nb",
+          "cell_type": "markdown",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "c1",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c1\",\n   \"source\": \"# new\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Updated cell c1 with # new"
+      }
+    },
+    {
+      "name": "insert after anchor",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "fresh",
+        "cell_id": "c1",
+        "cell_type": "code"
+      },
+      "expected": {
+        "data": {
+          "new_source": "fresh",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "insert",
+          "cell_id": "native12",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"native12\",\n   \"source\": \"fresh\",\n   \"metadata\": {},\n   \"execution_count\": null,\n   \"outputs\": []\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Inserted cell native12 with fresh"
+      }
+    },
+    {
+      "name": "insert at start",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "first",
+        "cell_type": "markdown"
+      },
+      "expected": {
+        "data": {
+          "new_source": "first",
+          "cell_type": "markdown",
+          "language": "julia",
+          "edit_mode": "insert",
+          "cell_id": "native12",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"native12\",\n   \"source\": \"first\",\n   \"metadata\": {}\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Inserted cell native12 with first"
+      }
+    },
+    {
+      "name": "old format insert",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":4}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "old format",
+        "cell_type": "code"
+      },
+      "expected": {
+        "data": {
+          "new_source": "old format",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "insert",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"source\": \"old format\",\n   \"metadata\": {},\n   \"execution_count\": null,\n   \"outputs\": []\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 4\n}",
+        "model": "Inserted a new cell with old format"
+      }
+    },
+    {
+      "name": "old format replace keeps input id",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":4}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "replaced",
+        "cell_id": "cell-0"
+      },
+      "expected": {
+        "data": {
+          "new_source": "replaced",
+          "old_source": "a\nb",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "cell-0",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": \"replaced\",\n   \"metadata\": {},\n   \"outputs\": [],\n   \"execution_count\": null\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 4\n}",
+        "model": "Updated cell cell-0 with replaced"
+      }
+    },
+    {
+      "name": "empty identifier insert",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "",
+        "cell_id": "",
+        "cell_type": "code"
+      },
+      "expected": {
+        "data": {
+          "new_source": "",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "insert",
+          "cell_id": "native12",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"native12\",\n   \"source\": \"\",\n   \"metadata\": {},\n   \"execution_count\": null,\n   \"outputs\": []\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"# title\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Inserted cell native12 with "
+      }
+    },
+    {
+      "name": "missing identifier",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "x"
+      },
+      "expected": {
+        "error": "Cell ID must be specified when not inserting a new cell."
+      }
+    },
+    {
+      "name": "bad identifier",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "x",
+        "cell_id": "missing"
+      },
+      "expected": {
+        "error": "Cell with ID \"missing\" not found in notebook."
+      }
+    },
+    {
+      "name": "index selector",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "index one",
+        "cell_id": "cell-01"
+      },
+      "expected": {
+        "data": {
+          "new_source": "index one",
+          "old_source": "# title",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "cell-01",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"index one\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Updated cell cell-01 with index one"
+      }
+    },
+    {
+      "name": "index outside notebook",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "x",
+        "cell_id": "cell-2"
+      },
+      "expected": {
+        "error": "Cell with index 2 does not exist in notebook."
+      }
+    },
+    {
+      "name": "empty notebook insert",
+      "notebookJson": "{\"cells\":[],\"nbformat\":4,\"nbformat_minor\":5}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "first",
+        "cell_type": "code"
+      },
+      "expected": {
+        "data": {
+          "new_source": "first",
+          "cell_type": "code",
+          "language": "python",
+          "edit_mode": "insert",
+          "cell_id": "native12",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"native12\",\n   \"source\": \"first\",\n   \"metadata\": {},\n   \"execution_count\": null,\n   \"outputs\": []\n  }\n ],\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}",
+        "model": "Inserted cell native12 with first"
+      }
+    },
+    {
+      "name": "surrogate and numeric serialization",
+      "notebookJson": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5,\"extra\":\"\\ud800\",\"number\":1e+21,\"small\":1e-7}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "\ud800😀",
+        "cell_id": "c2"
+      },
+      "expected": {
+        "data": {
+          "new_source": "\ud800😀",
+          "old_source": "# title",
+          "cell_type": "code",
+          "language": "julia",
+          "edit_mode": "replace",
+          "cell_id": "c2",
+          "error": ""
+        },
+        "updatedFile": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"c1\",\n   \"source\": [\n    \"a\\n\",\n    \"b\"\n   ],\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"output_type\": \"stream\",\n     \"text\": \"old\"\n    }\n   ],\n   \"execution_count\": 3\n  },\n  {\n   \"cell_type\": \"markdown\",\n   \"id\": \"c2\",\n   \"source\": \"\\ud800😀\",\n   \"metadata\": {}\n  }\n ],\n \"metadata\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"language_info\": {\n   \"name\": \"julia\"\n  }\n },\n \"nbformat\": 4,\n \"nbformat_minor\": 5,\n \"extra\": \"\\ud800\",\n \"number\": 1e+21,\n \"small\": 1e-7\n}",
+        "model": "Updated cell c2 with \ud800😀"
+      }
+    },
+    {
+      "name": "invalid cells",
+      "notebookJson": "{\"cells\":[{\"source\":[1]}]}",
+      "input": {
+        "edit_mode": "replace",
+        "new_source": "x",
+        "cell_id": "cell-0"
+      },
+      "expected": {
+        "error": "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\")."
+      }
+    },
+    {
+      "name": "missing cells",
+      "notebookJson": "{}",
+      "input": {
+        "edit_mode": "insert",
+        "new_source": "x",
+        "cell_type": "code"
+      },
+      "expected": {
+        "error": "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\")."
+      }
+    }
+  ],
+  "validations": [
+    {
+      "name": "uppercase extension",
+      "configuration": {
+        "file": "/w/NB.IPYNB",
+        "raw": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool.",
+        "errorCode": 2
+      }
+    },
+    {
+      "name": "malformed JSON",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "{",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "BOM notebook JSON",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "﻿{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "falsy notebook JSON null",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "null",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "falsy notebook JSON false",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "false",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "falsy notebook JSON 0",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "0",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "falsy notebook JSON \"\"",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "\"\"",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook is not valid JSON.",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "invalid cell source",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "{\"cells\":[{\"source\":[1]}]}",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\").",
+        "errorCode": 6
+      }
+    },
+    {
+      "name": "mtime advanced",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+        "timestamp": 1,
+        "mtime": 2,
+        "read": true
+      },
+      "expected": {
+        "result": false,
+        "message": "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.",
+        "errorCode": 10
+      }
+    },
+    {
+      "name": "unread notebook",
+      "configuration": {
+        "file": "/w/nb.ipynb",
+        "raw": "{\"cells\":[{\"cell_type\":\"code\",\"id\":\"c1\",\"source\":[\"a\\n\",\"b\"],\"metadata\":{},\"outputs\":[{\"output_type\":\"stream\",\"text\":\"old\"}],\"execution_count\":3},{\"cell_type\":\"markdown\",\"id\":\"c2\",\"source\":\"# title\",\"metadata\":{}}],\"metadata\":{\"2\":\"two\",\"10\":\"ten\",\"language_info\":{\"name\":\"julia\"}},\"nbformat\":4,\"nbformat_minor\":5}",
+        "timestamp": 1,
+        "mtime": 1,
+        "read": false
+      },
+      "expected": {
+        "result": false,
+        "message": "File has not been read yet. Read it first before writing to it.",
+        "errorCode": 9
+      }
+    }
+  ]
+}

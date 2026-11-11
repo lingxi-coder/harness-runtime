@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "new_source",
+    "cell_type",
+    "language",
+    "edit_mode",
+    "notebook_path",
+    "original_file",
+    "updated_file"
+  ],
+  "properties": {
+    "new_source": {
+      "type": "string",
+      "description": "The new source code that was written to the cell"
+    },
+    "old_source": {
+      "type": "string",
+      "description": "The previous cell source (replace/delete only). Enables cell-relative diff rendering without re-reading the notebook."
+    },
+    "cell_id": {
+      "type": "string",
+      "description": "The ID of the cell that was edited"
+    },
+    "cell_type": {
+      "type": "string",
+      "enum": [
+        "code",
+        "markdown"
+      ],
+      "description": "The type of the cell"
+    },
+    "language": {
+      "type": "string",
+      "description": "The programming language of the notebook"
+    },
+    "edit_mode": {
+      "type": "string",
+      "description": "The edit mode that was used"
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message if the operation failed"
+    },
+    "notebook_path": {
+      "type": "string",
+      "description": "The path to the notebook file"
+    },
+    "original_file": {
+      "type": "string",
+      "description": "The original notebook content before modification"
+    },
+    "updated_file": {
+      "type": "string",
+      "description": "The updated notebook content after modification"
+    }
+  }
+}

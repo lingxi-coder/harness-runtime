@@ -66,6 +66,7 @@ pub mod grep;
 pub mod image_read;
 pub mod notebook_edit;
 pub mod notebook_read;
+mod output_contract;
 #[cfg(feature = "pdf-read")]
 pub mod pdf_read;
 #[cfg(feature = "pdf-render")]
@@ -168,10 +169,46 @@ pub(crate) fn test_model_text(value: Option<&Utf16JsonProjection>) -> Option<&st
 /// observed route; canonical paths remain separate for permission and I/O.
 #[must_use]
 pub fn normalize_model_file_path(file_path: &str, cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = tool_api::util::path_validation::resolve_against_cwd(
-        std::path::PathBuf::from(file_path),
-        cwd,
-    );
+    normalize_file_path_with_home(file_path, cwd, dirs::home_dir().as_deref())
+}
+
+fn js_path_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+
+fn normalize_file_path_with_home(
+    file_path: &str,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    use unicode_normalization::UnicodeNormalization;
+
+    let file_path = file_path.trim_matches(js_path_whitespace);
+    let expanded = home.and_then(|home| {
+        if file_path == "~" {
+            Some(home.to_path_buf())
+        } else {
+            file_path.strip_prefix("~/").map(|rest| home.join(rest))
+        }
+    });
+    let path = expanded.unwrap_or_else(|| {
+        if file_path.is_empty() {
+            cwd.to_path_buf()
+        } else {
+            std::path::PathBuf::from(file_path)
+        }
+    });
+    // path.normalize preserves a final separator for absolute paths; resolve
+    // (used for relative inputs) removes it. Retain this distinction in the
+    // model-facing route while I/O continues to use canonical paths.
+    let preserve_separator = path.is_absolute()
+        && path
+            .as_os_str()
+            .to_string_lossy()
+            .ends_with(std::path::MAIN_SEPARATOR);
+    let path = tool_api::util::path_validation::resolve_against_cwd(path, cwd);
     let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
         match component {
@@ -188,7 +225,71 @@ pub fn normalize_model_file_path(file_path: &str, cwd: &std::path::Path) -> std:
             std::path::Component::Normal(part) => normalized.push(part),
         }
     }
-    normalized
+    let mut text: String = normalized.to_string_lossy().nfc().collect();
+    if preserve_separator && !text.ends_with(std::path::MAIN_SEPARATOR) {
+        text.push(std::path::MAIN_SEPARATOR);
+    }
+    text.into()
+}
+
+/// Normalize a filesystem-tool route and reject Native's null-byte and
+/// unstable-whitespace cases before permissions or filesystem access.
+pub fn checked_model_file_path(
+    file_path: &str,
+    cwd: &std::path::Path,
+) -> Result<std::path::PathBuf, tool_api::tool_trait::ToolError> {
+    checked_file_path_with_home(file_path, cwd, dirs::home_dir().as_deref())
+}
+
+#[cfg(test)]
+mod native_322_path_tests {
+    use super::*;
+
+    #[test]
+    fn native_322_path_fixtures() {
+        let fixture = Utf16JsonProjection::parse(include_str!(
+            "../../../../scripts/tests/fixtures/file_notebook_path_322.json"
+        ))
+        .unwrap();
+        let cwd = std::path::Path::new(fixture.string_at("/cwd").unwrap());
+        let home = std::path::Path::new(fixture.string_at("/home").unwrap());
+        for index in 0..fixture.array_len("/paths").unwrap() {
+            let case = fixture.subprojection(&format!("/paths/{index}")).unwrap();
+            let input = case.string_at("/input").unwrap();
+            match checked_file_path_with_home(input, cwd, Some(home)) {
+                Ok(path) => assert_eq!(
+                    path.as_os_str().to_str(),
+                    case.string_at("/expected/path"),
+                    "{input:?}"
+                ),
+                Err(error) => assert_eq!(
+                    error.model_facing_message().string_at(""),
+                    case.string_at("/expected/error"),
+                    "{input:?}"
+                ),
+            }
+        }
+    }
+}
+
+fn checked_file_path_with_home(
+    file_path: &str,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, tool_api::tool_trait::ToolError> {
+    use tool_api::tool_trait::ToolError;
+    if file_path.contains('\0') || cwd.as_os_str().to_string_lossy().contains('\0') {
+        return Err(ToolError::InvalidInput("Path contains null bytes".into()));
+    }
+    let normalized = normalize_file_path_with_home(file_path, cwd, home);
+    let again = normalize_file_path_with_home(&normalized.to_string_lossy(), cwd, home);
+    // Path equality ignores terminal separators; Native compares the strings.
+    if normalized.as_os_str() != again.as_os_str() {
+        return Err(ToolError::InvalidInput(
+            "Path ends in white space once its \".\" and \"..\" are resolved".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 /// Read-before-write staleness error: emitted when Edit / Write / NotebookEdit

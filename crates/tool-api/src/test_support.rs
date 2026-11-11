@@ -300,6 +300,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         agent_spawn_provenance: Default::default(),
         native_query_depth: None,
         options: ToolUseOptions {
+            read_context_room: None,
             session_interactive: None,
             prompt_policy: None,
             output_style_is_default: None,

@@ -206,6 +206,7 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
         system_context: Default::default(),
         user_context_message: None,
         tool_use_options: tool_api::ToolUseOptions {
+            read_context_room: None,
             session_interactive: None,
             prompt_policy: None,
             output_style_is_default: None,

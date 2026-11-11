@@ -271,6 +271,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
                         system_context: Default::default(),
                         user_context_message: None,
                         tool_use_options: tool_api::ToolUseOptions {
+                            read_context_room: None,
                             session_interactive: None,
                             prompt_policy: None,
                             output_style_is_default: None,

@@ -6994,6 +6994,7 @@ dependencies = [
  "base64 0.22.1",
  "branding",
  "core",
+ "dirs",
  "filetime",
  "globset",
  "grep-matcher",
@@ -7013,6 +7014,8 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
+ "unicode-normalization",
+ "uuid",
  "walkdir",
 ]
 

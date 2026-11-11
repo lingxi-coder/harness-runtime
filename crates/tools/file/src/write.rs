@@ -5,7 +5,7 @@
 //! - Parent directories are created UNCONDITIONALLY before the write
 //!   (`FileWriteTool.ts:254` `mkdir(dir, recursive)`).
 //! - Overwrite is allowed unconditionally.
-//! - Content is UTF-8; no BOM is written.
+//! - New files use UTF-8. Existing UTF-16LE encoding and leading BOMs persist.
 
 use crate::structured_patch::count_patch_lines;
 use crate::Utf16JsonProjection;
@@ -235,6 +235,13 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     }))
 });
 
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    Utf16JsonProjection::parse(include_str!(
+        "templates/claude-code-2.1.322/write-output-schema.json"
+    ))
+    .expect("pinned Write output schema is valid JSON")
+});
+
 #[async_trait]
 impl Tool for FileWriteTool {
     fn supports_persistent_chat(&self) -> bool {
@@ -251,6 +258,15 @@ impl Tool for FileWriteTool {
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        crate::output_contract::parse(TOOL_NAME, output)
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
         crate::input_repair_metadata()
@@ -326,7 +342,7 @@ impl Tool for FileWriteTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
+        let requested_path = crate::checked_model_file_path(file_path, &self.ctx.cwd())?;
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
@@ -420,6 +436,15 @@ impl Tool for FileWriteTool {
                     .await;
                 return Err(write_resolution_error(file_path, error));
             }
+            Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile) => {
+                self.emit_failed(&invocation_id, "not_regular_file").await;
+                let message = if std::fs::metadata(&canon).is_ok_and(|meta| meta.is_dir()) {
+                    format!("{file_path} is a directory, not a file. To create a file inside it, include the file name in file_path.")
+                } else {
+                    format!("{file_path} exists but is not a regular file (a device, FIFO or socket). Write only creates or overwrites regular files.")
+                };
+                return Err(ToolError::InvalidInput(message.into()));
+            }
             // A non-ENOENT read error means the path exists but is unreadable;
             // treat as "no prior content" and let the write operation report
             // its own error, matching the pre-hardening behavior.
@@ -429,25 +454,32 @@ impl Tool for FileWriteTool {
             .as_ref()
             .and_then(|snapshot| snapshot.modified)
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        let (is_create, file_exists, prior_decoded) = match prior_snapshot {
+        let (is_create, file_exists, prior_decoded, encoding, not_text) = match prior_snapshot {
             Some(snapshot) => {
-                // Raw UTF-8 decode matching how `Read` records content (used by
-                // the content-equality fallback); a non-UTF-8 prior file leaves
-                // it `None` and the mtime check alone governs.
-                let decoded = crate::shared::decode_utf8_strict(&snapshot.bytes).ok();
-                (snapshot.bytes.is_empty(), true, decoded)
+                let not_text = crate::file_meta::classify_not_text(&snapshot.bytes);
+                let (decoded, encoding, _) = crate::file_meta::read_with_metadata(&snapshot.bytes);
+                (decoded.is_empty(), true, Some(decoded), encoding, not_text)
             }
-            None => (true, false, None),
+            None => (true, false, None, crate::file_meta::Encoding::Utf8, None),
         };
 
         // Read-before-write staleness guard (Batch F): only for an EXISTING
         // file. New-file creation skips it (TS `meta === null` skips the
         // guard; `FileWriteTool.ts:198-219` & `:279-295`).
         if file_exists {
+            // Native Write refuses a truncated context even when its mtime is
+            // unchanged. Model waivers apply only when no entry exists.
+            if tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+                .is_some_and(|entry| entry.is_partial_view)
+            {
+                self.emit_failed(&invocation_id, "partial_read").await;
+                return Err(ToolError::InvalidInput(crate::FILE_NOT_READ_ERROR.into()));
+            }
             // Current mtime (floored ms), captured from the same opened handle
             // as the pre-write bytes; `None` falls back to epoch `0`.
             let current_mtime_ms = prior_mtime_ms;
             let cmp_content = prior_decoded.as_deref().unwrap_or("");
+            let cmp_content = cmp_content.strip_prefix('\u{feff}').unwrap_or(cmp_content);
             if let Err(e) = crate::check_read_before_write(
                 &self.ctx.read_file_state,
                 &requested_path,
@@ -459,6 +491,17 @@ impl Tool for FileWriteTool {
                 return Err(e);
             }
         }
+
+        if let Some(kind) = not_text {
+            self.emit_failed(&invocation_id, "unsupported_encoding")
+                .await;
+            return Err(ToolError::InvalidInput(
+                kind.mutation_refusal_message().into(),
+            ));
+        }
+        let content =
+            crate::file_meta::preserve_bom(prior_decoded.as_deref().unwrap_or(""), content);
+        let content = content.as_ref();
 
         // (/rewind) Back up the pre-write content (or record a null backup for a
         // brand-new file) BEFORE writing so /rewind can restore it.
@@ -513,7 +556,7 @@ impl Tool for FileWriteTool {
             );
         }
 
-        let bytes_written = content.len() as u64;
+        let bytes_written = bytes.len() as u64;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
             .await;
@@ -531,7 +574,10 @@ impl Tool for FileWriteTool {
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
-                content: content.to_string(),
+                content: content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(content)
+                    .replace("\r\n", "\n"),
                 mtime_ms: new_mtime_ms,
                 offset: None,
                 limit: None,
@@ -624,6 +670,179 @@ impl Tool for FileWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_322_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../../scripts/tests/fixtures/file_mutation_322.json"
+        ))
+        .unwrap()
+    }
+
+    fn native_322_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn native_322_writes_preserve_encoding_bom_and_exact_content_bytes() {
+        for case in native_322_fixture()["writes"].as_array().unwrap() {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("encoded.txt");
+            std::fs::write(
+                &target,
+                native_322_hex(case["originalHex"].as_str().unwrap()),
+            )
+            .unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            let tool = FileWriteTool::new(ctx);
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({
+                        "file_path": target.to_str().unwrap(), "content": case["replacement"],
+                    })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            let expected = &case["expected"];
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                native_322_hex(expected["bytesHex"].as_str().unwrap()),
+                "{}",
+                case["name"]
+            );
+            let data = crate::test_data(&result.data);
+            assert_eq!(data["content"], expected["content"], "{}", case["name"]);
+            assert_eq!(
+                data["originalFile"], expected["originalFile"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_write_refuses_unsupported_encoding_without_changing_bytes() {
+        for bytes in [
+            vec![0xfe, 0xff, 0, b'a'],
+            vec![b'a', 0, b'b'],
+            vec![b'c', b'a', b'f', 0xe9],
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("encoded.txt");
+            std::fs::write(&target, &bytes).unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            let tool = FileWriteTool::new(ctx);
+            let err = tool
+                .call(
+                    crate::generated_result(&json!({
+                        "file_path": target.to_str().unwrap(), "content": "replacement",
+                    })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            let expected = crate::file_meta::classify_not_text(&bytes)
+                .unwrap()
+                .mutation_refusal_message();
+            assert!(
+                matches!(err, ToolError::InvalidInput(message) if message.string_at("") == Some(expected.as_str()))
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_322_partial_read_never_authorizes_write_at_unchanged_mtime() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("partial.txt");
+        std::fs::write(&target, "unseen content").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        let mut entry = tool_api::read_file_state::get(&ctx.read_file_state, &route).unwrap();
+        entry.is_partial_view = true;
+        tool_api::read_file_state::set(&ctx.read_file_state, route, entry);
+        let tool = FileWriteTool::new(ctx);
+        let err = tool
+            .call(
+                crate::generated_result(&json!({
+                    "file_path": target.to_str().unwrap(), "content": "replacement",
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::InvalidInput(message) if message.string_at("") == Some(crate::FILE_NOT_READ_ERROR))
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unseen content");
+    }
+
+    #[tokio::test]
+    async fn native_322_write_directory_error_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let err = tool
+            .call(
+                crate::generated_result(&json!({
+                    "file_path": target.to_str().unwrap(), "content": "replacement",
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let fixture = native_322_fixture();
+        let template = fixture["writeTargets"][0]["expected"]["message"]
+            .as_str()
+            .unwrap();
+        let expected = template.replace("/oracle/target", target.to_str().unwrap());
+        assert!(
+            matches!(err, ToolError::InvalidInput(message) if message.string_at("") == Some(expected.as_str()))
+        );
+        assert!(target.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_322_write_socket_error_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        let _socket = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let err = tool
+            .call(
+                crate::generated_result(&json!({
+                    "file_path": target.to_str().unwrap(), "content": "replacement",
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let fixture = native_322_fixture();
+        let template = fixture["writeTargets"][1]["expected"]["message"]
+            .as_str()
+            .unwrap();
+        let expected = template.replace("/oracle/target", target.to_str().unwrap());
+        assert!(
+            matches!(err, ToolError::InvalidInput(message) if message.string_at("") == Some(expected.as_str()))
+        );
+        assert!(std::fs::symlink_metadata(&target).is_ok());
+    }
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
@@ -652,8 +871,11 @@ mod tests {
         let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
-        let content = crate::shared::decode_utf8_strict(&bytes)
-            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+        let decoded = crate::file_meta::read_with_metadata(&bytes).0;
+        let content = decoded
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&decoded)
+            .to_owned();
         let mtime_ms = std::fs::metadata(&canon)
             .ok()
             .and_then(|m| m.modified().ok())
