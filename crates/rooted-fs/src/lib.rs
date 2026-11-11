@@ -362,6 +362,18 @@ pub struct RootedFileSnapshot {
     pub mode: Option<u32>,
 }
 
+/// Metadata queried through a no-follow rooted directory chain without reading
+/// the file's contents. Regular files need no read-data permission for listing.
+#[derive(Debug)]
+pub struct RootedFileMetadata {
+    /// Size reported by the rooted metadata query.
+    pub size: u64,
+    /// Modification time reported by that query, when available.
+    pub modified: Option<SystemTime>,
+    /// Unix mode reported by that query, when the platform exposes one.
+    pub mode: Option<u32>,
+}
+
 /// Metadata returned by a direct rooted write, without reopening its pathname.
 #[derive(Debug, Default)]
 pub struct RootedWriteResult {
@@ -657,6 +669,25 @@ mod imp {
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(test)]
+    std::thread_local! {
+        static AFTER_ROOT_ANCHOR_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_root_open_hook_for_test(hook: impl FnOnce() + 'static) {
+        AFTER_ROOT_ANCHOR_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    #[cfg(test)]
+    fn run_after_root_anchor_open_hook() {
+        let hook = AFTER_ROOT_ANCHOR_OPEN_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     struct LocalSecurityDescriptor(*mut c_void);
 
     impl Drop for LocalSecurityDescriptor {
@@ -860,16 +891,62 @@ mod imp {
         root: &Path,
         expected: Option<&RootIdentity>,
     ) -> Result<std::fs::File, FsError> {
-        let canonical = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
+        use std::path::Prefix;
+
+        // Resolve only lexical coordinates here. Canonicalizing a mutable root
+        // first would follow a junction before the no-reparse opens below can
+        // protect it. Start at the drive/share anchor and open every filesystem
+        // component relative to the preceding, verified directory handle.
+        let absolute = std::path::absolute(root).map_err(|error| map_io(root, error))?;
+        let mut components = absolute.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return Err(FsError::OutsideWorkspace(root.display().to_string()));
+        };
+        let supported_prefix = match prefix.kind() {
+            Prefix::Disk(_)
+            | Prefix::VerbatimDisk(_)
+            | Prefix::UNC(_, _)
+            | Prefix::VerbatimUNC(_, _) => true,
+            // canonicalize can also return a volume-GUID filesystem root.
+            Prefix::Verbatim(name) => name
+                .to_str()
+                .is_some_and(|name| name.starts_with("Volume{") && name.ends_with('}')),
+            _ => false,
+        };
+        if !supported_prefix || components.next() != Some(Component::RootDir) {
+            return Err(FsError::OutsideWorkspace(root.display().to_string()));
+        }
+        let mut anchor = PathBuf::from(prefix.as_os_str());
+        anchor.push("\\");
         let mut options = std::fs::OpenOptions::new();
         options
-            .read(true)
+            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
             .share_mode(SHARE_ALL)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        let file = options
-            .open(&canonical)
-            .map_err(|error| map_io(&canonical, error))?;
-        ensure_directory(&file, &canonical)?;
+        let mut file = options
+            .open(&anchor)
+            .map_err(|error| map_io(&anchor, error))?;
+        ensure_directory(&file, &anchor)?;
+        #[cfg(test)]
+        run_after_root_anchor_open_hook();
+        for component in components {
+            let Component::Normal(name) = component else {
+                return Err(FsError::OutsideWorkspace(root.display().to_string()));
+            };
+            let next = nt_create_relative(
+                &file,
+                name,
+                root,
+                FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                SHARE_ALL,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_DIRECTORY,
+                std::ptr::null_mut(),
+            )?;
+            ensure_directory(&next, root)?;
+            file = next;
+        }
         if let Some(expected) = expected {
             if root_identity_from_file(&file, root)? != *expected {
                 return Err(FsError::OutsideWorkspace(format!(
@@ -2021,11 +2098,49 @@ mod imp {
         )
     }
 
-    pub(super) fn open_file_after_permission(
+    pub(super) fn metadata_file_after_permission(
         root: &Path,
         relative: &Path,
         requested: &Path,
         approved: &Path,
+    ) -> Result<RootedFileMetadata, RootedFsError> {
+        verify_resolution(requested, approved)?;
+        let (parent, file_name) = open_parent(root, relative, false).map_err(RootedFsError::Fs)?;
+        let file = nt_create_relative(
+            &parent,
+            &file_name,
+            relative,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            0,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+        .map_err(|error| match error {
+            FsError::OutsideWorkspace(_) => RootedFsError::NotRegularFile,
+            error => RootedFsError::Fs(error),
+        })?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        if !metadata.is_file() || is_reparse(&metadata) {
+            return Err(RootedFsError::NotRegularFile);
+        }
+        verify_resolution(requested, approved)?;
+        Ok(RootedFileMetadata {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            mode: None,
+        })
+    }
+
+    fn open_file_after_permission_inner(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: Option<&FileMutationIdentity>,
     ) -> Result<std::fs::File, RootedFsError> {
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
@@ -2033,7 +2148,13 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
-        let (parent, file_name) = open_parent(root, relative, false).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            false,
+            expected.map(|identity| &identity.root),
+        )
+        .map_err(RootedFsError::Fs)?;
         let file = open_regular(
             &parent,
             &file_name,
@@ -2052,7 +2173,32 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
+        if let Some(expected) = expected {
+            if matches!(expected.file, FileIdentity::Missing) {
+                return Err(RootedFsError::ContentChanged);
+            }
+            validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+        }
         Ok(file)
+    }
+
+    pub(super) fn open_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<std::fs::File, RootedFsError> {
+        open_file_after_permission_inner(root, relative, requested, approved, None)
+    }
+
+    pub(super) fn open_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: &FileMutationIdentity,
+    ) -> Result<std::fs::File, RootedFsError> {
+        open_file_after_permission_inner(root, relative, requested, approved, Some(expected))
     }
 
     #[cfg(test)]
@@ -3091,6 +3237,32 @@ pub fn open_file_after_permission(
     approved: &Path,
 ) -> Result<std::fs::File, RootedFsError> {
     imp::open_file_after_permission(root, relative, requested, approved)
+}
+
+/// Open a permission-checked regular file only under the admitted root and leaf
+/// identities. The returned descriptor can be inspected before a bounded read.
+/// A leaf admitted as missing must remain missing; a newly present file fails.
+pub fn open_file_after_permission_pinned(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    expected: &FileMutationIdentity,
+) -> Result<std::fs::File, RootedFsError> {
+    imp::open_file_after_permission_pinned(root, relative, requested, approved, expected)
+}
+
+/// Query regular-file metadata after checking that `requested` still resolves
+/// to `approved`, without opening the file for reading its contents. The query
+/// traverses the same no-follow rooted parent chain as permission-checked reads
+/// and rejects a symlink or non-regular file at the approved relative leaf.
+pub fn metadata_file_after_permission(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+) -> Result<RootedFileMetadata, RootedFsError> {
+    imp::metadata_file_after_permission(root, relative, requested, approved)
 }
 
 /// Write bytes after checking the approved resolution and rejecting a final
@@ -4630,11 +4802,55 @@ mod imp {
         )
     }
 
-    pub(super) fn open_file_after_permission(
+    pub(super) fn metadata_file_after_permission(
         root: &Path,
         relative: &Path,
         requested: &Path,
         approved: &Path,
+    ) -> Result<RootedFileMetadata, RootedFsError> {
+        use rustix::fs::StatExt;
+
+        verify_resolution(requested, approved)?;
+        let (parent, file_name) =
+            open_parent(root, relative, false, PRIVATE_DIR_MODE).map_err(RootedFsError::Fs)?;
+        let stat = fs::statat(&parent, &file_name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| RootedFsError::Fs(map_unix_io(relative, error)))?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return Err(RootedFsError::NotRegularFile);
+        }
+        verify_resolution(requested, approved)?;
+        #[cfg(any(target_os = "aix", target_os = "hurd", target_os = "nto"))]
+        let nanos = stat.st_mtim.tv_nsec;
+        #[cfg(not(any(target_os = "aix", target_os = "hurd", target_os = "nto")))]
+        let nanos = stat.st_mtime_nsec;
+        let modified = u32::try_from(nanos)
+            .ok()
+            .filter(|nanos| *nanos < 1_000_000_000)
+            .and_then(|nanos| {
+                let seconds = stat.mtime();
+                if seconds >= 0 {
+                    SystemTime::UNIX_EPOCH
+                        .checked_add(std::time::Duration::new(seconds.unsigned_abs(), nanos))
+                } else {
+                    SystemTime::UNIX_EPOCH
+                        .checked_sub(std::time::Duration::from_secs(seconds.unsigned_abs()))?
+                        .checked_add(std::time::Duration::from_nanos(u64::from(nanos)))
+                }
+            });
+        Ok(RootedFileMetadata {
+            size: u64::try_from(stat.st_size)
+                .map_err(|_| RootedFsError::Fs(FsError::Io("invalid file size".into())))?,
+            modified,
+            mode: Some(u32::from(stat.st_mode)),
+        })
+    }
+
+    fn open_file_after_permission_inner(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: Option<&FileMutationIdentity>,
     ) -> Result<std::fs::File, RootedFsError> {
         let target_exists = std::fs::symlink_metadata(requested).is_ok();
         if target_exists {
@@ -4642,8 +4858,14 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
-        let (parent, file_name) =
-            open_parent(root, relative, false, PRIVATE_DIR_MODE).map_err(RootedFsError::Fs)?;
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            false,
+            PRIVATE_DIR_MODE,
+            expected.map(|identity| &identity.root),
+        )
+        .map_err(RootedFsError::Fs)?;
         ensure_read_regular(&parent, &file_name, relative)?;
         let fd = fs::openat(
             &parent,
@@ -4661,7 +4883,33 @@ mod imp {
         } else {
             verify_parent_resolution(requested, approved)?;
         }
-        Ok(std::fs::File::from(fd))
+        let file = std::fs::File::from(fd);
+        if let Some(expected) = expected {
+            if matches!(expected.file, FileIdentity::Missing) {
+                return Err(RootedFsError::ContentChanged);
+            }
+            validate_file_identity(&file, &expected.file).map_err(RootedFsError::Fs)?;
+        }
+        Ok(file)
+    }
+
+    pub(super) fn open_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<std::fs::File, RootedFsError> {
+        open_file_after_permission_inner(root, relative, requested, approved, None)
+    }
+
+    pub(super) fn open_file_after_permission_pinned(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        expected: &FileMutationIdentity,
+    ) -> Result<std::fs::File, RootedFsError> {
+        open_file_after_permission_inner(root, relative, requested, approved, Some(expected))
     }
 
     #[cfg(test)]
@@ -5170,6 +5418,25 @@ mod imp {
         Err(RootedFsError::Fs(unsupported()))
     }
 
+    pub(super) fn open_file_after_permission_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+        _expected: &FileMutationIdentity,
+    ) -> Result<std::fs::File, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
+    pub(super) fn metadata_file_after_permission(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+    ) -> Result<RootedFileMetadata, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
     #[cfg(test)]
     pub(super) fn read_file_after_permission_for_test<F>(
         _root: &Path,
@@ -5402,6 +5669,254 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    mod metadata_tests {
+        use super::super::*;
+
+        #[test]
+        fn regular_file_metadata_matches_without_reading_contents() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("candidate.txt");
+            let target = root.join(relative);
+            std::fs::write(&target, b"metadata only").unwrap();
+            let expected = std::fs::metadata(&target).unwrap();
+            let actual = metadata_file_after_permission(&root, relative, &target, &target).unwrap();
+            assert_eq!(actual.size, expected.len());
+            assert_eq!(actual.modified, expected.modified().ok());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(actual.mode, Some(expected.mode()));
+            }
+
+            let subdirectory = root.join("directory");
+            std::fs::create_dir(&subdirectory).unwrap();
+            assert!(matches!(
+                metadata_file_after_permission(
+                    &root,
+                    Path::new("directory"),
+                    &subdirectory,
+                    &subdirectory,
+                ),
+                Err(RootedFsError::NotRegularFile)
+            ));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn metadata_does_not_require_regular_file_read_bits() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("unreadable.txt");
+            let target = root.join(relative);
+            std::fs::write(&target, b"not opened for content").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0)).unwrap();
+            let actual = metadata_file_after_permission(&root, relative, &target, &target).unwrap();
+            assert_eq!(actual.size, 22);
+            assert_eq!(actual.mode.unwrap() & 0o777, 0);
+            assert_eq!(
+                actual.modified,
+                std::fs::metadata(&target).unwrap().modified().ok()
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn metadata_does_not_require_windows_file_read_data() {
+            struct DenyGuard(PathBuf);
+            impl Drop for DenyGuard {
+                fn drop(&mut self) {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&self.0)
+                        .args(["/remove:d", "*S-1-3-4"])
+                        .output();
+                }
+            }
+
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("unreadable.txt");
+            let target = root.join(relative);
+            std::fs::write(&target, b"not opened for content").unwrap();
+            // OWNER RIGHTS applies to this fixture's owner without relying on
+            // the account's localized name. Deny read-data only, leaving
+            // FILE_READ_ATTRIBUTES and SYNCHRONIZE available for metadata.
+            let output = std::process::Command::new("icacls")
+                .arg(&target)
+                .args(["/deny", "*S-1-3-4:(RD)"])
+                .output()
+                .unwrap();
+            let _guard = DenyGuard(target.clone());
+            assert!(output.status.success(), "{output:?}");
+            assert!(std::fs::File::open(&target).is_err());
+            let actual = metadata_file_after_permission(&root, relative, &target, &target).unwrap();
+            assert_eq!(actual.size, 22);
+            assert_eq!(
+                actual.modified,
+                std::fs::metadata(&target).unwrap().modified().ok()
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn metadata_rejects_junction_parents() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let real = root.join("real");
+            std::fs::create_dir(&real).unwrap();
+            let target = real.join("candidate.txt");
+            std::fs::write(&target, b"approved").unwrap();
+            let alias = root.join("alias");
+            if !super::create_junction(&alias, &real) {
+                return;
+            }
+            let result = metadata_file_after_permission(
+                &root,
+                Path::new("alias/candidate.txt"),
+                &alias.join("candidate.txt"),
+                &target,
+            );
+            std::fs::remove_dir(&alias).unwrap();
+            assert!(result.is_err());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn metadata_preserves_modification_times_before_the_epoch() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("old.txt");
+            let target = root.join(relative);
+            let file = std::fs::File::create(&target).unwrap();
+            file.set_modified(SystemTime::UNIX_EPOCH - std::time::Duration::from_millis(750))
+                .unwrap();
+            let actual = metadata_file_after_permission(&root, relative, &target, &target).unwrap();
+            assert_eq!(actual.modified, file.metadata().unwrap().modified().ok());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn metadata_rejects_unresolved_leaf_and_parent_symlinks() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let real = root.join("real");
+            std::fs::create_dir(&real).unwrap();
+            let target = real.join("candidate.txt");
+            std::fs::write(&target, b"approved").unwrap();
+            let leaf = root.join("leaf.txt");
+            std::os::unix::fs::symlink(&target, &leaf).unwrap();
+            assert!(matches!(
+                metadata_file_after_permission(&root, Path::new("leaf.txt"), &leaf, &target),
+                Err(RootedFsError::NotRegularFile)
+            ));
+            let parent = root.join("alias");
+            std::os::unix::fs::symlink(&real, &parent).unwrap();
+            assert!(metadata_file_after_permission(
+                &root,
+                Path::new("alias/candidate.txt"),
+                &parent.join("candidate.txt"),
+                &target,
+            )
+            .is_err());
+            // As for content reads, an already-approved lexical alias can be
+            // queried using its canonical root-relative target.
+            assert_eq!(
+                metadata_file_after_permission(
+                    &root,
+                    Path::new("real/candidate.txt"),
+                    &leaf,
+                    &target,
+                )
+                .unwrap()
+                .size,
+                8
+            );
+            std::fs::remove_file(&leaf).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let outside_file = outside.path().join("candidate.txt");
+            std::fs::write(&outside_file, b"outside").unwrap();
+            std::os::unix::fs::symlink(&outside_file, &leaf).unwrap();
+            assert!(matches!(
+                metadata_file_after_permission(
+                    &root,
+                    Path::new("real/candidate.txt"),
+                    &leaf,
+                    &target,
+                ),
+                Err(RootedFsError::SymlinkResolutionChanged)
+            ));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn metadata_rejects_nonregular_files_without_opening_them() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("s");
+            let target = root.join(relative);
+            let _socket = std::os::unix::net::UnixListener::bind(&target).unwrap();
+            assert!(matches!(
+                metadata_file_after_permission(&root, relative, &target, &target),
+                Err(RootedFsError::NotRegularFile)
+            ));
+        }
+
+        #[test]
+        fn pinned_opener_rejects_stale_root_leaf_and_missing_admission() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let relative = Path::new("candidate.txt");
+            let target = root.join(relative);
+            std::fs::write(&target, b"admitted").unwrap();
+            let root_pin = root_identity(&root).unwrap();
+            let pin = FileMutationIdentity {
+                root: root_pin,
+                file: file_identity_pinned(&root, relative, &root_pin).unwrap(),
+            };
+            let mut file =
+                open_file_after_permission_pinned(&root, relative, &target, &target, &pin).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"admitted");
+            drop(file);
+
+            std::fs::rename(&target, root.join("old.txt")).unwrap();
+            std::fs::write(&target, b"replacement").unwrap();
+            assert!(
+                open_file_after_permission_pinned(&root, relative, &target, &target, &pin).is_err()
+            );
+            let other = tempfile::tempdir().unwrap();
+            let wrong_root_pin = FileMutationIdentity {
+                root: root_identity(other.path()).unwrap(),
+                file: file_identity_pinned(&root, relative, &root_pin).unwrap(),
+            };
+            assert!(open_file_after_permission_pinned(
+                &root,
+                relative,
+                &target,
+                &target,
+                &wrong_root_pin,
+            )
+            .is_err());
+
+            let missing_pin = FileMutationIdentity {
+                root: root_pin,
+                file: FileIdentity::Missing,
+            };
+            assert!(matches!(
+                open_file_after_permission_pinned(&root, relative, &target, &target, &missing_pin),
+                Err(RootedFsError::ContentChanged)
+            ));
+            std::fs::remove_file(&target).unwrap();
+            assert!(matches!(
+                open_file_after_permission_pinned(&root, relative, &target, &target, &missing_pin),
+                Err(RootedFsError::Fs(FsError::NotFound(_)))
+            ));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn memory_pinned_file_io_rejects_replaced_roots_and_new_hard_links() {
@@ -6662,6 +7177,66 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_initial_root_walk_refuses_a_concurrent_junction_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let active = parent.path().join("trusted");
+        let saved = parent.path().join("trusted-original");
+        std::fs::create_dir(&active).unwrap();
+        std::fs::write(active.join("source.txt"), b"approved").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("source.txt"), b"outside").unwrap();
+        let root = std::fs::canonicalize(&active).unwrap();
+        let requested = root.join("source.txt");
+        let replaced = std::rc::Rc::new(std::cell::Cell::new(false));
+        let did_replace = replaced.clone();
+        let swap_active = active.clone();
+        let swap_saved = saved.clone();
+        let swap_outside = outside.path().to_path_buf();
+        imp::install_root_open_hook_for_test(move || {
+            std::fs::rename(&swap_active, &swap_saved).unwrap();
+            if create_junction(&swap_active, &swap_outside) {
+                did_replace.set(true);
+            } else {
+                std::fs::rename(&swap_saved, &swap_active).unwrap();
+            }
+        });
+        let result =
+            read_file_after_permission(&root, Path::new("source.txt"), &requested, &requested);
+        if !replaced.get() {
+            return;
+        }
+        std::fs::remove_dir(&active).unwrap();
+        std::fs::rename(&saved, &active).unwrap();
+        assert!(
+            result.is_err(),
+            "initial root replacement must not yield outside bytes"
+        );
+        assert_eq!(
+            std::fs::read(active.join("source.txt")).unwrap(),
+            b"approved"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_initial_root_walk_refuses_junctions_in_any_root_component() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("nested")).unwrap();
+        std::fs::write(outside.path().join("source.txt"), b"outside").unwrap();
+        std::fs::write(outside.path().join("nested/source.txt"), b"outside").unwrap();
+        let linked = parent.path().join("linked");
+        if !create_junction(&linked, outside.path()) {
+            return;
+        }
+        for root in [linked.clone(), linked.join("nested")] {
+            assert!(open_read_file_pinned(&root, Path::new("source.txt"), None).is_err());
+        }
+        std::fs::remove_dir(&linked).unwrap();
     }
 
     #[cfg(windows)]

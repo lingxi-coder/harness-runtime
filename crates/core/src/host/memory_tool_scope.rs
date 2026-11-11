@@ -287,6 +287,27 @@ impl MemoryMutation {
         Ok((parent, pin))
     }
 
+    /// Open the admitted file without loading its body. Mutation callers can
+    /// reject missing or partial model context using metadata from this same
+    /// pinned descriptor before allocating an existing-file snapshot.
+    pub fn open_file(&self) -> Result<std::fs::File, rooted_fs::RootedFsError> {
+        let target = &self.targets[0];
+        let (parent, pin) = self
+            .parent(target, false)
+            .map_err(rooted_fs::RootedFsError::Fs)?;
+        let path = self.target();
+        rooted_fs::open_file_after_permission_pinned(
+            &parent,
+            Path::new(target.relative.file_name().expect("admitted leaf")),
+            &path,
+            &path,
+            &rooted_fs::FileMutationIdentity {
+                root: pin,
+                file: target.file_identity,
+            },
+        )
+    }
+
     pub fn read_file(&self) -> Result<rooted_fs::RootedFileSnapshot, rooted_fs::RootedFsError> {
         let target = &self.targets[0];
         let (parent, pin) = self
@@ -660,6 +681,7 @@ mod tests {
                 let admitted = memory_file_mutation("Write", &input).unwrap().unwrap();
                 active.store(false, Ordering::Release);
                 assert!(memory_file_mutation("Write", &input).is_err());
+                assert!(admitted.open_file().is_err());
                 assert!(admitted.write_file(b"must not write").is_err());
             },
         )

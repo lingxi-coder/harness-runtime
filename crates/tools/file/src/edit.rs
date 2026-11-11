@@ -1080,16 +1080,35 @@ impl Tool for FileEditTool {
             }
         };
 
+        // Exact patch generation stays off the async worker and precedes the
+        // mutation. A cancelled/failed preparation must not leave a committed
+        // edit without its result, even for expensive shuffled-line diffs.
+        let (before, after, bytes, published_units, structured_patch, lines_added, lines_removed) =
+            crate::mutation_io::prepare(ctx.cancel.as_ref(), move || {
+                let (structured_patch, lines_added, lines_removed) =
+                    crate::utf16_mutation::patch(&before, &after);
+                // Preserve the original encoding and line endings. `after` is
+                // LF-normalized and retains any leading UTF-16/UTF-8 BOM.
+                let bytes = crate::file_meta::encode_units_with_metadata(&after, enc, ending);
+                let published_units = crate::utf16_mutation::without_bom(&after).to_vec();
+                (
+                    before,
+                    after,
+                    bytes,
+                    published_units,
+                    structured_patch,
+                    lines_added,
+                    lines_removed,
+                )
+            })
+            .await?;
+
         // (/rewind) Back up the pre-edit content BEFORE writing so /rewind can
         // restore it. Best-effort; no-op when checkpointing isn't wired.
         if let Some(fh) = ctx.file_history.as_ref() {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
-        // Re-apply the original encoding + line endings on write so a CRLF or
-        // UTF-16LE file round-trips byte-for-byte (claude-code
-        // `writeTextContent`, file.ts:84-98). `after` is LF-normalized.
-        let bytes = crate::file_meta::encode_units_with_metadata(&after, enc, ending);
         let commit_path = path.clone();
         let commit_canon = canon.clone();
         let commit_requested = requested_path.clone();
@@ -1097,7 +1116,6 @@ impl Tool for FileEditTool {
         let commit_scope = memory_mutation.clone();
         let state =
             tool_api::read_file_state::capture_read_file_state_write(&self.ctx.read_file_state);
-        let published_units = crate::utf16_mutation::without_bom(&after).to_vec();
         let history = ctx.file_history.clone();
         let result = crate::mutation_io::commit(ctx.cancel.as_ref(), move || {
             let result = if let Some(scope) = &commit_scope {
@@ -1156,8 +1174,6 @@ impl Tool for FileEditTool {
             .sync_lsp_after_file_write(&canon, &String::from_utf16_lossy(&after))
             .await;
 
-        let (structured_patch, lines_added, lines_removed) =
-            crate::utf16_mutation::patch(&before, &after);
         if lines_added > 0 || lines_removed > 0 {
             // The oracle records the MODEL that made the change, not the tool.
             otel::record_lines_of_code_change(

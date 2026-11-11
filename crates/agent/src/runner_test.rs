@@ -793,6 +793,207 @@ struct CaptureLiveInvocationContexts {
     contexts: Mutex<Vec<lingxi_core::host::tool_invoker::SubagentInvocationContext>>,
 }
 
+struct ReadMediaInvoker {
+    result: lingxi_core::host::tool_invoker::ToolInvocationResult,
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for ReadMediaInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: Utf16JsonProjection,
+        _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Ok(self.result.data.clone())
+    }
+
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        _input: Utf16JsonProjection,
+        _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        assert_eq!(name, "Read");
+        Ok(self.result.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn inline_pdf_read_invocation() -> lingxi_core::host::tool_invoker::ToolInvocationResult {
+    lingxi_core::host::tool_invoker::ToolInvocationResult {
+        data: test_projection(&serde_json::json!({"type":"pdf", "file":{
+            "filePath":"report.pdf", "base64":"JVBERi0xLjQK", "originalSize":9
+        }})),
+        model_content: Some("PDF file read: report.pdf (9B)".into()),
+        new_messages: vec![ConversationMessage::user_with_documents(
+            MessageId::new(),
+            String::new(),
+            vec![lingxi_core::types::DocumentSource::Base64 {
+                media_type: "application/pdf".into(),
+                data: "JVBERi0xLjQK".into(),
+            }],
+        )],
+        is_error: false,
+        context_modifier: None,
+        mcp_meta: None,
+        turn_end: None,
+        context: Utf16JsonProjection::parse("[]").unwrap(),
+        context_state: None,
+    }
+}
+
+fn encode_read_media_history(history: Vec<ConversationMessage>) -> serde_json::Value {
+    use llm_runtime::services::sdk::{self, WireCodec};
+    let messages = llm_runtime::convert::to_llm_messages(
+        llm_runtime::convert::normalize_messages_for_api(history),
+    )
+    .unwrap();
+    let (input, _) = llm_runtime::convert::history_input(
+        "claude-opus-4-7",
+        &messages,
+        &[],
+        &[],
+        sdk::protocol::ProtocolFamily::AnthropicMessages,
+    )
+    .unwrap();
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
+        "protocol":"anthropic_messages", "auth":"none", "models":[]
+    }))
+    .unwrap();
+    let encoded = sdk::AnthropicMessagesCodec
+        .encode_request(
+            sdk::EncodeRequest::new(&input),
+            &sdk::CodecContext::new(&profile, &input.model, sdk::RequestMode::Complete),
+        )
+        .unwrap();
+    serde_json::from_slice(&encoded.body).unwrap()
+}
+
+fn count_read_wire_media(value: &serde_json::Value, kind: &str) -> usize {
+    match value {
+        serde_json::Value::Object(fields) => {
+            usize::from(fields.get("type").and_then(|value| value.as_str()) == Some(kind))
+                + fields
+                    .values()
+                    .map(|value| count_read_wire_media(value, kind))
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| count_read_wire_media(value, kind))
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[tokio::test]
+async fn agent_inline_pdf_reaches_next_provider_once_with_live_and_deferred_tools() {
+    for deferred in [false, true] {
+        let turns = [
+            tool_use_response("Read", Some("tool_use")),
+            text_response("finished", Some("end_turn")),
+        ]
+        .into_iter()
+        .map(|response| {
+            llm_runtime::stream_accumulator::response_to_stream_events(response)
+                .into_iter()
+                .map(Ok)
+                .collect()
+        })
+        .collect();
+        let mut api = ResultStreamMockApiClient::new(turns);
+        if deferred {
+            Arc::get_mut(&mut api).unwrap().workflow_watchdog =
+                Some(lingxi_core::host::WorkflowQueryWatchdog {
+                    stall_timeout_ms: 60_000,
+                    max_retries: 0,
+                    retry_response_body: true,
+                });
+        }
+        let invoker = Arc::new(ReadMediaInvoker {
+            result: inline_pdf_read_invocation(),
+        });
+        let ctx = loop_ctx(api.clone(), Some(invoker), 3);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        drop(event_tx);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let events = drain(out_rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. })),
+            "deferred={deferred}: {events:?}"
+        );
+        let histories = api.histories.lock().unwrap();
+        assert_eq!(histories.len(), 2, "deferred={deferred}");
+        let wire = encode_read_media_history(histories[1].clone());
+        assert_eq!(
+            count_read_wire_media(&wire, "document"),
+            1,
+            "deferred={deferred}: {wire}"
+        );
+        assert_eq!(count_read_wire_media(&wire, "tool_result"), 1, "{wire}");
+        assert!(wire.to_string().contains("JVBERi0xLjQK"), "{wire}");
+    }
+}
+
+#[test]
+fn agent_read_result_preserves_pdf_fallback_and_extracted_page_images_on_wire() {
+    let mut pdf = inline_pdf_read_invocation();
+    pdf.new_messages.clear();
+    let mut pages = inline_pdf_read_invocation();
+    pages.data = test_projection(&serde_json::json!({"type":"parts", "file":{
+        "filePath":"report.pdf", "originalSize":9, "count":1
+    }}));
+    pages.model_content = Some("PDF pages extracted: 1 page(s) from report.pdf (9B)".into());
+    pages.new_messages = vec![ConversationMessage::user_with_images(
+        MessageId::new(),
+        String::new(),
+        vec![lingxi_core::types::ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        }],
+    )];
+    for (invocation, documents, images) in [(pdf, 1, 0), (pages, 0, 1)] {
+        let id = ToolUseId::new();
+        let result = successful_live_tool_result_block("Read", &id, None, &invocation);
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id,
+                name: "Read".into(),
+                input: test_projection(&serde_json::json!({})),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            per_turn_effort: None,
+            resumable: None,
+        };
+        let mut user = ConversationMessage::user(MessageId::new(), String::new());
+        if let ConversationMessage::User { content, .. } = &mut user {
+            *content = vec![result];
+        }
+        let mut history = vec![assistant, user];
+        history.extend(invocation.new_messages);
+        let wire = encode_read_media_history(history);
+        assert_eq!(
+            count_read_wire_media(&wire, "document"),
+            documents,
+            "{wire}"
+        );
+        assert_eq!(count_read_wire_media(&wire, "image"), images, "{wire}");
+    }
+}
+
 #[async_trait]
 impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
     async fn invoke(
