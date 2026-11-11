@@ -65,6 +65,7 @@ pub struct CostStateVector {
     /// Per-model vector.
     pub per_model_usage: Vec<ModelUsage>,
     /// Per-account vector. Always stored, including when it is empty.
+    #[serde(default)]
     pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
     /// Aggregate timing/counters.
     pub total_api_duration_ms: u64,

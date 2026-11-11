@@ -104,6 +104,7 @@ pub struct CostState {
     /// Same settlements as [`Self::per_model_usage`], split by the account
     /// that served each response. These rows are not added into
     /// [`Self::total_nano_usd`] again.
+    #[serde(default)]
     pub per_account_usage: Vec<crate::account_usage::AccountModelUsage>,
 }
 
