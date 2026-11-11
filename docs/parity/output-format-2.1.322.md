@@ -32,6 +32,11 @@ token counts and prices remain truthful to the selected host and provider.
   native no-UI diagnostic changes presentation after an actual denial; it grants
   no permission.
 
+Catalog reads capture one provider/account runtime for the complete listing.
+The next read refreshes that snapshot; active model calls keep their own routing
+boundary. This avoids rebuilding the complete catalog for each model during SDK
+initialization without caching accounts across operations.
+
 The command-replay regression remains enabled. It snapshots registered command
 metadata before host shutdown and allows LingXi's built-in asset guidance in
 the Skill prefix while retaining the immutable native replay fixtures.

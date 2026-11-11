@@ -4089,72 +4089,82 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `switch_model` still accepts any string; actual availability depends on the
     /// profile's credential (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
-        let available = self.api.available_models();
-        let listings = self.api.list_model_listings();
-        let candidates = if self.side_chat {
-            self.side_chat_model_refs
-                .clone()
-                .unwrap_or_else(|| vec![self.config.model.clone()])
-        } else {
-            available
-        };
-        let mut visible = Vec::with_capacity(candidates.len());
-        for reference in candidates {
-            if self.side_chat
-                && self
-                    .side_chat_model_refs
-                    .as_ref()
-                    .is_some_and(|models| !models.contains(&reference))
-            {
-                continue;
-            }
-            let (model, profile) = lingxi_core::host::parse_model_ref(&reference, &listings);
-            match self
-                .model_catalog_route_allows(&model, profile.as_deref())
-                .await
-            {
-                Ok(Some(false)) => {}
-                Err(error) => {
-                    tracing::warn!(%error, %reference, "hiding model from an unavailable Native model policy")
+        // Resolve the provider/account catalog once for this read operation.
+        // The next operation gets a fresh snapshot; prepared calls keep theirs.
+        llm_runtime::catalog_task::scope(async {
+            let available = self.api.available_models();
+            let listings = self.api.list_model_listings();
+            let candidates = if self.side_chat {
+                self.side_chat_model_refs
+                    .clone()
+                    .unwrap_or_else(|| vec![self.config.model.clone()])
+            } else {
+                available
+            };
+            let mut visible = Vec::with_capacity(candidates.len());
+            for reference in candidates {
+                if self.side_chat
+                    && self
+                        .side_chat_model_refs
+                        .as_ref()
+                        .is_some_and(|models| !models.contains(&reference))
+                {
+                    continue;
                 }
-                _ => visible.push(reference),
+                let (model, profile) = lingxi_core::host::parse_model_ref(&reference, &listings);
+                match self
+                    .model_catalog_route_allows(&model, profile.as_deref())
+                    .await
+                {
+                    Ok(Some(false)) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, %reference, "hiding model from an unavailable Native model policy")
+                    }
+                    _ => visible.push(reference),
+                }
             }
-        }
-        visible
+            visible
+        })
+        .await
     }
 
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the
     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
     /// production `ProviderApiAdapter` sources from the llm-runtime catalog.
     async fn list_model_listings(&self) -> Vec<lingxi_core::host::orchestrator::ModelListing> {
-        let listings = self.api.list_model_listings();
-        let mut visible = Vec::with_capacity(listings.len());
-        for listing in listings {
-            if self.side_chat
-                && !self.side_chat_model_refs.as_ref().is_some_and(|models| {
-                    models.contains(&lingxi_core::host::qualified_model_ref(
-                        &listing.display_model,
-                        Some(&listing.provider_id),
-                    )) || models.contains(&lingxi_core::host::qualified_model_ref(
-                        &listing.request_model,
-                        Some(&listing.provider_id),
-                    ))
-                })
-            {
-                continue;
-            }
-            match self
-                .model_catalog_route_allows(&listing.request_model, Some(&listing.provider_id))
-                .await
-            {
-                Ok(Some(false)) => {}
-                Err(error) => {
-                    tracing::warn!(%error, model = %listing.request_model, profile = %listing.provider_id, "hiding model from an unavailable Native model policy")
+        // Resolve the provider/account catalog once for this read operation.
+        // The next operation gets a fresh snapshot; prepared calls keep theirs.
+        llm_runtime::catalog_task::scope(async {
+            let listings = self.api.list_model_listings();
+            let mut visible = Vec::with_capacity(listings.len());
+            for listing in listings {
+                if self.side_chat
+                    && !self.side_chat_model_refs.as_ref().is_some_and(|models| {
+                        models.contains(&lingxi_core::host::qualified_model_ref(
+                            &listing.display_model,
+                            Some(&listing.provider_id),
+                        )) || models.contains(&lingxi_core::host::qualified_model_ref(
+                            &listing.request_model,
+                            Some(&listing.provider_id),
+                        ))
+                    })
+                {
+                    continue;
                 }
-                _ => visible.push(listing),
+                match self
+                    .model_catalog_route_allows(&listing.request_model, Some(&listing.provider_id))
+                    .await
+                {
+                    Ok(Some(false)) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, model = %listing.request_model, profile = %listing.provider_id, "hiding model from an unavailable Native model policy")
+                    }
+                    _ => visible.push(listing),
+                }
             }
-        }
-        visible
+            visible
+        })
+        .await
     }
 
     /// Return the most recently observed provider rate-limit header snapshot.
