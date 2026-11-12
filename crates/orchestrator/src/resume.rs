@@ -2476,6 +2476,9 @@ struct DeferredReplayOutcome {
     tool_results: Vec<ContentBlock>,
     injected_messages: Vec<(ConversationMessage, ToolUseId)>,
     had_context_modifiers: bool,
+    /// Exact raw sidecar for a completed call restored without re-execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_use_result_json: Option<String>,
 }
 
 async fn replay_deferred_tool_after_resume(
@@ -2562,11 +2565,25 @@ async fn replay_deferred_tool_after_resume(
         crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers)
     })
     .await?;
+    let raw_result = orch
+        .transcript
+        .tool_use_results
+        .lock()
+        .await
+        .get(tool_use_id.as_str())
+        .cloned();
+    let tool_use_result_json = raw_result
+        .map(|result| result.to_json_string())
+        .transpose()
+        .map_err(|error| {
+            crate::OrchestratorError::Internal(format!("deferred result sidecar: {error}"))
+        })?;
     Ok(DeferredReplayOutcome {
         tool_use_id,
         tool_results,
         injected_messages,
         had_context_modifiers,
+        tool_use_result_json,
     })
 }
 

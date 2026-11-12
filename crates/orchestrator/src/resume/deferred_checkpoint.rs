@@ -250,6 +250,9 @@ fn validate_outcome(
     descriptor: &ReplayDescriptor,
     outcome: &DeferredReplayOutcome,
 ) -> Result<(), OrchestratorError> {
+    if let Some(raw) = &outcome.tool_use_result_json {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).map_err(error)?;
+    }
     if outcome.tool_use_id.to_string() != descriptor.tool_use_id || outcome.tool_results.iter().any(|block| !matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &outcome.tool_use_id)) || outcome.injected_messages.iter().any(|(_, id)| id.as_str().is_empty()) {
         return Err(error("completion contains a mismatched tool result"));
     }
@@ -270,6 +273,12 @@ impl CompletedReplay {
             return Err(error("completed tool changed runtime context that requires reconciliation; the tool will not be executed again"));
         }
         self.context.restore(orch).await?;
+        if let Some(raw) = &self.outcome.tool_use_result_json {
+            let raw =
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).map_err(error)?;
+            orch.record_tool_use_result(&self.outcome.tool_use_id, raw)
+                .await;
+        }
         Ok(self.outcome)
     }
 }

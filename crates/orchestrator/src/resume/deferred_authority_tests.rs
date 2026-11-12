@@ -153,7 +153,10 @@ impl Tool for CountingTool {
                     .map_err(|error| tool_api::ToolError::Internal(error.to_string()))?;
             }
         }
-        let mut result = tool_api::ToolCallResult::from_data("called".into());
+        let mut result = tool_api::ToolCallResult::from_data(
+            Utf16JsonProjection::parse(r#"{"status":"called","detail":"left\ud800right"}"#)
+                .unwrap(),
+        );
         if self.modifier_failure {
             result.context_modifier = Some(Box::new(|mut context| {
                 context.options.main_loop_model = "unresolvable-modifier-model".into();
@@ -412,8 +415,32 @@ async fn replay_accepts_writer_owned_append() {
         loaded.messages_in_order.iter().any(|row| row
             .tool_use_result_projection
             .as_ref()
-            .is_some_and(|result| result.string_at("") == Some("called"))),
+            .is_some_and(|result| result.string_at("/status") == Some("called"))),
         "accepted deferred results must publish raw sidecars before persistence"
+    );
+    let (cold, permissions, calls) = fixture.orchestrator(None);
+    replay_deferred_tools_after_resume(&cold, deferred(1))
+        .await
+        .unwrap();
+    assert_eq!(permissions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a completed logical call must not execute again"
+    );
+    let source = std::fs::read_to_string(&fixture.path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    let result = loaded
+        .messages_in_order
+        .last()
+        .unwrap()
+        .tool_use_result_projection
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.string_at("/status"), Some("called"));
+    assert_eq!(
+        result.string_units("/detail"),
+        Some(vec![108, 101, 102, 116, 0xd800, 114, 105, 103, 104, 116])
     );
 }
 
