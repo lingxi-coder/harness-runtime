@@ -1,0 +1,6 @@
+{
+  "type": "decision_request",
+  "request_id": "00000000-0000-4000-8000-000000000071",
+  "input_json": "{\"state\":{\"text\":\"检查 \\\"quoted\\\" evidence\\n你好😀\"},\"questions\":{\"supported\":{\"type\":\"binary\",\"instructions\":\"Does the evidence support the change?\"}}}",
+  "timeout_ms": 1000
+}

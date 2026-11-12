@@ -1,0 +1,5 @@
+{
+  "type": "decision_response",
+  "request_id": "00000000-0000-4000-8000-000000000071",
+  "result_json": "{\"result\":{\"state_revision\":0,\"answers\":{\"supported\":{\"type\":\"binary\",\"probability\":0.8}},\"usage\":{\"input_tokens\":24,\"output_tokens\":null},\"actual_model\":null,\"elapsed_ms\":12}}"
+}
