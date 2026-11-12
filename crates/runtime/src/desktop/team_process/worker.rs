@@ -115,10 +115,23 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let ask = bootstrap
         .ask_requester
         .then(|| Arc::new(super::ask_tool::AskRequester::new()));
+    let list = match bootstrap.shared_list.clone() {
+        Some(list) => {
+            list.validate()?;
+            Some(Arc::new(super::list_tools::TeamListTools {
+                bridge: bridge.clone(),
+                list,
+                task_id: bootstrap.task_id.clone(),
+                source: Default::default(),
+            }))
+        }
+        None => None,
+    };
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
         ask: ask.clone(),
+        list: list.clone(),
     }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
@@ -134,7 +147,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -223,6 +236,7 @@ async fn run(
     ledger: Arc<super::chat_session::DispatchLedger>,
     protocol: lingxi_llm_client::protocol::ProtocolFamily,
     ask: Option<Arc<super::ask_tool::AskRequester>>,
+    list: Option<Arc<super::list_tools::TeamListTools>>,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
         return Err(TeamProcessError::RouteUnsupported);
@@ -235,6 +249,14 @@ async fn run(
     );
     if continuation.is_some() && !path.exists() {
         return Err(TeamProcessError::NotContinuable);
+    }
+    if let Some(list) = &list {
+        // A write is dispatched only once its call is on this file.
+        let _ = list.source.set(super::list_tools::StepSource {
+            transcript: path.clone(),
+            scope: batch.scope(),
+            batch_id: batch.batch_id.clone(),
+        });
     }
     let start = if path.exists() {
         crate::headless::session::SessionStart::Resume {

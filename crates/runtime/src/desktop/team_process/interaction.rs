@@ -24,6 +24,10 @@ enum Pending {
         id: String,
         reply: oneshot::Sender<TeamDataRef>,
     },
+    Operation {
+        id: String,
+        reply: oneshot::Sender<super::TeamOperationResult>,
+    },
 }
 pub(super) struct ChildInteraction {
     next: AtomicU64,
@@ -103,6 +107,12 @@ impl ChildInteraction {
                 {
                     reply.send(data).map_err(|_| TeamProcessError::Protocol)?
                 }
+                (Pending::Operation { id, reply }, ParentFrame::Operated { id: got, result })
+                    if id == got =>
+                {
+                    result.validate()?;
+                    reply.send(result).map_err(|_| TeamProcessError::Protocol)?
+                }
                 _ => return Err(TeamProcessError::Protocol),
             }
         }
@@ -159,6 +169,33 @@ impl ChildInteraction {
                 reply,
             },
             WorkerFrame::Authorize { id },
+        )?;
+        tokio::select! {biased;_=self.cancel.cancelled()=>Err(TeamProcessError::Cancelled),response=response=>response.map_err(|_|TeamProcessError::Protocol)}
+    }
+    /// One request to the host's shared-list service. An error means the
+    /// outcome is not established and the parent is ending this process.
+    pub async fn operate(
+        &self,
+        tool: super::TeamOperationTool,
+        logical_step_id: Option<String>,
+        arguments: serde_json::Value,
+    ) -> Result<super::TeamOperationResult, TeamProcessError> {
+        let _serial = self.serial.lock().await;
+        let id = self.id()?;
+        let (reply, response) = oneshot::channel();
+        self.emit(
+            Pending::Operation {
+                id: id.clone(),
+                reply,
+            },
+            WorkerFrame::Operate {
+                request: super::TeamOperationRequest {
+                    id,
+                    tool,
+                    logical_step_id,
+                    arguments,
+                },
+            },
         )?;
         tokio::select! {biased;_=self.cancel.cancelled()=>Err(TeamProcessError::Cancelled),response=response=>response.map_err(|_|TeamProcessError::Protocol)}
     }

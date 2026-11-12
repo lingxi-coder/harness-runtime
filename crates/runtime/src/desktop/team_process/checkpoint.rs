@@ -12,7 +12,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(super) const READ_ONLY_TOOLS: [&str; 2] = ["TeamChatHistory", "TeamKnowledge"];
+pub(super) const LIST_READ_TOOL: &str = "TeamListRead";
+/// A write the ledger makes safe to repeat: the list service applies one operation id once.
+pub(super) const LIST_WRITE_TOOL: &str = "TeamListWrite";
+pub(super) const READ_ONLY_TOOLS: [&str; 3] = ["TeamChatHistory", "TeamKnowledge", LIST_READ_TOOL];
 /// The one tool whose unfinished call is a question to the task's requester.
 pub(super) const ASK_TOOL: &str = "TeamAskRequester";
 pub(super) const MAX_QUESTION_BYTES: usize = 2000;
@@ -101,6 +104,7 @@ pub(super) struct PendingCall {
     pub input_json: String,
     /// Durable per-block assistant row that holds the call.
     pub assistant_row_uuid: String,
+    pub logical_step_id: String,
 }
 
 /// Everything the transcript says about one task, plus the checkpoint view.
@@ -121,6 +125,34 @@ pub(super) struct Inputs<'a> {
     pub transcript: &'a str,
     pub attempts: u32,
     pub protocol: ProtocolFamily,
+}
+
+/// The logical step of the unfinished call `tool_use_id` of a task, as every
+/// later inspection of the same transcript will name it; `None` until the
+/// response that holds the call is durable.
+pub(super) fn pending_step(
+    scope: &BotChatScope,
+    task_id: &str,
+    batch_id: &str,
+    transcript: &str,
+    tool_use_id: &str,
+) -> Option<String> {
+    let state = evaluate(&Inputs {
+        scope,
+        task_id,
+        batch_id: Some(batch_id),
+        batch_admitted: true,
+        cursor: &BotChatCursor::default(),
+        transcript,
+        attempts: 0,
+        protocol: ProtocolFamily::AnthropicMessages,
+    })
+    .ok()?;
+    state
+        .pending
+        .into_iter()
+        .find(|call| call.tool_use_id == tool_use_id)
+        .map(|call| call.logical_step_id)
 }
 
 pub(super) fn task_dir(home: &Path, task_id: &str) -> PathBuf {
@@ -442,7 +474,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             _ if inconsistent => (false, Some("transcript_inconsistent")),
             _ if pending_tool_calls
                 .iter()
-                .any(|c| !c.read_only && c.tool_name != ASK_TOOL) =>
+                .any(|c| !c.read_only && c.tool_name != ASK_TOOL && c.tool_name != LIST_WRITE_TOOL) =>
             {
                 (false, Some("pending_write_tool"))
             }
@@ -476,6 +508,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                 tool_name: c.name.clone(),
                 input_json: c.input_json.clone(),
                 assistant_row_uuid: c.row_uuid.clone(),
+                logical_step_id: format!("{}/t{}/c{}", input.task_id, c.group, c.index),
             })
             .collect()
     } else {

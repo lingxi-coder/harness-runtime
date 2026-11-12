@@ -36,6 +36,9 @@ pub(super) struct Bootstrap {
     /// Register the ask-the-requester tool for this process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ask_requester: bool,
+    /// Register the shared-list tools for this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_list: Option<super::TeamSharedList>,
 }
 impl Bootstrap {
     pub fn limits(&self) -> Result<TeamInvocationLimits, TeamProcessError> {
@@ -76,6 +79,9 @@ pub(super) enum WorkerFrame {
     ReadChat {
         request: TeamChatReadRequest,
     },
+    Operate {
+        request: super::TeamOperationRequest,
+    },
     Result {
         result: TeamProcessResult,
     },
@@ -108,6 +114,10 @@ pub(super) enum ParentFrame {
     ChatRead {
         id: String,
         data: TeamDataRef,
+    },
+    Operated {
+        id: String,
+        result: super::TeamOperationResult,
     },
 }
 pub(super) fn valid_id(id: &str) -> bool {

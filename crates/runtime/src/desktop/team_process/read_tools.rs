@@ -144,6 +144,8 @@ pub(crate) struct TeamReadTools {
     pub(super) knowledge: Vec<TeamKnowledgeDocument>,
     /// Present when this process may ask the task's requester a question.
     pub(super) ask: Option<Arc<super::ask_tool::AskRequester>>,
+    /// Present when the Bot's publication shares a list with this Chat.
+    pub(super) list: Option<Arc<super::list_tools::TeamListTools>>,
 }
 impl TeamReadTools {
     /// Every tool this process offers the model, and nothing else.
@@ -151,6 +153,10 @@ impl TeamReadTools {
         let mut names = vec!["TeamChatHistory".to_owned(), "TeamKnowledge".to_owned()];
         if self.ask.is_some() {
             names.push(super::checkpoint::ASK_TOOL.to_owned());
+        }
+        if self.list.is_some() {
+            names.push(super::checkpoint::LIST_READ_TOOL.to_owned());
+            names.push(super::checkpoint::LIST_WRITE_TOOL.to_owned());
         }
         names
     }
@@ -163,6 +169,9 @@ struct ReadTool {
 pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamReadTools>) {
     if let Some(ask) = &tools.ask {
         super::ask_tool::register(registry, ask.clone());
+    }
+    if let Some(list) = &tools.list {
+        super::list_tools::register(registry, list.clone());
     }
     for history in [true, false] {
         let schema = if history {

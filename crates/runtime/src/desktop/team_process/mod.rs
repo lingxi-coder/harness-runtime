@@ -8,6 +8,7 @@ mod ask_tool;
 mod checkpoint;
 mod data;
 mod interaction;
+pub(crate) mod list_tools;
 pub(crate) mod read_tools;
 use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, ChatInputBatch};
 pub use chat_session::{inspect_scope, inspect_task, recover_result};
@@ -16,6 +17,7 @@ pub use checkpoint::{
     TeamTaskPhase, TeamTaskWait,
 };
 pub use data::TeamDataRef;
+pub use list_tools::{TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList};
 pub use read_tools::{
     TeamChatQuery, TeamChatReadRequest, TeamChatReadResult, TeamKnowledgeDocument,
 };
@@ -112,6 +114,10 @@ pub struct TeamProcessRequest {
     /// pauses the task. Ignored on routes without continuation support, since
     /// a paused task could never be continued there.
     pub ask_requester: bool,
+    /// Offer the Bot the published shared list: one tool reads it and one
+    /// changes it through the Team operation ledger. Ignored on routes without
+    /// continuation support, where an interrupted write could not be finished.
+    pub shared_list: Option<TeamSharedList>,
 }
 
 /// The requester's answer to the question a task is waiting on.
@@ -233,6 +239,17 @@ pub trait TeamProcessBroker: Send + Sync {
         request: TeamChatReadRequest,
         cancel: CancellationToken,
     ) -> Result<TeamChatReadResult, TeamProcessError>;
+    /// Run one shared-list request. For a write the host records the operation
+    /// in the Team ledger before the list service sees it and settles it after.
+    /// Return an error whenever the outcome is not established: the process
+    /// ends with the call unfinished and nothing is reported to the model.
+    async fn operate(
+        &self,
+        _request: TeamOperationRequest,
+        _cancel: CancellationToken,
+    ) -> Result<TeamOperationResult, TeamProcessError> {
+        Err(TeamProcessError::Protocol)
+    }
 }
 
 /// Worker outcomes carry no provider error bodies or arbitrary diagnostic text.
@@ -427,6 +444,13 @@ impl TeamProcessStart {
             continuation,
             ask_requester: request.ask_requester
                 && checkpoint::route_supports_continuation(protocol),
+            shared_list: match request.shared_list {
+                Some(list) if checkpoint::route_supports_continuation(protocol) => {
+                    list.validate()?;
+                    Some(list)
+                }
+                _ => None,
+            },
         };
         Ok(Self {
             profile,
@@ -540,6 +564,7 @@ impl TeamProcessStart {
                 broker,
                 broker_cancel,
                 &self.profile.scope_root().join("tmp"),
+                &self.bootstrap.task_id,
             )
             .await?;
             let status = child.wait().await?;
@@ -589,6 +614,7 @@ async fn broker_exchange(
     broker: Arc<dyn TeamProcessBroker>,
     cancel: CancellationToken,
     data_root: &Path,
+    task_id: &str,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
     let mut seen = BTreeSet::new();
@@ -634,6 +660,17 @@ async fn broker_exchange(
                     id,
                     data: TeamDataRef::write(data_root, &result)?,
                 }
+            }
+            WorkerFrame::Operate { request } => {
+                request.validate(task_id)?;
+                if !seen.insert(request.id.clone()) {
+                    return Err(TeamProcessError::Protocol);
+                }
+                let id = request.id.clone();
+                broker.authorize(cancel.child_token()).await?;
+                let result = tokio::select! {biased;_=output.read(&mut unexpected)=>return Err(TeamProcessError::Protocol),result=broker.operate(request,cancel.child_token())=>result?};
+                result.validate()?;
+                ParentFrame::Operated { id, result }
             }
             WorkerFrame::ProviderAccountRefresh { request } => {
                 if !protocol::valid_id(&request.id)

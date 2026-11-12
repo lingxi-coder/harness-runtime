@@ -39,6 +39,7 @@ struct Start {
     limits: Option<Limits>,
     continuation: Option<TeamContinuation>,
     ask_requester: Option<bool>,
+    shared_list: Option<team_process::TeamSharedList>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,7 +79,8 @@ impl Start {
             || self.credentials.is_some()
             || self.limits.is_some()
             || self.continuation.is_some()
-            || self.ask_requester.is_some();
+            || self.ask_requester.is_some()
+            || self.shared_list.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
             && self.instructions.is_some()
@@ -108,7 +110,8 @@ impl Start {
                 && self.credentials.is_none()
                 && self.limits.is_none()
                 && self.continuation.is_none()
-                && self.ask_requester.is_none();
+                && self.ask_requester.is_none()
+                && self.shared_list.is_none();
             if !only_task_and_model {
                 return Err(Error::Protocol);
             }
@@ -156,6 +159,7 @@ impl Start {
                 self.deadline_at.ok_or(Error::Protocol)?,
             )?,
             ask_requester: self.ask_requester.unwrap_or(false),
+            shared_list: self.shared_list,
         })
     }
 }
@@ -176,6 +180,15 @@ enum Response {
         version: u32,
         id: String,
     },
+    /// `established` is false when Desktop could not learn what the list
+    /// service did: the worker then ends with the call unfinished.
+    OperationResult {
+        version: u32,
+        id: String,
+        established: bool,
+        succeeded: bool,
+        result: Value,
+    },
 }
 impl Response {
     fn correlation(&self) -> (u32, &str, &'static str) {
@@ -185,6 +198,7 @@ impl Response {
             }
             Self::ChatRead { version, id, .. } => (*version, id, "read_chat"),
             Self::Authorized { version, id } => (*version, id, "authorize"),
+            Self::OperationResult { version, id, .. } => (*version, id, "operation"),
         }
     }
 }
@@ -284,6 +298,27 @@ impl TeamProcessBroker for Bridge {
         cancel: CancellationToken,
     ) -> Result<TeamAccountEnvelope, Error> {
         match self.request("provider_account_refresh",json!({"account_id":request.account_id,"identity_generation":request.identity_generation,"credential_revision":request.credential_revision}),&cancel).await?{Response::ProviderAccountsUpdated{credentials,..}=>Ok(credentials),_=>Err(Error::Protocol)}
+    }
+    async fn operate(
+        &self,
+        request: team_process::TeamOperationRequest,
+        cancel: CancellationToken,
+    ) -> Result<team_process::TeamOperationResult, Error> {
+        let mut value = json!({"tool":request.tool,"arguments":request.arguments});
+        if let Some(step) = request.logical_step_id {
+            value["logicalStepId"] = json!(step);
+        }
+        match self.request("operation", value, &cancel).await? {
+            Response::OperationResult {
+                established: true,
+                succeeded,
+                result,
+                ..
+            } => Ok(team_process::TeamOperationResult { succeeded, result }),
+            // Not a protocol fault: the outcome is unknown and must not be replayed blindly.
+            Response::OperationResult { .. } => Err(Error::Worker),
+            _ => Err(Error::Protocol),
+        }
     }
     async fn read_chat(
         &self,
@@ -601,6 +636,20 @@ mod tests {
             json!({"version":1,"type":"start","mode":"run","target":{}})
         )
         .is_err());
+    }
+    #[test]
+    fn an_operation_result_says_whether_its_outcome_is_established() {
+        let refused: Response = serde_json::from_value(json!({"version":3,"type":"operation_result","id":"operation-1",
+            "established":true,"succeeded":false,"result":{"error":"DATA_REVISION_CONFLICT","dataRevision":4}}))
+        .unwrap();
+        assert_eq!(refused.correlation(), (3, "operation-1", "operation"));
+        for incomplete in [
+            json!({"version":3,"type":"operation_result","id":"operation-1","succeeded":true,"result":{}}),
+            json!({"version":3,"type":"operation_result","id":"operation-1","established":true,"result":{}}),
+            json!({"version":3,"type":"operation_result","id":"operation-1","established":true,"succeeded":true,"result":{},"retry":true}),
+        ] {
+            assert!(serde_json::from_value::<Response>(incomplete).is_err());
+        }
     }
     #[test]
     fn stale_response_versions_are_rejected() {

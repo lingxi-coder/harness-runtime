@@ -93,6 +93,7 @@ fn request(
         },
         model: team_account_fixture::model(MODEL.into(), endpoint, KEY.into()).unwrap(),
         ask_requester: false,
+        shared_list: None,
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }

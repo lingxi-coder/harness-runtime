@@ -11,7 +11,8 @@ mod team_account_fixture;
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
     inspect_task, TeamContinuation, TeamKnowledgeDocument, TeamProcessDeadline, TeamProcessError,
-    TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamTaskPhase,
+    TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamProcessOutcome,
+    TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList, TeamTaskPhase,
     TeamWaitAnswer,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
@@ -69,6 +70,8 @@ struct Task {
     input: harness_runtime::desktop::session_state::ChatInputBatch,
     /// Offer the ask-the-requester tool.
     ask: bool,
+    /// Offer the shared-list tools.
+    list: Option<TeamSharedList>,
 }
 impl Task {
     fn new() -> Self {
@@ -78,6 +81,7 @@ impl Task {
             task_id: format!("task_{}", id.simple()),
             input: batch(0, 2, 0),
             ask: false,
+            list: None,
         }
     }
     /// Same task and batch; a fresh invocation identity, like a new host permit.
@@ -115,6 +119,7 @@ impl Task {
             model,
             deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
             ask_requester: self.ask,
+            shared_list: self.list.clone(),
         }
     }
     fn chat_model(
@@ -129,6 +134,11 @@ impl Task {
 struct Broker {
     hang_reads: AtomicBool,
     read_calls: AtomicUsize,
+    /// Every shared-list request, with whether its call was already on the transcript.
+    operations: Mutex<Vec<(TeamOperationRequest, bool)>>,
+    /// Answers in order; `None` is an outcome the host could not establish. Empty hangs.
+    operation_replies: Mutex<std::collections::VecDeque<Option<TeamOperationResult>>>,
+    storage: Mutex<Option<PathBuf>>,
 }
 #[async_trait::async_trait]
 impl harness_runtime::desktop::team_process::TeamProcessBroker for Broker {
@@ -159,6 +169,28 @@ impl harness_runtime::desktop::team_process::TeamProcessBroker for Broker {
                 })
             }
             _ => Err(TeamProcessError::Protocol),
+        }
+    }
+    async fn operate(
+        &self,
+        request: TeamOperationRequest,
+        cancel: CancellationToken,
+    ) -> Result<TeamOperationResult, TeamProcessError> {
+        let durable = self
+            .storage
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|root| transcript(root).contains("\"tool_use\""));
+        self.operations.lock().unwrap().push((request, durable));
+        let reply = self.operation_replies.lock().unwrap().pop_front();
+        match reply {
+            Some(Some(result)) => Ok(result),
+            Some(None) => Err(TeamProcessError::Worker),
+            None => {
+                cancel.cancelled().await;
+                Err(TeamProcessError::Cancelled)
+            }
         }
     }
 }
@@ -1110,4 +1142,169 @@ async fn an_abandoned_question_does_not_block_the_next_task() {
     let second = server.requests.lock().unwrap()[1].body.clone();
     assert_legal_sequence(&second);
     assert!(second.to_string().contains("SOURCE_0003"));
+}
+
+fn list_task() -> Task {
+    Task {
+        list: Some(TeamSharedList {
+            title: "Groceries".into(),
+            description: "What the household needs to buy.".into(),
+        }),
+        ..Task::new()
+    }
+}
+fn list_broker(root: &Path, replies: Vec<Option<TeamOperationResult>>) -> Arc<Broker> {
+    let broker = Broker::default();
+    *broker.storage.lock().unwrap() = Some(root.to_owned());
+    broker.operation_replies.lock().unwrap().extend(replies);
+    Arc::new(broker)
+}
+fn add_milk(revision: u64) -> Reply {
+    Reply::Tool(
+        "TeamListWrite",
+        json!({"expectedDataRevision":revision,"changes":[{"op":"add","text":"Milk"}]}),
+    )
+}
+fn saved(revision: u64) -> Option<TeamOperationResult> {
+    Some(TeamOperationResult {
+        succeeded: true,
+        result: json!({"dataRevision":revision,"items":[{"itemId":"item_0001","text":"Milk","done":false}]}),
+    })
+}
+
+#[tokio::test]
+async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable() {
+    let (_temp, root) = root();
+    let task = list_task();
+    let server = Server::new(vec![add_milk(3), Reply::Text("Milk is on the list".into())]).await;
+    // The first host never answers: the worker dies between dispatch and result.
+    let first_broker = list_broker(&root, vec![]);
+    let (handle, cancel) = first_run(&task, &root, &server.endpoint, first_broker.clone());
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while first_broker.operations.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the write reached the host");
+    kill(handle, cancel).await;
+    let step = format!("{}/t0/c0", task.task_id);
+    {
+        let seen = first_broker.operations.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.tool, TeamOperationTool::ListWrite);
+        assert_eq!(seen[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+        assert!(!step.contains("call_fixture"));
+        assert!(seen[0].1, "the call row was durable before the host saw the write");
+    }
+
+    let inspected = checkpoint(&root, &task);
+    assert_eq!(inspected.phase, TeamTaskPhase::InFlight);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert_eq!(inspected.pending_tool_calls.len(), 1);
+    assert_eq!(inspected.pending_tool_calls[0].tool_name, "TeamListWrite");
+    assert!(!inspected.pending_tool_calls[0].read_only);
+    assert_eq!(inspected.pending_tool_calls[0].logical_step_id, step);
+
+    let second_broker = list_broker(&root, vec![saved(4)]);
+    let result = run_to_end(
+        continuation(&root, &task, &server.endpoint, 2, &inspected.checkpoint_digest).unwrap(),
+        second_broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Milk is on the list");
+    let repeated = second_broker.operations.lock().unwrap();
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+    assert_eq!(repeated[0].0.arguments, first_broker.operations.lock().unwrap()[0].0.arguments);
+    assert_eq!(server.count(), 2);
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
+    assert!(results[0]["content"].to_string().contains("dataRevision"));
+}
+
+#[tokio::test]
+async fn a_refused_write_is_an_error_to_the_model_and_its_retry_is_a_new_operation() {
+    let (_temp, root) = root();
+    let task = list_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamListWrite", json!({"expectedDataRevision":3,"changes":[]})),
+        add_milk(3),
+        Reply::Tool("TeamListRead", json!({})),
+        add_milk(4),
+        Reply::Text("Milk is on the list".into()),
+    ])
+    .await;
+    let conflict = Some(TeamOperationResult {
+        succeeded: false,
+        result: json!({"error":"DATA_REVISION_CONFLICT","dataRevision":4}),
+    });
+    let read = Some(TeamOperationResult {
+        succeeded: true,
+        result: json!({"dataRevision":4,"items":[]}),
+    });
+    let broker = list_broker(&root, vec![conflict, read, saved(5)]);
+    let result = run_to_end(
+        TeamProcessStart::prepare(&root, task.request(&root, task.chat_model(&server.endpoint))).unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    let seen = broker.operations.lock().unwrap();
+    // The malformed write (no changes) never left the worker.
+    let steps: Vec<_> = seen
+        .iter()
+        .map(|(request, _)| (request.tool, request.logical_step_id.clone()))
+        .collect();
+    // The fixture provider reuses one response id, so every call of the task is
+    // in response group 0; the retry is still its own step and so its own operation.
+    assert_eq!(
+        steps,
+        [
+            (TeamOperationTool::ListWrite, Some(format!("{}/t0/c1", task.task_id))),
+            (TeamOperationTool::ListRead, None),
+            (TeamOperationTool::ListWrite, Some(format!("{}/t0/c3", task.task_id))),
+        ]
+    );
+    assert_eq!(seen[1].0.arguments, json!({}));
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(
+        tool_names(&requests[0].body),
+        ["TeamChatHistory", "TeamKnowledge", "TeamListRead", "TeamListWrite"]
+    );
+    let last = tool_results(&requests[4].body);
+    assert_eq!(last.len(), 4);
+    // Refused inside the worker (schema or validator); it carries no list state.
+    assert!(!last[0]["content"].to_string().contains("dataRevision"));
+    assert!(last[1]["content"].to_string().contains("DATA_REVISION_CONFLICT"));
+    assert_legal_sequence(&requests[4].body);
+}
+
+#[tokio::test]
+async fn a_write_of_unknown_outcome_ends_the_process_with_the_call_unfinished() {
+    let (_temp, root) = root();
+    let task = list_task();
+    let server = Server::new(vec![add_milk(3), Reply::Text("never requested".into())]).await;
+    let broker = list_broker(&root, vec![None]);
+    let result = run_to_end(
+        TeamProcessStart::prepare(&root, task.request(&root, task.chat_model(&server.endpoint))).unwrap(),
+        broker.clone(),
+    )
+    .await;
+    assert!(matches!(result, Err(TeamProcessError::Worker)), "{result:?}");
+    // The model was not told anything about the write.
+    assert_eq!(server.count(), 1);
+    assert!(!transcript(&root).contains("\"tool_result\""));
+    let inspected = checkpoint(&root, &task);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert_eq!(
+        inspected.pending_tool_calls[0].logical_step_id,
+        format!("{}/t0/c0", task.task_id)
+    );
 }
