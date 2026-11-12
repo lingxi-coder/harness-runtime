@@ -406,6 +406,15 @@ async fn replay_accepts_writer_owned_append() {
         .unwrap();
     assert_eq!(permissions.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let source = std::fs::read_to_string(&fixture.path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    assert!(
+        loaded.messages_in_order.iter().any(|row| row
+            .tool_use_result_projection
+            .as_ref()
+            .is_some_and(|result| result.string_at("") == Some("called"))),
+        "accepted deferred results must publish raw sidecars before persistence"
+    );
 }
 
 #[tokio::test]

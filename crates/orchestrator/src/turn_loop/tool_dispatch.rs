@@ -8841,6 +8841,12 @@ pub(crate) async fn finish_direct_tool_dispatch(
     ),
     OrchestratorError,
 > {
+    // Direct callers own the accepted batch rather than an actor generation.
+    // Publish its sidecars before result persistence and PostToolBatch consume
+    // them, just as the guarded conversation path does at its accept boundary.
+    for publication in std::mem::take(&mut dispatched.publications) {
+        publication.commit(orch).await;
+    }
     if !dispatched.prevent_continuation {
         let batch_outcome = run_post_tool_batch_hooks(
             orch,

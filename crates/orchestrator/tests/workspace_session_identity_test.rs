@@ -66,6 +66,46 @@ fn write_source(path: &Path, cwd: &Path, id: SessionId) -> String {
 }
 
 #[tokio::test]
+async fn initial_display_starts_at_latest_compact_without_losing_resumable_context() {
+    let root = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+    let mut source = write_source(&path, root.path(), id);
+    let first_boundary = uuid::Uuid::new_v4();
+    let boundary = uuid::Uuid::new_v4();
+    let latest = uuid::Uuid::new_v4();
+    for row in [
+        serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":first_boundary,"sessionId":id.as_uuid(),"parentUuid":null,"content":"old compact","compactMetadata":{}}),
+        serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id.as_uuid(),"parentUuid":first_boundary,"message":{"role":"user","content":"old visible history"}}),
+        serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":boundary,"sessionId":id.as_uuid(),"parentUuid":null,"content":"latest compact","compactMetadata":{}}),
+        serde_json::json!({"type":"user","uuid":latest,"sessionId":id.as_uuid(),"parentUuid":boundary,"message":{"role":"user","content":"latest user message"}}),
+    ] {
+        source.push_str(&format!("{row}\n"));
+    }
+    std::fs::write(&path, &source).unwrap();
+    let fs: Arc<dyn FileSystem> =
+        Arc::new(platform_posix::PosixFileSystem::new(root.path().into()));
+    let replayed = orchestrator::resume::replay_session_state_from_path(&path, id.as_uuid(), fs)
+        .await
+        .unwrap();
+    assert!(replayed.display_history.iter().all(|message| !message
+        .text_content()
+        .contains("old visible history")
+        && !message.text_content().contains("source-history")));
+    assert_eq!(replayed.display_history[0].id().as_uuid(), boundary);
+    assert!(replayed
+        .display_history
+        .iter()
+        .any(|message| message.id().as_uuid() == latest));
+    assert!(replayed
+        .state
+        .history
+        .iter()
+        .any(|message| message.id().as_uuid() == latest));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[tokio::test]
 async fn selected_transcript_path_wins_over_a_current_bucket_copy_of_the_same_uuid() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");

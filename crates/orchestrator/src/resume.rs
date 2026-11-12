@@ -520,9 +520,9 @@ pub struct ReplayedSession {
     pub transcript_metadata: Vec<Utf16JsonProjection>,
     /// Replayed session state with `history` populated from the JSONL.
     pub state: SessionState,
-    /// Complete main-thread history for UI transcript replay. This may include
-    /// messages before the latest compact boundary; callers must keep it out
-    /// of the model context and use [`Self::state`] for engine resume.
+    /// Main-thread display history from the latest compact boundary onward.
+    /// Earlier history is loaded by the host on demand. Persistent App Chat
+    /// checkpoints retain their exact full projection for checkpoint identity.
     pub display_history: Vec<ConversationMessage>,
     /// Persisted timestamps for the complete display history, keyed by row UUID.
     pub display_timestamps: std::collections::HashMap<String, i64>,
@@ -782,7 +782,17 @@ fn replay_captured_session_inner(
     let transcript_entries = loaded.messages_in_order;
     let (mut state, last_uuid, mut runtime_metadata) =
         build_state_from_jsonl_with_text_projection(session_id, &messages, !persistent_app_chat);
-    let display_entries = transcript_entries
+    // Rebuilding pre-compact display rows is independent of restoring model
+    // context and durable metadata. Keep those rows on disk until requested.
+    let display_start = if persistent_app_chat {
+        0
+    } else {
+        transcript_entries
+            .iter()
+            .rposition(|row| !row.is_sidechain && is_compact_boundary(row))
+            .unwrap_or(0)
+    };
+    let display_entries = transcript_entries[display_start..]
         .iter()
         .filter(|message| !message.is_sidechain)
         .cloned()
