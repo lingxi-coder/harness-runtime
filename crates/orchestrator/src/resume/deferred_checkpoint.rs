@@ -287,6 +287,8 @@ impl CompletedReplay {
 #[serde(deny_unknown_fields)]
 struct ReadSnapshot {
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_units: Option<Vec<u16>>,
     mtime_ms: i64,
     offset: Option<u64>,
     limit: Option<u64>,
@@ -331,6 +333,9 @@ fn read_snapshot(orch: &ConversationOrchestrator) -> BTreeMap<PathBuf, ReadSnaps
         .filter_map(|path| {
             let entry = cache.peek(&path)?;
             let snapshot = ReadSnapshot {
+                content_units: cache
+                    .peek_content_units(&path)
+                    .filter(|units| entry.content.encode_utf16().ne(units.iter().copied())),
                 content: entry.content,
                 mtime_ms: entry.mtime_ms,
                 offset: entry.offset,
@@ -444,6 +449,15 @@ impl ContextDelta {
             if !file.path.is_absolute() || !paths.insert(&file.path) {
                 return Err(error("file context delta has an ambiguous path"));
             }
+            for snapshot in [&file.before, &file.after].into_iter().flatten() {
+                if snapshot
+                    .content_units
+                    .as_ref()
+                    .is_some_and(|units| String::from_utf16_lossy(units) != snapshot.content)
+                {
+                    return Err(error("file context delta has inconsistent exact text"));
+                }
+            }
         }
         if let Some(todos) = &self.todos {
             for source in [&todos.before_json, &todos.after_json] {
@@ -488,18 +502,21 @@ impl ContextDelta {
             cache.remove(&file.path);
             if let Some(after) = &file.after {
                 if after.routes.is_empty() {
-                    cache.set_with_model_context(
+                    cache.set_with_requested_aliases_and_units(
                         file.path.clone(),
                         after.entry(),
                         after.in_model_context,
+                        Vec::new(),
+                        after.content_units.clone(),
                     );
                 } else {
                     for route in &after.routes {
-                        cache.set_with_requested_aliases(
+                        cache.set_with_requested_aliases_and_units(
                             file.path.clone(),
                             after.entry(),
                             after.in_model_context,
                             route.clone(),
+                            after.content_units.clone(),
                         );
                     }
                 }

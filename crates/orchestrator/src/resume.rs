@@ -780,6 +780,19 @@ fn replay_captured_session_inner(
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
     let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
     let transcript_entries = loaded.messages_in_order;
+    let lineage_ids = messages
+        .iter()
+        .map(|row| row.uuid.as_str())
+        .collect::<HashSet<_>>();
+    let owns = |row: &JsonlMessage| {
+        Uuid::parse_str(
+            row.session_id
+                .strip_prefix("sess:")
+                .unwrap_or(&row.session_id),
+        )
+        .ok()
+            == Some(session_id)
+    };
     let (mut state, last_uuid, mut runtime_metadata) =
         build_state_from_jsonl_with_text_projection(session_id, &messages, !persistent_app_chat);
     // Rebuilding pre-compact display rows is independent of restoring model
@@ -789,12 +802,18 @@ fn replay_captured_session_inner(
     } else {
         transcript_entries
             .iter()
-            .rposition(|row| !row.is_sidechain && is_compact_boundary(row))
+            .rposition(|row| {
+                !row.is_sidechain
+                    && lineage_ids.contains(row.uuid.as_str())
+                    && is_compact_boundary(row)
+            })
             .unwrap_or(0)
     };
     let display_entries = transcript_entries[display_start..]
         .iter()
-        .filter(|message| !message.is_sidechain)
+        .filter(|message| {
+            !message.is_sidechain && (owns(message) || lineage_ids.contains(message.uuid.as_str()))
+        })
         .cloned()
         .collect::<Vec<_>>();
     runtime_metadata.historical_read_fence_attachments = historical_read_fence_attachments(
@@ -811,7 +830,10 @@ fn replay_captured_session_inner(
     );
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
-    runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);
+    // Off-chain hook attachments are intentional, but only the selected
+    // foreground owner may contribute pending work or resolve its tool IDs.
+    runtime_metadata.deferred_tools =
+        deferred_tool_replays_for_session(&transcript_entries, session_id);
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
@@ -843,6 +865,19 @@ fn replay_captured_session_inner(
         session_id = %sid_str,
         message_count = messages.len() as u64,
     );
+    // A displayed result may answer a call before the compact boundary. Keep
+    // only the visible results, but resolve their tool identity in the owner's
+    // full source so structured client state survives that display cut.
+    let visible_results = display_entries
+        .iter()
+        .flat_map(tool_result_ids)
+        .collect::<HashSet<_>>();
+    let client_state_tool_results = client_state_tool_results_from_rows(
+        transcript_entries.iter().filter(|row| {
+            !row.is_sidechain && (owns(row) || lineage_ids.contains(row.uuid.as_str()))
+        }),
+        Some(&visible_results),
+    );
     Ok(ReplayedSession {
         transcript_path,
         working_directory,
@@ -861,10 +896,7 @@ fn replay_captured_session_inner(
         last_message_uuid: last_uuid,
         messages,
         runtime_metadata,
-        // Built from the DISPLAY entries, which is exactly the history the
-        // hosts lower for the client — and, being non-sidechain, is what makes
-        // this map main-chain-only.
-        client_state_tool_results: client_state_tool_results_from_messages(&display_entries),
+        client_state_tool_results,
     })
 }
 
@@ -2341,6 +2373,13 @@ pub const CLIENT_STATE_TOOLS: &[&str] = &[
 pub fn client_state_tool_results_from_messages(
     messages: &[JsonlMessage],
 ) -> std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    client_state_tool_results_from_rows(messages.iter(), None)
+}
+
+fn client_state_tool_results_from_rows<'a>(
+    messages: impl Iterator<Item = &'a JsonlMessage>,
+    wanted: Option<&HashSet<&str>>,
+) -> std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection> {
     let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let mut results = std::collections::HashMap::new();
     for message in messages {
@@ -2359,7 +2398,9 @@ pub fn client_state_tool_results_from_messages(
                         block.get_property("id").and_then(JsonValueView::as_str),
                         block.get_property("name").and_then(JsonValueView::as_str),
                     ) {
-                        names.insert(id, name);
+                        if wanted.is_none_or(|ids| ids.contains(id)) {
+                            names.insert(id, name);
+                        }
                     }
                 }
             }
@@ -2371,6 +2412,9 @@ pub fn client_state_tool_results_from_messages(
         let (Some(only), None) = (ids.next(), ids.next()) else {
             continue;
         };
+        if wanted.is_some_and(|ids| !ids.contains(only)) {
+            continue;
+        }
         if !names
             .get(only)
             .is_some_and(|name| CLIENT_STATE_TOOLS.contains(name))
@@ -2382,11 +2426,42 @@ pub fn client_state_tool_results_from_messages(
     results
 }
 
-/// Extract all persisted deferred hook tools that have no later tool result.
+/// Extract deferred hook tools from an already scoped stream of messages.
+/// Resume entry points must use [`deferred_tool_replays_for_session`] instead.
 #[must_use]
 pub fn deferred_tool_replays_from_messages(
     messages: &[JsonlMessage],
 ) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    scoped_deferred_tool_replays(messages, |_| true)
+}
+
+/// Extract unresolved main-thread hook tools owned by the resumed session.
+/// Foreign results and assistant origins cannot resolve or impersonate its work.
+#[must_use]
+pub fn deferred_tool_replays_for_session(
+    messages: &[JsonlMessage],
+    session_id: Uuid,
+) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    scoped_deferred_tool_replays(messages, |row| {
+        !row.is_sidechain
+            && Uuid::parse_str(
+                row.session_id
+                    .strip_prefix("sess:")
+                    .unwrap_or(&row.session_id),
+            )
+            .ok()
+                == Some(session_id)
+    })
+}
+
+fn scoped_deferred_tool_replays(
+    messages: &[JsonlMessage],
+    include: impl Fn(&JsonlMessage) -> bool,
+) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    let messages = messages
+        .iter()
+        .filter(|row| include(row))
+        .collect::<Vec<_>>();
     let mut resolved: HashSet<&str> = HashSet::new();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut deferred = Vec::new();

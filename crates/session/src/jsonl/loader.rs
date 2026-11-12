@@ -4999,8 +4999,8 @@ pub(super) fn exact_native_staged_anchors(
 }
 
 /// Claude's applyPreservedSegmentRelinks: only the latest boundary can keep
-/// a segment live. Validate the original tail-to-head chain before applying
-/// any relinks or pruning, so malformed transcripts remain recoverable.
+/// a segment live. Validate its tail-to-head chain against earlier committed
+/// compact links before applying the latest relinks or pruning.
 fn preserved_tail_state(
     loaded: &LoadedTranscript,
     requested_owner: Option<&str>,
@@ -5074,6 +5074,7 @@ fn preserved_tail_state(
     let mut state = PreservedTailState::default();
     let latest_index = boundaries.last().expect("segment is a boundary").0;
     if *segment_index == latest_index {
+        let prior_parents = prior_compact_parents(loaded, &boundaries[..boundaries.len() - 1]);
         let Some(segment) = boundary
             .extra
             .get_property("compactMetadata")
@@ -5109,7 +5110,10 @@ fn preserved_tail_state(
                 reached_head = true;
                 break;
             }
-            current = message.parent_uuid.as_ref().and_then(|p| loaded.message(p));
+            current = prior_parents
+                .get(&message.uuid)
+                .or(message.parent_uuid.as_ref())
+                .and_then(|parent| loaded.message(parent));
         }
         if !reached_head {
             return PreservedTailState::default();
@@ -5158,6 +5162,11 @@ fn preserved_tail_state(
                 }
             }
         }
+        state.parents.extend(
+            prior_parents
+                .into_iter()
+                .filter(|(id, _)| state.usage_to_clear.contains(id)),
+        );
         state.parents.insert(head.to_string(), anchor.to_string());
         // Children appended against the summary before the tail was re-linked
         // must follow the tail, while the original segment internals stay intact.
@@ -5173,6 +5182,85 @@ fn preserved_tail_state(
         .map(|message| message.uuid.clone())
         .collect();
     state
+}
+
+/// Compose preceding compact links without cloning/re-routing the transcript
+/// for every boundary. Only validated segments may contribute parent edges.
+fn prior_compact_parents(
+    loaded: &LoadedTranscript,
+    boundaries: &[(usize, &JsonlMessage)],
+) -> HashMap<String, String> {
+    let mut parents = HashMap::new();
+    let mut children: HashMap<&str, Vec<&JsonlMessage>> = HashMap::new();
+    for row in &loaded.messages_in_order {
+        if let Some(parent) = row.parent_uuid.as_deref() {
+            children.entry(parent).or_default().push(row);
+        }
+    }
+    for (index, boundary) in boundaries {
+        if boundary
+            .extra
+            .at_pointer("/compactMetadata/nativeExactPreserved")
+            .is_some()
+        {
+            parents = exact_native_tail_state(loaded, *index, boundary)
+                .map(|state| state.parents)
+                .unwrap_or_default();
+            continue;
+        }
+        let Some(segment) = boundary
+            .extra
+            .at_pointer("/compactMetadata/preservedSegment")
+        else {
+            parents = legacy_preserved_tail_reparents_from(loaded, std::iter::once(*boundary));
+            continue;
+        };
+        let endpoints = (
+            segment
+                .get_property("headUuid")
+                .and_then(JsonValueView::as_str),
+            segment
+                .get_property("tailUuid")
+                .and_then(JsonValueView::as_str),
+            segment
+                .get_property("anchorUuid")
+                .and_then(JsonValueView::as_str),
+        );
+        let (Some(head), Some(tail), Some(anchor)) = endpoints else {
+            parents.clear();
+            continue;
+        };
+        let head = preserved_endpoint_uuid(loaded, head, false);
+        let tail = preserved_endpoint_uuid(loaded, tail, true);
+        let anchor = preserved_endpoint_uuid(loaded, anchor, true);
+        let mut visited = HashSet::new();
+        let mut current = loaded.message(tail);
+        let mut valid = false;
+        while let Some(row) = current {
+            if !visited.insert(row.uuid.as_str()) {
+                break;
+            }
+            if row.uuid == head {
+                valid = true;
+                break;
+            }
+            current = parents
+                .get(&row.uuid)
+                .or(row.parent_uuid.as_ref())
+                .and_then(|parent| loaded.message(parent));
+        }
+        if !valid {
+            parents.clear();
+            continue;
+        }
+        parents.insert(head.to_string(), anchor.to_string());
+        for row in children.get(anchor).into_iter().flatten() {
+            if row.uuid != head {
+                parents.insert(row.uuid.clone(), tail.to_string());
+            }
+        }
+    }
+    parents
 }
 
 fn preserved_endpoint_uuid<'a>(loaded: &'a LoadedTranscript, id: &'a str, last: bool) -> &'a str {
@@ -5197,8 +5285,15 @@ fn preserved_assistant_matches_id(message: &JsonlMessage, id: &str) -> bool {
 }
 
 fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String, String> {
+    legacy_preserved_tail_reparents_from(loaded, loaded.messages_in_order.iter())
+}
+
+fn legacy_preserved_tail_reparents_from<'a>(
+    loaded: &LoadedTranscript,
+    rows: impl Iterator<Item = &'a JsonlMessage>,
+) -> HashMap<String, String> {
     let mut reparent: HashMap<String, String> = HashMap::new();
-    for line in &loaded.messages_in_order {
+    for line in rows {
         if line.message_type != "system"
             || line.extra.string_at("/subtype") != Some("compact_boundary")
         {
@@ -5431,6 +5526,49 @@ mod tests {
             loaded.push_message(row);
         }
         loaded
+    }
+
+    #[test]
+    fn repeated_compact_preserves_an_earlier_compacted_prefix() {
+        let root = user_line("root");
+        let tail = assistant_line("tail", Some("root"), "2026-07-13T10:00:01Z", false);
+        let mut first = boundary_line("first", None);
+        first.extra.set_field("compactMetadata", projection(json!({
+            "preservedSegment":{"headUuid":"tail","tailUuid":"tail","anchorUuid":"summary-1"},
+            "preservedMessages":{"anchorUuid":"summary-1","uuids":["tail"]}
+        }))).unwrap();
+        let mut summary = user_line("summary-1");
+        summary.parent_uuid = Some("first".into());
+        let mut added = user_line("added");
+        added.parent_uuid = Some("tail".into());
+        let mut second = boundary_line("second", None);
+        second
+            .extra
+            .set_field(
+                "compactMetadata",
+                projection(json!({
+                    "preservedSegment":{"headUuid":"first","tailUuid":"tail","anchorUuid":"second"},
+                    "preservedMessages":{"anchorUuid":"second","uuids":["first","summary-1","tail"]}
+                })),
+            )
+            .unwrap();
+        let mut latest = user_line("summary-2");
+        latest.parent_uuid = Some("second".into());
+        latest.timestamp = "2026-07-13T10:00:10Z".into();
+        let owner = latest.session_id.clone();
+        let loaded = loaded_transcript(vec![root, tail, first, summary, added, second, latest]);
+        let (chain, _) = build_conversation_chain(&loaded, &owner);
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first", "summary-1", "tail", "summary-2"]
+        );
+        assert_eq!(
+            loaded.message("tail").unwrap().parent_uuid.as_deref(),
+            Some("root")
+        );
     }
 
     fn native_exact_fixture() -> (Vec<JsonlMessage>, Vec<String>) {

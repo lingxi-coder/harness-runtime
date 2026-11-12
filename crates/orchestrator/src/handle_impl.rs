@@ -2028,7 +2028,10 @@ impl ConversationOrchestrator {
             .replace_loaded(runtime.loaded_tool_names);
         self.restore_hot_resume_prompt_state().await;
         // The fixed mode precedes resumed hooks and deferred skill dispatch.
-        profile_result?;
+        profile_result.map_err(|source| HandleError::ResumeCommitted {
+            session_id,
+            source: Box::new(source),
+        })?;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
         self.model_runtime
@@ -2081,7 +2084,12 @@ impl ConversationOrchestrator {
         if !runtime.deferred_tools.is_empty() {
             crate::resume::replay_deferred_tools_after_resume(self, runtime.deferred_tools)
                 .await
-                .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))?;
+                .map_err(|error| HandleError::ResumeCommitted {
+                    session_id,
+                    source: Box::new(HandleError::ActionFailed(format!(
+                        "deferred replay: {error}"
+                    ))),
+                })?;
         }
         // Restore usage and the selected route before Mods take their first
         // reading; otherwise token-weather keeps the empty boot snapshot.

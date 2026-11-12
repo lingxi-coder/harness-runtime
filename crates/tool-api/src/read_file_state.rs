@@ -269,6 +269,17 @@ impl ReadFileStateLru {
         )
     }
 
+    /// Inspect exact cached text without changing its eviction order.
+    #[must_use]
+    pub fn peek_content_units(&self, path: &Path) -> Option<Vec<u16>> {
+        let node = self.map.get(path)?;
+        Some(
+            node.content_units
+                .clone()
+                .unwrap_or_else(|| node.entry.content.encode_utf16().collect()),
+        )
+    }
+
     /// Record that instruction context exposed only a prefix of this file.
     /// Never infer clipping merely from stripped frontmatter or comments.
     pub fn mark_start_only(&mut self, path: PathBuf) {
@@ -1969,6 +1980,34 @@ mod tests {
             "B was LRU, must be evicted"
         );
         assert!(get(&map, Path::new("/C")).is_some());
+    }
+
+    #[test]
+    fn exact_snapshot_peeks_preserve_recency_and_the_next_eviction() {
+        let map = new_read_file_state_map_with_limits(3, u64::MAX);
+        for name in ["/A", "/B", "/C"] {
+            set(&map, PathBuf::from(name), entry(name));
+        }
+        {
+            let cache = map.lock().unwrap();
+            let before = cache.keys();
+            for path in &before {
+                assert_eq!(
+                    cache.peek_content_units(path).unwrap(),
+                    cache
+                        .peek(path)
+                        .unwrap()
+                        .content
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(cache.keys(), before);
+        }
+        set(&map, PathBuf::from("/D"), entry("d"));
+        let cache = map.lock().unwrap();
+        assert!(cache.peek(Path::new("/A")).is_none());
+        assert!(cache.peek(Path::new("/C")).is_some());
     }
 
     #[test]

@@ -2099,6 +2099,7 @@ impl ConversationOrchestrator {
             let detail = match error {
                 lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
                 lingxi_core::host::HandleError::Unimplemented(_)
+                | lingxi_core::host::HandleError::ResumeCommitted { .. }
                 | lingxi_core::host::HandleError::Settings(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;
@@ -2380,6 +2381,7 @@ impl ConversationOrchestrator {
             let detail = match error {
                 lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
                 lingxi_core::host::HandleError::Unimplemented(_)
+                | lingxi_core::host::HandleError::ResumeCommitted { .. }
                 | lingxi_core::host::HandleError::Settings(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;

@@ -1174,6 +1174,15 @@ pub enum HandleError {
     /// sparse-array length across the host boundary.
     #[error("settings operation failed")]
     Settings(crate::types::utf16_json::Utf16JsonProjection),
+    /// The target identity/history committed, but a post-activation operation
+    /// failed. Hosts must publish the mounted session before reporting failure.
+    #[error("session {session_id} resumed with an error: {source}")]
+    ResumeCommitted {
+        /// The durable session now mounted by the handle.
+        session_id: SessionId,
+        /// Original failure, including structured source-preserving details.
+        source: Box<HandleError>,
+    },
 }
 
 impl From<crate::settings::SettingsError> for HandleError {
