@@ -41,10 +41,35 @@ Same bootstrap as `run` plus `continuation: {"epoch": <u32 >= 2>, "expected_chec
 
 New failure codes (host `type:"error"`): `CHECKPOINT_MISMATCH`, `NOT_CONTINUABLE`, `ROUTE_UNSUPPORTED`. `TASK_INTERRUPTED` also covers a reused epoch.
 
+## Asking the requester (Q03)
+
+`run` and `continue` bootstraps may carry `askRequester: true`. The worker then registers one extra tool, `TeamAskRequester {question}` (1..2000 bytes, not blank), next to the two read tools. The flag is ignored on a route without continuation support, so a Bot is never offered a question it could not be resumed from. Without the flag the tool does not exist for the model.
+
+A question is not a tool result: the call stays unfinished and the process ends.
+
+1. The first well-formed ask call never returns. Once the transcript durably holds that response with the ask call as its only unfinished non-read call (two consecutive checkpoint evaluations agree), the worker fsyncs the transcript, reports outcome `waiting` and exits immediately. No result row is written and nothing is drained: on disk this is exactly a worker that died after persisting a tool call.
+2. The host, after the worker has exited, takes the checkpoint with `inspect_task` and emits
+
+```json
+{"version":3,"type":"result","status":"waiting","cursor":{...},
+ "wait":{"waitId":"wait_<40 hex>","logicalStepId":"<taskId>/t0/c0","question":"...","requestDigest":"<64 hex>"},
+ "checkpointDigest":"<64 hex>","pausedAt":1731300000000,
+ "dispatchedRequests":1,"attemptDispatchedRequests":1,"deniedTools":0,"usage":{...}}
+```
+
+   No `results/<taskId>.json` is saved. `waitId` is derived from the logical step (`"wait_" + first 40 hex of sha256("team-wait:<logicalStepId>")`), so every inspection of the same paused task names the same wait. `requestDigest` is SHA-256 over `{"domain":"lingxi-team-wait-1","taskId","waitId","question"}`.
+3. `inspect_task` reports the same `wait` object for as long as the call is unfinished (`phase: in_flight`, `continuable: true`; the ask call is listed in `pendingToolCalls` with `readOnly: false`). A host that crashed between the worker's exit and its own report recovers the wait this way. A malformed ask call (blank or oversized question) is an ordinary failed tool call, not a wait.
+4. The task continues only with the answer: `continuation: {"epoch", "expected_checkpoint_digest", "answer": {"wait_id", "message_id", "text"}}` (`text` at most 8192 bytes) and `askRequester: true`. A checkpoint with a wait and no answer, an answer for another `wait_id`, an answer without a wait, or an answer while the tool is not registered is `NOT_CONTINUABLE` before any dispatch. The refused attempt consumed its epoch; re-inspect and use the next one.
+5. The continuing worker replays the unfinished calls: read tools run again, the ask call receives `{"answer": text, "answerMessageId": message_id}` as its result, the row is persisted and the model loop resumes. No batch is admitted, so revision and cursors do not move. A second ask call in the same response gets an error result ("only one question can be open at a time"); the Bot may ask again in a later turn, which pauses the task again with a new `waitId`.
+
+The question and the answer also exist as Chat messages. Source messages carry an optional `waitId`; a message with `waitId` whose `sourceTaskId` names a task with a recorded result is not projected into a later batch, because the session already holds both as the tool call and its result. If the wait is abandoned (expired, cancelled, revoked) the task is never continued; the next `run` in the scope repairs the dangling call as an interrupted tool call, exactly as after a killed worker, and its batch then projects the question and any late answer as ordinary Chat messages.
+
+Usage in a `waiting` result is this process's delta; the host sums it with the continuing attempts.
+
 ## Route allow-list
 
 Continuation is enabled only for `ProtocolFamily::OpenAiChat` routes (DeepSeek and other OpenAI-chat-compatible providers). It is covered by loopback fixtures in `crates/runtime/tests/desktop/team_continuation_process.rs`: kill after the tool call is persisted, kill after the result is persisted, kill mid-response, epoch reuse, stale digest, recorded result, unsupported route, exactly-once batch and legal provider sequence. Anthropic, OpenAI Responses, Gemini, Azure and Foundry routes report `route_unsupported` until a continuation test proves them. Provider hidden reasoning state is neither saved nor relied on; a real-provider acceptance run (for example a DeepSeek reasoning model with tool calls) has not been done and is required before enabling the route in a product build.
 
 ## Not covered
 
-Write tools, waiting/approval, member answers and Team permits (Q02/Q03); cumulative usage across processes; a read-only tool result produced before its assistant row is durable.
+Write tools, approval and connection waits; cumulative usage across processes (the host sums attempts); a read-only tool result produced before its assistant row is durable; a host-binary end-to-end fixture for `status: "waiting"` (the worker path is covered in `team_continuation_process.rs`, the host report is exercised only from the Desktop host).

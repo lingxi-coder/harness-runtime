@@ -12,6 +12,7 @@ use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
     inspect_task, TeamContinuation, TeamKnowledgeDocument, TeamProcessDeadline, TeamProcessError,
     TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamTaskPhase,
+    TeamWaitAnswer,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
 use serde_json::{json, Value};
@@ -66,6 +67,8 @@ struct Task {
     id: uuid::Uuid,
     task_id: String,
     input: harness_runtime::desktop::session_state::ChatInputBatch,
+    /// Offer the ask-the-requester tool.
+    ask: bool,
 }
 impl Task {
     fn new() -> Self {
@@ -74,6 +77,7 @@ impl Task {
             id,
             task_id: format!("task_{}", id.simple()),
             input: batch(0, 2, 0),
+            ask: false,
         }
     }
     /// Same task and batch; a fresh invocation identity, like a new host permit.
@@ -110,6 +114,7 @@ impl Task {
             },
             model,
             deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
+            ask_requester: self.ask,
         }
     }
     fn chat_model(
@@ -426,8 +431,40 @@ fn continuation(
         TeamContinuation {
             epoch,
             expected_checkpoint_digest: digest.into(),
+            answer: None,
         },
     )
+}
+fn answered(
+    root: &Path,
+    task: &Task,
+    endpoint: &str,
+    epoch: u32,
+    digest: &str,
+    wait_id: &str,
+    text: &str,
+) -> Result<TeamProcessStart, TeamProcessError> {
+    TeamProcessStart::prepare_continuation(
+        root,
+        task.request(root, task.chat_model(endpoint)),
+        TeamContinuation {
+            epoch,
+            expected_checkpoint_digest: digest.into(),
+            answer: Some(TeamWaitAnswer {
+                wait_id: wait_id.into(),
+                message_id: "message_0004".into(),
+                text: text.into(),
+            }),
+        },
+    )
+}
+fn tool_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect()
 }
 fn history_call() -> Reply {
     Reply::Tool(
@@ -488,6 +525,8 @@ async fn kill_after_tool_call_persisted_before_result_continues_and_runs_tool_in
     assert_eq!(server.count(), 2);
     let second = server.requests.lock().unwrap()[1].body.clone();
     assert_legal_sequence(&second);
+    // Without the host's opt-in the Bot cannot ask its requester anything.
+    assert_eq!(tool_names(&second), ["TeamChatHistory", "TeamKnowledge"]);
     let results = tool_results(&second);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
@@ -774,7 +813,8 @@ async fn unsupported_route_is_not_continuable_and_refused_before_dispatch() {
             task.request(&root, anthropic),
             TeamContinuation {
                 epoch: 2,
-                expected_checkpoint_digest: supported.checkpoint_digest.clone()
+                expected_checkpoint_digest: supported.checkpoint_digest.clone(),
+                answer: None,
             }
         ),
         Err(TeamProcessError::RouteUnsupported)
@@ -860,4 +900,214 @@ async fn continued_task_keeps_one_batch_exact_cursors_and_a_legal_provider_histo
     assert_eq!(tool_results(resumed).len(), 1);
     // The persisted result is exactly what the first process produced.
     assert_eq!(tool_results(resumed), tool_results(&requests[1].body));
+}
+
+fn question() -> Reply {
+    Reply::Tool(
+        "TeamAskRequester",
+        json!({"question":"Which city should I plan for?"}),
+    )
+}
+/// The Bot asked: the worker ends as `waiting` with the ask call unfinished.
+async fn ask_and_wait(task: &Task, root: &Path, server: &Server) -> TeamProcessResult {
+    let result = run_to_end(
+        TeamProcessStart::prepare(root, task.request(root, task.chat_model(&server.endpoint)))
+            .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Waiting);
+    assert_eq!(result.text, "");
+    assert!(result.document.is_none());
+    result
+}
+
+#[tokio::test]
+async fn a_question_pauses_the_task_and_only_its_answer_continues_it() {
+    let (_temp, root) = root();
+    let mut task = Task::new();
+    task.ask = true;
+    let server = Server::new(vec![
+        question(),
+        Reply::Text("Planned for Lisbon".into()),
+        Reply::Text("Next task answer".into()),
+    ])
+    .await;
+    let paused = ask_and_wait(&task, &root, &server).await;
+    assert_eq!(paused.attempt_dispatched_requests, 1);
+    assert_eq!(server.count(), 1);
+    let first = server.requests.lock().unwrap()[0].body.clone();
+    assert_eq!(
+        tool_names(&first),
+        ["TeamAskRequester", "TeamChatHistory", "TeamKnowledge"]
+    );
+    assert!(!transcript(&root).contains("team_bot_result"));
+
+    let inspected = checkpoint(&root, &task);
+    assert_eq!(inspected.phase, TeamTaskPhase::InFlight);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert_eq!(inspected.pending_tool_calls.len(), 1);
+    assert_eq!(
+        inspected.pending_tool_calls[0].tool_name,
+        "TeamAskRequester"
+    );
+    assert!(!inspected.pending_tool_calls[0].read_only);
+    let wait = inspected
+        .wait
+        .clone()
+        .expect("the checkpoint reports the wait");
+    assert_eq!(wait.question, "Which city should I plan for?");
+    assert_eq!(wait.logical_step_id, format!("{}/t0/c0", task.task_id));
+    assert!(wait.wait_id.starts_with("wait_") && wait.wait_id.len() == 45);
+    assert_eq!(wait.request_digest.len(), 64);
+    assert_eq!(checkpoint(&root, &task), inspected);
+
+    // No answer, or the answer to another question, never reaches the model.
+    let refused = run_to_end(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(TeamProcessError::NotContinuable)),
+        "{refused:?}"
+    );
+    let again = checkpoint(&root, &task);
+    let other = run_to_end(
+        answered(
+            &root,
+            &task,
+            &server.endpoint,
+            3,
+            &again.checkpoint_digest,
+            "wait_0000000000000000000000000000000000000000",
+            "Porto",
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await;
+    assert!(
+        matches!(other, Err(TeamProcessError::NotContinuable)),
+        "{other:?}"
+    );
+    assert_eq!(server.count(), 1);
+
+    let ready = checkpoint(&root, &task);
+    assert_eq!(
+        ready.wait.as_ref(),
+        Some(&wait),
+        "the wait survives refused attempts"
+    );
+    let result = run_to_end(
+        answered(
+            &root,
+            &task,
+            &server.endpoint,
+            4,
+            &ready.checkpoint_digest,
+            &wait.wait_id,
+            "ANSWER_SENTINEL Lisbon",
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Planned for Lisbon");
+    assert_eq!(result.dispatched_requests, 2);
+    assert_eq!(result.attempt_dispatched_requests, 1);
+    assert_eq!(server.count(), 2);
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
+    assert!(results[0]["content"]
+        .to_string()
+        .contains("ANSWER_SENTINEL Lisbon"));
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .last_message_seq,
+        2,
+        "the answer is the ask call's result, not an admitted batch"
+    );
+    let done = checkpoint(&root, &task);
+    assert_eq!(done.phase, TeamTaskPhase::ResultRecorded);
+    assert!(done.wait.is_none());
+
+    // The next request's batch carries the Bot's question and the requester's
+    // answer as Chat messages. The session already holds both, so only the new
+    // message is projected.
+    let mut next = Task::new();
+    let mut value = serde_json::to_value(batch(2, 5, 1)).unwrap();
+    value["messages"][0]["author"] =
+        json!({"kind":"shared_bot","sharedBotId":"sharedbot_01","displayName":"Bot"});
+    value["messages"][0]["text"] = json!("QUESTION_ECHO Which city should I plan for?");
+    value["messages"][0]["sourceTaskId"] = json!(task.task_id);
+    value["messages"][0]["waitId"] = json!(wait.wait_id);
+    value["messages"][1]["text"] = json!("ANSWER_ECHO Lisbon");
+    value["messages"][1]["sourceTaskId"] = json!(task.task_id);
+    value["messages"][1]["waitId"] = json!(wait.wait_id);
+    next.input = serde_json::from_value(value).unwrap();
+    let after = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            next.request(&root, next.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.outcome, TeamProcessOutcome::Completed);
+    let third = server.requests.lock().unwrap()[2].body.to_string();
+    assert!(third.contains("SOURCE_0005"));
+    assert!(!third.contains("QUESTION_ECHO") && !third.contains("ANSWER_ECHO"));
+    assert!(
+        third.contains("ANSWER_SENTINEL Lisbon"),
+        "the answer stays as the tool result"
+    );
+    assert_legal_sequence(&server.requests.lock().unwrap()[2].body);
+}
+
+#[tokio::test]
+async fn an_abandoned_question_does_not_block_the_next_task() {
+    let (_temp, root) = root();
+    let mut task = Task::new();
+    task.ask = true;
+    let server = Server::new(vec![
+        question(),
+        Reply::Text("Answer to the next request".into()),
+    ])
+    .await;
+    ask_and_wait(&task, &root, &server).await;
+    // The wait expired or was cancelled: the task is never continued.
+    let mut next = Task::new();
+    next.input = batch(2, 3, 1);
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            next.request(&root, next.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Answer to the next request");
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    assert!(second.to_string().contains("SOURCE_0003"));
 }

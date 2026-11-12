@@ -112,9 +112,13 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             })
         }))
         .map_err(|_| TeamProcessError::Protocol)?;
+    let ask = bootstrap
+        .ask_requester
+        .then(|| Arc::new(super::ask_tool::AskRequester::new()));
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
+        ask: ask.clone(),
     }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
@@ -130,7 +134,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -218,6 +222,7 @@ async fn run(
     continuation: Option<super::TeamContinuation>,
     ledger: Arc<super::chat_session::DispatchLedger>,
     protocol: lingxi_llm_client::protocol::ProtocolFamily,
+    ask: Option<Arc<super::ask_tool::AskRequester>>,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
         return Err(TeamProcessError::RouteUnsupported);
@@ -319,6 +324,7 @@ async fn run(
                 protocol,
                 continuation,
                 captured.as_deref().unwrap_or_default(),
+                ask.is_some(),
             ) {
                 Ok(state) => Some(state),
                 Err(error) => {
@@ -339,6 +345,7 @@ async fn run(
     }
     let usage_before = rt.cost().await;
     let current_message_id = batch.current_message_id.clone();
+    let (scope, batch_id) = (batch.scope(), batch.batch_id.clone());
     if resumed.is_none() {
         if let Err(error) = super::chat_session::admit(&rt, profile, batch, cancel.clone()).await {
             let _ = rt.shutdown().await;
@@ -350,14 +357,73 @@ async fn run(
         .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
     let finish_only = resumed.as_ref().is_some_and(|state| state.final_answer.is_some());
-    let outcome = match &resumed {
-        // The newest durable response already is the final answer: only its
-        // terminal result row is missing. No model request may repeat it.
-        Some(_) if finish_only => Ok(TurnOutcome::EndTurn),
-        Some(state) => {
-            run_continuation(&rt, state, &input, &task_id, cancel.clone()).await
+    let turn = async {
+        match &resumed {
+            // The newest durable response already is the final answer: only its
+            // terminal result row is missing. No model request may repeat it.
+            Some(_) if finish_only => Ok(TurnOutcome::EndTurn),
+            Some(state) => {
+                let answer = continuation.as_ref().and_then(|c| c.answer.as_ref());
+                run_continuation(&rt, state, ask.as_deref(), answer, &input, &task_id, cancel.clone())
+                    .await
+            }
+            None => run_prompt(&rt, &input, &task_id, cancel.clone()).await,
         }
-        None => run_prompt(&rt, &input, &task_id, cancel.clone()).await,
+    };
+    let outcome = match &ask {
+        None => turn.await,
+        Some(ask) => {
+            tokio::pin!(turn);
+            // A question pauses the task. The loop keeps driving the turn until
+            // the response that holds the ask call is on the transcript file,
+            // then ends this process exactly as a kill would: the call stays
+            // unfinished, nothing is drained and no result row is written.
+            let (mut asked, mut seen) = (false, false);
+            loop {
+                tokio::select! {
+                    biased;
+                    outcome = &mut turn => break outcome,
+                    () = ask.asked(), if !asked => asked = true,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(50)), if asked => {
+                        let transcript = std::fs::read_to_string(&path).unwrap_or_default();
+                        let cursor = rt.session_state.bot_chat_cursor();
+                        let waiting = super::checkpoint::evaluate(&super::checkpoint::Inputs {
+                            scope: &scope,
+                            task_id: &task_id,
+                            batch_id: Some(&batch_id),
+                            batch_admitted: true,
+                            cursor: &cursor,
+                            transcript: &transcript,
+                            attempts: 0,
+                            protocol,
+                        })
+                        .is_ok_and(|state| state.checkpoint.wait.is_some());
+                        // Two sightings 50 ms apart let the response's own
+                        // bookkeeping (cost journal) settle first.
+                        if waiting && seen {
+                            let usage_after = rt.cost().await;
+                            let attempt = dispatch_limit - profile.output_quota().remaining_dispatches();
+                            pause(TeamProcessResult {
+                                version: 3,
+                                outcome: TeamProcessOutcome::Waiting,
+                                text: String::new(),
+                                document: None,
+                                finished_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_err(|_| TeamProcessError::Deadline)?
+                                    .as_millis() as u64,
+                                cursor,
+                                usage: super::TeamUsage::from_snapshots(&usage_before, &usage_after, false),
+                                dispatched_requests: prior_dispatches.saturating_add(attempt),
+                                attempt_dispatched_requests: attempt,
+                                denied_tools: denied.load(Ordering::Relaxed),
+                            }, &path);
+                        }
+                        seen = waiting;
+                    }
+                }
+            }
+        }
     };
     let metrics = rt.orchestrator.completed_turn_metrics();
     // The sink also sees rejected attempts and error presentation. A Bot
@@ -451,6 +517,20 @@ async fn run(
     Ok(result)
 }
 
+/// End this process on a durable question. The frame is the last thing the
+/// parent reads; exiting here (no drain, no destructors) leaves the transcript
+/// exactly as the checkpoint will be inspected.
+fn pause(result: TeamProcessResult, transcript: &std::path::Path) -> ! {
+    let _ = std::fs::File::open(transcript).and_then(|file| file.sync_all());
+    let sent = protocol::encode(&protocol::WorkerFrame::Result { result })
+        .ok()
+        .and_then(|frame| {
+            let mut out = std::io::stdout();
+            out.write_all(&frame).and_then(|()| out.flush()).ok()
+        });
+    std::process::exit(if sent.is_some() { 0 } else { 70 })
+}
+
 /// The first epoch: admit the prompt with an identity derived from the task, so
 /// a later continuation can recognise it among the durable rows.
 async fn run_prompt(
@@ -487,6 +567,7 @@ fn verify_continuation(
     protocol: lingxi_llm_client::protocol::ProtocolFamily,
     continuation: &super::TeamContinuation,
     captured_transcript: &str,
+    can_answer: bool,
 ) -> Result<super::checkpoint::TaskState, TeamProcessError> {
     let cursor = rt.session_state.bot_chat_cursor();
     let admitted = rt
@@ -520,6 +601,13 @@ fn verify_continuation(
     {
         return Err(TeamProcessError::NotContinuable);
     }
+    // A waiting task continues only with the answer to exactly that question,
+    // in a process that offers the ask tool; any other task takes no answer.
+    match (&state.checkpoint.wait, &continuation.answer) {
+        (Some(wait), Some(answer)) if can_answer && wait.wait_id == answer.wait_id => {}
+        (None, None) => {}
+        _ => return Err(TeamProcessError::NotContinuable),
+    }
     Ok(state)
 }
 
@@ -530,6 +618,8 @@ fn verify_continuation(
 async fn run_continuation(
     rt: &crate::desktop::DesktopRuntime,
     state: &super::checkpoint::TaskState,
+    ask: Option<&super::ask_tool::AskRequester>,
+    answer: Option<&super::TeamWaitAnswer>,
     input: &str,
     task_id: &str,
     cancel: CancellationToken,
@@ -557,7 +647,15 @@ async fn run_continuation(
                 })
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
-        orchestrator::replay_unfinished_read_only_tool_calls(&rt.orchestrator, calls).await?;
+        if let Some(ask) = ask {
+            ask.begin_replay(answer.map(|a| (a.message_id.clone(), a.text.clone())));
+        }
+        let replayed =
+            orchestrator::replay_unfinished_read_only_tool_calls(&rt.orchestrator, calls).await;
+        if let Some(ask) = ask {
+            ask.end_replay();
+        }
+        replayed?;
     }
     let outcome = rt
         .orchestrator

@@ -38,6 +38,7 @@ struct Start {
     credentials: Option<TeamAccountEnvelope>,
     limits: Option<Limits>,
     continuation: Option<TeamContinuation>,
+    ask_requester: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +77,8 @@ impl Start {
             || self.model.is_some()
             || self.credentials.is_some()
             || self.limits.is_some()
-            || self.continuation.is_some();
+            || self.continuation.is_some()
+            || self.ask_requester.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
             && self.instructions.is_some()
@@ -105,7 +107,8 @@ impl Start {
                 && self.deadline_at.is_none()
                 && self.credentials.is_none()
                 && self.limits.is_none()
-                && self.continuation.is_none();
+                && self.continuation.is_none()
+                && self.ask_requester.is_none();
             if !only_task_and_model {
                 return Err(Error::Protocol);
             }
@@ -152,6 +155,7 @@ impl Start {
             deadline: TeamProcessDeadline::from_backend_unix_millis(
                 self.deadline_at.ok_or(Error::Protocol)?,
             )?,
+            ask_requester: self.ask_requester.unwrap_or(false),
         })
     }
 }
@@ -464,6 +468,8 @@ fn entry() -> Result<(), Error> {
         let root = boot.storage_root.clone();
         let worker = boot.worker_executable.clone();
         let continuation = boot.continuation.clone();
+        let scope = boot.scope.clone();
+        let protocol = boot.model.as_ref().ok_or(Error::Protocol)?.model_protocol;
         let request = boot.request()?;
         let task_id = request.task_id.clone();
         bridge.authorize(bridge.cancel.child_token()).await?;
@@ -477,7 +483,22 @@ fn entry() -> Result<(), Error> {
             .run_with_broker(&worker, bridge.cancel.child_token(), bridge.clone())
             .await;
         watcher.abort();
-        let value = result_value(result?);
+        let result = result?;
+        if result.outcome == TeamProcessOutcome::Waiting {
+            // The worker is gone; nothing can append any more. The wait and the
+            // digest come from the durable checkpoint, the one authority a
+            // later inspection and the continuing worker will also read.
+            let checkpoint = team_process::inspect_task(&root, &scope, &task_id, protocol)?;
+            let wait = checkpoint
+                .wait
+                .filter(|_| checkpoint.continuable)
+                .ok_or(Error::Worker)?;
+            return bridge.emit(json!({"version":3,"type":"result","status":"waiting","cursor":result.cursor,
+                "wait":wait,"checkpointDigest":checkpoint.checkpoint_digest,"pausedAt":result.finished_at,
+                "dispatchedRequests":result.dispatched_requests,"attemptDispatchedRequests":result.attempt_dispatched_requests,
+                "deniedTools":result.denied_tools,"usage":result.usage}));
+        }
+        let value = result_value(result);
         save_result(&root, &task_id, &value)?;
         bridge.emit(value)
     });

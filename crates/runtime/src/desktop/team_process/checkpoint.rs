@@ -13,6 +13,16 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub(super) const READ_ONLY_TOOLS: [&str; 2] = ["TeamChatHistory", "TeamKnowledge"];
+/// The one tool whose unfinished call is a question to the task's requester.
+pub(super) const ASK_TOOL: &str = "TeamAskRequester";
+pub(super) const MAX_QUESTION_BYTES: usize = 2000;
+
+/// The question of a well-formed ask call. The tool and the checkpoint share
+/// this rule, so a call the tool refuses is never reported as a wait.
+pub(super) fn ask_question(input: &serde_json::Value) -> Option<&str> {
+    let question = input.get("question")?.as_str()?;
+    (!question.trim().is_empty() && question.len() <= MAX_QUESTION_BYTES).then_some(question)
+}
 const TOMBSTONE_PREFIX: &str = "process-started-";
 const TOMBSTONE_MAGIC: &str = "team-worker-start-v2";
 
@@ -49,6 +59,18 @@ pub struct TeamPendingToolCall {
     pub read_only: bool,
 }
 
+/// The question an in-flight task is blocked on: its first unfinished,
+/// well-formed ask call. `wait_id` is derived from the logical step, so every
+/// process and the host name the same wait.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamTaskWait {
+    pub wait_id: String,
+    pub logical_step_id: String,
+    pub question: String,
+    pub request_digest: String,
+}
+
 /// Read-only result of `inspect_task`. `checkpoint_digest` covers the scope,
 /// task, batch, session revision, both cursors and the identity of the
 /// transcript head, so any journal or transcript append changes it.
@@ -65,6 +87,9 @@ pub struct TeamTaskCheckpoint {
     pub continuable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// Present when continuing needs the requester's answer to this question.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait: Option<TeamTaskWait>,
     pub checkpoint_digest: String,
 }
 
@@ -415,7 +440,10 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             TeamTaskPhase::ResultRecorded => (true, None),
             TeamTaskPhase::Absent => (false, Some("not_admitted")),
             _ if inconsistent => (false, Some("transcript_inconsistent")),
-            _ if pending_tool_calls.iter().any(|c| !c.read_only) => {
+            _ if pending_tool_calls
+                .iter()
+                .any(|c| !c.read_only && c.tool_name != ASK_TOOL) =>
+            {
                 (false, Some("pending_write_tool"))
             }
             _ => (true, None),
@@ -427,6 +455,19 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
         last_change_seq: input.cursor.last_change_seq,
     };
     let digest = digest(input, &cursor, rows)?;
+    let wait = if phase == TeamTaskPhase::InFlight && continuable {
+        pending_calls.iter().find_map(|c| {
+            if c.name != ASK_TOOL {
+                return None;
+            }
+            let asked: serde_json::Value = serde_json::from_str(&c.input_json).ok()?;
+            let question = ask_question(&asked)?.to_owned();
+            let logical_step_id = format!("{}/t{}/c{}", input.task_id, c.group, c.index);
+            Some(wait_of(input.task_id, logical_step_id, question))
+        })
+    } else {
+        None
+    };
     let pending = if phase == TeamTaskPhase::InFlight {
         pending_calls
             .iter()
@@ -451,12 +492,37 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             pending_tool_calls,
             continuable,
             reason,
+            wait,
             checkpoint_digest: digest,
         },
         pending,
         prompt_persisted,
         final_answer: final_answer.filter(|_| pending_calls.is_empty()),
     })
+}
+
+fn wait_of(task_id: &str, logical_step_id: String, question: String) -> TeamTaskWait {
+    let wait_id = format!(
+        "wait_{}",
+        &format!(
+            "{:x}",
+            Sha256::digest(format!("team-wait:{logical_step_id}").as_bytes())
+        )[..40]
+    );
+    let request_digest = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::json!({"domain":"lingxi-team-wait-1","taskId":task_id,"waitId":wait_id,"question":question})
+                .to_string()
+                .as_bytes()
+        )
+    );
+    TeamTaskWait {
+        wait_id,
+        logical_step_id,
+        question,
+        request_digest,
+    }
 }
 
 fn digest(

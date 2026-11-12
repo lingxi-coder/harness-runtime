@@ -142,6 +142,18 @@ impl TeamChatReadResult {
 pub(crate) struct TeamReadTools {
     pub(super) bridge: Arc<ChildInteraction>,
     pub(super) knowledge: Vec<TeamKnowledgeDocument>,
+    /// Present when this process may ask the task's requester a question.
+    pub(super) ask: Option<Arc<super::ask_tool::AskRequester>>,
+}
+impl TeamReadTools {
+    /// Every tool this process offers the model, and nothing else.
+    pub(crate) fn names(&self) -> Vec<String> {
+        let mut names = vec!["TeamChatHistory".to_owned(), "TeamKnowledge".to_owned()];
+        if self.ask.is_some() {
+            names.push(super::checkpoint::ASK_TOOL.to_owned());
+        }
+        names
+    }
 }
 struct ReadTool {
     tools: Arc<TeamReadTools>,
@@ -149,6 +161,9 @@ struct ReadTool {
     schema: Json,
 }
 pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamReadTools>) {
+    if let Some(ask) = &tools.ask {
+        super::ask_tool::register(registry, ask.clone());
+    }
     for history in [true, false] {
         let schema = if history {
             serde_json::json!({"type":"object","properties":{"kind":{"type":"string","enum":["before","range","by_id"]},"before_seq":{"type":"integer","minimum":1,"description":"For before: exclusive sequence cutoff"},"limit":{"type":"integer","minimum":1,"maximum":200,"description":"For before: page size"},"from_seq_exclusive":{"type":"integer","minimum":0,"description":"For range: exclusive lower sequence"},"to_seq_inclusive":{"type":"integer","minimum":1,"description":"For range: inclusive upper sequence"},"message_id":{"type":"string","description":"For by_id: the exact source message ID"}},"required":["kind"],"additionalProperties":false})

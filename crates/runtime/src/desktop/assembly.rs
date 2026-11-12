@@ -3535,8 +3535,8 @@ pub async fn build_with_credential_stack(
         // dangerous-rule strip with the escalation in effect. A no-op when `mode`
         // is `Default` (from == to).
         policy.set_mode(mode);
-        if cfg.team_invocation.is_some() {
-            super::team_invocation::enforce_team_permission_policy(&mut policy);
+        if let Some(profile) = &cfg.team_invocation {
+            super::team_invocation::enforce_team_permission_policy(&mut policy, profile);
         }
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).

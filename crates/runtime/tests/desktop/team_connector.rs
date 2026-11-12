@@ -109,6 +109,8 @@ fn inspect_task_and_continue_reject_malformed_bootstraps_before_any_io() {
         ("inspect_task", json!({"taskId":"task_00000001"})),
         ("inspect_scope", json!({"continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}})),
         ("continue", json!({"taskId":"task_00000001"})),
+        ("inspect_scope", json!({"askRequester":true})),
+        ("inspect_task", json!({"taskId":"task_00000001","model":chat_model(),"askRequester":true})),
         ("run", json!({"taskId":"task_00000001","continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}})),
     ] {
         let (result, success) = invoke_with(3, false, kind, extra);

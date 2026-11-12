@@ -4,6 +4,7 @@
 
 pub(crate) mod accounts;
 mod chat_session;
+mod ask_tool;
 mod checkpoint;
 mod data;
 mod interaction;
@@ -12,7 +13,7 @@ use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, Chat
 pub use chat_session::{inspect_scope, inspect_task, recover_result};
 pub use checkpoint::{
     route_supports_continuation, TeamCheckpointCursor, TeamPendingToolCall, TeamTaskCheckpoint,
-    TeamTaskPhase,
+    TeamTaskPhase, TeamTaskWait,
 };
 pub use data::TeamDataRef;
 pub use read_tools::{
@@ -107,6 +108,19 @@ pub struct TeamProcessRequest {
     pub limits: TeamInvocationLimits,
     pub model: TeamProcessModel,
     pub deadline: TeamProcessDeadline,
+    /// Offer the Bot the tool that asks the task's requester one question and
+    /// pauses the task. Ignored on routes without continuation support, since
+    /// a paused task could never be continued there.
+    pub ask_requester: bool,
+}
+
+/// The requester's answer to the question a task is waiting on.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TeamWaitAnswer {
+    pub wait_id: String,
+    pub message_id: String,
+    pub text: String,
 }
 
 /// Continuation of a task whose earlier worker process died. The epoch must
@@ -117,11 +131,23 @@ pub struct TeamProcessRequest {
 pub struct TeamContinuation {
     pub epoch: u32,
     pub expected_checkpoint_digest: String,
+    /// Required exactly when the checkpoint reports a wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<TeamWaitAnswer>,
 }
 impl TeamContinuation {
     pub(crate) fn validate(&self) -> Result<(), TeamProcessError> {
         if self.epoch < 2 || !checkpoint::valid_digest(&self.expected_checkpoint_digest) {
             return Err(TeamProcessError::Protocol);
+        }
+        if let Some(answer) = &self.answer {
+            if !protocol::valid_id(&answer.wait_id)
+                || !protocol::valid_id(&answer.message_id)
+                || answer.text.trim().is_empty()
+                || answer.text.len() > 8192
+            {
+                return Err(TeamProcessError::Protocol);
+            }
         }
         Ok(())
     }
@@ -217,6 +243,9 @@ pub enum TeamProcessOutcome {
     MaxTurns,
     ModelFailed,
     OutputLimit,
+    /// The Bot asked its requester a question. The task is not finished: no
+    /// result row exists and the durable checkpoint reports the wait.
+    Waiting,
 }
 
 /// Bounded terminal text for the trusted host to settle through `completeTask`.
@@ -368,6 +397,7 @@ impl TeamProcessStart {
         }
         read_tools::validate_knowledge(&request.knowledge)?;
         let batch_id = batch.batch_id.clone();
+        let protocol = request.model.route.model_protocol;
         let bootstrap = Bootstrap {
             version: 3,
             storage_root: storage_root.to_owned(),
@@ -395,6 +425,8 @@ impl TeamProcessStart {
                 .credentials
                 .for_worker(&profile.scope_root().join("home"))?,
             continuation,
+            ask_requester: request.ask_requester
+                && checkpoint::route_supports_continuation(protocol),
         };
         Ok(Self {
             profile,

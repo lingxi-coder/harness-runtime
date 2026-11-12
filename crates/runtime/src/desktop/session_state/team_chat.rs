@@ -87,6 +87,9 @@ pub struct ChatSourceMessage {
     pub delivery_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
+    /// Set on a Bot's question to its requester and on the requester's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_id: Option<String>,
 }
 /// This is the exact model input fact, not a queryable replica of the Chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +174,7 @@ impl ChatInputBatch {
                     &message.source_task_id,
                     &message.delivery_id,
                     &message.artifact_id,
+                    &message.wait_id,
                 ]
                 .iter()
                 .any(|value| {
@@ -389,6 +393,7 @@ mod tests {
                     source_task_id: None,
                     delivery_id: None,
                     artifact_id: None,
+                    wait_id: None,
                 })
                 .collect(),
         }

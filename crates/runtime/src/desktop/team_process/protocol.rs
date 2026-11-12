@@ -33,6 +33,9 @@ pub(super) struct Bootstrap {
     /// Present only for `continue`; absent bytes are the epoch-1 `run` bootstrap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<super::TeamContinuation>,
+    /// Register the ask-the-requester tool for this process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ask_requester: bool,
 }
 impl Bootstrap {
     pub fn limits(&self) -> Result<TeamInvocationLimits, TeamProcessError> {
@@ -135,6 +138,9 @@ pub(super) async fn read_frame<T: serde::de::DeserializeOwned>(
 pub(super) fn validate_result(result: &TeamProcessResult) -> Result<(), TeamProcessError> {
     use sha2::{Digest, Sha256};
     if result.version != 3 || result.text.len() > 8192 || result.finished_at == 0 {
+        return Err(TeamProcessError::Protocol);
+    }
+    if result.outcome == super::TeamProcessOutcome::Waiting && !result.text.is_empty() {
         return Err(TeamProcessError::Protocol);
     }
     if let super::TeamUsage::Complete { currency, .. } = &result.usage {

@@ -188,8 +188,12 @@ fn source_map(batches: &[ChatInputBatch]) -> BTreeMap<u64, ChatSourceMessage> {
     }
     values
 }
+/// A Chat message this session already holds in another form: the Bot's own
+/// reply or question of a finished task, or the requester's answer to such a
+/// question (the finished task consumed it as the ask call's result).
 fn own_echo(source: &ChatSourceMessage, scope: &BotChatScope, tasks: &HashSet<String>) -> bool {
-    matches!(&source.author,ChatAuthor::SharedBot{shared_bot_id,..}if shared_bot_id==&scope.shared_bot_id)
+    let own = matches!(&source.author,ChatAuthor::SharedBot{shared_bot_id,..}if shared_bot_id==&scope.shared_bot_id);
+    (own || source.wait_id.is_some())
         && source
             .source_task_id
             .as_ref()

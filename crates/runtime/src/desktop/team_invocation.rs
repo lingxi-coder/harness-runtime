@@ -214,8 +214,22 @@ impl TeamInvocationProfile {
         mut self,
         tools: Arc<super::team_process::read_tools::TeamReadTools>,
     ) -> Self {
+        // Called once, before the profile is applied or cloned: the grant
+        // lease is replaced so it names exactly the tools of this process.
+        self.lease = SessionToolGrantLease::new(SessionToolPolicy {
+            builtin_tools: tools.names().into_iter().collect(),
+            mcp_tools: HashSet::new(),
+        });
         self.read_tools = Some(tools);
         self
+    }
+
+    /// The published tools of this invocation: the whole capability set.
+    pub(crate) fn tool_names(&self) -> Vec<String> {
+        match &self.read_tools {
+            Some(tools) => tools.names(),
+            None => vec!["TeamChatHistory".into(), "TeamKnowledge".into()],
+        }
     }
 
     /// All captured tools and future model dispatches lose authority. This is
@@ -301,13 +315,14 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     }
     scoped.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;
     scoped.isolated_credential_storage = true;
-    // M1 has no waiting/question/owner approval continuation capability.
+    // The owner's interactive question channel never reaches a Team worker;
+    // a Bot asks its requester only through the published ask tool.
     scoped.ask_user_question_tx = None;
     scoped.team_invocation = Some(profile.clone());
     scoped.session_tool_grant_lease = Some(profile.lease.clone());
     scoped.scope_output_quota = Some(profile.quota.clone());
     scoped.restricted = true;
-    scoped.restricted_tools = Some(vec!["TeamChatHistory".into(), "TeamKnowledge".into()]);
+    scoped.restricted_tools = Some(profile.tool_names());
     scoped.setting_source_scope = (false, false);
     scoped.customization_gates = CustomizationGates {
         safe_mode: true,
@@ -366,13 +381,16 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     Ok(())
 }
 
-/// Published read-only tools are the entire M1 capability set. A managed
+/// The invocation's published tools are its entire capability set. A managed
 /// policy may deny them but cannot restore ambient owner capabilities.
-pub(super) fn enforce_team_permission_policy(policy: &mut permission::PermissionPolicy) {
+pub(super) fn enforce_team_permission_policy(
+    policy: &mut permission::PermissionPolicy,
+    profile: &TeamInvocationProfile,
+) {
     policy.allow_rules.clear();
     policy.ask_rules.clear();
-    for name in ["TeamChatHistory", "TeamKnowledge"] {
-        let rule = permission::PermissionRule::allow_tool_session(name);
+    for name in profile.tool_names() {
+        let rule = permission::PermissionRule::allow_tool_session(&name);
         policy
             .allow_rules
             .entry(rule.source)
