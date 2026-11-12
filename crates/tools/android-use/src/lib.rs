@@ -85,8 +85,12 @@ Use `list_granted_apps` to obtain package names, then `open_app` with an authori
 package. Prefer accessibility node IDs over coordinates and re-observe with \
 `ui_tree`/`find` after UI changes. The same active session may `listen` through \
 the microphone or `speak` through Android TTS only when those capabilities are \
-enabled in Settings. Protected and high-risk surfaces remain enforced by the \
-Android host.";
+enabled in Settings. Browser apps use these same per-app grants: obtain their \
+actual packages from `list_granted_apps`, never assume Chrome. The user manages \
+browser choices on the Browser page in LingXi Settings. Saved choices and the \
+system default browser are not active authorization. Desktop browser extensions \
+do not connect to this Android channel. Protected and high-risk surfaces remain \
+enforced by the Android host.";
 
 static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     Utf16JsonProjection::from_serde_value(&json!({
