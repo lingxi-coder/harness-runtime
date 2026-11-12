@@ -52,6 +52,8 @@ mod compaction_iteration_tests;
 #[cfg(test)]
 mod deferred_authority_tests;
 mod deferred_checkpoint;
+#[cfg(test)]
+mod deferred_state_replay_tests;
 mod file_state;
 #[cfg(test)]
 mod file_state_tests;
@@ -745,7 +747,33 @@ pub fn replay_captured_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_inner(transcript_path, source, loaded, session_id, false)
+    replay_captured_session_inner(transcript_path, &source, &loaded, session_id, false, true)
+}
+
+/// Replay an already-routed immutable transcript without cloning its full
+/// parsed entry stream. The caller must validate that `source` and `loaded`
+/// describe the same selected path, session and claimed source revision.
+/// This function performs no filesystem reads.
+pub fn replay_prepared_session(
+    transcript_path: PathBuf,
+    source: &str,
+    loaded: &LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, false, true)
+}
+
+/// Project the complete display and model checkpoint from an already-routed
+/// immutable source without recording a session-resume event or executing
+/// deferred tools. Source identity requirements match [`replay_prepared_session`].
+/// This function performs no filesystem reads.
+pub fn project_transcript_checkpoint(
+    transcript_path: PathBuf,
+    source: &str,
+    loaded: &LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, false, false)
 }
 
 /// App Chat checkpoints replay exact source units in both canonical and display
@@ -756,30 +784,31 @@ pub(crate) fn replay_persistent_app_chat_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_inner(transcript_path, source, loaded, session_id, true)
+    replay_captured_session_inner(transcript_path, &source, &loaded, session_id, true, true)
 }
 
 fn replay_captured_session_inner(
     transcript_path: PathBuf,
-    source: String,
-    loaded: LoadedTranscript,
+    source: &str,
+    loaded: &LoadedTranscript,
     session_id: Uuid,
     persistent_app_chat: bool,
+    emit_resumed: bool,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
+    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &sid_str);
     if messages.is_empty() {
         return Err(session::jsonl::LoaderError::EmptyDirectory.into());
     }
     let (agent_type, agent_definition) =
-        session::jsonl::loader::agent_resume_state_from_loaded(&loaded, &sid_str);
+        session::jsonl::loader::agent_resume_state_from_loaded(loaded, &sid_str);
     let working_directory =
-        session::jsonl::loader::transcript_workspace_path(&transcript_path, &loaded)
+        session::jsonl::loader::transcript_workspace_path(&transcript_path, loaded)
             .map(PathBuf::from)
             .filter(|path| path.is_dir());
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
-    let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
-    let transcript_entries = loaded.messages_in_order;
+    let transcript_metadata = JsonlWriter::capture_session_metadata_source(source, &sid_str);
+    let transcript_entries = &loaded.messages_in_order;
     let lineage_ids = messages
         .iter()
         .map(|row| row.uuid.as_str())
@@ -817,7 +846,7 @@ fn replay_captured_session_inner(
         .cloned()
         .collect::<Vec<_>>();
     runtime_metadata.historical_read_fence_attachments = historical_read_fence_attachments(
-        &transcript_entries,
+        transcript_entries,
         messages
             .iter()
             .map(|message| message.uuid.clone())
@@ -833,11 +862,11 @@ fn replay_captured_session_inner(
     // Off-chain hook attachments are intentional, but only the selected
     // foreground owner may contribute pending work or resolve its tool IDs.
     runtime_metadata.deferred_tools =
-        deferred_tool_replays_for_session(&transcript_entries, session_id);
+        deferred_tool_replays_for_session(transcript_entries, session_id);
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
-    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(&source, &sid_str)
+    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(source, &sid_str)
         .map_err(ResumeError::Profile)?
         .instruction_epoch;
     if persistent_app_chat {
@@ -853,18 +882,19 @@ fn replay_captured_session_inner(
             .collect::<Vec<_>>();
         state.model_context_excluded_messages.extend(obsolete);
     }
-    let (snapshot, rendering) =
-        prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
+    let (snapshot, rendering) = prompt_state_for_epoch_from_source(source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
     runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
     runtime_metadata.context_rendering_hint = rendering;
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
-    tracing::info!(
-        event = RESUMED,
-        session_id = %sid_str,
-        message_count = messages.len() as u64,
-    );
+    if emit_resumed {
+        tracing::info!(
+            event = RESUMED,
+            session_id = %sid_str,
+            message_count = messages.len() as u64,
+        );
+    }
     // A displayed result may answer a call before the compact boundary. Keep
     // only the visible results, but resolve their tool identity in the owner's
     // full source so structured client state survives that display cut.
@@ -1775,11 +1805,40 @@ fn restore_deferred_tool_state_from_history(
     replay_deferred_tool_state_in_order(deferral, ordered_rows, attachments);
 }
 
+fn deferred_records_by_delta(
+    attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
+) -> std::collections::HashMap<&str, Vec<MessageId>> {
+    let mut records_by_delta = std::collections::HashMap::<&str, Vec<MessageId>>::new();
+    // Keep each delta's record IDs in the same attachment-map traversal order
+    // as the former per-delta scan. A record may link several deltas, and a
+    // duplicate link must still admit that record only once for a given delta.
+    for (record_id, record) in attachments {
+        if record.string_at("/type") != Some("deferred_tools_record") {
+            continue;
+        }
+        for index in 0..record
+            .array_len("/nameOnlyAnnouncements")
+            .unwrap_or_default()
+        {
+            let Some(delta_uuid) = record.string_at(&format!("/nameOnlyAnnouncements/{index}"))
+            else {
+                continue;
+            };
+            let record_ids = records_by_delta.entry(delta_uuid).or_default();
+            if record_ids.last() != Some(record_id) {
+                record_ids.push(*record_id);
+            }
+        }
+    }
+    records_by_delta
+}
+
 fn replay_deferred_tool_state_in_order<'a>(
     deferral: &tool_api::DeferralState,
     ordered_rows: impl IntoIterator<Item = (MessageId, &'a Utf16JsonProjection)>,
     attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
 ) {
+    let records_by_delta = deferred_records_by_delta(attachments);
     let mut replayed_records = HashSet::new();
     for (message_id, attachment) in ordered_rows {
         if attachment.string_at("/type") == Some("deferred_tools_delta") {
@@ -1789,18 +1848,14 @@ fn replay_deferred_tool_state_in_order<'a>(
             // find the records that name this delta and replay their set-like
             // latch before folding the history-ordered delta row. The set
             // latch is commutative when multiple record sidecars name a row.
-            for (record_id, record) in attachments.iter().filter(|(_, payload)| {
-                payload.string_at("/type") == Some("deferred_tools_record")
-                    && (0..payload
-                        .array_len("/nameOnlyAnnouncements")
-                        .unwrap_or_default())
-                        .any(|index| {
-                            payload.string_at(&format!("/nameOnlyAnnouncements/{index}"))
-                                == Some(delta_uuid.as_str())
-                        })
-            }) {
-                if replayed_records.insert(*record_id) {
-                    deferral.replay_deferred_tool_state_attachment(record, &record_id.to_string());
+            if let Some(record_ids) = records_by_delta.get(delta_uuid.as_str()) {
+                for record_id in record_ids {
+                    if replayed_records.insert(*record_id) {
+                        deferral.replay_deferred_tool_state_attachment(
+                            &attachments[record_id],
+                            &record_id.to_string(),
+                        );
+                    }
                 }
             }
             deferral.replay_deferred_mcp_status_attachment(attachment);
@@ -4381,6 +4436,41 @@ mod exact_history_string_tests {
         assert_eq!(loaded.malformed_line_count, 0);
         assert_eq!(loaded.messages_in_order.len(), 1);
         loaded.messages_in_order.pop().unwrap()
+    }
+
+    #[test]
+    fn prepared_replay_can_borrow_one_routed_source_repeatedly() {
+        let session_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let source = concat!(
+            r#"{"type":"fixed-session-mode","sessionId":"11111111-2222-3333-4444-555555555555","sessionMode":"code","instructionEpoch":0}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","message":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","role":"assistant","content":[{"type":"text","text":"你好😀\ud800"}]}}"#,
+        );
+        let loaded = session::jsonl::route_lines(source);
+        let path = PathBuf::from("/fixture/prepared-resume.jsonl");
+        let first = replay_prepared_session(path.clone(), source, &loaded, session_id).unwrap();
+        let second = replay_prepared_session(path.clone(), source, &loaded, session_id).unwrap();
+        let checkpoint =
+            project_transcript_checkpoint(path.clone(), source, &loaded, session_id).unwrap();
+        let owned = replay_captured_session(
+            path,
+            source.to_owned(),
+            session::jsonl::route_lines(source),
+            session_id,
+        )
+        .unwrap();
+        for replayed in [first, second, checkpoint] {
+            assert_eq!(replayed.state.history, owned.state.history);
+            assert_eq!(replayed.display_history, owned.display_history);
+            assert_eq!(replayed.transcript_metadata, owned.transcript_metadata);
+            assert_eq!(replayed.last_message_uuid, owned.last_message_uuid);
+            assert_eq!(
+                replayed.client_state_tool_results,
+                owned.client_state_tool_results
+            );
+        }
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        assert_eq!(loaded.malformed_line_count, 0);
     }
 
     fn row(role: &str, content: &str) -> JsonlMessage {

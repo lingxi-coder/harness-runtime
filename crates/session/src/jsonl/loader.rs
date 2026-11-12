@@ -1227,6 +1227,54 @@ struct CatalogCandidate {
     file_created: SystemTime,
     /// Reuse metadata only after a guarded read succeeded in this invocation.
     current_read_validated: bool,
+    /// Alias admission and row enrichment share one bounded source capture.
+    /// Only the small derived row survives until candidate deduplication.
+    alias_capture: Option<AliasCatalogCapture>,
+}
+
+#[derive(Clone)]
+struct AliasCatalogCapture {
+    revision: AliasSourceRevision,
+    backend: Option<FileSystemCacheIdentity>,
+    row: Option<SessionMetadata>,
+    scoped_cwd: Option<String>,
+    skipped_files: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AliasSourceRevision {
+    len: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64, i64, i64),
+}
+
+impl AliasSourceRevision {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        if !metadata.is_file() {
+            return None;
+        }
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+
+    async fn read(path: &Path) -> Option<Self> {
+        Self::from_metadata(&tokio::fs::metadata(path).await.ok()?)
+    }
 }
 
 /// Native G9 runs on KBe's lite rows before jAt clamps logical timestamps.
@@ -1460,6 +1508,7 @@ async fn collect_dir(
             file_modified,
             file_created,
             current_read_validated,
+            alias_capture: None,
         });
     }
     Ok(true)
@@ -1537,60 +1586,144 @@ async fn collect_cwd_aliases(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
     );
-    let mut admitted_paths: HashSet<PathBuf> = candidates
+    let admitted_paths: HashSet<PathBuf> = candidates
         .iter()
         .map(|candidate| candidate.path.clone())
         .collect();
-    for (path, cwd) in aliases {
+    // Group destination variants before opening a source. A stale first alias
+    // must not prevent a later, current alias for the same file from matching.
+    let mut by_path = HashMap::<PathBuf, usize>::new();
+    let mut pending = Vec::<(PathBuf, Vec<(usize, PathBuf)>)>::new();
+    for (alias_index, (path, cwd)) in aliases.iter().enumerate() {
         if admitted_paths.contains(path) {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(uuid) = Uuid::parse_str(stem) else {
-            continue;
-        };
-        if only_session.is_some_and(|session| session != uuid) {
-            continue;
+        if let Some(&index) = by_path.get(path) {
+            pending[index].1.push((alias_index, cwd.clone()));
+        } else {
+            by_path.insert(path.clone(), pending.len());
+            pending.push((path.clone(), vec![(alias_index, cwd.clone())]));
         }
-        let Ok(metadata) = tokio::fs::metadata(path).await else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let Some(path_str) = path.to_str() else {
-            continue;
-        };
-        let Ok(read) = fs.read_file(path_str, None, None).await else {
-            continue;
-        };
-        let first = read
-            .content
-            .trim_start_matches('\u{feff}')
-            .split('\n')
-            .next()
-            .unwrap_or("");
-        if first_line_hides_session(first, current_is_sdk_entrypoint)
-            || !cwd_alias_matches_source(path, cwd, &read.content)
-        {
-            continue;
-        }
-        let Ok(file_modified) = metadata.modified() else {
-            continue;
-        };
-        candidates.push(CatalogCandidate {
-            uuid,
-            path: path.clone(),
-            stem: stem.to_string(),
-            file_len: metadata.len(),
-            file_modified,
-            file_created: metadata.created().unwrap_or(file_modified),
-            current_read_validated: true,
-        });
-        admitted_paths.insert(path.clone());
     }
+    let mut pending = pending.into_iter();
+    let parallelism = catalog_parallelism();
+    let mut jobs = tokio::task::JoinSet::new();
+    let mut prepared = Vec::new();
+    loop {
+        while jobs.len() < parallelism {
+            let Some((path, cwds)) = pending.next() else {
+                break;
+            };
+            let fs = Arc::clone(fs);
+            jobs.spawn(async move {
+                prepare_cwd_alias_candidate(
+                    path,
+                    cwds,
+                    &fs,
+                    only_session,
+                    current_is_sdk_entrypoint,
+                )
+                .await
+            });
+        }
+        let Some(joined) = jobs.join_next().await else {
+            break;
+        };
+        match joined {
+            Ok(Some(prepared_candidate)) => prepared.push(prepared_candidate),
+            Ok(None) => {}
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => {}
+        }
+    }
+    prepared.sort_by_key(|(index, _)| *index);
+    candidates.extend(prepared.into_iter().map(|(_, candidate)| candidate));
+}
+
+async fn prepare_cwd_alias_candidate(
+    path: PathBuf,
+    cwds: Vec<(usize, PathBuf)>,
+    fs: &Arc<dyn FileSystem>,
+    only_session: Option<Uuid>,
+    current_is_sdk_entrypoint: bool,
+) -> Option<(usize, CatalogCandidate)> {
+    let stem = path.file_stem()?.to_str()?.to_owned();
+    let uuid = Uuid::parse_str(&stem).ok()?;
+    if only_session.is_some_and(|session| session != uuid) {
+        return None;
+    }
+    let metadata = tokio::fs::metadata(&path).await.ok()?;
+    let revision = AliasSourceRevision::from_metadata(&metadata)?;
+    let backend = fs.cache_identity();
+    #[cfg(test)]
+    optimization_tests::record_catalog_read(&path);
+    #[cfg(test)]
+    if optimization_tests::catalog_read_fault(&path, false).is_some() {
+        return None;
+    }
+    let content = fs.read_file(path.to_str()?, None, None).await.ok()?.content;
+    let first = strip_transcript_bom(&content)
+        .split('\n')
+        .next()
+        .unwrap_or("");
+    if first_line_hides_session(first, current_is_sdk_entrypoint) {
+        return None;
+    }
+    let mode = crate::jsonl::JsonlWriter::fixed_session_mode_from_source(&content, &stem).ok()?;
+    let mut scoped_cwd = scoped_cwd_from_source(&content);
+    #[cfg(test)]
+    optimization_tests::record_catalog_parse(&path);
+    let loaded = match tokio::task::spawn_blocking(move || route_lines(&content)).await {
+        Ok(loaded) => loaded,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => return None,
+    };
+    let workspace = transcript_workspace_path(&path, &loaded)?;
+    let workspace = normalized_directory_path(Path::new(&workspace));
+    let alias_index = cwds
+        .iter()
+        .find_map(|(index, cwd)| (workspace == normalized_directory_path(cwd)).then_some(*index))?;
+    if AliasSourceRevision::read(&path).await.as_ref() != Some(&revision)
+        || fs.cache_identity() != backend
+    {
+        return None;
+    }
+    let file_modified = metadata.modified().ok()?;
+    let mut candidate = CatalogCandidate {
+        uuid,
+        path,
+        stem,
+        file_len: metadata.len(),
+        file_modified,
+        file_created: metadata.created().unwrap_or(file_modified),
+        current_read_validated: true,
+        alias_capture: None,
+    };
+    let mut skipped_files = 0;
+    let row = enrich_candidate_from_loaded(
+        candidate.clone(),
+        mode,
+        loaded,
+        current_is_sdk_entrypoint,
+        &[],
+        &mut scoped_cwd,
+        &mut skipped_files,
+    )
+    .ok()?;
+    candidate.alias_capture = Some(AliasCatalogCapture {
+        revision,
+        backend,
+        row,
+        scoped_cwd,
+        skipped_files,
+    });
+    Some((alias_index, candidate))
+}
+
+fn catalog_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(1, 8)
 }
 
 /// Enrich every candidate, several at a time.
@@ -1608,9 +1741,7 @@ async fn enrich_candidates(
     uncached_paths: &[PathBuf],
     skipped_files: &mut usize,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
-    let parallelism = std::thread::available_parallelism()
-        .map_or(4, std::num::NonZeroUsize::get)
-        .clamp(1, 8);
+    let parallelism = catalog_parallelism();
     let cache_identity = fs.cache_identity();
     let total = candidates.len();
     let mut pending = candidates.into_iter().enumerate();
@@ -1683,6 +1814,46 @@ async fn enrich_candidate(
     target_cwds: &[String],
     skipped_files: &mut usize,
 ) -> Result<Option<SessionMetadata>, LoaderError> {
+    if let Some(capture) = &candidate.alias_capture {
+        // Reuse only a backend that promises its generation covers changes
+        // invisible to OS metadata. Probe access again, bracketed by the
+        // captured inode/revision, so a replacement, late /cd or permission
+        // change cannot inherit the earlier admission. Other platforms without
+        // this inode/ctime revision conservatively take the full-read path.
+        if cfg!(unix)
+            && capture.backend.is_some()
+            && fs.cache_identity() == capture.backend
+            && AliasSourceRevision::read(&candidate.path).await.as_ref() == Some(&capture.revision)
+            && read_catalog_prefix(fs, candidate.path.to_str().expect("UTF-8 path"))
+                .await
+                .is_ok()
+            && AliasSourceRevision::read(&candidate.path).await.as_ref() == Some(&capture.revision)
+            && fs.cache_identity() == capture.backend
+        {
+            *skipped_files += capture.skipped_files;
+            if !transcript_matches_target_dirs(
+                capture
+                    .row
+                    .as_ref()
+                    .and_then(|row| row.workspace_path.as_deref())
+                    .or(capture.scoped_cwd.as_deref()),
+                target_cwds,
+            ) {
+                return Ok(None);
+            }
+            return Ok(capture.row.clone());
+        }
+        let mut scoped_cwd = None;
+        return enrich_candidate_uncached(
+            candidate,
+            fs,
+            current_is_sdk_entrypoint,
+            target_cwds,
+            &mut scoped_cwd,
+            skipped_files,
+        )
+        .await;
+    }
     let Some(cache_identity) = cache_identity else {
         let mut scoped_cwd = None;
         return enrich_candidate_uncached(
@@ -1790,6 +1961,17 @@ async fn enrich_candidate_uncached(
             return Ok(None);
         }
     };
+    if candidate.alias_capture.is_some()
+        && first_line_hides_session(
+            strip_transcript_bom(&content)
+                .split('\n')
+                .next()
+                .unwrap_or(""),
+            current_is_sdk_entrypoint,
+        )
+    {
+        return Ok(None);
+    }
     enrich_candidate_from_content(
         candidate,
         content,
@@ -1809,16 +1991,11 @@ async fn enrich_candidate_from_content(
     scoped_cwd: &mut Option<String>,
     skipped_files: &mut usize,
 ) -> Result<Option<SessionMetadata>, LoaderError> {
-    let CatalogCandidate {
-        uuid,
-        path,
-        stem,
-        file_modified,
-        file_created,
-        ..
-    } = candidate;
     *scoped_cwd = scoped_cwd_from_source(&content);
-    let mode = match crate::jsonl::JsonlWriter::fixed_session_mode_from_source(&content, &stem) {
+    let mode = match crate::jsonl::JsonlWriter::fixed_session_mode_from_source(
+        &content,
+        &candidate.stem,
+    ) {
         Ok(mode) => mode,
         Err(_) => {
             *skipped_files += 1;
@@ -1827,6 +2004,8 @@ async fn enrich_candidate_from_content(
     };
     // The parse is the whole cost of a row: keep it off the async workers so
     // concurrent rows (see `enrich_candidates`) parse on separate threads.
+    #[cfg(test)]
+    optimization_tests::record_catalog_parse(&candidate.path);
     let loaded = match tokio::task::spawn_blocking(move || route_lines(&content)).await {
         Ok(loaded) => loaded,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
@@ -1835,6 +2014,35 @@ async fn enrich_candidate_from_content(
             return Ok(None);
         }
     };
+
+    enrich_candidate_from_loaded(
+        candidate,
+        mode,
+        loaded,
+        current_is_sdk_entrypoint,
+        target_cwds,
+        scoped_cwd,
+        skipped_files,
+    )
+}
+
+fn enrich_candidate_from_loaded(
+    candidate: CatalogCandidate,
+    mode: SessionMode,
+    loaded: LoadedTranscript,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: &[String],
+    scoped_cwd: &mut Option<String>,
+    skipped_files: &mut usize,
+) -> Result<Option<SessionMetadata>, LoaderError> {
+    let CatalogCandidate {
+        uuid,
+        path,
+        stem,
+        file_modified,
+        file_created,
+        ..
+    } = candidate;
 
     // A metadata-only file is not a resumable session unless its latest
     // custom-title is the explicit versioned mobile empty-session anchor.
@@ -2693,6 +2901,7 @@ async fn describe_session_source_inner<F: FnOnce()>(
             file_modified: modified,
             file_created: metadata.created().unwrap_or(modified),
             current_read_validated: true,
+            alias_capture: None,
         };
         let current_is_sdk_entrypoint = matches!(
             std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
@@ -2764,6 +2973,7 @@ pub async fn find_session_exact_raw_with_diagnostics(
         file_modified: modified,
         file_created: metadata.created().unwrap_or(modified),
         current_read_validated: false,
+        alias_capture: None,
     };
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
@@ -2937,8 +3147,8 @@ async fn list_recent_sessions_inner_with_diagnostics(
         &mut skipped_files,
     )
     .await?;
-    // A second read can overlap a later `/cd`. The final catalog row must
-    // still name the alias destination, not just the earlier preflight read.
+    // Source refresh can overlap a later `/cd`. The final catalog row must
+    // still name the alias destination validated from its current capture.
     retain_current_cwd_alias_rows(&mut rows, &ordinary_paths, &cwd_aliases);
     let had_rows = !rows.is_empty();
     if let Some(mode) = mode {
@@ -3233,12 +3443,27 @@ pub async fn load_routed_session_from_path_with_source(
     Ok((path.to_path_buf(), content, loaded))
 }
 
-/// Validate an already captured source without reading a mutable file again.
+/// Route and validate an already captured source without reading a mutable
+/// file again.
 pub fn route_captured_session_source(
     path: &Path,
     expected_id: Uuid,
     content: &str,
 ) -> Result<LoadedTranscript, LoaderError> {
+    let loaded = route_lines(content);
+    validate_captured_session_source(path, expected_id, content, &loaded)?;
+    Ok(loaded)
+}
+
+/// Validate a routed snapshot against the exact captured source it came from.
+/// Callers reusing a previous parse must establish byte equality before using
+/// this entry point; it deliberately does not parse or read the source again.
+pub fn validate_captured_session_source(
+    path: &Path,
+    expected_id: Uuid,
+    content: &str,
+    loaded: &LoadedTranscript,
+) -> Result<(), LoaderError> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -3251,8 +3476,7 @@ pub fn route_captured_session_source(
         });
     }
     validate_fixed_session_mode(content, &expected_id.to_string(), path)?;
-    let loaded = route_lines(content);
-    if !native_exact_preserved_valid_for(&loaded, &expected_id.to_string()) {
+    if !native_exact_preserved_valid_for(loaded, &expected_id.to_string()) {
         return Err(LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::new(
@@ -3268,7 +3492,7 @@ pub fn route_captured_session_source(
     {
         return Err(LoaderError::EmptyDirectory);
     }
-    Ok(loaded)
+    Ok(())
 }
 
 fn validate_fixed_session_mode(
@@ -6851,6 +7075,7 @@ mod tests {
                         file_created: SystemTime::UNIX_EPOCH
                             + Duration::from_millis(row["created_ms"].as_u64().unwrap()),
                         current_read_validated: false,
+                        alias_capture: None,
                     })
                 })
                 .collect();

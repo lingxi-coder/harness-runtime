@@ -34,37 +34,61 @@ pub struct ApiRoundGroup {
 /// the previously-seen assistant `id`, provided the current group is non-empty.
 #[must_use]
 pub fn group_messages_by_api_round(messages: &[ConversationMessage]) -> Vec<ApiRoundGroup> {
-    let mut groups = Vec::new();
-    let mut start = 0usize;
+    api_round_ranges(messages)
+        .map(|range| ApiRoundGroup {
+            start: range.start,
+            end: range.end,
+            estimated_tokens: estimate_tokens_for_range(&messages[range]),
+        })
+        .collect()
+}
+
+/// Count the same round boundaries without examining content. The manual
+/// compaction guard only needs this count; its compactor estimates the input.
+pub(crate) fn api_round_count(messages: &[ConversationMessage]) -> usize {
+    api_round_ranges(messages).count()
+}
+
+fn api_round_ranges(
+    messages: &[ConversationMessage],
+) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
     // `id` of the most-recently-seen assistant message. Sole boundary gate:
     // streaming chunks from one API response share an id, so a boundary only
     // fires at the start of a genuinely new round.
     let mut last_assistant_id: Option<MessageId> = None;
-
-    for (i, m) in messages.iter().enumerate() {
-        if let ConversationMessage::Assistant { id, .. } = m {
-            // Boundary: a new assistant id begins and the current group is
-            // non-empty (`i > start`).
-            if last_assistant_id != Some(*id) && i > start {
-                groups.push(ApiRoundGroup {
-                    start,
-                    end: i,
-                    estimated_tokens: estimate_tokens_for_range(&messages[start..i]),
-                });
-                start = i;
+    let ends = messages
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, message)| {
+            if let ConversationMessage::Assistant { id, .. } = message {
+                let begins_round = last_assistant_id != Some(*id);
+                last_assistant_id = Some(*id);
+                // Every prior boundary is before an already-visited message,
+                // so any new assistant after index zero has a non-empty group.
+                if begins_round && index > 0 {
+                    return Some(index);
+                }
             }
-            last_assistant_id = Some(*id);
-        }
-    }
-
-    if start < messages.len() {
-        groups.push(ApiRoundGroup {
-            start,
-            end: messages.len(),
-            estimated_tokens: estimate_tokens_for_range(&messages[start..]),
+            None
         });
-    }
-    groups
+
+    let mut start = 0;
+    ends.chain((!messages.is_empty()).then_some(messages.len()))
+        .map(move |end| {
+            let range = start..end;
+            start = end;
+            range
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    static BLOCK_ESTIMATE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn block_estimate_calls() -> usize {
+    BLOCK_ESTIMATE_CALLS.with(std::cell::Cell::get)
 }
 
 /// Claude Code 2.1.261 `Og` / `xno` / `M0` / `HXr`: estimate each API content
@@ -84,6 +108,8 @@ pub fn estimate_tokens_for_range(msgs: &[ConversationMessage]) -> u64 {
 }
 
 fn estimate_block_tokens(block: &ContentBlock) -> u64 {
+    #[cfg(test)]
+    BLOCK_ESTIMATE_CALLS.with(|calls| calls.set(calls.get() + 1));
     match block {
         ContentBlock::Text { text, .. } => estimate_content_tokens(text),
         ContentBlock::TextJsUtf16 {
@@ -196,7 +222,10 @@ fn estimate_json_block_tokens(block: &Source) -> u64 {
             .as_ref()
             .map_or(0, estimate_json_content_tokens),
         Some("tool_use") => estimate_tool_use_units(
-            block.at_pointer("/name").and_then(|value| value.code_units()).map_or(0, |units| units.len()),
+            block
+                .at_pointer("/name")
+                .and_then(|value| value.code_units())
+                .map_or(0, |units| units.len()),
             &block
                 .subprojection("/input")
                 .unwrap_or_else(|_| Source::parse("null").unwrap()),
@@ -215,6 +244,73 @@ mod tests {
 
     fn source(value: &serde_json::Value) -> Source {
         Source::from_serde_value(value).expect("test value is valid JSON")
+    }
+
+    #[test]
+    fn round_count_skips_content_and_group_totals_match_the_full_estimate() {
+        let assistant_id = MessageId::new();
+        let system = ConversationMessage::System {
+            id: MessageId::new(),
+            content: "system markers contribute no API content tokens 😀".into(),
+            subtype: None,
+            api_system: None,
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let mut unicode = ConversationMessage::user(MessageId::new(), "你好😀".into());
+        if let ConversationMessage::User { content, .. } = &mut unicode {
+            content.push(ContentBlock::TextJsUtf16 {
+                text: "display-safe replacement".into(),
+                utf16_code_units: vec![0xd800, 0x61, 0xd83d, 0xde00],
+                citations: None,
+            });
+            content.push(ContentBlock::ProviderContent {
+                protocol: "provider-neutral".into(),
+                value: Source::parse(r#"{"text":"é😀\ud800","nested":[1,2]}"#).unwrap(),
+            });
+        }
+        let same_round = assistant_with_id(assistant_id, "工具😀");
+        let another_round = assistant_with_id(MessageId::new(), "Read");
+        let samples = [
+            vec![],
+            vec![system.clone()],
+            vec![unicode.clone(), system.clone()],
+            vec![same_round.clone()],
+            vec![
+                system,
+                unicode,
+                same_round.clone(),
+                user_result(ToolUseId::new()),
+                same_round.clone(),
+                another_round,
+                same_round,
+            ],
+        ];
+        for messages in samples {
+            let before = block_estimate_calls();
+            let count = api_round_count(&messages);
+            assert_eq!(
+                block_estimate_calls(),
+                before,
+                "count reads only boundaries"
+            );
+            let groups = group_messages_by_api_round(&messages);
+            assert_eq!(count, groups.len());
+            assert_eq!(
+                groups
+                    .iter()
+                    .map(|group| group.estimated_tokens)
+                    .sum::<u64>(),
+                estimate_tokens_for_range(&messages)
+            );
+            assert_eq!(groups.first().map(|group| group.start).unwrap_or(0), 0);
+            assert_eq!(
+                groups.last().map(|group| group.end).unwrap_or(0),
+                messages.len()
+            );
+            assert!(groups.windows(2).all(|pair| pair[0].end == pair[1].start));
+        }
     }
 
     #[test]

@@ -45,13 +45,13 @@ mod background_agent;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
-mod goal_proposal;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+mod goal_proposal;
 pub use fusion_command::record_fusion_command_failure;
 mod fusion_implement;
 #[cfg(test)]
@@ -1462,8 +1462,15 @@ async fn hydrate_captured_session_before_start(
             "cold resume snapshot does not match the active session".into(),
         ));
     }
-    let loaded = session::jsonl::route_lines(&snapshot.content);
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    let parsed;
+    let loaded = match cfg.prepared_session_resume() {
+        Some(loaded) => loaded,
+        None => {
+            parsed = session::jsonl::route_lines(&snapshot.content);
+            &parsed
+        }
+    };
+    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
     if messages.is_empty()
         && !loaded
             .mobile_empty_sessions
@@ -1587,8 +1594,9 @@ fn desktop_fusion_executor(
              /fusion will report this until the settings file is fixed"
         );
     }
-    let config_source: Arc<dyn fusion::FusionConfigSource> =
-        Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
+    let config_source: Arc<dyn fusion::FusionConfigSource> = Arc::new(DesktopFusionConfigSource {
+        cfg: cfg.clone_for_runtime_controls(),
+    });
     let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
@@ -1599,7 +1607,7 @@ fn desktop_fusion_executor(
     }
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
-        cfg: cfg.clone(),
+        cfg: cfg.clone_for_runtime_controls(),
     })
 }
 
@@ -6419,6 +6427,10 @@ fn code_review_suggestion_provider(
 #[path = "tests/bash_precommit_skill_wiring_tests.rs"]
 mod bash_precommit_skill_wiring_tests;
 
+#[cfg(test)]
+#[path = "tests/startup_capture_tests.rs"]
+mod startup_capture_tests;
+
 /// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
 /// remote MCP servers. The MCP OAuth flow ([`mcp::McpRegistry::connect`]) fires
 /// this once per interactive flow with the authorization URL the user must visit
@@ -6814,6 +6826,7 @@ pub use configuration::DesktopEngineConfig;
 pub use configuration::DesktopMcpServices;
 pub use configuration::DesktopRequestIdentity;
 pub use configuration::DesktopSessionComposition;
+pub use configuration::DesktopSessionResumeLoaded;
 pub use configuration::DesktopSessionResumeSnapshot;
 pub use configuration::MAX_PERMISSION_TIMEOUT;
 pub use credentials::api_service_from_stack;

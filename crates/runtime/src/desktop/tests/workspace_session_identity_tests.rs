@@ -695,7 +695,25 @@ async fn captured_cold_history_waits_for_transport_before_dispatching_deferred_t
     tools.register_builtin(Arc::new(ColdResumeTool(dispatches.clone())));
     let fs: Arc<dyn FileSystem> =
         Arc::new(super::platform::DesktopFileSystem::new(root.path().into()));
-    let writer = Arc::new(session::JsonlWriter::new(path.clone(), fs));
+    // Side-effect replay requires the physical source admitted by the host,
+    // alongside the durable transaction used by the ordinary desktop writer.
+    let (authority, _) = session::jsonl::writer::TranscriptFileAuthority::capture(
+        root.path().into(),
+        path.file_name().unwrap().into(),
+    )
+    .unwrap();
+    let state_root = root.path().join("deferred-state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let durable = Arc::new(session::jsonl::DurableTranscriptWriter::open(state_root).unwrap());
+    let writer = Arc::new(session::JsonlWriter::new(path.clone(), fs).with_durable_lock(durable));
+    writer
+        .activate_session_target_with_authority(
+            id,
+            path.clone(),
+            root.path().into(),
+            Some(authority),
+        )
+        .unwrap();
     writer
         .bootstrap_session_message_identity_snapshot(&path)
         .await
@@ -795,7 +813,7 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
     .unwrap();
     let unselected_bytes = std::fs::read(&unselected).unwrap();
     let unselected_mtime = std::fs::metadata(&unselected).unwrap().modified().unwrap();
-    let cfg = DesktopConfig {
+    let mut cfg = DesktopConfig {
         cwd: target.clone(),
         initial_project_root: Some(launch.clone()),
         lingxi_home: home.clone(),
@@ -809,6 +827,10 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
         permission_mode_cli_explicit: true,
         ..Default::default()
     };
+    cfg.session_resume_loaded = Some(super::DesktopSessionResumeLoaded::new(
+        cfg.session_resume_snapshot.as_ref().unwrap(),
+        Arc::new(session::jsonl::route_lines(&content)),
+    ));
     let input_path = root.path().join("hook-input.json");
     let environment_path = root.path().join("hook-environment.txt");
     let response = serde_json::json!({"hookSpecificOutput":{
@@ -860,6 +882,9 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
         Arc::new(StaticMemoryProvider::empty()),
         target.clone(),
     )
+    // Production assembly chooses the captured fixed mode in the builder,
+    // before hydration verifies that the mode still matches its owner.
+    .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
     .with_session_id(session_id)
     .with_config_home(home)
     .with_jsonl_writer(writer);

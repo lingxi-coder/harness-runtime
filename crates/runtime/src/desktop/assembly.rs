@@ -1297,12 +1297,8 @@ pub async fn build_with_credential_stack(
     // or other child must never rebind its registry or close its admission.
     let bg_session_forker = cfg.bg_session_forker.take();
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
-        let mut seed = cfg.clone();
-        seed.session_writer_lease = None;
+        let mut seed = cfg.clone_for_runtime_controls();
         seed.session_transcript_path = None;
-        seed.session_transcript_authority = None;
-        seed.session_resume_snapshot = None;
-        seed.session_resume_cost = None;
         (seed, permission_sink.clone())
     });
     // Consume the construction-only writer claim before any config-derived
@@ -1773,7 +1769,7 @@ pub async fn build_with_credential_stack(
         settings_backoff_ms,
     )
     .with_fast_policy_source({
-        let fast_cfg = cfg.clone();
+        let fast_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || {
             let Ok(managed) = super::settings_watch::managed_policy_layers_sync(&fast_cfg) else {
                 return Ok(llm_runtime::model::fast_admission::Policy {
@@ -1807,7 +1803,7 @@ pub async fn build_with_credential_stack(
     .with_thinking(cfg.session_thinking)
     .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
     .with_effort_settings_source({
-        let effort_cfg = cfg.clone();
+        let effort_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || {
             let snapshot = super::settings_watch::managed_settings_snapshot_sync(&effort_cfg)
                 .ok_or(lingxi_core::settings::SettingsError::SourceUnavailable(
@@ -1818,7 +1814,7 @@ pub async fn build_with_credential_stack(
         })
     })?
     .with_prompt_cache_ttl_settings_source({
-        let cache_cfg = cfg.clone();
+        let cache_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
     })
     // Surface API retry/backoff status to the UI (Claude Code's
@@ -2239,8 +2235,8 @@ pub async fn build_with_credential_stack(
         )
         .map_err(|error| BuildError::DurableSession(error.to_string()))?;
         let initialization: Result<_, cost::CostPersistError> = async {
+            // start waits for recovery and installs the projection imports use.
             coordinator.start().await?;
-            let _initial_hydration = coordinator.hydrate(main_session_id).await?;
             if let Some(opening) = cfg.session_resume_cost.as_ref() {
                 coordinator.import_session_opening_state(opening).await?;
             }
@@ -2335,6 +2331,10 @@ pub async fn build_with_credential_stack(
             BuildError::Orchestrator(format!("main transcript identity import failed: {error}"))
         })?;
     }
+    // These independent target owners are no longer needed once identity and
+    // metadata have been installed in the writer.
+    drop(captured_target_content);
+    drop(target_resume_snapshot);
     if !is_app_chat {
         // Strict Chat owns its identity/append barrier; ordinary transcript
         // queues and Fusion delivery must never bind a second writer authority.
@@ -3135,7 +3135,7 @@ pub async fn build_with_credential_stack(
     //       root is `cfg.lingxi_home` (was `dirs::config_dir()/claude`).
     let mut hook_registry = hooks::HookRegistry::new();
     let mod_settings_reader: Arc<dyn hooks::mods::ModSettingsReader> = Arc::new(
-        super::mod_settings::DesktopModSettingsReader::new(cfg.clone()),
+        super::mod_settings::DesktopModSettingsReader::new(cfg.clone_for_runtime_controls()),
     );
     if cfg.team_invocation.is_none() {
         hook_registry.attach_mod_model_policy(mod_settings_reader.clone());
@@ -5053,7 +5053,7 @@ pub async fn build_with_credential_stack(
     // `trusted_dirs` set (cwd + `--add-dir`/`additionalDirectories`) so the
     // file tools' `ctx.trusted_dirs()` gate keeps allowing the additional dirs.
     let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
-    let working_directory_config = cfg.clone();
+    let working_directory_config = cfg.clone_for_runtime_controls();
     let _ = teammate_session_cwd_cell.set(session_cwd.clone());
     // Local IDE endpoints are discovered lazily by the provider-neutral
     // controller. The same MCP registry owns their live JSON-RPC connection;
@@ -5145,7 +5145,7 @@ pub async fn build_with_credential_stack(
             as Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>
     });
     let goal_proposal_host = Arc::new(super::goal_proposal::DesktopGoalProposalHost::new(
-        cfg.clone(),
+        cfg.clone_for_runtime_controls(),
         goal_proposal_resolver,
         analytics_bus.clone(),
     ));
@@ -6492,7 +6492,10 @@ pub async fn build_with_credential_stack(
     );
     let mod_prompt_output = output.clone();
     let command_visibility_settings_loader =
-        super::native_skill_listing_settings_loader_for_desktop(cfg.clone(), session_cwd.clone());
+        super::native_skill_listing_settings_loader_for_desktop(
+            cfg.clone_for_runtime_controls(),
+            session_cwd.clone(),
+        );
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -6663,8 +6666,8 @@ pub async fn build_with_credential_stack(
                 let provider = registry_skill_listing_provider_for_desktop(
                     shared_command_registry.clone(),
                     read_state_map.clone(),
-                    super::code_review_suggestion_provider(cfg.clone(), session_cwd.clone()),
-                    cfg.clone(),
+                    super::code_review_suggestion_provider(cfg.clone_for_runtime_controls(), session_cwd.clone()),
+                    cfg.clone_for_runtime_controls(),
                     session_cwd.clone(),
                     command_visibility_settings_loader.clone(),
                     command_snapshot_provider.clone(),
@@ -7013,6 +7016,9 @@ pub async fn build_with_credential_stack(
         model_provenance,
     ))
     .await?;
+    // All source history, mode, agent, workspace and cost consumers have now
+    // finished. Settings/cwd controls were cloned without these captures.
+    cfg.release_startup_capture();
     // Deferred headless mounts initialize only after installing their captured
     // history. App Chat uses its own transcript identity and lifecycle.
     if !cfg.defer_session_start && !is_app_chat {

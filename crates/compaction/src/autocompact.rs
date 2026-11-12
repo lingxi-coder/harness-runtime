@@ -523,7 +523,6 @@ impl Autocompactor {
         model_override: Option<&CompactModelOverride>,
     ) -> Result<CompactionResult, CompactionError> {
         let preserve_tail = reactive_options.is_some();
-        let pre = crate::grouping::estimate_tokens_for_range(&messages);
         if preserve_tail
             && !self
                 .forked_runner
@@ -536,6 +535,10 @@ impl Autocompactor {
         }
 
         let groups = crate::grouping::group_messages_by_api_round(&messages);
+        // Groups partition this immutable input and already carry the same
+        // additive per-block estimate. Reuse it within this attempt instead of
+        // scanning and serializing all content a second time.
+        let pre = groups.iter().map(|group| group.estimated_tokens).sum();
         if preserve_tail && groups.len() < 2 {
             return Err(CompactionError::NotEnoughMessages);
         }
@@ -1578,6 +1581,138 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_compacts_estimate_each_input_once_and_keep_source_and_tail_exact() {
+        let mut tool = assistant_tool(MessageId::new(), "工具😀");
+        if let ConversationMessage::Assistant { content, .. } = &mut tool {
+            if let ContentBlock::ToolUse { input, .. } = &mut content[0] {
+                *input = Utf16JsonProjection::parse(r#"{"path":"é😀\ud800","n":7}"#).unwrap();
+            }
+            content.push(ContentBlock::TextJsUtf16 {
+                text: "display-safe replacement".into(),
+                utf16_code_units: vec![0x4f60, 0xd800, 0xd83d, 0xde00],
+                citations: None,
+            });
+            content.push(ContentBlock::ProviderContent {
+                protocol: "provider-neutral".into(),
+                value: Utf16JsonProjection::parse(r#"{"text":"你好😀\ud800"}"#).unwrap(),
+            });
+        }
+        let tool_id = if let ConversationMessage::Assistant { content, .. } = &tool {
+            let ContentBlock::ToolUse { id, .. } = &content[0] else {
+                panic!("fixture has a tool call");
+            };
+            id.clone()
+        } else {
+            unreachable!()
+        };
+        let mut result = tool_result_msg();
+        if let ConversationMessage::User { content, .. } = &mut result {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content_blocks,
+                ..
+            } = &mut content[0]
+            {
+                *tool_use_id = tool_id;
+                *content_blocks = Some(
+                    Utf16JsonProjection::parse(
+                        r#"[{"type":"text","text":"结果😀\ud800"},{"type":"tool_result","content":[{"type":"text","text":"嵌套😀"}]},{"type":"provider-data","value":"é😀"}]"#,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        let history = vec![
+            user_msg("请求你好😀"),
+            tool,
+            result,
+            assistant_text("preserve this final round 😀"),
+        ];
+        let mut changed = history.clone();
+        if let ConversationMessage::User { content, .. } = &mut changed[0] {
+            content.push(ContentBlock::Text {
+                text: "edited input with the same message ID".repeat(10),
+                citations: None,
+            });
+        }
+        let summary = Utf16JsonProjection::parse(r#""<summary>摘要😀\ud800</summary>""#).unwrap();
+        let (compactor, client) = wired_source(summary.clone(), Vec::new()).await;
+        let slot = compactor.cache_slot.as_ref().unwrap();
+        let mut params = slot.get_last().await.unwrap();
+        params.tool_use_options.main_loop_model = "provider-neutral-model".into();
+        params.tool_use_options.model_profile = Some("provider-neutral-profile".into());
+        slot.save(params).await;
+        let mut previous_pre = None;
+
+        for (manual, input, edited) in [
+            (true, &history, false),
+            (false, &history, false),
+            (true, &changed, true),
+        ] {
+            let expected_pre = crate::grouping::estimate_tokens_for_range(input);
+            let input_block_count = input
+                .iter()
+                .map(|message| match message {
+                    ConversationMessage::User { content, .. }
+                    | ConversationMessage::Assistant { content, .. } => content.len(),
+                    ConversationMessage::System { .. } => 0,
+                })
+                .sum::<usize>();
+            let before = crate::grouping::block_estimate_calls();
+            let compacted = if manual {
+                compactor
+                    .compact_manual_with_instructions(input.to_vec(), None, None)
+                    .await
+            } else {
+                compactor.compact(input.to_vec(), None).await
+            }
+            .unwrap();
+            let calls = crate::grouping::block_estimate_calls() - before;
+            assert_eq!(
+                calls,
+                input_block_count + 1,
+                "input once, then summary once"
+            );
+            assert_eq!(compacted.pre_compact_token_count, expected_pre);
+            assert_eq!(
+                compacted.post_compact_token_count,
+                crate::grouping::estimate_tokens_for_range(&compacted.summary_messages)
+            );
+            assert_eq!(compacted.raw_summary_text, summary);
+            let ConversationMessage::User { content, .. } = &compacted.summary_messages[0] else {
+                panic!("summary is a user message");
+            };
+            assert!(matches!(
+                content.as_slice(),
+                [ContentBlock::TextJsUtf16 { utf16_code_units, .. }]
+                    if utf16_code_units.contains(&0xd800)
+            ));
+            assert_eq!(compacted.summary_model, "provider-neutral-model");
+            assert_eq!(
+                compacted.summary_profile.as_deref(),
+                Some("provider-neutral-profile")
+            );
+            let sent = client.seen.lock().unwrap().clone().unwrap();
+            let prefix_end = input.len() - usize::from(manual);
+            assert_eq!(&sent.messages[..prefix_end], &input[..prefix_end]);
+            if manual {
+                assert_eq!(compacted.messages_to_preserve, input[input.len() - 1..]);
+            } else {
+                assert!(compacted.messages_to_preserve.is_empty());
+                assert_eq!(previous_pre, Some(expected_pre));
+            }
+            if edited {
+                assert_ne!(
+                    previous_pre,
+                    Some(expected_pre),
+                    "edits get a fresh estimate"
+                );
+            }
+            previous_pre = Some(expected_pre);
         }
     }
 

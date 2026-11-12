@@ -574,6 +574,10 @@ struct CoordinatorState {
     /// treats a snapshot with no WAL as proof that an authoritative ledger was
     /// lost, so that inference only holds while every WAL has one.
     snapshot_present: AtomicBool,
+    /// Counts complete hydration replays, excluding import lookups and append
+    /// work, so startup/switch tests can guard against discarded WAL folds.
+    #[cfg(test)]
+    hydration_replays: AtomicU64,
 }
 
 /// App-owned collection of hydrated session authorities. A hot clear/resume
@@ -819,7 +823,9 @@ impl SessionStateManager {
                 initialization_coordinator
                     .import_legacy_opening_balance(opening_balance)
                     .await?;
-                initialization_coordinator.hydrate(session_id).await?;
+                // start and the acknowledged import have updated the live
+                // projection. A cold tracker consumes its own final hydration
+                // in prepare_session before any destination is activated.
                 Ok::<(), CostPersistError>(())
             });
             let initialized = initialization.await.unwrap_or_else(|error| {
@@ -954,6 +960,8 @@ impl SessionStateCoordinator {
                 durability_gate: CostDurabilityGate::default(),
                 last_journal_revision: AtomicU64::new(0),
                 snapshot_present: AtomicBool::new(false),
+                #[cfg(test)]
+                hydration_replays: AtomicU64::new(0),
             }),
             queue_tx,
             queue_rx: Arc::new(AsyncMutex::new(Some(queue_rx))),
@@ -1357,6 +1365,11 @@ impl SessionStateCoordinator {
     /// vectors already present in the journal.
     pub fn hydrate_blocking(&self) -> Result<CostHydration, CostPersistError> {
         self.state.hydrate_blocking()
+    }
+
+    #[cfg(test)]
+    pub(super) fn hydration_replay_count(&self) -> u64 {
+        self.state.hydration_replays.load(AtomicOrdering::Relaxed)
     }
 
     /// Return the current freeze-safe projection for composition roots that
@@ -2060,6 +2073,8 @@ impl CoordinatorState {
         if let Some(reason) = self.durability_gate.frozen_reason() {
             return Err(CostPersistError::Frozen(reason));
         }
+        #[cfg(test)]
+        self.hydration_replays.fetch_add(1, AtomicOrdering::Relaxed);
         let hydrated = match hydrate_from_journal(&self.journal, self.session_id) {
             Ok(hydrated) => hydrated,
             Err(error) if rebuildable_ledger_damage(&error) => {
@@ -3692,6 +3707,7 @@ mod tests {
         );
 
         let first = manager.ensure_coordinator(session_id).await.unwrap();
+        assert_eq!(first.hydration_replay_count(), 1);
         let projection = first
             .projection()
             .expect("new coordinator is hydrated before publication")
@@ -3704,6 +3720,7 @@ mod tests {
 
         let reused = manager.ensure_coordinator(session_id).await.unwrap();
         assert!(first.shares_authority(&reused));
+        assert_eq!(reused.hydration_replay_count(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first.journal().replay().unwrap().entries.len(), 1);
         manager.flush_all().await.unwrap();
@@ -3829,8 +3846,89 @@ mod tests {
         assert_eq!(tracker.session_id().await, session_a);
         assert_eq!(tracker.snapshot().await.session_id, session_a);
         assert!(manager.coordinator(session_b).is_some());
+        assert_eq!(coordinator_a.hydration_replay_count(), 2);
+        assert_eq!(
+            manager
+                .coordinator(session_b)
+                .unwrap()
+                .hydration_replay_count(),
+            2,
+            "cold preparation needs startup recovery and the final tracker hydration"
+        );
         drop(prepared);
         assert_eq!(tracker.session_id().await, session_a);
+        manager.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_prepare_repairs_torn_tail_and_warm_prepare_reuses_authoritative_cost() {
+        use orchestrator::conversation::CostSessionSwitcher;
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new();
+        let prior =
+            SessionStateCoordinator::open(directory.path(), session_id, lease(session_id)).unwrap();
+        persist_cost(&prior, session_id, 1, 37).await;
+        let wal = prior
+            .journal()
+            .root()
+            .join(session::jsonl::JOURNAL_FILE_NAME);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal)
+            .unwrap()
+            .write_all(b"{\"interrupted\":")
+            .unwrap();
+        drop(prior);
+
+        let manager = SessionStateManager::new_with_legacy_shadow(
+            directory.path(),
+            Some(Arc::new(|_| Some(99))),
+        );
+        let initial_id = SessionId::new();
+        let (legacy_tx, _legacy_rx) = tokio::sync::mpsc::channel(1);
+        let tracker = Arc::new(CostTracker::new(
+            initial_id,
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+            legacy_tx,
+        ));
+        let prepared = manager
+            .prepare_session(tracker.clone(), session_id)
+            .await
+            .unwrap();
+        let coordinator = manager.coordinator(session_id).unwrap();
+        assert_eq!(coordinator.hydration_replay_count(), 2);
+        assert_eq!(tracker.session_id().await, initial_id);
+        drop(prepared);
+        tracker.switch_session(session_id).await.unwrap();
+        let expected = tracker.snapshot().await;
+        assert_eq!(expected.session_id, session_id);
+        assert_eq!(expected.total_nano_usd, 37);
+        assert_eq!(expected.legacy_opening_balance_nano_usd, 0);
+        assert!(expected.legacy_import_evaluated);
+        assert_eq!(expected.cost_revision, 2);
+        assert_eq!(coordinator.projection().unwrap(), (expected.clone(), 2));
+        let replay = coordinator.journal().replay().unwrap();
+        assert_eq!(replay.entries.len(), 2);
+        assert_eq!(replay.entries.last().unwrap().journal_revision, 2);
+        assert!(!std::fs::read_to_string(wal)
+            .unwrap()
+            .contains("interrupted"));
+
+        let warm = manager
+            .prepare_session(tracker.clone(), session_id)
+            .await
+            .unwrap();
+        assert_eq!(coordinator.hydration_replay_count(), 2);
+        drop(warm);
+        assert_eq!(tracker.snapshot().await, expected);
+        coordinator.durability_gate().freeze("fixture freeze");
+        assert!(matches!(
+            coordinator.hydrate(session_id).await,
+            Err(CostPersistError::Frozen(reason)) if reason == "fixture freeze"
+        ));
+        assert_eq!(coordinator.hydration_replay_count(), 2);
         manager.close_and_drain().await.unwrap();
     }
 

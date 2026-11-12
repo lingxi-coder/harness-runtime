@@ -262,6 +262,7 @@ async fn run(
         let _ = rt.shutdown().await;
         return Err(TeamProcessError::Worker);
     }
+    drop(mounted_cfg);
     let gate = rt
         .permission_gate
         .as_ref()

@@ -261,7 +261,7 @@ impl CompactionOrchestrator {
         custom_instructions: Option<&Utf16JsonProjection>,
         api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
-        if crate::grouping::group_messages_by_api_round(&messages).len() < 2 {
+        if crate::grouping::api_round_count(&messages) < 2 {
             return Err(CompactionError::NotEnoughMessages);
         }
 
@@ -1024,12 +1024,41 @@ mod tests {
     #[tokio::test]
     async fn forced_compact_rejects_history_without_a_completed_reply() {
         let orch = forced_orchestrator(0).await;
+        let before = crate::grouping::block_estimate_calls();
         let err = orch
             .process_forced(vec![long_user(0)], None, None)
             .await
             .expect_err("a lone user message is not enough");
+        assert_eq!(crate::grouping::block_estimate_calls(), before);
         assert!(matches!(err, CompactionError::NotEnoughMessages));
         assert_eq!(err.to_string(), "Not enough messages to compact.");
+    }
+
+    #[tokio::test]
+    async fn forced_compact_guard_does_not_estimate_the_valid_input_again() {
+        let orch = forced_orchestrator(u64::MAX).await;
+        let messages = vec![
+            long_user(0),
+            assistant("first reply"),
+            long_user(1),
+            assistant("second reply"),
+        ];
+        let expected_pre = crate::grouping::estimate_tokens_for_range(&messages);
+        let before = crate::grouping::block_estimate_calls();
+        let result = orch
+            .process_forced(messages.clone(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::grouping::block_estimate_calls() - before,
+            messages.len() + 1
+        );
+        assert_eq!(result.messages_to_preserve, messages[3..]);
+        assert_eq!(
+            result.total_tokens_freed,
+            expected_pre
+                .saturating_sub(crate::grouping::estimate_tokens_for_range(&result.messages))
+        );
     }
 
     /// The 2.1.286 Hre last resort summarizes a complete single exchange.

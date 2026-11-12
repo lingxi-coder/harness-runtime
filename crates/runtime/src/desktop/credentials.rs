@@ -1066,7 +1066,7 @@ pub fn api_service_from_stack(
     .with_thinking(cfg.session_thinking)
     .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
     .with_effort_settings_source({
-        let effort_cfg = cfg.clone();
+        let effort_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || {
             let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(
                 &effort_cfg,
@@ -1079,7 +1079,7 @@ pub fn api_service_from_stack(
         })
     })?
     .with_prompt_cache_ttl_settings_source({
-        let cache_cfg = cfg.clone();
+        let cache_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
     });
 
