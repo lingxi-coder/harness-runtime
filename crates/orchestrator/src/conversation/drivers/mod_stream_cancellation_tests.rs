@@ -151,6 +151,7 @@ async fn raw_stream(
         None,
         ModelCallRetryScope::default(),
         Default::default(),
+        llm_runtime::context_usage::ContextUsageEstimator::new(|_, _, _| None),
         None,
         None,
         Default::default(),

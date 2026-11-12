@@ -52,6 +52,7 @@ pub mod computer;
 pub mod config;
 pub use computer::{scope_computer_request, ComputerNativeDeclaration, ComputerRequestProjection};
 mod classifier_cache;
+pub mod context_usage;
 pub mod convert;
 pub mod cost;
 mod dispatch_header;

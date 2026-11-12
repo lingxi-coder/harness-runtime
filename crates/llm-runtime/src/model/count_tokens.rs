@@ -32,8 +32,20 @@ pub async fn count_tokens(
 ) -> Result<u64, LlmError> {
     match try_count_tokens_exact(client, transport, request).await? {
         Some(tokens) => Ok(tokens),
-        None => Ok(approximate_tokens(request)),
+        None => Ok(estimate_input_tokens(request)),
     }
+}
+
+/// Prefer the last provider's measured prefix plus newly appended content.
+/// A first request or changed input/route falls back to whole-input estimation.
+#[must_use]
+pub fn estimate_input_tokens(request: &LlmRequest) -> u64 {
+    request
+        .execution
+        .context_usage_estimate
+        .as_ref()
+        .and_then(|usage| usage.tokens_for(request))
+        .unwrap_or_else(|| approximate_tokens(request))
 }
 
 /// Count tokens only when the resolved route exposes Anthropic's exact

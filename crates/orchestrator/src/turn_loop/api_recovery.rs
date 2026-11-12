@@ -353,10 +353,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
         side_cancel,
     );
     let request_history = request.messages.clone();
-    let first = side_request!(orch
-        .model_runtime
-        .prompt_cache_capture
-        .scope(crate::native_computer::call_model(orch, request)));
+    let first =
+        side_request!(orch.scope_main_request(crate::native_computer::call_model(orch, request)));
     orch.record_native_afk_beta_rejection_if_any();
 
     // An assembled request can cross its local soft budget before the
@@ -498,10 +496,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         side_cancel,
                     );
                     let request_history = request.messages.clone();
-                    let retry_result = side_request!(orch
-                        .model_runtime
-                        .prompt_cache_capture
-                        .scope(crate::native_computer::call_model(orch, request)));
+                    let retry_result =
+                        side_request!(orch
+                            .scope_main_request(crate::native_computer::call_model(orch, request)));
                     orch.record_native_afk_beta_rejection_if_any();
                     return match retry_result {
                         Ok(resp) => {
@@ -609,10 +606,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     side_cancel,
                 );
                 let request_history = request.messages.clone();
-                let retry_result = side_request!(orch
-                    .model_runtime
-                    .prompt_cache_capture
-                    .scope(crate::native_computer::call_model(orch, request)));
+                let retry_result = side_request!(
+                    orch.scope_main_request(crate::native_computer::call_model(orch, request))
+                );
                 orch.record_native_afk_beta_rejection_if_any();
                 match retry_result {
                     Ok(resp) => {
@@ -919,10 +915,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     side_cancel,
                 );
                 let request_history = request.messages.clone();
-                let retry_result = side_request!(orch
-                    .model_runtime
-                    .prompt_cache_capture
-                    .scope(crate::native_computer::call_model(orch, request)));
+                let retry_result = side_request!(
+                    orch.scope_main_request(crate::native_computer::call_model(orch, request))
+                );
                 orch.record_native_afk_beta_rejection_if_any();
                 match retry_result {
                     Ok(resp) => {

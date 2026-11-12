@@ -126,6 +126,32 @@ pub(crate) fn has_measured_usage(
     usage_anchor(history, metadata).is_some_and(|(_, tokens)| tokens > 0)
 }
 
+fn measured_route_matches(
+    history: &[ConversationMessage],
+    metadata: &NativeRequestHistoryMetadata,
+    model: &str,
+    profile: Option<&str>,
+) -> bool {
+    // The route must belong to the positive usage anchor. A later zero-usage
+    // placeholder on another model must not relabel an older model's count.
+    for message in history.iter().rev() {
+        if compaction::is_compact_boundary(message) {
+            return false;
+        }
+        if !matches!(message, ConversationMessage::Assistant { .. }) {
+            continue;
+        }
+        let Some(source) = metadata.assistant_usage.get(&message.id()) else {
+            continue;
+        };
+        if normalized_usage(source).is_some() {
+            return source.string_at("/requestedModel") == Some(model)
+                && source.string_at("/requestedProfile") == profile;
+        }
+    }
+    false
+}
+
 /// Current retained context, falling back to message estimates without usage.
 pub(crate) fn live_context_tokens(
     history: &[ConversationMessage],
@@ -496,6 +522,34 @@ pub(crate) fn usage_metadata_from_rows(
 }
 
 impl ConversationOrchestrator {
+    pub(crate) async fn main_context_usage_estimator(
+        &self,
+    ) -> llm_runtime::context_usage::ContextUsageEstimator {
+        let metadata = NativeRequestHistoryMetadata {
+            assistant_usage: self
+                .session
+                .lock()
+                .await
+                .native_request_history
+                .assistant_usage
+                .clone(),
+            ..Default::default()
+        };
+        llm_runtime::context_usage::ContextUsageEstimator::new(move |model, profile, history| {
+            measured_route_matches(history, &metadata, model, profile)
+                .then(|| live_context_tokens(history, &metadata))
+        })
+    }
+
+    /// Each API round captures fresh usage. Concurrent chats and side queries
+    /// cannot borrow another conversation's measured prefix.
+    pub(crate) async fn scope_main_request<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.main_context_usage_estimator()
+            .await
+            .scope(self.model_runtime.prompt_cache_capture.scope(future))
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn current_context_usage_for(&self, history: &[ConversationMessage]) -> u64 {
         context_tokens_for_compaction(history, &self.session.lock().await.native_request_history)
@@ -538,6 +592,85 @@ mod tests {
             Arc::new(crate::test_support::StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
+    }
+
+    #[tokio::test]
+    async fn main_request_uses_provider_usage_plus_only_new_content_on_the_same_route() {
+        let orch = test_orchestrator();
+        let mut opaque = assistant(MessageId::new(), "old");
+        if let ConversationMessage::Assistant { content, .. } = &mut opaque {
+            *content = vec![ContentBlock::ProviderContent {
+                protocol: "open_ai_responses".into(),
+                value: Source::from_serde_value(&serde_json::json!({
+                    "type":"reasoning", "encrypted_content":"x".repeat(900_000),
+                }))
+                .unwrap(),
+            }];
+        }
+        let measured = assistant(MessageId::new(), "last answer");
+        let history = vec![
+            opaque,
+            measured.clone(),
+            ConversationMessage::user(MessageId::new(), "tailtail".into()),
+        ];
+        {
+            let mut state = orch.session.lock().await;
+            state.history = history.clone();
+            state.native_request_history.assistant_usage.insert(measured.id(), Source::parse(
+                r#"{"providerMessageId":"last-response","requestedModel":"requested","requestedProfile":"openai","usage":{"input_tokens":3,"cache_creation_input_tokens":106617,"cache_read_input_tokens":20709,"output_tokens":638}}"#,
+            ).unwrap());
+        }
+        let estimator = orch.main_context_usage_estimator().await;
+        assert_eq!(
+            estimator.estimate("requested", Some("openai"), &history),
+            Some(127_969)
+        );
+        assert_eq!(orch.current_live_context_usage_for(&history).await, 127_969);
+        assert_eq!(estimator.estimate("other", Some("openai"), &history), None);
+        assert_eq!(
+            estimator.estimate("requested", Some("other"), &history),
+            None
+        );
+        assert_eq!(estimator.estimate("requested", None, &history), None);
+        assert_eq!(
+            estimator.estimate("requested", Some("openai"), &history[2..]),
+            None,
+            "compacted or rewritten history cannot retain an absent usage anchor"
+        );
+
+        let mut grown = history;
+        grown.push(ConversationMessage::user(
+            MessageId::new(),
+            "x".repeat(600_000),
+        ));
+        assert_eq!(
+            estimator.estimate("requested", Some("openai"), &grown),
+            Some(277_969)
+        );
+        let placeholder = assistant(MessageId::new(), "pending");
+        orch.session.lock().await.native_request_history.assistant_usage.insert(
+            placeholder.id(),
+            Source::parse(r#"{"requestedModel":"other","requestedProfile":"other","usage":{"input_tokens":0,"output_tokens":0}}"#).unwrap(),
+        );
+        grown.push(placeholder);
+        assert_eq!(
+            orch.main_context_usage_estimator().await.estimate("other", Some("other"), &grown),
+            None,
+            "a zero-usage model switch cannot borrow the preceding model's count"
+        );
+        orch.session
+            .lock()
+            .await
+            .native_request_history
+            .assistant_usage
+            .clear();
+        assert_eq!(
+            orch.main_context_usage_estimator()
+                .await
+                .estimate("requested", Some("openai"), &grown),
+            None,
+            "the next API round captures fresh usage"
+        );
     }
 
     #[test]
@@ -792,8 +925,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cold_resume_restores_outer_requested_model_and_profile() {
+    #[tokio::test]
+    async fn cold_resume_restores_outer_requested_model_and_profile() {
         let session = uuid::Uuid::new_v4();
         let id = uuid::Uuid::new_v4();
         let raw = serde_json::to_string(&serde_json::json!({
@@ -811,6 +944,16 @@ mod tests {
         assert_eq!(
             latest_requested_model(&state.history, &state.native_request_history),
             Some(("requested-large", Some("same-provider")))
+        );
+        let orch = test_orchestrator();
+        orch.session.lock().await.native_request_history = state.native_request_history;
+        assert_eq!(
+            orch.main_context_usage_estimator().await.estimate(
+                "requested-large",
+                Some("same-provider"),
+                &state.history,
+            ),
+            Some(200_100)
         );
     }
 

@@ -407,6 +407,7 @@ fn mod_turn_step_stream(
     output_observation: Option<output_accounting_impl::MainOutputObservation>,
     retry_scope: ModelCallRetryScope,
     request_capture: llm_runtime::prompt_cache::RequestCapture,
+    context_usage: llm_runtime::context_usage::ContextUsageEstimator,
     request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
     native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
     typed_attachment_ids: std::collections::HashSet<MessageId>,
@@ -461,6 +462,7 @@ fn mod_turn_step_stream(
             let fallback_output = output.clone();
             let fallback_retry_scope = retry_scope.clone();
             let fallback_request_capture = request_capture.clone();
+            let fallback_context_usage = context_usage.clone();
             let source_retry_scope = retry_scope.clone();
             let source_request_capture = request_capture.clone();
             let source_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
@@ -499,6 +501,7 @@ fn mod_turn_step_stream(
                 let requested_model = source_requested.clone();
                 let retry_scope = source_retry_scope.clone();
                 let request_capture = source_request_capture.clone();
+                let context_usage = context_usage.clone();
                 let request_dispatch_observer =
                     observe_main_dispatch(source_dispatch_observer.clone(), &source_output);
                 let capture_native_frames = source_output.wants_native_stream_frames();
@@ -685,7 +688,7 @@ fn mod_turn_step_stream(
                             Some(route.clone()),
                             PROMPT_POLICY_OVERRIDE.scope(
                                 (route, Arc::clone(&components.policy)),
-                                retry_scope.run(request_capture.scope(
+                                retry_scope.run(context_usage.scope(request_capture.scope(
                                     llm_runtime::native_stream_capture::scope_requested(
                                         capture_native_frames,
                                         api.stream_with_effort_override(
@@ -708,7 +711,7 @@ fn mod_turn_step_stream(
                                             scalar_user_content_ids.clone(),
                                         ),
                                     ),
-                                )),
+                                ))),
                             ),
                         )
                         .await
@@ -867,7 +870,7 @@ fn mod_turn_step_stream(
                             fallback_components.clone(),
                         ));
                         let stream = fallback_retry_scope
-                            .run(fallback_request_capture.scope(
+                            .run(fallback_context_usage.scope(fallback_request_capture.scope(
                                 llm_runtime::native_stream_capture::scope_requested(
                                     fallback_output.wants_native_stream_frames(),
                                     fallback_api.stream_with_effort_override(
@@ -893,7 +896,7 @@ fn mod_turn_step_stream(
                                         fallback_scalar_user_content_ids,
                                     ),
                                 ),
-                            ))
+                            )))
                             .await;
                         match stream {
                             Ok(stream) => {
@@ -1663,6 +1666,7 @@ impl StreamingTurnDriver<'_> {
                 first_output_observation.take().flatten(),
                 retry_scope.clone(),
                 orch.model_runtime.prompt_cache_capture.clone(),
+                orch.main_context_usage_estimator().await,
                 orch.turn_request_dispatch_observer(),
                 native_anthropic_request_context.clone(),
                 typed_attachment_ids.clone(),
@@ -1737,7 +1741,7 @@ impl StreamingTurnDriver<'_> {
             open_cancelable_stream(
                 user_cancel,
                 Box::pin(
-                    retry_scope.run(orch.model_runtime.prompt_cache_capture.scope(
+                    retry_scope.run(orch.scope_main_request(
                         llm_runtime::native_stream_capture::scope_requested(
                             orch.output.wants_native_stream_frames(),
                             orch.streaming_api.stream_with_effort_override(
@@ -2311,9 +2315,7 @@ impl StreamingTurnDriver<'_> {
             orch,
             user_cancel,
             retry_scope.run(
-                orch.model_runtime
-                    .prompt_cache_capture
-                    .scope(
+                orch.scope_main_request(
                         orch.api
                             .messages_create(crate::OrchestratorApiRequest::Main({
                                 let mut request = llm_runtime::MessagesCreateRequest::new(
@@ -2964,7 +2966,7 @@ impl StreamingTurnDriver<'_> {
                                 user_cancel,
                                 Box::pin(
                                     retry_scope.run(
-                                        orch.model_runtime.prompt_cache_capture.scope(
+                                        orch.scope_main_request(
                                             llm_runtime::native_stream_capture::scope_requested(
                                                 orch.output.wants_native_stream_frames(),
                                                 orch.streaming_api.stream_with_effort_override(

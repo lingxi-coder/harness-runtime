@@ -23,12 +23,11 @@ mod tests {
     use super::*;
     use lingxi_llm_client::providers::anthropic::system_prompt::PromptText;
 
-    #[tokio::test]
-    async fn context_policy_stops_oversized_custom_input_before_generation() {
+    fn context_policy_fixture(input_tokens: u64) -> (ApiService, Arc<FakeTransport>) {
         let mut provider = crate::builtin_presets()
             .providers
             .into_iter()
-            .find(|p| p.profile_name == "openai-chat")
+            .find(|p| p.profile_name == "openai")
             .unwrap();
         provider.profile_name = "context-policy-test".into();
         provider.provider_id = crate::ProviderId::Custom {
@@ -48,7 +47,7 @@ mod tests {
         model.metadata = lingxi_core::host::ModelMetadata {
             context_window_tokens: Some(1000000),
             context: Some(lingxi_core::host::ContextMetadata {
-                application: Some(lingxi_core::host::ContextPolicy::Custom { input_tokens: 100 }),
+                application: Some(lingxi_core::host::ContextPolicy::Custom { input_tokens }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -71,6 +70,12 @@ mod tests {
             None,
         )
         .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        (service, transport)
+    }
+
+    #[tokio::test]
+    async fn context_policy_stops_oversized_custom_input_before_generation() {
+        let (service, transport) = context_policy_fixture(100);
         let mut request = LlmRequest::new("m").with_user_text("x".repeat(1000));
         request.profile = Some("context-policy-test".into());
         let error = service
@@ -86,6 +91,96 @@ mod tests {
             }
         ));
         assert_eq!(transport.seen_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn context_policy_measured_prefix_ignores_opaque_bytes_but_admits_new_input() {
+        use crate::model::count_tokens::{approximate_tokens, estimate_input_tokens};
+        use lingxi_core::types::{ContentBlock, MessageId};
+
+        let (service, transport) = context_policy_fixture(272_000);
+        let old = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ProviderContent {
+                protocol: "open_ai_responses".into(),
+                value: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"reasoning", "encrypted_content":"x".repeat(900_000)}),
+                ).unwrap(),
+            }],
+            stop_reason: Some("end_turn".into()),
+            per_turn_effort: None,
+            resumable: None,
+        };
+        let estimator =
+            crate::context_usage::ContextUsageEstimator::new(|model, profile, history| {
+                assert_eq!((model, profile), ("m", Some("context-policy-test")));
+                // Orchestrator tests cover extracting this measured baseline from
+                // provider usage. Here exercise request building and admission.
+                let new_tokens = history[1..]
+                    .iter()
+                    .flat_map(|message| match message {
+                        ConversationMessage::User { content, .. } => content.as_slice(),
+                        _ => &[],
+                    })
+                    .map(|block| match block {
+                        ContentBlock::Text { text, .. } => text.len() as u64 / 4,
+                        _ => 0,
+                    })
+                    .sum::<u64>();
+                Some(127_967 + new_tokens)
+            });
+        for stream in [false, true] {
+            let make_request = |text: String| {
+                MessagesCreateRequest::new(
+                    "m",
+                    Some("context-policy-test"),
+                    None,
+                    vec![
+                        old.clone(),
+                        ConversationMessage::user(MessageId::new(), text),
+                    ],
+                    vec![],
+                )
+            };
+            let (request, _) = estimator
+                .scope(async {
+                    service.build_main_message_request(make_request("tailtail".into()), stream)
+                })
+                .await
+                .unwrap();
+            assert!(approximate_tokens(&request) > 272_000);
+            assert_eq!(estimate_input_tokens(&request), 127_969);
+            service.ensure_context_fit(&request).await.unwrap();
+
+            let (larger, _) = estimator
+                .scope(async {
+                    service.build_main_message_request(make_request("x".repeat(600_000)), stream)
+                })
+                .await
+                .unwrap();
+            assert_eq!(estimate_input_tokens(&larger), 277_967);
+            assert!(matches!(
+                service.ensure_context_fit(&larger).await,
+                Err(LlmError::InputBudgetExceeded {
+                    input_tokens: 277_967,
+                    budget: 272_000,
+                    ..
+                })
+            ));
+
+            let (unmeasured, _) = service
+                .build_main_message_request(make_request("tailtail".into()), stream)
+                .unwrap();
+            assert!(matches!(
+                service.ensure_context_fit(&unmeasured).await,
+                Err(LlmError::InputBudgetExceeded { .. })
+            ));
+        }
+        assert_eq!(
+            transport.seen_count(),
+            0,
+            "no generation or counting calls for local admission"
+        );
     }
 
     fn context_policy_count_fixture(
@@ -143,6 +238,20 @@ mod tests {
         request.profile = Some("context-count-test".into());
         request.input.max_tokens = Some(512);
         (service, transport, request)
+    }
+
+    #[tokio::test]
+    async fn context_policy_fresh_provider_count_overrides_measured_prefix_estimate() {
+        let (service, transport, mut request) = context_policy_count_fixture(FakeResponse::Ok(
+            ProviderResponse::json(200, serde_json::json!({"input_tokens":9000})),
+        ));
+        request.execution.context_usage_estimate =
+            crate::context_usage::ContextUsageEstimate::bind(&request, 7400);
+        assert!(matches!(
+            service.ensure_context_fit(&request).await,
+            Err(LlmError::ContextOverflow { .. })
+        ));
+        assert_eq!(transport.seen_count(), 1);
     }
 
     #[tokio::test]

@@ -386,6 +386,9 @@ impl PartialEq for RequestCredentials {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Last provider usage plus new content, bound to this request's input.
+    /// Host-only; never serialized into model input or carried across reroutes.
+    pub context_usage_estimate: Option<crate::context_usage::ContextUsageEstimate>,
     /// Selected resource identity; token rotation keeps this identity stable.
     pub selected_account: Option<crate::accounts::AccountResourceScope>,
     /// Optional operation-wide physical API attempt budget. Host-only; never

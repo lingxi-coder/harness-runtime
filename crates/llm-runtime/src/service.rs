@@ -3478,7 +3478,7 @@ impl ApiService {
         let Some(budget) = context.effective_input_budget else {
             return Ok(());
         };
-        let estimate = crate::model::count_tokens::approximate_tokens(request);
+        let estimate = crate::model::count_tokens::estimate_input_tokens(request);
         if estimate < budget.saturating_sub(13_000.min(budget / 10)) {
             return Ok(());
         }
@@ -12908,6 +12908,7 @@ impl ApiService {
             &mut msgs,
             tool_result_reminder_suffixes,
         );
+        let context_tokens = crate::context_usage::estimate(model, profile, &msgs);
         let native_system_prefix = self
             .native_system_prefix
             .as_ref()
@@ -13279,6 +13280,8 @@ impl ApiService {
         if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
             req.set_effort(Some(effort))?;
         }
+        req.execution.context_usage_estimate = context_tokens
+            .and_then(|tokens| crate::context_usage::ContextUsageEstimate::bind(&req, tokens));
         Ok(req)
     }
 
