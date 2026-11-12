@@ -2626,6 +2626,16 @@ pub async fn replay_deferred_tools_after_resume(
         tool_results.extend(outcome.tool_results);
         injected_messages.extend(outcome.injected_messages);
     }
+    persist_replayed_tool_results(orch, tool_use_ids, tool_results, injected_messages).await
+}
+
+/// Put every replayed result in ONE user message, in history and transcript.
+async fn persist_replayed_tool_results(
+    orch: &ConversationOrchestrator,
+    tool_use_ids: Vec<ToolUseId>,
+    tool_results: Vec<ContentBlock>,
+    injected_messages: Vec<(ConversationMessage, ToolUseId)>,
+) -> Result<(), crate::OrchestratorError> {
     if tool_results.is_empty() {
         return Ok(());
     }
@@ -2657,6 +2667,35 @@ pub async fn replay_deferred_tools_after_resume(
     })
     .await;
     Ok(())
+}
+
+
+/// Execute calls whose assistant row is durable but whose result row is not,
+/// through the ordinary dispatch/permission/hook path. Unlike a deferred hook
+/// replay this keeps no Started checkpoint: the caller guarantees that every
+/// call is an idempotent read-only capability that may run again under the
+/// current authorization. One user row carries every result.
+pub async fn replay_unfinished_read_only_tool_calls(
+    orch: &ConversationOrchestrator,
+    calls: Vec<lingxi_core::host::DeferredToolReplay>,
+) -> Result<(), crate::OrchestratorError> {
+    let mut tool_use_ids: Vec<ToolUseId> = Vec::new();
+    let mut tool_results: Vec<ContentBlock> = Vec::new();
+    let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
+    for call in calls {
+        orch.check_storage_pause().await?;
+        let outcome = crate::turn_loop::boxed_turn_future(|| {
+            replay_deferred_tool_after_resume(orch, call)
+        })
+        .await?;
+        if outcome.tool_results.is_empty() {
+            continue;
+        }
+        tool_use_ids.push(outcome.tool_use_id);
+        tool_results.extend(outcome.tool_results);
+        injected_messages.extend(outcome.injected_messages);
+    }
+    persist_replayed_tool_results(orch, tool_use_ids, tool_results, injected_messages).await
 }
 
 fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalState>> {

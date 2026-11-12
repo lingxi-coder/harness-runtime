@@ -94,3 +94,21 @@ pub fn model(
     profile.profile_name = "fixture-anthropic".into();
     selected(TeamModelRoute::for_account(profile, &model)?, key)
 }
+
+/// Synthetic OpenAI-Chat-compatible route for loopback continuation fixtures.
+#[allow(dead_code)]
+pub fn openai_chat_model(
+    model: String,
+    endpoint: String,
+    key: String,
+) -> Result<TeamProcessModel, TeamProcessError> {
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"fixture","profile_name":"fixture-openai-chat","base_url":endpoint,
+        "protocol":"open_ai_chat","auth":"api_key",
+        "credential":{"source":"host_managed","key":"team-selected-model"},
+        "models":[{"display_model":model,"request_model":model,"billing_model":model,
+        "capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}
+    }))
+    .map_err(|_| TeamProcessError::Model)?;
+    selected(TeamModelRoute::for_account(profile, &model)?, key)
+}

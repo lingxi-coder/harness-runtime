@@ -3,8 +3,8 @@ use crate::desktop::team_invocation::{BotChatScope, TeamInvocationLimits};
 use crate::desktop::team_process::{
     self, TeamAccountEnvelope, TeamChatReadRequest, TeamChatReadResult, TeamDataRef,
     TeamKnowledgeDocument, TeamModelRoute, TeamProcessBroker, TeamProcessDeadline,
-    TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
-    TeamProviderAccountRefresh,
+    TeamContinuation, TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest,
+    TeamProcessStart, TeamProviderAccountRefresh,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -37,6 +37,7 @@ struct Start {
     model: Option<Model>,
     credentials: Option<TeamAccountEnvelope>,
     limits: Option<Limits>,
+    continuation: Option<TeamContinuation>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,7 +61,7 @@ impl Start {
         if self.version != 3
             || !matches!(
                 self.kind.as_str(),
-                "inspect_scope" | "inspect_result" | "run"
+                "inspect_scope" | "inspect_result" | "inspect_task" | "run" | "continue"
             )
         {
             return Err(Error::Protocol);
@@ -74,7 +75,8 @@ impl Start {
             || self.deadline_at.is_some()
             || self.model.is_some()
             || self.credentials.is_some()
-            || self.limits.is_some();
+            || self.limits.is_some()
+            || self.continuation.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
             && self.instructions.is_some()
@@ -86,9 +88,36 @@ impl Start {
             && self.limits.is_some();
         if self.kind == "inspect_scope" && (any || self.task_id.is_some())
             || self.kind == "inspect_result" && (any || self.task_id.is_none())
-            || self.kind == "run" && !all
+            || self.kind == "run" && (!all || self.continuation.is_some())
+            || self.kind == "continue" && (!all || self.continuation.is_none())
         {
             return Err(Error::Protocol);
+        }
+        if self.kind == "inspect_task" {
+            // Read-only: the route is needed only to say whether continuation
+            // is enabled for it. No credentials, endpoint use or model call.
+            let only_task_and_model = self.task_id.is_some()
+                && self.model.is_some()
+                && self.invocation_id.is_none()
+                && self.instructions.is_none()
+                && self.input_batch_ref.is_none()
+                && self.knowledge.is_none()
+                && self.deadline_at.is_none()
+                && self.credentials.is_none()
+                && self.limits.is_none()
+                && self.continuation.is_none();
+            if !only_task_and_model {
+                return Err(Error::Protocol);
+            }
+        }
+        if let Some(continuation) = &self.continuation {
+            if self.kind != "continue" {
+                return Err(Error::Protocol);
+            }
+            // Re-checked by the runtime; refuse malformed epochs before any I/O.
+            if continuation.epoch < 2 || continuation.expected_checkpoint_digest.len() != 64 {
+                return Err(Error::Protocol);
+            }
         }
         Ok(())
     }
@@ -410,6 +439,19 @@ fn entry() -> Result<(), Error> {
                 }
             };
         }
+        if boot.kind == "inspect_task" {
+            let model = boot.model.as_ref().ok_or(Error::Protocol)?;
+            let checkpoint = team_process::inspect_task(
+                &boot.storage_root,
+                &boot.scope,
+                boot.task_id.as_deref().ok_or(Error::Protocol)?,
+                model.model_protocol,
+            )?;
+            let mut value = serde_json::to_value(&checkpoint).map_err(|_| Error::Protocol)?;
+            value["type"] = json!("result");
+            value["status"] = json!("task_checkpoint");
+            return bridge.emit(value);
+        }
         let stop = bridge.cancel.clone();
         let watcher = tokio::spawn(async move {
             if let Ok(mut signal) =
@@ -421,10 +463,17 @@ fn entry() -> Result<(), Error> {
         });
         let root = boot.storage_root.clone();
         let worker = boot.worker_executable.clone();
+        let continuation = boot.continuation.clone();
         let request = boot.request()?;
         let task_id = request.task_id.clone();
         bridge.authorize(bridge.cancel.child_token()).await?;
-        let result = TeamProcessStart::prepare(&root, request)?
+        let start = match continuation {
+            Some(continuation) => {
+                TeamProcessStart::prepare_continuation(&root, request, continuation)?
+            }
+            None => TeamProcessStart::prepare(&root, request)?,
+        };
+        let result = start
             .run_with_broker(&worker, bridge.cancel.child_token(), bridge.clone())
             .await;
         watcher.abort();
@@ -437,7 +486,7 @@ fn entry() -> Result<(), Error> {
 }
 fn result_value(result: team_process::TeamProcessResult) -> Value {
     let mut value = json!({"version":3,"type":"result","status":if result.outcome==TeamProcessOutcome::Completed{"completed"}else{"failed"},
-        "text":result.text,"cursor":result.cursor,"finishedAt":result.finished_at,"dispatchedRequests":result.dispatched_requests,"deniedTools":result.denied_tools,"usage":result.usage});
+        "text":result.text,"cursor":result.cursor,"finishedAt":result.finished_at,"dispatchedRequests":result.dispatched_requests,"attemptDispatchedRequests":result.attempt_dispatched_requests,"deniedTools":result.denied_tools,"usage":result.usage});
     if let Some(document) = result.document {
         value["document"] = json!(document);
     }
@@ -473,7 +522,19 @@ fn save_result(root: &Path, task_id: &str, value: &Value) -> Result<(), Error> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
     }
-    let mut file = options.open(path)?;
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        // A continuation that returns the already recorded terminal result may
+        // find the host's earlier copy; it must be byte-identical.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return if std::fs::read(&path)? == bytes {
+                Ok(())
+            } else {
+                Err(Error::Protocol)
+            };
+        }
+        Err(e) => return Err(e.into()),
+    };
     file.write_all(&bytes)?;
     file.sync_all()?;
     std::fs::File::open(&directory)?.sync_all()?;
@@ -488,6 +549,9 @@ pub fn host_main() -> i32 {
                 Error::Model => "MODEL_UNAVAILABLE",
                 Error::Deadline => "TASK_EXPIRED",
                 Error::AlreadyAttempted => "TASK_INTERRUPTED",
+                Error::CheckpointMismatch => "CHECKPOINT_MISMATCH",
+                Error::NotContinuable => "NOT_CONTINUABLE",
+                Error::RouteUnsupported => "ROUTE_UNSUPPORTED",
                 Error::Environment => "ENVIRONMENT",
                 Error::Worker => "WORKER",
                 Error::Capacity => "CHAT_CONTEXT_CAPACITY",

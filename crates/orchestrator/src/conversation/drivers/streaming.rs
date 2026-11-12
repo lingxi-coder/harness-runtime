@@ -4624,6 +4624,95 @@ impl StreamingTurnDriver<'_> {
         })
     }
 
+    /// The model loop of [`Self::run`] over history that is already durable:
+    /// no prompt screening, no user-row append, no prompt hooks and no file
+    /// snapshot. Every later guard, round and terminal is the ordinary loop.
+    async fn run_resumed(
+        orch: &ConversationOrchestrator,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: Option<CancellationToken>,
+        in_human_turn: bool,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
+        let (prior_message_id, current_user_id) = {
+            let session = orch.session.lock().await;
+            let prior = session
+                .history
+                .last()
+                .map(ConversationMessage::id)
+                .ok_or_else(|| OrchestratorError::Internal("no durable history to resume".into()))?;
+            let user = session
+                .history
+                .iter()
+                .rev()
+                .find(|message| matches!(message, ConversationMessage::User { is_meta: false, .. }))
+                .map_or(prior, ConversationMessage::id);
+            (prior, user)
+        };
+        let empty_mod_turn_text = super::source_string_projection("");
+        orch.begin_output_turn(current_user_id).await?;
+        let mut loop_state = TurnLoopState::new(orch, prior_message_id, user_cancel.clone());
+        let final_message_id;
+        loop {
+            match orch
+                .run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut loop_state)
+                .await?
+            {
+                loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::StructuredOutputRetries(error) => return Err(error),
+                loop_state::GuardVerdict::MaxTurns => {
+                    return Err(OrchestratorError::MaxTurnsReached {
+                        max_turns: orch.config.max_turns,
+                    });
+                }
+                loop_state::GuardVerdict::OverBudget => {
+                    return Err(OrchestratorError::MaxBudgetReached {
+                        budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
+                    });
+                }
+            }
+            if token_aborted(&user_cancel) {
+                let cost = orch.snapshot_cost_real().await;
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                final_message_id = loop_state.last_message_id;
+                break;
+            }
+            if !loop_state.mod_turn_started {
+                orch.fire_mod_turn_start(&empty_mod_turn_text, &loop_state.mod_turn_id)
+                    .await;
+                loop_state.mod_turn_started = true;
+            }
+            match Box::pin(Self::run_round(
+                orch,
+                system_prompt,
+                &user_cancel,
+                &mut loop_state,
+                in_human_turn,
+            ))
+            .await?
+            {
+                StepExit::Continue => continue,
+                StepExit::FinishThroughEpilogue(message_id) => {
+                    final_message_id = message_id;
+                    break;
+                }
+                StepExit::ReturnDirect(outcome) => return Ok(outcome),
+            }
+        }
+        if !token_aborted(&user_cancel) && orch.over_budget().await {
+            let cost = orch.snapshot_cost_real().await;
+            orch.emit_turn_terminal("budget_exhausted", &cost).await;
+            return Err(OrchestratorError::MaxBudgetReached {
+                budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
+            });
+        }
+        Ok(ConversationOutcome::EndTurn {
+            turn_count: loop_state.turn_count,
+            final_message_id,
+        })
+    }
+
     pub(super) async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
         let Self {
             orch,
@@ -4653,6 +4742,13 @@ impl StreamingTurnDriver<'_> {
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
         orch.discard_stale_prefetches().await;
+
+        if super::RESUME_EXISTING_HISTORY
+            .try_with(|resume| *resume)
+            .unwrap_or(false)
+        {
+            return Self::run_resumed(orch, &system_prompt, user_cancel, in_human_turn).await;
+        }
 
         // Direct Bash already passed the host's explicit command ingress and
         // Native sends no PromptSubmit event for it. Preserve its source rows

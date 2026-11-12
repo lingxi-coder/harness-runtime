@@ -30,6 +30,9 @@ pub(super) struct Bootstrap {
     pub model_id: String,
     pub endpoint: String,
     pub credentials: super::TeamAccountEnvelope,
+    /// Present only for `continue`; absent bytes are the epoch-1 `run` bootstrap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<super::TeamContinuation>,
 }
 impl Bootstrap {
     pub fn limits(&self) -> Result<TeamInvocationLimits, TeamProcessError> {
@@ -85,6 +88,9 @@ pub(super) enum WorkerFailure {
     Model,
     Storage,
     Worker,
+    CheckpointMismatch,
+    NotContinuable,
+    RouteUnsupported,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -161,6 +167,7 @@ mod tests {
             outcome: super::super::TeamProcessOutcome::Completed,
             text: "Accepted".into(),
             dispatched_requests: 1,
+            attempt_dispatched_requests: 1,
             denied_tools: 0,
             finished_at: 1,
             cursor: Default::default(),

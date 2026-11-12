@@ -41,6 +41,13 @@ use loop_state::{StepExit, TurnEndVerdict};
 use projected_content::ProjectedUserContent;
 use streaming::StreamingTurnDriver;
 
+tokio::task_local! {
+    /// Set only by [`ConversationOrchestrator::run_resumed_turn_streaming_with_cancel`].
+    /// The streaming driver then runs the model loop on the already durable
+    /// history instead of admitting a new prompt.
+    static RESUME_EXISTING_HISTORY: bool;
+}
+
 /// One queued prompt, retaining its own transcript identity and origin class.
 #[derive(Clone, Debug)]
 pub struct QueuedPromptInput {
@@ -4062,6 +4069,28 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.run_turn_streaming_with_cancel_images_and_message_id(prompt, &[], cancel, None)
+            .await
+    }
+
+    /// Continue an interrupted turn from its durable history without admitting
+    /// a new prompt. The caller must already have made the history provider
+    /// legal (every assistant tool call paired with a persisted result). The
+    /// next model request is built from the restored history exactly as the
+    /// loop would have built it after the last persisted row.
+    pub async fn run_resumed_turn_streaming_with_cancel(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        RESUME_EXISTING_HISTORY
+            .scope(
+                true,
+                self.run_turn_streaming_with_cancel_image_sources_and_message_id(
+                    Utf16JsonProjection::from(""),
+                    Vec::new(),
+                    cancel,
+                    None,
+                ),
+            )
             .await
     }
 

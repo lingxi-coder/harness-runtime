@@ -4,11 +4,16 @@
 
 pub(crate) mod accounts;
 mod chat_session;
+mod checkpoint;
 mod data;
 mod interaction;
 pub(crate) mod read_tools;
 use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, ChatInputBatch};
-pub use chat_session::{inspect_scope, recover_result};
+pub use chat_session::{inspect_scope, inspect_task, recover_result};
+pub use checkpoint::{
+    route_supports_continuation, TeamCheckpointCursor, TeamPendingToolCall, TeamTaskCheckpoint,
+    TeamTaskPhase,
+};
 pub use data::TeamDataRef;
 pub use read_tools::{
     TeamChatQuery, TeamChatReadRequest, TeamChatReadResult, TeamKnowledgeDocument,
@@ -104,6 +109,24 @@ pub struct TeamProcessRequest {
     pub deadline: TeamProcessDeadline,
 }
 
+/// Continuation of a task whose earlier worker process died. The epoch must
+/// exceed every recorded epoch (the first `run` is epoch 1) and the digest must
+/// still match the durable checkpoint the host inspected.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TeamContinuation {
+    pub epoch: u32,
+    pub expected_checkpoint_digest: String,
+}
+impl TeamContinuation {
+    pub(crate) fn validate(&self) -> Result<(), TeamProcessError> {
+        if self.epoch < 2 || !checkpoint::valid_digest(&self.expected_checkpoint_digest) {
+            return Err(TeamProcessError::Protocol);
+        }
+        Ok(())
+    }
+}
+
 /// A single-use launch. A durable create-new tombstone refuses another launch
 /// of the same invocation, including after spawn/pipe/ACK failure. It is never
 /// automatically removed: ambiguous starts require product owner recovery.
@@ -111,6 +134,7 @@ pub struct TeamProcessStart {
     profile: TeamInvocationProfile,
     bootstrap: Bootstrap,
     deadline: TeamProcessDeadline,
+    batch_id: String,
 }
 
 impl std::fmt::Debug for TeamProcessStart {
@@ -144,6 +168,12 @@ pub enum TeamProcessError {
     ResourceLimit,
     #[error("complete Chat input exceeds the selected model context capacity")]
     Capacity,
+    #[error("Team continuation checkpoint changed since it was inspected")]
+    CheckpointMismatch,
+    #[error("Team task is not continuable from its durable checkpoint")]
+    NotContinuable,
+    #[error("Team continuation is not enabled for this provider route")]
+    RouteUnsupported,
     #[error("Team worker failed; execution must not be replayed")]
     Worker,
     #[error("Team worker process or storage operation failed")]
@@ -197,7 +227,10 @@ pub struct TeamProcessResult {
     version: u32,
     pub outcome: TeamProcessOutcome,
     pub text: String,
+    /// Provider requests authorized for the whole task, across every epoch.
     pub dispatched_requests: u32,
+    /// Provider requests authorized by the process that produced this result.
+    pub attempt_dispatched_requests: u32,
     pub denied_tools: u32,
     pub finished_at: u64,
     pub cursor: BotChatCursor,
@@ -294,6 +327,29 @@ impl TeamProcessStart {
         storage_root: &Path,
         request: TeamProcessRequest,
     ) -> Result<Self, TeamProcessError> {
+        Self::prepare_inner(storage_root, request, None)
+    }
+
+    /// Prepare the continuation of an earlier epoch. The batch is never
+    /// admitted again; the worker verifies the checkpoint digest under the
+    /// session writer lease before any provider dispatch.
+    pub fn prepare_continuation(
+        storage_root: &Path,
+        request: TeamProcessRequest,
+        continuation: TeamContinuation,
+    ) -> Result<Self, TeamProcessError> {
+        continuation.validate()?;
+        if !checkpoint::route_supports_continuation(request.model.route.model_protocol) {
+            return Err(TeamProcessError::RouteUnsupported);
+        }
+        Self::prepare_inner(storage_root, request, Some(continuation))
+    }
+
+    fn prepare_inner(
+        storage_root: &Path,
+        request: TeamProcessRequest,
+        continuation: Option<TeamContinuation>,
+    ) -> Result<Self, TeamProcessError> {
         request.deadline.check()?;
         let profile = TeamInvocationProfile::prepare(
             storage_root,
@@ -311,6 +367,7 @@ impl TeamProcessStart {
             return Err(TeamProcessError::Protocol);
         }
         read_tools::validate_knowledge(&request.knowledge)?;
+        let batch_id = batch.batch_id.clone();
         let bootstrap = Bootstrap {
             version: 3,
             storage_root: storage_root.to_owned(),
@@ -337,11 +394,13 @@ impl TeamProcessStart {
                 .model
                 .credentials
                 .for_worker(&profile.scope_root().join("home"))?,
+            continuation,
         };
         Ok(Self {
             profile,
             bootstrap,
             deadline: request.deadline,
+            batch_id,
         })
     }
 
@@ -383,6 +442,17 @@ impl TeamProcessStart {
             .bootstrap
             .input_batch_ref
             .read(&self.bootstrap.storage_root)?;
+        if self.bootstrap.continuation.is_some() {
+            // A recorded terminal result is returned as is: no epoch is
+            // consumed, no worker is spawned and no model is called.
+            if let Some(result) = chat_session::recover_result(
+                &self.bootstrap.storage_root,
+                &self.bootstrap.scope,
+                &self.bootstrap.task_id,
+            )? {
+                return Ok(result);
+            }
+        }
         let mut cfg = super::DesktopConfig::default();
         cfg.default_model = format!(
             "{}/{}",
@@ -398,7 +468,12 @@ impl TeamProcessStart {
         let frame = protocol::encode(&self.bootstrap)?;
         // Persist before spawning, even if spawn itself fails. Never reset
         // quota authority or replay ambiguous work after a lost response.
-        record_start(&self.profile)?;
+        checkpoint::record_start(
+            &self.profile.scope_root().join("home"),
+            &self.bootstrap.task_id,
+            &self.batch_id,
+            self.bootstrap.continuation.as_ref().map_or(1, |c| c.epoch),
+        )?;
         self.deadline.check()?;
         let mut command = tokio::process::Command::new(worker_executable);
         command
@@ -440,7 +515,9 @@ impl TeamProcessStart {
             if !status.success() {
                 return Err(TeamProcessError::Worker);
             }
-            if result.dispatched_requests > self.bootstrap.physical_dispatches {
+            if result.attempt_dispatched_requests > self.bootstrap.physical_dispatches
+                || result.attempt_dispatched_requests > result.dispatched_requests
+            {
                 return Err(TeamProcessError::Protocol);
             }
             self.deadline.check()?;
@@ -496,6 +573,11 @@ async fn broker_exchange(
                     protocol::WorkerFailure::ResourceLimit => TeamProcessError::ResourceLimit,
                     protocol::WorkerFailure::Protocol => TeamProcessError::Protocol,
                     protocol::WorkerFailure::Model => TeamProcessError::Model,
+                    protocol::WorkerFailure::CheckpointMismatch => {
+                        TeamProcessError::CheckpointMismatch
+                    }
+                    protocol::WorkerFailure::NotContinuable => TeamProcessError::NotContinuable,
+                    protocol::WorkerFailure::RouteUnsupported => TeamProcessError::RouteUnsupported,
                     _ => TeamProcessError::Worker,
                 })
             }
@@ -589,28 +671,6 @@ pub(super) fn fixed_text_encoding() -> String {
     format!("0x{uid:X}:0x8000100:0x0") // fixed UTF-8, not user preferences
 }
 
-fn record_start(profile: &TeamInvocationProfile) -> Result<(), TeamProcessError> {
-    let path = profile.task_output_dir().join("process-started");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o400);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(TeamProcessError::AlreadyAttempted);
-        }
-        Err(e) => return Err(e.into()),
-    };
-    file.write_all(b"team-worker-start-v1\n")?;
-    file.sync_all()?;
-    std::fs::File::open(profile.task_output_dir())?.sync_all()?;
-    Ok(())
-}
-
 fn check_executable(path: &Path) -> Result<(), TeamProcessError> {
     #[cfg(unix)]
     {
@@ -656,6 +716,11 @@ pub fn worker_main() -> i32 {
                 TeamProcessError::Profile(_) => (protocol::WorkerFailure::Profile, 77),
                 TeamProcessError::Protocol => (protocol::WorkerFailure::Protocol, 65),
                 TeamProcessError::Model => (protocol::WorkerFailure::Model, 70),
+                TeamProcessError::CheckpointMismatch => {
+                    (protocol::WorkerFailure::CheckpointMismatch, 65)
+                }
+                TeamProcessError::NotContinuable => (protocol::WorkerFailure::NotContinuable, 65),
+                TeamProcessError::RouteUnsupported => (protocol::WorkerFailure::RouteUnsupported, 65),
                 TeamProcessError::Io(_) => (protocol::WorkerFailure::Storage, 74),
                 _ => (protocol::WorkerFailure::Worker, 70),
             };

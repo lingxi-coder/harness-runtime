@@ -387,6 +387,11 @@ path = "tests/desktop/team_invocation_process.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "team_continuation_process"
+path = "tests/desktop/team_continuation_process.rs"
+required-features = ["desktop"]
+
+[[test]]
 name = "team_connector"
 path = "tests/desktop/team_connector.rs"
 required-features = ["desktop"]

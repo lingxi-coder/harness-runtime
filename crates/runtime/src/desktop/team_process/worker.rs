@@ -3,7 +3,7 @@ use super::protocol::{self, Bootstrap, MAX_FRAME, MAX_RESULT_TEXT};
 use super::{
     environment, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessResult,
 };
-use crate::api::{LifecycleService, RunInput, SessionService};
+use crate::api::{LifecycleService, SessionService};
 use crate::desktop::team_invocation::TeamInvocationProfile;
 use crate::desktop::DesktopConfig;
 use client::adapter::PermissionRequestSink;
@@ -80,16 +80,34 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         batch.to_seq_inclusive,
     )?;
     let authorize = bridge.clone();
+    if let Some(continuation) = &bootstrap.continuation {
+        continuation.validate()?;
+    }
+    let ledger = Arc::new(super::chat_session::DispatchLedger::new(
+        bootstrap.task_id.clone(),
+        bootstrap.continuation.as_ref().map_or(1, |c| c.epoch),
+        profile.session_id(),
+    ));
+    let receipts = ledger.clone();
     profile
         .output_quota()
         .set_dispatch_authorization(Arc::new(move || {
             let bridge = authorize.clone();
+            let receipts = receipts.clone();
             Box::pin(async move {
                 bridge
                     .authorize()
                     .await
                     .map_err(|_| llm_runtime::LlmError::InvalidRequest {
                         message: "Shared Bot execution authorization changed".into(),
+                    })?;
+                // The receipt is durable before the request may leave the
+                // process, so a lost response can never be uncounted.
+                receipts
+                    .record()
+                    .await
+                    .map_err(|_| llm_runtime::LlmError::InvalidRequest {
+                        message: "Shared Bot dispatch receipt could not be recorded".into(),
                     })
             })
         }))
@@ -112,7 +130,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -197,13 +215,22 @@ async fn run(
     cancel: CancellationToken,
     interaction: Arc<ChildInteraction>,
     envelope: super::TeamAccountEnvelope,
+    continuation: Option<super::TeamContinuation>,
+    ledger: Arc<super::chat_session::DispatchLedger>,
+    protocol: lingxi_llm_client::protocol::ProtocolFamily,
 ) -> Result<TeamProcessResult, TeamProcessError> {
+    if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
+        return Err(TeamProcessError::RouteUnsupported);
+    }
     interaction.authorize().await?;
     let path = session::jsonl::session_path(
         &cfg.lingxi_home,
         &cfg.cwd.to_string_lossy(),
         &profile.session_id().as_uuid().to_string(),
     );
+    if continuation.is_some() && !path.exists() {
+        return Err(TeamProcessError::NotContinuable);
+    }
     let start = if path.exists() {
         crate::headless::session::SessionStart::Resume {
             session_id: profile.session_id().as_uuid(),
@@ -277,26 +304,61 @@ async fn run(
                 .await;
         }
     }));
+    // Verified under the lease, from the captured pre-mount transcript and the
+    // hydrated journal, before any repair, admission or provider dispatch.
+    let resumed = match &continuation {
+        Some(continuation) => {
+            let captured = mounted_cfg
+                .session_resume_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.content.clone());
+            match verify_continuation(
+                &rt,
+                &batch,
+                &task_id,
+                protocol,
+                continuation,
+                captured.as_deref().unwrap_or_default(),
+            ) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    let _ = rt.shutdown().await;
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
+    if let Err(error) = ledger.bind(&rt) {
+        let _ = rt.shutdown().await;
+        return Err(error);
+    }
     if let Err(error) = super::chat_session::repair_projection(&rt).await {
         let _ = rt.shutdown().await;
         return Err(error);
     }
     let usage_before = rt.cost().await;
     let current_message_id = batch.current_message_id.clone();
-    if let Err(error) = super::chat_session::admit(&rt, profile, batch, cancel.clone()).await {
-        let _ = rt.shutdown().await;
-        return Err(error);
+    if resumed.is_none() {
+        if let Err(error) = super::chat_session::admit(&rt, profile, batch, cancel.clone()).await {
+            let _ = rt.shutdown().await;
+            return Err(error);
+        }
     }
+    let prior_dispatches = resumed
+        .as_ref()
+        .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
-    let outcome = rt
-        .run(
-            RunInput {
-                prompt: input,
-                images: Vec::new(),
-            },
-            cancel.clone(),
-        )
-        .await;
+    let finish_only = resumed.as_ref().is_some_and(|state| state.final_answer.is_some());
+    let outcome = match &resumed {
+        // The newest durable response already is the final answer: only its
+        // terminal result row is missing. No model request may repeat it.
+        Some(_) if finish_only => Ok(TurnOutcome::EndTurn),
+        Some(state) => {
+            run_continuation(&rt, state, &input, &task_id, cancel.clone()).await
+        }
+        None => run_prompt(&rt, &input, &task_id, cancel.clone()).await,
+    };
     let metrics = rt.orchestrator.completed_turn_metrics();
     // The sink also sees rejected attempts and error presentation. A Bot
     // reply uses the final accepted assistant of this task in the restored session.
@@ -324,7 +386,7 @@ async fn run(
     } else if output.failed.load(Ordering::Acquire)
         || outcome.is_err()
         || (matches!(&outcome, Ok(TurnOutcome::EndTurn)) && text.trim().is_empty())
-        || metrics.as_ref().is_none_or(|m| {
+        || (!finish_only && metrics.as_ref().is_none_or(|m| {
             m.api_error_status.is_some()
                 || m.api_error_terminal_reason.is_some()
                 || m.api_error_stop_reason.is_some()
@@ -333,7 +395,7 @@ async fn run(
                         m.model_stop_reason.as_deref(),
                         Some("end_turn" | "stop_sequence")
                     ))
-        })
+        }))
     {
         (TeamProcessOutcome::ModelFailed, String::new())
     } else {
@@ -348,12 +410,17 @@ async fn run(
         (outcome, text)
     };
     let usage_after = rt.cost().await;
-    let dispatched_requests = dispatch_limit - profile.output_quota().remaining_dispatches();
-    let settled = output.usage_settled(
-        outcome,
-        dispatched_requests,
-        usage_after.api_calls.saturating_sub(usage_before.api_calls),
-    );
+    let attempt_dispatched_requests = dispatch_limit - profile.output_quota().remaining_dispatches();
+    let dispatched_requests = prior_dispatches.saturating_add(attempt_dispatched_requests);
+    // Usage is this process's cost-ledger delta. A continued task also spent
+    // requests in an earlier process whose usage is not attributable here, so
+    // it can never claim complete accounting.
+    let settled = resumed.is_none()
+        && output.usage_settled(
+            outcome,
+            attempt_dispatched_requests,
+            usage_after.api_calls.saturating_sub(usage_before.api_calls),
+        );
     let result = TeamProcessResult {
         version: 3,
         outcome,
@@ -371,6 +438,7 @@ async fn run(
         cursor,
         usage: super::TeamUsage::from_snapshots(&usage_before, &usage_after, settled),
         dispatched_requests,
+        attempt_dispatched_requests,
         denied_tools: denied.load(Ordering::Relaxed),
     };
     let saved = super::chat_session::record_result(&rt, &task_id, &result).await;
@@ -381,6 +449,121 @@ async fn run(
         return Err(TeamProcessError::Worker);
     }
     Ok(result)
+}
+
+/// The first epoch: admit the prompt with an identity derived from the task, so
+/// a later continuation can recognise it among the durable rows.
+async fn run_prompt(
+    rt: &crate::desktop::DesktopRuntime,
+    input: &str,
+    task_id: &str,
+    cancel: CancellationToken,
+) -> Result<TurnOutcome, orchestrator::OrchestratorError> {
+    let prompt = Json::from(input);
+    let id = lingxi_core::types::MessageId::from_uuid(super::checkpoint::prompt_uuid(task_id));
+    let outcome = orchestrator::native_user_message_source::with_sdk_source(
+        rt.orchestrator
+            .run_turn_streaming_with_cancel_images_and_message_id(prompt, &[], cancel, Some(id)),
+    )
+    .await?;
+    Ok(host_outcome(outcome))
+}
+
+fn host_outcome(outcome: orchestrator::TurnOutcome) -> TurnOutcome {
+    match outcome {
+        orchestrator::TurnOutcome::EndTurn => TurnOutcome::EndTurn,
+        orchestrator::TurnOutcome::MaxTurns => TurnOutcome::MaxTurns,
+        orchestrator::TurnOutcome::Cancelled => TurnOutcome::Cancelled,
+    }
+}
+
+/// Recompute the checkpoint from the captured pre-mount transcript and the
+/// hydrated journal and refuse before any dispatch unless it still is the one
+/// the host inspected and the task is continuable on this route.
+fn verify_continuation(
+    rt: &crate::desktop::DesktopRuntime,
+    batch: &crate::desktop::session_state::team_chat::ChatInputBatch,
+    task_id: &str,
+    protocol: lingxi_llm_client::protocol::ProtocolFamily,
+    continuation: &super::TeamContinuation,
+    captured_transcript: &str,
+) -> Result<super::checkpoint::TaskState, TeamProcessError> {
+    let cursor = rt.session_state.bot_chat_cursor();
+    let admitted = rt
+        .session_state
+        .chat_input_batches()
+        .map_err(|_| TeamProcessError::Worker)?
+        .iter()
+        .any(|admitted| admitted.batch_id == batch.batch_id);
+    let scope = batch.scope();
+    let state = super::checkpoint::evaluate(&super::checkpoint::Inputs {
+        scope: &scope,
+        task_id,
+        batch_id: Some(&batch.batch_id),
+        batch_admitted: admitted,
+        cursor: &cursor,
+        transcript: captured_transcript,
+        attempts: 0,
+        protocol,
+    })?;
+    if state.checkpoint.checkpoint_digest != continuation.expected_checkpoint_digest {
+        return Err(TeamProcessError::CheckpointMismatch);
+    }
+    if !super::checkpoint::route_supports_continuation(protocol) {
+        return Err(TeamProcessError::RouteUnsupported);
+    }
+    if !state.checkpoint.continuable
+        || !matches!(
+            state.checkpoint.phase,
+            super::TeamTaskPhase::Admitted | super::TeamTaskPhase::InFlight
+        )
+    {
+        return Err(TeamProcessError::NotContinuable);
+    }
+    Ok(state)
+}
+
+/// Continue from the durable head. Persisted tool results are already in the
+/// restored history and are never executed again; each unfinished read-only
+/// Team tool runs once now under the current authorization and its result is
+/// persisted before the next model request is built.
+async fn run_continuation(
+    rt: &crate::desktop::DesktopRuntime,
+    state: &super::checkpoint::TaskState,
+    input: &str,
+    task_id: &str,
+    cancel: CancellationToken,
+) -> Result<TurnOutcome, orchestrator::OrchestratorError> {
+    use orchestrator::OrchestratorError;
+    if matches!(state.checkpoint.phase, super::TeamTaskPhase::Admitted) && !state.prompt_persisted {
+        return run_prompt(rt, input, task_id, cancel).await;
+    }
+    if !state.pending.is_empty() {
+        let calls = state
+            .pending
+            .iter()
+            .map(|call| {
+                let row = uuid::Uuid::parse_str(&call.assistant_row_uuid)
+                    .map_err(|_| OrchestratorError::Internal("invalid durable tool-call row".into()))?;
+                Ok(lingxi_core::host::DeferredToolReplay {
+                    tool_use_id: call.tool_use_id.clone(),
+                    assistant_message_id: Some(lingxi_core::types::MessageId::from_uuid(row)),
+                    tool_name: call.tool_name.clone(),
+                    tool_input: Json::parse(&call.input_json).map_err(|_| {
+                        OrchestratorError::Internal("invalid durable tool input".into())
+                    })?,
+                    permission_mode: None,
+                    traceparent: None,
+                })
+            })
+            .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        orchestrator::replay_unfinished_read_only_tool_calls(&rt.orchestrator, calls).await?;
+    }
+    let outcome = rt
+        .orchestrator
+        .run_resumed_turn_streaming_with_cancel(cancel)
+        .await?;
+    Ok(host_outcome(outcome))
 }
 
 // Dropping a run future also drops its callbacks; no detached broker wait

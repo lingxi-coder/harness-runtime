@@ -39,7 +39,123 @@ pub fn inspect_scope(
     state.hydrate_blocking().map_err(storage_error)?;
     Ok(state.bot_chat_cursor())
 }
-fn uuid(key: &str) -> uuid::Uuid {
+/// Read-only Q01 view of one task. Taken under the session writer lease; it
+/// never mounts the runtime, never appends and never calls a model.
+pub fn inspect_task(
+    storage_root: &Path,
+    scope: &BotChatScope,
+    task_id: &str,
+    protocol: lingxi_llm_client::protocol::ProtocolFamily,
+) -> Result<super::TeamTaskCheckpoint, TeamProcessError> {
+    if !super::protocol::valid_id(task_id) {
+        return Err(TeamProcessError::Protocol);
+    }
+    let id = scope.session_id().map_err(storage_error)?;
+    let scope_root = storage_root.join("scopes").join(id.as_uuid().to_string());
+    let home = scope_root.join("home");
+    let epochs = super::checkpoint::epochs(&super::checkpoint::task_dir(&home, task_id))?;
+    let batch_id = epochs.first().map(|(_, t)| t.batch_id.clone());
+    let attempts = u32::try_from(epochs.len()).map_err(storage_error)?;
+    let (cursor, admitted, transcript) = if home.exists() {
+        if home.canonicalize()? != home {
+            return Err(TeamProcessError::Protocol);
+        }
+        let lease =
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+                .claim_session_id(&id.to_string(), std::process::id())
+                .map_err(storage_error)?
+                .into_shared();
+        let state = SessionStateCoordinator::open(home.clone(), id, lease).map_err(storage_error)?;
+        state.hydrate_blocking().map_err(storage_error)?;
+        let admitted = match &batch_id {
+            Some(wanted) => state
+                .chat_input_batches()
+                .map_err(storage_error)?
+                .iter()
+                .any(|batch| &batch.batch_id == wanted),
+            None => false,
+        };
+        let path = session::jsonl::session_path(
+            &home,
+            &scope_root.join("workspace").to_string_lossy(),
+            &id.as_uuid().to_string(),
+        );
+        let transcript = if path.exists() {
+            let relative = path.strip_prefix(&home).map_err(storage_error)?.to_owned();
+            let (_, bytes) =
+                session::jsonl::writer::TranscriptFileAuthority::capture(home.clone(), relative)
+                    .map_err(storage_error)?;
+            String::from_utf8(bytes).map_err(storage_error)?
+        } else {
+            String::new()
+        };
+        (state.bot_chat_cursor(), admitted, transcript)
+    } else {
+        (BotChatCursor::default(), false, String::new())
+    };
+    Ok(super::checkpoint::evaluate(&super::checkpoint::Inputs {
+        scope,
+        task_id,
+        batch_id: batch_id.as_deref(),
+        batch_admitted: admitted,
+        cursor: &cursor,
+        transcript: &transcript,
+        attempts,
+        protocol,
+    })?
+    .checkpoint)
+}
+
+/// Durable receipt written under the writer lease immediately before each
+/// physical provider dispatch is allowed. It over-counts (never under-counts)
+/// requests whose response was lost with the process.
+pub(super) struct DispatchLedger {
+    task_id: String,
+    epoch: u32,
+    session_id: lingxi_core::types::SessionId,
+    next: std::sync::atomic::AtomicU32,
+    writer: std::sync::OnceLock<std::sync::Arc<session::jsonl::JsonlWriter>>,
+}
+impl DispatchLedger {
+    pub(super) fn new(
+        task_id: String,
+        epoch: u32,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Self {
+        Self {
+            task_id,
+            epoch,
+            session_id,
+            next: std::sync::atomic::AtomicU32::new(1),
+            writer: std::sync::OnceLock::new(),
+        }
+    }
+    pub(super) fn bind(&self, rt: &DesktopRuntime) -> Result<(), TeamProcessError> {
+        let writer = rt
+            .orchestrator
+            .session_transcript_writer()
+            .ok_or(TeamProcessError::Worker)?;
+        self.writer.set(writer).map_err(|_| TeamProcessError::Worker)
+    }
+    pub(super) async fn record(&self) -> Result<(), TeamProcessError> {
+        let writer = self.writer.get().ok_or(TeamProcessError::Worker)?;
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let event = format!("team-dispatch:{}:{}:{n}", self.task_id, self.epoch);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let row = serde_json::json!({"type":"system","subtype":"team_bot_dispatch","uuid":uuid(&event),"sessionId":self.session_id.as_uuid().to_string(),"parentUuid":null,"timestamp":now,"isSidechain":false,"isMeta":true,"isVisibleInTranscriptOnly":true,"message":{"role":"system","content":""},"taskId":self.task_id,"epoch":self.epoch,"sequence":n});
+        writer
+            .append_json_once_durable(
+                &event,
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&row)
+                    .map_err(storage_error)?,
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+pub(super) fn uuid(key: &str) -> uuid::Uuid {
     let h = Sha256::digest(key.as_bytes());
     let mut b: [u8; 16] = h[..16].try_into().unwrap();
     b[6] = (b[6] & 15) | 128;
