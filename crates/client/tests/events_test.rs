@@ -98,6 +98,7 @@ fn session_agent_events_round_trip() {
 
     let message = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
@@ -395,6 +396,7 @@ fn message_complete_round_trips() {
         stop_reason: Some("end_turn".to_string()),
         message: Some(MessageDto {
             transcript_uuid: None,
+            skill_name: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,

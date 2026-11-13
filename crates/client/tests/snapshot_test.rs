@@ -568,6 +568,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 messages: vec![
                     MessageDto {
                         transcript_uuid: None,
+                        skill_name: None,
                         sent_at_ms: None,
                         loop_wakeup: None,
                         visualization_context: None,
@@ -2318,6 +2319,7 @@ fn canonical_cost() -> CostDto {
 fn canonical_message() -> MessageDto {
     MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,

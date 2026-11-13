@@ -44,6 +44,10 @@ pub struct MessageDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub sent_at_ms: Option<i64>,
+    /// Host-authored Skill companion identity, independent of prompt wording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub skill_name: Option<String>,
 }
 
 /// One published revision of an inline visualization.

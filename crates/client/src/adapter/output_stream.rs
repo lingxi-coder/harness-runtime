@@ -537,6 +537,7 @@ impl AdapterOutputStream {
                 stop_reason: stop_reason.map(str::to_string),
                 message: Some(MessageDto {
                     transcript_uuid,
+                    skill_name: None,
                     sent_at_ms: None,
                     loop_wakeup: None,
                     visualization_context: None,

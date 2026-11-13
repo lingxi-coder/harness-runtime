@@ -44,6 +44,7 @@ fn test_tool_display() -> ToolResultDisplayDto {
 fn message_dto_round_trips() {
     let msg = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: Some(1_791_417_600_000),
         loop_wakeup: None,
         visualization_context: None,
@@ -101,6 +102,7 @@ fn message_dto_round_trips() {
 fn message_text_keeps_lone_surrogates_as_a_json_string() {
     let message = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
@@ -231,6 +233,7 @@ fn loop_wakeup_metadata_is_additive_and_round_trips() {
     assert!(old.loop_wakeup.is_none());
     let dto = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         role: "system".into(),
         blocks: vec![],
@@ -276,6 +279,7 @@ fn visualization_block_and_context_are_additive_and_round_trip() {
     assert!(old.visualization_context.is_none());
     let dto = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         role: "user".into(),
         blocks: vec![],

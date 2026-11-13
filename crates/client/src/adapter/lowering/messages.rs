@@ -34,7 +34,9 @@ pub fn lower_conversation_message_with(
     index: &mut crate::adapter::turn::ToolUseIndex,
 ) -> MessageDto {
     match message {
-        ConversationMessage::User { content, .. } => {
+        ConversationMessage::User {
+            content, origin, ..
+        } => {
             let mut visualization_context = None;
             let blocks = legacy_cron_slash_line(content).map_or_else(
                 || {
@@ -81,6 +83,14 @@ pub fn lower_conversation_message_with(
             );
             MessageDto {
                 transcript_uuid: Some(message.id().as_uuid().to_string()),
+                skill_name: origin.as_ref().and_then(|origin| {
+                    let kind = origin.string_units("/type")?;
+                    if kind != "skill_activation".encode_utf16().collect::<Vec<_>>() {
+                        return None;
+                    }
+                    let name = String::from_utf16_lossy(&origin.string_units("/skill_name")?);
+                    (!name.trim().is_empty()).then_some(name)
+                }),
                 sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context,
@@ -92,6 +102,7 @@ pub fn lower_conversation_message_with(
         ConversationMessage::Assistant { content, .. } => {
             MessageDto {
                 transcript_uuid: Some(message.id().as_uuid().to_string()),
+                skill_name: None,
                 sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context: None,
@@ -121,6 +132,7 @@ pub fn lower_conversation_message_with(
                     .unwrap_or_else(|| ClientTextDto::from_utf8(""));
                 MessageDto {
                     transcript_uuid: Some(message.id().as_uuid().to_string()),
+                    skill_name: None,
                     sent_at_ms: None,
                     role: "system".into(),
                     images: Vec::new(),
@@ -138,6 +150,7 @@ pub fn lower_conversation_message_with(
                     });
                 MessageDto {
                     transcript_uuid: Some(message.id().as_uuid().to_string()),
+                    skill_name: None,
                     sent_at_ms: None,
                     role: "system".into(),
                     blocks: Vec::new(),
@@ -153,6 +166,7 @@ pub fn lower_conversation_message_with(
             ..
         } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
             transcript_uuid: Some(message.id().as_uuid().to_string()),
+            skill_name: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
@@ -169,6 +183,7 @@ pub fn lower_conversation_message_with(
         },
         ConversationMessage::System { content, .. } => MessageDto {
             transcript_uuid: Some(message.id().as_uuid().to_string()),
+            skill_name: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
@@ -527,6 +542,7 @@ fn lower_transcript_inner(
                         message.id(),
                         MessageDto {
                             transcript_uuid: None,
+                            skill_name: None,
                             sent_at_ms: None,
                             role: "user".to_string(),
                             blocks,
