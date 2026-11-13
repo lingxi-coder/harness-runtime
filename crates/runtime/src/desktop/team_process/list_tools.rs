@@ -4,7 +4,7 @@
 //! the durable logical step of its tool call, never by a provider call id, and
 //! it leaves this process only after the response that holds the call is on
 //! the transcript file, so a later process names the same operation again.
-use super::checkpoint::{LIST_READ_TOOL, LIST_WRITE_TOOL};
+use super::checkpoint::{LIST_PROPOSE_TOOL, LIST_READ_TOOL, LIST_WRITE_TOOL};
 use super::{interaction::ChildInteraction, TeamProcessError};
 use crate::desktop::session_state::team_chat::BotChatScope;
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
@@ -17,12 +17,29 @@ pub(super) const MAX_OPERATION_JSON: usize = 64 * 1024;
 const MAX_CHANGES: usize = 20;
 const MAX_ITEM_TEXT: usize = 500;
 
+/// Who must agree to a change before it is saved.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamListApproval {
+    #[default]
+    None,
+    /// The member whose request the task serves approves each change.
+    Requester,
+}
+impl TeamListApproval {
+    fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+}
+
 /// What the Bot is told about the list it may read and change.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TeamSharedList {
     pub title: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "TeamListApproval::is_none")]
+    pub approval: TeamListApproval,
 }
 impl TeamSharedList {
     pub fn validate(&self) -> Result<(), TeamProcessError> {
@@ -46,6 +63,8 @@ pub enum TeamOperationTool {
 
 /// One request to the host's shared-list service. `logical_step_id` is present
 /// exactly for a write and is the identity the ledger derives its operation id from.
+/// `approval_ref` is present exactly for a write on a list whose changes the
+/// requester approves, and names the wait of that same step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TeamOperationRequest {
@@ -53,14 +72,29 @@ pub struct TeamOperationRequest {
     pub tool: TeamOperationTool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_ref: Option<String>,
     pub arguments: serde_json::Value,
 }
 impl TeamOperationRequest {
-    pub fn validate(&self, task_id: &str) -> Result<(), TeamProcessError> {
+    pub fn validate(
+        &self,
+        task_id: &str,
+        approval: TeamListApproval,
+    ) -> Result<(), TeamProcessError> {
         let step = match (self.tool, &self.logical_step_id) {
-            (TeamOperationTool::ListRead, None) => self.arguments == serde_json::json!({}),
+            (TeamOperationTool::ListRead, None) => {
+                self.approval_ref.is_none() && self.arguments == serde_json::json!({})
+            }
             (TeamOperationTool::ListWrite, Some(step)) => {
                 step.len() <= 200
+                    && match approval {
+                        TeamListApproval::None => self.approval_ref.is_none(),
+                        TeamListApproval::Requester => {
+                            self.approval_ref.as_deref()
+                                == Some(super::checkpoint::wait_id(step).as_str())
+                        }
+                    }
                     && step
                         .strip_prefix(task_id)
                         .and_then(|rest| rest.strip_prefix("/t"))
@@ -104,7 +138,7 @@ impl TeamOperationResult {
 
 /// A list change as the model may request it. Unknown keys are refused so a
 /// typo is never silently dropped from a write.
-fn validate_write(arguments: &serde_json::Value) -> Result<(), &'static str> {
+pub(super) fn validate_write(arguments: &serde_json::Value) -> Result<(), &'static str> {
     let object = arguments.as_object().ok_or("The input must be an object")?;
     if object
         .keys()
@@ -164,10 +198,25 @@ pub(crate) struct TeamListTools {
     pub(super) bridge: Arc<ChildInteraction>,
     pub(super) list: TeamSharedList,
     pub(super) task_id: String,
+    /// The wait state shared with the ask tool. Required when the requester approves changes.
+    pub(super) ask: Option<Arc<super::ask_tool::AskRequester>>,
     /// Set once the session transcript of this process is known.
     pub(super) source: OnceLock<StepSource>,
 }
 impl TeamListTools {
+    fn approved(&self) -> bool {
+        self.list.approval == TeamListApproval::Requester
+    }
+    /// The name of the tool that changes the list. A list whose changes are
+    /// approved offers a different tool, so a transcript never confuses a
+    /// proposal with a direct write.
+    pub(super) fn write_tool(&self) -> &'static str {
+        if self.approved() {
+            LIST_PROPOSE_TOOL
+        } else {
+            LIST_WRITE_TOOL
+        }
+    }
     /// The logical step of the unfinished call `tool_use_id`, once the response
     /// that holds it is on the transcript file. A call that never becomes
     /// durable is never dispatched.
@@ -236,7 +285,7 @@ fn done(value: &serde_json::Value, is_error: bool) -> ToolCallResult {
 impl Tool for ListTool {
     fn name(&self) -> &str {
         if self.write {
-            LIST_WRITE_TOOL
+            self.tools.write_tool()
         } else {
             LIST_READ_TOOL
         }
@@ -265,7 +314,9 @@ impl Tool for ListTool {
     }
     async fn description(&self, _: &Json, _: &DescriptionOptions) -> String {
         let list = &self.tools.list;
-        if self.write {
+        if self.write && self.tools.approved() {
+            format!("Propose a change to the shared list \"{}\": add, update or remove items. The person who asked is shown the exact change and it is saved only if they approve it.", list.title)
+        } else if self.write {
             format!("Change the shared list \"{}\": add, update or remove items. Everyone with access sees the same list.", list.title)
         } else {
             format!(
@@ -275,7 +326,9 @@ impl Tool for ListTool {
         }
     }
     async fn prompt(&self, _: &PromptOptions) -> Json {
-        if self.write {
+        if self.write && self.tools.approved() {
+            "Read the list first and pass the dataRevision you received as expectedDataRevision. The person who asked is shown exactly this change and the task pauses until they reply, so propose everything you want changed in one call. If they decline, nothing is saved: do not propose the same change again unless they ask for it. If the list changed in the meantime the approved change is refused and nothing is saved: read the list again and, if the change is still needed, propose it again. Tell people a change was saved only after this tool reported success.".into()
+        } else if self.write {
             "Read the list first and pass the dataRevision you received as expectedDataRevision. If the list changed in the meantime the write is refused and nothing is saved: read the list again, check whether your change is still needed, then write again. Tell people a change was saved only after this tool reported success.".into()
         } else {
             "The list is shared and other people change it. Read it again before relying on earlier contents.".into()
@@ -306,7 +359,7 @@ impl Tool for ListTool {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .ok_or_else(|| ToolError::Internal("Invalid list request".into()))?;
-        let (tool, logical_step_id, arguments) = if self.write {
+        let (tool, logical_step_id, approval_ref, arguments) = if self.write {
             validate_write(&arguments).map_err(|reason| ToolError::Internal(reason.into()))?;
             let id = context
                 .tool_use_id
@@ -318,14 +371,46 @@ impl Tool for ListTool {
                         .into(),
                 )
             })?;
-            (TeamOperationTool::ListWrite, Some(step), arguments)
+            let approval_ref = if self.tools.approved() {
+                let ask =
+                    self.tools.ask.as_ref().ok_or_else(|| {
+                        ToolError::Internal("The list cannot be changed here".into())
+                    })?;
+                // The proposal is durable, so the wait every process derives
+                // from its step exists before this call can park on it.
+                let wait_id = super::checkpoint::wait_id(&step);
+                match ask.open(Some(&wait_id)) {
+                    Err(reason) => return Err(ToolError::Internal(reason.into())),
+                    Ok(None) => ask.park().await,
+                    Ok(Some(reply)) if reply.approved != Some(true) => {
+                        return Ok(done(
+                            &serde_json::json!({"error":"DECLINED","message":"The person who asked declined this change. Nothing was saved."}),
+                            true,
+                        ))
+                    }
+                    Ok(Some(_)) => Some(wait_id),
+                }
+            } else {
+                None
+            };
+            (
+                TeamOperationTool::ListWrite,
+                Some(step),
+                approval_ref,
+                arguments,
+            )
         } else {
-            (TeamOperationTool::ListRead, None, serde_json::json!({}))
+            (
+                TeamOperationTool::ListRead,
+                None,
+                None,
+                serde_json::json!({}),
+            )
         };
         match self
             .tools
             .bridge
-            .operate(tool, logical_step_id, arguments)
+            .operate(tool, logical_step_id, approval_ref, arguments)
             .await
         {
             Ok(outcome) => Ok(done(&outcome.result, !outcome.succeeded)),
@@ -350,11 +435,12 @@ mod tests {
             id: "interaction-1".into(),
             tool: TeamOperationTool::ListWrite,
             logical_step_id: step.map(str::to_owned),
+            approval_ref: None,
             arguments,
         };
         let add = json!({"expectedDataRevision":3,"changes":[{"op":"add","text":"Milk"}]});
         assert!(write(Some("task_1/t0/c1"), add.clone())
-            .validate("task_1")
+            .validate("task_1", TeamListApproval::None)
             .is_ok());
         for step in [
             None,
@@ -364,7 +450,9 @@ mod tests {
             Some("task_1/t0/c1/x"),
         ] {
             assert!(
-                write(step, add.clone()).validate("task_1").is_err(),
+                write(step, add.clone())
+                    .validate("task_1", TeamListApproval::None)
+                    .is_err(),
                 "{step:?}"
             );
         }
@@ -372,13 +460,55 @@ mod tests {
             id: "interaction-1".into(),
             tool: TeamOperationTool::ListRead,
             logical_step_id: step.map(str::to_owned),
+            approval_ref: None,
             arguments,
         };
-        assert!(read(None, json!({})).validate("task_1").is_ok());
+        assert!(read(None, json!({}))
+            .validate("task_1", TeamListApproval::None)
+            .is_ok());
         assert!(read(Some("task_1/t0/c0"), json!({}))
-            .validate("task_1")
+            .validate("task_1", TeamListApproval::None)
             .is_err());
-        assert!(read(None, json!({"all":true})).validate("task_1").is_err());
+        assert!(read(None, json!({"all":true}))
+            .validate("task_1", TeamListApproval::None)
+            .is_err());
+    }
+
+    #[test]
+    fn an_approved_write_names_the_wait_of_its_own_step() {
+        let write = |approval_ref: Option<String>| TeamOperationRequest {
+            id: "interaction-1".into(),
+            tool: TeamOperationTool::ListWrite,
+            logical_step_id: Some("task_1/t0/c1".into()),
+            approval_ref,
+            arguments: json!({"expectedDataRevision":3,"changes":[{"op":"add","text":"Milk"}]}),
+        };
+        let own = super::super::checkpoint::wait_id("task_1/t0/c1");
+        let other = super::super::checkpoint::wait_id("task_1/t0/c2");
+        assert!(write(Some(own.clone()))
+            .validate("task_1", TeamListApproval::Requester)
+            .is_ok());
+        for approval_ref in [None, Some(other)] {
+            assert!(write(approval_ref)
+                .validate("task_1", TeamListApproval::Requester)
+                .is_err());
+        }
+        assert!(write(Some(own))
+            .validate("task_1", TeamListApproval::None)
+            .is_err());
+        let list: TeamSharedList =
+            serde_json::from_value(json!({"title":"Groceries","description":"What to buy"}))
+                .unwrap();
+        assert_eq!(list.approval, TeamListApproval::None);
+        assert_eq!(
+            serde_json::to_value(&list).unwrap(),
+            json!({"title":"Groceries","description":"What to buy"})
+        );
+        let list: TeamSharedList = serde_json::from_value(
+            json!({"title":"Groceries","description":"What to buy","approval":"requester"}),
+        )
+        .unwrap();
+        assert_eq!(list.approval, TeamListApproval::Requester);
     }
 
     #[test]

@@ -14,10 +14,12 @@ use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, Chat
 pub use chat_session::{inspect_scope, inspect_task, recover_result};
 pub use checkpoint::{
     route_supports_continuation, TeamCheckpointCursor, TeamPendingToolCall, TeamTaskCheckpoint,
-    TeamTaskPhase, TeamTaskWait,
+    TeamTaskPhase, TeamTaskWait, TeamWaitKind,
 };
 pub use data::TeamDataRef;
-pub use list_tools::{TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList};
+pub use list_tools::{
+    TeamListApproval, TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList,
+};
 pub use read_tools::{
     TeamChatQuery, TeamChatReadRequest, TeamChatReadResult, TeamKnowledgeDocument,
 };
@@ -120,13 +122,17 @@ pub struct TeamProcessRequest {
     pub shared_list: Option<TeamSharedList>,
 }
 
-/// The requester's answer to the question a task is waiting on.
+/// The requester's reply to what a task is waiting on: the answer to its
+/// question, or their decision on the change it proposed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TeamWaitAnswer {
     pub wait_id: String,
     pub message_id: String,
     pub text: String,
+    /// Present exactly for the reply to an approval request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<bool>,
 }
 
 /// Continuation of a task whose earlier worker process died. The epoch must
@@ -447,6 +453,10 @@ impl TeamProcessStart {
             shared_list: match request.shared_list {
                 Some(list) if checkpoint::route_supports_continuation(protocol) => {
                     list.validate()?;
+                    // An approval is a wait: it needs the same durable pause as a question.
+                    if list.approval == TeamListApproval::Requester && !request.ask_requester {
+                        return Err(TeamProcessError::Protocol);
+                    }
                     Some(list)
                 }
                 _ => None,
@@ -565,6 +575,10 @@ impl TeamProcessStart {
                 broker_cancel,
                 &self.profile.scope_root().join("tmp"),
                 &self.bootstrap.task_id,
+                self.bootstrap
+                    .shared_list
+                    .as_ref()
+                    .map_or(TeamListApproval::None, |list| list.approval),
             )
             .await?;
             let status = child.wait().await?;
@@ -615,6 +629,7 @@ async fn broker_exchange(
     cancel: CancellationToken,
     data_root: &Path,
     task_id: &str,
+    approval: TeamListApproval,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
     let mut seen = BTreeSet::new();
@@ -662,7 +677,7 @@ async fn broker_exchange(
                 }
             }
             WorkerFrame::Operate { request } => {
-                request.validate(task_id)?;
+                request.validate(task_id, approval)?;
                 if !seen.insert(request.id.clone()) {
                     return Err(TeamProcessError::Protocol);
                 }

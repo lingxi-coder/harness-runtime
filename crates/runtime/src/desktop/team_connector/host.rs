@@ -308,6 +308,9 @@ impl TeamProcessBroker for Bridge {
         if let Some(step) = request.logical_step_id {
             value["logicalStepId"] = json!(step);
         }
+        if let Some(wait) = request.approval_ref {
+            value["approvalRef"] = json!(wait);
+        }
         match self.request("operation", value, &cancel).await? {
             Response::OperationResult {
                 established: true,

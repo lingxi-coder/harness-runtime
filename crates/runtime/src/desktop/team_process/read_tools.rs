@@ -154,9 +154,9 @@ impl TeamReadTools {
         if self.ask.is_some() {
             names.push(super::checkpoint::ASK_TOOL.to_owned());
         }
-        if self.list.is_some() {
+        if let Some(list) = &self.list {
             names.push(super::checkpoint::LIST_READ_TOOL.to_owned());
-            names.push(super::checkpoint::LIST_WRITE_TOOL.to_owned());
+            names.push(list.write_tool().to_owned());
         }
         names
     }

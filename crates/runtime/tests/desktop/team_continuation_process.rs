@@ -12,8 +12,8 @@ use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
     inspect_task, TeamContinuation, TeamKnowledgeDocument, TeamProcessDeadline, TeamProcessError,
     TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamProcessOutcome,
-    TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList, TeamTaskPhase,
-    TeamWaitAnswer,
+    TeamListApproval, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList,
+    TeamTaskPhase, TeamWaitAnswer, TeamWaitKind,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
 use serde_json::{json, Value};
@@ -476,6 +476,32 @@ fn answered(
     wait_id: &str,
     text: &str,
 ) -> Result<TeamProcessStart, TeamProcessError> {
+    replied(root, task, endpoint, epoch, digest, wait_id, text, None)
+}
+/// The requester's decision on a proposed change.
+fn decided(
+    root: &Path,
+    task: &Task,
+    endpoint: &str,
+    epoch: u32,
+    digest: &str,
+    wait_id: &str,
+    approved: bool,
+) -> Result<TeamProcessStart, TeamProcessError> {
+    let text = if approved { "Approved" } else { "Declined" };
+    replied(root, task, endpoint, epoch, digest, wait_id, text, Some(approved))
+}
+#[allow(clippy::too_many_arguments)]
+fn replied(
+    root: &Path,
+    task: &Task,
+    endpoint: &str,
+    epoch: u32,
+    digest: &str,
+    wait_id: &str,
+    text: &str,
+    approved: Option<bool>,
+) -> Result<TeamProcessStart, TeamProcessError> {
     TeamProcessStart::prepare_continuation(
         root,
         task.request(root, task.chat_model(endpoint)),
@@ -486,6 +512,7 @@ fn answered(
                 wait_id: wait_id.into(),
                 message_id: "message_0004".into(),
                 text: text.into(),
+                approved,
             }),
         },
     )
@@ -1149,6 +1176,7 @@ fn list_task() -> Task {
         list: Some(TeamSharedList {
             title: "Groceries".into(),
             description: "What the household needs to buy.".into(),
+            approval: TeamListApproval::None,
         }),
         ..Task::new()
     }
@@ -1307,4 +1335,253 @@ async fn a_write_of_unknown_outcome_ends_the_process_with_the_call_unfinished() 
         inspected.pending_tool_calls[0].logical_step_id,
         format!("{}/t0/c0", task.task_id)
     );
+}
+
+/// A list whose changes the requester approves; an approval is a wait.
+fn approval_task() -> Task {
+    let mut task = list_task();
+    task.ask = true;
+    task.list.as_mut().unwrap().approval = TeamListApproval::Requester;
+    task
+}
+fn propose_milk(revision: u64) -> Reply {
+    Reply::Tool(
+        "TeamListProposeChange",
+        json!({"expectedDataRevision":revision,"changes":[{"op":"add","text":"Milk"}]}),
+    )
+}
+/// The Bot proposed a change: the worker ends as `waiting`, nothing reached the host.
+async fn propose_and_wait(task: &Task, root: &Path, server: &Server) -> TeamProcessResult {
+    let broker = list_broker(root, vec![]);
+    let result = run_to_end(
+        TeamProcessStart::prepare(root, task.request(root, task.chat_model(&server.endpoint)))
+            .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Waiting);
+    assert!(
+        broker.operations.lock().unwrap().is_empty(),
+        "a proposal writes nothing"
+    );
+    result
+}
+
+#[tokio::test]
+async fn a_proposed_change_is_written_only_with_the_approval_of_exactly_that_proposal() {
+    let (_temp, root) = root();
+    let task = approval_task();
+    let server = Server::new(vec![
+        propose_milk(3),
+        Reply::Text("Milk is on the list".into()),
+    ])
+    .await;
+    propose_and_wait(&task, &root, &server).await;
+    assert_eq!(server.count(), 1);
+    let offered = tool_names(&server.requests.lock().unwrap()[0].body);
+    assert!(offered.contains(&"TeamListProposeChange".to_owned()), "{offered:?}");
+    assert!(
+        !offered.contains(&"TeamListWrite".to_owned()),
+        "an approved list offers no direct write"
+    );
+
+    let inspected = checkpoint(&root, &task);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    let step = format!("{}/t0/c0", task.task_id);
+    let wait = inspected.wait.clone().expect("the checkpoint reports the wait");
+    assert_eq!(wait.kind, TeamWaitKind::ToolApproval);
+    assert_eq!(wait.logical_step_id, step);
+    assert_eq!(
+        serde_json::from_str::<Value>(&wait.question).unwrap(),
+        json!({"expectedDataRevision":3,"changes":[{"op":"add","text":"Milk"}]}),
+        "the requester approves exactly the parameters the write will carry"
+    );
+    assert_eq!(serde_json::to_value(&wait).unwrap()["kind"], "tool_approval");
+
+    // No reply, a typed answer, or the approval of another proposal continue nothing.
+    let mut epoch = 1;
+    for (wait_id, approved) in [
+        (None, None),
+        (Some(wait.wait_id.as_str()), None),
+        (
+            Some("wait_0000000000000000000000000000000000000000"),
+            Some(true),
+        ),
+    ] {
+        epoch += 1;
+        let digest = checkpoint(&root, &task).checkpoint_digest;
+        let broker = list_broker(&root, vec![saved(4)]);
+        let start = match wait_id {
+            None => continuation(&root, &task, &server.endpoint, epoch, &digest),
+            Some(id) => replied(&root, &task, &server.endpoint, epoch, &digest, id, "Yes", approved),
+        }
+        .unwrap();
+        let refused = run_to_end(start, broker.clone()).await;
+        assert!(
+            matches!(refused, Err(TeamProcessError::NotContinuable)),
+            "{refused:?}"
+        );
+        assert!(broker.operations.lock().unwrap().is_empty());
+    }
+    assert_eq!(server.count(), 1);
+
+    let ready = checkpoint(&root, &task);
+    assert_eq!(ready.wait.as_ref(), Some(&wait));
+    let broker = list_broker(&root, vec![saved(4)]);
+    let result = run_to_end(
+        decided(
+            &root,
+            &task,
+            &server.endpoint,
+            epoch + 1,
+            &ready.checkpoint_digest,
+            &wait.wait_id,
+            true,
+        )
+        .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Milk is on the list");
+    let written = broker.operations.lock().unwrap();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].0.tool, TeamOperationTool::ListWrite);
+    assert_eq!(written[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+    assert_eq!(
+        written[0].0.approval_ref.as_deref(),
+        Some(wait.wait_id.as_str())
+    );
+    assert_eq!(
+        written[0].0.arguments,
+        serde_json::from_str::<Value>(&wait.question).unwrap()
+    );
+    assert_eq!(server.count(), 2);
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert!(results[0]["content"].to_string().contains("dataRevision"));
+    assert!(checkpoint(&root, &task).wait.is_none());
+}
+
+#[tokio::test]
+async fn a_declined_change_is_never_written_and_the_model_is_told() {
+    let (_temp, root) = root();
+    let task = approval_task();
+    let server = Server::new(vec![
+        propose_milk(3),
+        Reply::Text("I left the list as it was".into()),
+    ])
+    .await;
+    propose_and_wait(&task, &root, &server).await;
+    let inspected = checkpoint(&root, &task);
+    let wait = inspected.wait.clone().unwrap();
+    let broker = list_broker(&root, vec![saved(4)]);
+    let result = run_to_end(
+        decided(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+            &wait.wait_id,
+            false,
+        )
+        .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "I left the list as it was");
+    assert!(
+        broker.operations.lock().unwrap().is_empty(),
+        "a declined change never reaches the host"
+    );
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert!(results[0]["content"].to_string().contains("DECLINED"));
+}
+
+#[tokio::test]
+async fn an_approved_write_interrupted_before_its_result_repeats_with_the_same_approval() {
+    let (_temp, root) = root();
+    let task = approval_task();
+    let server = Server::new(vec![
+        propose_milk(3),
+        Reply::Text("Milk is on the list".into()),
+    ])
+    .await;
+    propose_and_wait(&task, &root, &server).await;
+    let inspected = checkpoint(&root, &task);
+    let wait = inspected.wait.clone().unwrap();
+    // The host could not establish the outcome: the process ends, the call stays open.
+    let lost = list_broker(&root, vec![None]);
+    let interrupted = run_to_end(
+        decided(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+            &wait.wait_id,
+            true,
+        )
+        .unwrap(),
+        lost.clone(),
+    )
+    .await;
+    assert!(interrupted.is_err(), "{interrupted:?}");
+    assert_eq!(lost.operations.lock().unwrap().len(), 1);
+    assert_eq!(server.count(), 1);
+
+    let again = checkpoint(&root, &task);
+    assert_eq!(again.wait.as_ref(), Some(&wait), "the same wait, already decided");
+    let broker = list_broker(&root, vec![saved(4)]);
+    let result = run_to_end(
+        decided(
+            &root,
+            &task,
+            &server.endpoint,
+            3,
+            &again.checkpoint_digest,
+            &wait.wait_id,
+            true,
+        )
+        .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    let repeated = broker.operations.lock().unwrap();
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].0, {
+        let mut first = lost.operations.lock().unwrap()[0].0.clone();
+        first.id = repeated[0].0.id.clone();
+        first
+    });
+    assert_eq!(server.count(), 2);
+}
+
+#[tokio::test]
+async fn an_approved_list_needs_the_durable_wait() {
+    let (_temp, root) = root();
+    let mut task = approval_task();
+    task.ask = false;
+    let server = Server::new(vec![]).await;
+    let refused = TeamProcessStart::prepare(
+        &root,
+        task.request(&root, task.chat_model(&server.endpoint)),
+    );
+    assert!(
+        matches!(refused, Err(TeamProcessError::Protocol)),
+        "approval without a wait is refused before any process starts"
+    );
+    assert_eq!(server.count(), 0);
 }

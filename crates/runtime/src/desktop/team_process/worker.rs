@@ -118,10 +118,14 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let list = match bootstrap.shared_list.clone() {
         Some(list) => {
             list.validate()?;
+            if list.approval == super::TeamListApproval::Requester && ask.is_none() {
+                return Err(TeamProcessError::Protocol);
+            }
             Some(Arc::new(super::list_tools::TeamListTools {
                 bridge: bridge.clone(),
                 list,
                 task_id: bootstrap.task_id.clone(),
+                ask: ask.clone(),
                 source: Default::default(),
             }))
         }
@@ -623,10 +627,15 @@ fn verify_continuation(
     {
         return Err(TeamProcessError::NotContinuable);
     }
-    // A waiting task continues only with the answer to exactly that question,
-    // in a process that offers the ask tool; any other task takes no answer.
+    // A waiting task continues only with the reply to exactly that wait, of
+    // the kind it asked for, in a process that offers the ask tool; any other
+    // task takes no answer.
     match (&state.checkpoint.wait, &continuation.answer) {
-        (Some(wait), Some(answer)) if can_answer && wait.wait_id == answer.wait_id => {}
+        (Some(wait), Some(answer))
+            if can_answer
+                && wait.wait_id == answer.wait_id
+                && (wait.kind == super::TeamWaitKind::ToolApproval)
+                    == answer.approved.is_some() => {}
         (None, None) => {}
         _ => return Err(TeamProcessError::NotContinuable),
     }
@@ -670,7 +679,12 @@ async fn run_continuation(
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
         if let Some(ask) = ask {
-            ask.begin_replay(answer.map(|a| (a.message_id.clone(), a.text.clone())));
+            ask.begin_replay(answer.map(|a| super::ask_tool::WaitReply {
+                wait_id: a.wait_id.clone(),
+                message_id: a.message_id.clone(),
+                text: a.text.clone(),
+                approved: a.approved,
+            }));
         }
         let replayed =
             orchestrator::replay_unfinished_read_only_tool_calls(&rt.orchestrator, calls).await;

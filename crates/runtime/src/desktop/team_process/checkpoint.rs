@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 pub(super) const LIST_READ_TOOL: &str = "TeamListRead";
 /// A write the ledger makes safe to repeat: the list service applies one operation id once.
 pub(super) const LIST_WRITE_TOOL: &str = "TeamListWrite";
+/// The same write on a list whose changes the requester approves first: its unfinished call is a request for that approval.
+pub(super) const LIST_PROPOSE_TOOL: &str = "TeamListProposeChange";
 pub(super) const READ_ONLY_TOOLS: [&str; 3] = ["TeamChatHistory", "TeamKnowledge", LIST_READ_TOOL];
 /// The one tool whose unfinished call is a question to the task's requester.
 pub(super) const ASK_TOOL: &str = "TeamAskRequester";
@@ -62,13 +64,25 @@ pub struct TeamPendingToolCall {
     pub read_only: bool,
 }
 
-/// The question an in-flight task is blocked on: its first unfinished,
-/// well-formed ask call. `wait_id` is derived from the logical step, so every
-/// process and the host name the same wait.
+/// What the requester is asked for: an answer in their own words, or a yes or
+/// no to one exact operation.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamWaitKind {
+    HumanInput,
+    ToolApproval,
+}
+
+/// What an in-flight task is blocked on: its first unfinished, well-formed
+/// ask call or list-change proposal. `wait_id` is derived from the logical
+/// step, so every process and the host name the same wait. For an approval,
+/// `question` is the proposed write as compact JSON and `request_digest`
+/// covers it, so an approval is of exactly these parameters.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamTaskWait {
     pub wait_id: String,
+    pub kind: TeamWaitKind,
     pub logical_step_id: String,
     pub question: String,
     pub request_digest: String,
@@ -474,7 +488,11 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             _ if inconsistent => (false, Some("transcript_inconsistent")),
             _ if pending_tool_calls
                 .iter()
-                .any(|c| !c.read_only && c.tool_name != ASK_TOOL && c.tool_name != LIST_WRITE_TOOL) =>
+                .any(|c| {
+                    !c.read_only
+                        && ![ASK_TOOL, LIST_WRITE_TOOL, LIST_PROPOSE_TOOL]
+                            .contains(&c.tool_name.as_str())
+                }) =>
             {
                 (false, Some("pending_write_tool"))
             }
@@ -489,13 +507,17 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
     let digest = digest(input, &cursor, rows)?;
     let wait = if phase == TeamTaskPhase::InFlight && continuable {
         pending_calls.iter().find_map(|c| {
-            if c.name != ASK_TOOL {
-                return None;
-            }
             let asked: serde_json::Value = serde_json::from_str(&c.input_json).ok()?;
-            let question = ask_question(&asked)?.to_owned();
+            let (kind, question) = match c.name.as_str() {
+                ASK_TOOL => (TeamWaitKind::HumanInput, ask_question(&asked)?.to_owned()),
+                LIST_PROPOSE_TOOL => {
+                    super::list_tools::validate_write(&asked).ok()?;
+                    (TeamWaitKind::ToolApproval, asked.to_string())
+                }
+                _ => return None,
+            };
             let logical_step_id = format!("{}/t{}/c{}", input.task_id, c.group, c.index);
-            Some(wait_of(input.task_id, logical_step_id, question))
+            Some(wait_of(input.task_id, logical_step_id, kind, question))
         })
     } else {
         None
@@ -534,24 +556,36 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
     })
 }
 
-fn wait_of(task_id: &str, logical_step_id: String, question: String) -> TeamTaskWait {
-    let wait_id = format!(
+/// The wait a tool call at `logical_step_id` opens, whichever process names it.
+pub(super) fn wait_id(logical_step_id: &str) -> String {
+    format!(
         "wait_{}",
         &format!(
             "{:x}",
             Sha256::digest(format!("team-wait:{logical_step_id}").as_bytes())
         )[..40]
-    );
-    let request_digest = format!(
-        "{:x}",
-        Sha256::digest(
+    )
+}
+
+fn wait_of(
+    task_id: &str,
+    logical_step_id: String,
+    kind: TeamWaitKind,
+    question: String,
+) -> TeamTaskWait {
+    let wait_id = wait_id(&logical_step_id);
+    let request = match kind {
+        TeamWaitKind::HumanInput => {
             serde_json::json!({"domain":"lingxi-team-wait-1","taskId":task_id,"waitId":wait_id,"question":question})
-                .to_string()
-                .as_bytes()
-        )
-    );
+        }
+        TeamWaitKind::ToolApproval => {
+            serde_json::json!({"domain":"lingxi-team-approval-1","taskId":task_id,"waitId":wait_id,"tool":LIST_WRITE_TOOL,"arguments":question})
+        }
+    };
+    let request_digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
     TeamTaskWait {
         wait_id,
+        kind,
         logical_step_id,
         question,
         request_digest,

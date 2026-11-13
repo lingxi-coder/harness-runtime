@@ -178,6 +178,7 @@ impl ChildInteraction {
         &self,
         tool: super::TeamOperationTool,
         logical_step_id: Option<String>,
+        approval_ref: Option<String>,
         arguments: serde_json::Value,
     ) -> Result<super::TeamOperationResult, TeamProcessError> {
         let _serial = self.serial.lock().await;
@@ -193,6 +194,7 @@ impl ChildInteraction {
                     id,
                     tool,
                     logical_step_id,
+                    approval_ref,
                     arguments,
                 },
             },

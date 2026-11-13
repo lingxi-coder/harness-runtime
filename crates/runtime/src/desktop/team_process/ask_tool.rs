@@ -7,12 +7,20 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use std::sync::{Arc, Mutex};
 use tool_api::tool_trait::*;
 
+/// The requester's reply to the open wait. `approved` is set exactly for the
+/// reply to a list-change proposal.
+pub(super) struct WaitReply {
+    pub wait_id: String,
+    pub message_id: String,
+    pub text: String,
+    pub approved: Option<bool>,
+}
 enum Mode {
-    /// The model loop is running: the first well-formed question pauses the task.
+    /// The model loop is running: the first well-formed question or proposal pauses the task.
     Live { asked: bool },
-    /// Unfinished calls are being replayed: the first well-formed question is
-    /// the one the task waited on and receives the answer, if there is one.
-    Replay { answer: Option<(String, String)> },
+    /// Unfinished calls are being replayed: the first well-formed question or
+    /// proposal is the one the task waited on and receives the reply, if there is one.
+    Replay { answer: Option<WaitReply> },
 }
 pub(crate) struct AskRequester {
     mode: Mutex<Mode>,
@@ -25,8 +33,7 @@ impl AskRequester {
             asked: tokio::sync::Notify::new(),
         }
     }
-    /// `answer` is `(message id, text)` of the requester's reply.
-    pub(super) fn begin_replay(&self, answer: Option<(String, String)>) {
+    pub(super) fn begin_replay(&self, answer: Option<WaitReply>) {
         *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = Mode::Replay { answer };
     }
     pub(super) fn end_replay(&self) {
@@ -35,6 +42,38 @@ impl AskRequester {
     /// Resolves once a question paused the task in this process.
     pub(super) async fn asked(&self) {
         self.asked.notified().await;
+    }
+    /// One wait is open at a time, whichever tool opens it. `proposal` is the
+    /// wait id of a list-change proposal and `None` for a question. `Ok(Some)`
+    /// is the requester's reply to this call: a reply to a question never
+    /// reaches a proposal, nor an approval any call but the one it names.
+    /// `Ok(None)`: this call opened the wait and must `park`, never return.
+    pub(super) fn open(&self, proposal: Option<&str>) -> Result<Option<WaitReply>, &'static str> {
+        let mut mode = self.mode.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *mode {
+            Mode::Replay { answer } => {
+                let meant = answer.as_ref().is_some_and(|reply| match proposal {
+                    Some(wait_id) => reply.approved.is_some() && reply.wait_id == wait_id,
+                    None => reply.approved.is_none(),
+                });
+                if meant {
+                    Ok(answer.take())
+                } else {
+                    Err(ONE_AT_A_TIME)
+                }
+            }
+            Mode::Live { asked } if *asked => Err(ONE_AT_A_TIME),
+            Mode::Live { asked } => {
+                *asked = true;
+                Ok(None)
+            }
+        }
+    }
+    /// The worker ends this process once the call is durable. Returning would
+    /// let the model continue without the reply.
+    pub(super) async fn park(&self) -> ! {
+        self.asked.notify_one();
+        std::future::pending().await
     }
 }
 
@@ -50,7 +89,7 @@ pub(super) fn register(registry: &mut tool_api::ToolRegistry, ask: Arc<AskReques
     }));
 }
 const ONE_AT_A_TIME: &str =
-    "Only one question can be open at a time. Ask again after the requester has answered.";
+    "Only one question or change proposal can be open at a time. Try again after the requester has replied.";
 #[async_trait::async_trait]
 impl Tool for AskTool {
     fn name(&self) -> &str {
@@ -115,27 +154,12 @@ impl Tool for AskTool {
                 "The question must be non-empty text of at most 2000 bytes".into(),
             ));
         }
-        let answer = {
-            let mut mode = self.ask.mode.lock().unwrap_or_else(|e| e.into_inner());
-            match &mut *mode {
-                Mode::Replay { answer } => match answer.take() {
-                    Some(answer) => Some(answer),
-                    None => return Err(ToolError::Internal(ONE_AT_A_TIME.into())),
-                },
-                Mode::Live { asked } if *asked => {
-                    return Err(ToolError::Internal(ONE_AT_A_TIME.into()))
-                }
-                Mode::Live { asked } => {
-                    *asked = true;
-                    None
-                }
-            }
-        };
-        let Some((message_id, text)) = answer else {
-            // The worker ends this process once the call is durable. Returning
-            // here would let the model continue without the answer.
-            self.ask.asked.notify_one();
-            return std::future::pending().await;
+        let WaitReply {
+            message_id, text, ..
+        } = match self.ask.open(None) {
+            Err(reason) => return Err(ToolError::Internal(reason.into())),
+            Ok(None) => self.ask.park().await,
+            Ok(Some(reply)) => reply,
         };
         Ok(ToolCallResult {
             data: generated_builtin_result(
