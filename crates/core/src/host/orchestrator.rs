@@ -4401,7 +4401,9 @@ pub struct TerminalApiErrorMessage {
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// SDK stream transports opt in to the ephemeral result-usage accumulator.
-    fn wants_result_usage(&self) -> bool { false }
+    fn wants_result_usage(&self) -> bool {
+        false
+    }
 
     /// Native-compatible CLI sinks request its diagnostic wording. This is a
     /// presentation fact, not an authorization decision.
@@ -4410,7 +4412,11 @@ pub trait OutputStream: Send + Sync {
     }
 
     /// Bind the session accounting source for SDK usage-since-result stamps.
-    fn set_result_usage_source(&self, _source: std::sync::Arc<dyn super::result_usage::ResultUsageSource>) {}
+    fn set_result_usage_source(
+        &self,
+        _source: std::sync::Arc<dyn super::result_usage::ResultUsageSource>,
+    ) {
+    }
     /// Observe selected accounts and sanitized aggregate routing failures.
     async fn emit_provider_account_routing(
         &self,
@@ -4504,7 +4510,8 @@ pub trait OutputStream: Send + Sync {
         _model: &str,
         _native_event_json: Option<&str>,
         _content: &[crate::types::ContentBlock],
-    ) {}
+    ) {
+    }
 
     /// Emit a native tombstone for a complete row. `display_only` is a native
     /// flag and does not promise presentation-only deletion; native consumers

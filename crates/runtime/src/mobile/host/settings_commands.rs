@@ -150,19 +150,32 @@ impl MobileEngineHandle {
             .iter()
             .find(|(key, _)| key == "promptSuggestionEnabled")
             .and_then(|(_, value)| value.as_ref().and_then(serde_json::Value::as_bool));
-        let compact_settings_changed = patch.iter().any(|(key, _)| matches!(key.as_str(),
-            "autoCompactEnabled" | "autoCompactWindow" | "modelSettings"));
+        let compact_settings_changed = patch.iter().any(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "autoCompactEnabled" | "autoCompactWindow" | "modelSettings"
+            )
+        });
         match apply_patch(&context.paths, destination, patch) {
             Ok(()) => {
                 if compact_settings_changed {
-                    match self.current_mobile_config().map_err(|error| error.to_string())
-                        .and_then(|config| super::provider_services::mobile_effective_settings(&config).map_err(|error| error.to_string()))
-                    {
+                    match self
+                        .current_mobile_config()
+                        .map_err(|error| error.to_string())
+                        .and_then(|config| {
+                            super::provider_services::mobile_effective_settings(&config)
+                                .map_err(|error| error.to_string())
+                        }) {
                         Ok(effective) => {
                             self.inner.orchestrator.refresh_auto_compact_settings(
-                                crate::native_model_settings::snapshot(Some(&effective)).auto_compact,
+                                crate::native_model_settings::snapshot(Some(&effective))
+                                    .auto_compact,
                             );
-                            let _ = context.mark_keys_applied(&["autoCompactEnabled", "autoCompactWindow", "modelSettings"]);
+                            let _ = context.mark_keys_applied(&[
+                                "autoCompactEnabled",
+                                "autoCompactWindow",
+                                "modelSettings",
+                            ]);
                         }
                         Err(message) => {
                             sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal,

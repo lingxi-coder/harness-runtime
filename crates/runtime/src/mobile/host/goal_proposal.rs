@@ -150,15 +150,15 @@ pub(super) async fn run_queued_goal_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use command_api::{CommandRegistry, builtins::GoalHandler};
+    use command_api::{builtins::GoalHandler, CommandRegistry};
     use lingxi_core::host::goal::GoalProposalHost;
     use lingxi_core::session::GoalOrigin;
     use orchestrator::test_support::{
-        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-        message_start, message_stop, noop_hook_executor, text_delta,
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
+        MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
-    use tokio::sync::{Mutex, RwLock, mpsc};
+    use tokio::sync::{mpsc, Mutex, RwLock};
     use tokio_util::sync::CancellationToken;
 
     struct Queue(Arc<msgqueue::MessageQueueManager>);

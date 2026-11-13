@@ -19,7 +19,8 @@ use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_start, noop_hook_executor, text_delta,
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::path::PathBuf;

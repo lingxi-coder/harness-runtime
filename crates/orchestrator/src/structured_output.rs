@@ -308,7 +308,9 @@ impl Tool for StructuredOutputTool {
             JsonSchemaValidation::Invalid { detail, .. } => {
                 const PREFIX: &str = "Output does not match required schema: ";
                 let prefix = PREFIX.encode_utf16().collect::<Vec<_>>();
-                let units = detail.string_units("").expect("schema validation detail is a source string");
+                let units = detail
+                    .string_units("")
+                    .expect("schema validation detail is a source string");
                 let detail = if units.starts_with(&prefix) {
                     detail
                 } else {
@@ -416,7 +418,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.model_facing_message(), parse(r#""Output does not match required schema: invalid \ud800 output""#));
+        assert_eq!(
+            error.model_facing_message(),
+            parse(r#""Output does not match required schema: invalid \ud800 output""#)
+        );
         assert_eq!(slot.lock().unwrap().as_ref(), Some(&previous));
     }
 }

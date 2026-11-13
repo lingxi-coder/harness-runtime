@@ -36,9 +36,9 @@ pub use test_support::{
 mod attempt_pricing;
 #[cfg(test)]
 mod codec_tests;
+mod native_request_layout;
 #[cfg(test)]
 mod native_request_layout_319_test;
-mod native_request_layout;
 pub mod native_stream_capture;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 

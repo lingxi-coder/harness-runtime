@@ -857,7 +857,8 @@ pub fn emit_assistant_response_log_chunks<'a>(
         if !runtime.config.log_include.assistant_responses {
             return;
         }
-        let truncated = super::record::truncate_content_chunks(body, runtime.config.content_max_length);
+        let truncated =
+            super::record::truncate_content_chunks(body, runtime.config.content_max_length);
         let attrs = attrs_from_pairs(&[
             ("request_id", AttrValue::from(request_id.to_string())),
             ("model", AttrValue::from(model.to_string())),

@@ -2018,7 +2018,10 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         "isApiErrorMessage is always stamped"
     );
     assert!(!bare.extra.contains_property("error"), "no error category");
-    assert!(!bare.extra.contains_property("apiError"), "no API-error subtype");
+    assert!(
+        !bare.extra.contains_property("apiError"),
+        "no API-error subtype"
+    );
     assert!(
         !bare.extra.contains_property("apiErrorStatus"),
         "no apiErrorStatus"

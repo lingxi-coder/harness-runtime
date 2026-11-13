@@ -922,11 +922,14 @@ impl ConversationOrchestrator {
             submitted: false,
         };
         let dispatch_check = context.dispatch_check(cancel);
-        let query = context.config.client.query_with_dispatch_admission_and_usage_observer(
-            summary_request,
-            llm_runtime::RequestDispatchAdmission::new(move || dispatch_check()),
-            observer,
-        );
+        let query = context
+            .config
+            .client
+            .query_with_dispatch_admission_and_usage_observer(
+                summary_request,
+                llm_runtime::RequestDispatchAdmission::new(move || dispatch_check()),
+                observer,
+            );
         let response = match cancel {
             Some(cancel) => tokio::select! {
                 biased;

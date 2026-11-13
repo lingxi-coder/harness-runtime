@@ -7026,9 +7026,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     } else {
                         rule_decision_otel_source(rule_source.as_deref(), false)
                     };
-                    let mut fact = serde_json::json!({"decision":"reject", "source":decision_otel_source});
+                    let mut fact =
+                        serde_json::json!({"decision":"reject", "source":decision_otel_source});
                     if let Some(reason_type) = &decision_reason_type {
-                        fact.as_object_mut().expect("permission fact").insert("reason_type".into(), serde_json::json!(reason_type));
+                        fact.as_object_mut()
+                            .expect("permission fact")
+                            .insert("reason_type".into(), serde_json::json!(reason_type));
                     }
                     permission_decision = Some(Utf16JsonProjection::plain(fact));
                     // Classify the denial for the stream-json `tool_result_meta`

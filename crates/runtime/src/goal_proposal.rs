@@ -1,10 +1,10 @@
 //! Nonblocking Goal proposal approval on the owning interactive session.
 
 use async_trait::async_trait;
-use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::host::goal::{GoalProposalHost, GoalProposalState, ModelProposedGoals};
+use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::session::GoalOrigin;
-use lingxi_core::settings::{EffectiveSettings, tracer::Source};
+use lingxi_core::settings::{tracer::Source, EffectiveSettings};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::ConversationOrchestrator;
 use std::sync::{Arc, Mutex, OnceLock, Weak};

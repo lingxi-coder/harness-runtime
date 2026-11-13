@@ -654,7 +654,9 @@ mod tests {
         );
         grown.push(placeholder);
         assert_eq!(
-            orch.main_context_usage_estimator().await.estimate("other", Some("other"), &grown),
+            orch.main_context_usage_estimator()
+                .await
+                .estimate("other", Some("other"), &grown),
             None,
             "a zero-usage model switch cannot borrow the preceding model's count"
         );

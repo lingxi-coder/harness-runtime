@@ -235,7 +235,6 @@ mod tests {
             restored.try_into_state().unwrap().per_account_usage.len(),
             0
         );
-
     }
 
     #[test]
@@ -317,5 +316,4 @@ mod tests {
             assert!(serde_json::from_value::<crate::CostStateVector>(value).is_err());
         }
     }
-
 }

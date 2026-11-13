@@ -1740,36 +1740,30 @@ impl StreamingTurnDriver<'_> {
             orch.cancel_idle_compaction();
             open_cancelable_stream(
                 user_cancel,
-                Box::pin(
-                    retry_scope.run(orch.scope_main_request(
-                        llm_runtime::native_stream_capture::scope_requested(
-                            orch.output.wants_native_stream_frames(),
-                            orch.streaming_api.stream_with_effort_override(
-                                &model,
-                                model_profile.as_deref(),
-                                system_prompt.as_ref(),
-                                snapshot,
-                                tool_declarations.clone(),
-                                max_output_budget,
-                                None,
-                                tool_result_reminder_suffixes.clone(),
-                                crate::config::sanitize_query_source(&orch.config.query_source),
-                                skip_global_cache_for_system_prompt,
-                                request_dispatch_admission,
-                                request_dispatch_observer,
-                                native_anthropic_request_context.clone(),
-                                typed_attachment_ids,
-                                task_deliveries,
-                                native_model_source.for_route(
-                                    orch,
-                                    &model,
-                                    model_profile.as_deref(),
-                                ),
-                                scalar_user_content_ids.clone(),
-                            ),
+                Box::pin(retry_scope.run(orch.scope_main_request(
+                    llm_runtime::native_stream_capture::scope_requested(
+                        orch.output.wants_native_stream_frames(),
+                        orch.streaming_api.stream_with_effort_override(
+                            &model,
+                            model_profile.as_deref(),
+                            system_prompt.as_ref(),
+                            snapshot,
+                            tool_declarations.clone(),
+                            max_output_budget,
+                            None,
+                            tool_result_reminder_suffixes.clone(),
+                            crate::config::sanitize_query_source(&orch.config.query_source),
+                            skip_global_cache_for_system_prompt,
+                            request_dispatch_admission,
+                            request_dispatch_observer,
+                            native_anthropic_request_context.clone(),
+                            typed_attachment_ids,
+                            task_deliveries,
+                            native_model_source.for_route(orch, &model, model_profile.as_deref()),
+                            scalar_user_content_ids.clone(),
                         ),
-                    )),
-                ),
+                    ),
+                ))),
             )
             .await
             .map(|stream| {
@@ -2314,58 +2308,52 @@ impl StreamingTurnDriver<'_> {
         let resp = side_model_request(
             orch,
             user_cancel,
-            retry_scope.run(
-                orch.scope_main_request(
-                        orch.api
-                            .messages_create(crate::OrchestratorApiRequest::Main({
-                                let mut request = llm_runtime::MessagesCreateRequest::new(
-                                    &non_stream_model,
-                                    non_stream_profile.as_deref(),
-                                    system_prompt.as_ref().cloned(),
-                                    non_stream_snapshot,
-                                    tools_for_fallback,
-                                );
-                                request.opts.skip_global_cache_for_system_prompt =
-                                    skip_global_cache_for_system_prompt;
-                                request.opts.native_anthropic_request_context =
-                                    native_anthropic_request_context.clone();
-                                request.opts.typed_attachment_ids =
-                                    orch.typed_attachment_ids_for_snapshot(&request.messages);
-                                request.opts.task_deliveries =
-                                    orch.task_deliveries_for_snapshot(&request.messages).await;
-                                request.opts.scalar_user_content_ids = orch
-                                    .session
-                                    .lock()
-                                    .await
-                                    .native_request_history
-                                    .scalar_user_content_ids
-                                    .clone();
-                                request.opts.request_dispatch_admission =
-                                    request_dispatch_admission;
-                                request.opts.request_dispatch_observer =
-                                    observe_main_dispatch(None, &orch.output);
-                                request.opts.query_source = Some(
-                                    crate::config::sanitize_query_source(&orch.config.query_source)
-                                        .to_string(),
-                                );
-                                request.opts.model_source = native_model_source.for_route(
-                                    orch,
-                                    &non_stream_model,
-                                    non_stream_profile.as_deref(),
-                                );
-                                request.opts.initial_consecutive_overloaded = Some(seed);
-                                request.opts.failed_stream_outlasted_timeout =
-                                    failed_stream_outlasted_timeout;
-                                request.opts.fallback = orch
-                                    .config
-                                    .fallback_model
-                                    .as_deref()
-                                    .map(llm_runtime::FallbackPolicy::from_models_csv)
-                                    .unwrap_or(llm_runtime::FallbackPolicy::Disabled);
-                                request
-                            })),
-                    ),
-            ),
+            retry_scope.run(orch.scope_main_request(orch.api.messages_create(
+                crate::OrchestratorApiRequest::Main({
+                    let mut request = llm_runtime::MessagesCreateRequest::new(
+                        &non_stream_model,
+                        non_stream_profile.as_deref(),
+                        system_prompt.as_ref().cloned(),
+                        non_stream_snapshot,
+                        tools_for_fallback,
+                    );
+                    request.opts.skip_global_cache_for_system_prompt =
+                        skip_global_cache_for_system_prompt;
+                    request.opts.native_anthropic_request_context =
+                        native_anthropic_request_context.clone();
+                    request.opts.typed_attachment_ids =
+                        orch.typed_attachment_ids_for_snapshot(&request.messages);
+                    request.opts.task_deliveries =
+                        orch.task_deliveries_for_snapshot(&request.messages).await;
+                    request.opts.scalar_user_content_ids = orch
+                        .session
+                        .lock()
+                        .await
+                        .native_request_history
+                        .scalar_user_content_ids
+                        .clone();
+                    request.opts.request_dispatch_admission = request_dispatch_admission;
+                    request.opts.request_dispatch_observer =
+                        observe_main_dispatch(None, &orch.output);
+                    request.opts.query_source = Some(
+                        crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
+                    );
+                    request.opts.model_source = native_model_source.for_route(
+                        orch,
+                        &non_stream_model,
+                        non_stream_profile.as_deref(),
+                    );
+                    request.opts.initial_consecutive_overloaded = Some(seed);
+                    request.opts.failed_stream_outlasted_timeout = failed_stream_outlasted_timeout;
+                    request.opts.fallback = orch
+                        .config
+                        .fallback_model
+                        .as_deref()
+                        .map(llm_runtime::FallbackPolicy::from_models_csv)
+                        .unwrap_or(llm_runtime::FallbackPolicy::Disabled);
+                    request
+                }),
+            ))),
         )
         .await;
         let Some(resp_result) = resp else {

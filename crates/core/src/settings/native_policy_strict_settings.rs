@@ -3047,11 +3047,26 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 mod tests {
     #[test]
     fn model_window_is_optional_and_invalid_windows_retain_effort_siblings() {
-        let result = validate(&parse(r#"{"modelSettings":{"missing":{"effortLevel":"high"},"invalid":{"effortLevel":"low","autoCompactWindow":17}}}"#));
+        let result = validate(&parse(
+            r#"{"modelSettings":{"missing":{"effortLevel":"high"},"invalid":{"effortLevel":"low","autoCompactWindow":17}}}"#,
+        ));
         assert_eq!(result.status, NativeStrictSettingsStatus::Valid);
-        assert_eq!(result.projection.string_at("/modelSettings/missing/effortLevel"), Some("high"));
-        assert_eq!(result.projection.string_at("/modelSettings/invalid/effortLevel"), Some("low"));
-        assert!(result.projection.at_pointer("/modelSettings/invalid/autoCompactWindow").is_none());
+        assert_eq!(
+            result
+                .projection
+                .string_at("/modelSettings/missing/effortLevel"),
+            Some("high")
+        );
+        assert_eq!(
+            result
+                .projection
+                .string_at("/modelSettings/invalid/effortLevel"),
+            Some("low")
+        );
+        assert!(result
+            .projection
+            .at_pointer("/modelSettings/invalid/autoCompactWindow")
+            .is_none());
     }
     #[cfg(windows)]
     #[test]
@@ -3357,7 +3372,10 @@ mod tests {
             Some("high")
         );
         assert!(valid.projection.at_pointer("/modelSettings/bad").is_some());
-        assert!(valid.projection.at_pointer("/modelSettings/bad/autoCompactWindow").is_none());
+        assert!(valid
+            .projection
+            .at_pointer("/modelSettings/bad/autoCompactWindow")
+            .is_none());
         assert!(valid
             .projection
             .at_pointer("/pluginConfigs/review@local/unknown")

@@ -1780,7 +1780,11 @@ async fn pump_stream_inner(
     // Scoped to this physical stream; never share envelopes across accounts.
     let mut native_message_start: Option<String> = None;
     let mut active_native_message_start: Option<String> = None;
-    let mut pending_native_stops: std::collections::VecDeque<(u32, String, lingxi_core::host::orchestrator::PartialStreamEventMetadata)> = std::collections::VecDeque::new();
+    let mut pending_native_stops: std::collections::VecDeque<(
+        u32,
+        String,
+        lingxi_core::host::orchestrator::PartialStreamEventMetadata,
+    )> = std::collections::VecDeque::new();
     // Providers close tool blocks before reporting why generation stopped.
     // Do not abort on incomplete JSON until the terminal reason is available.
     let mut pending_tool_json_error = None;
@@ -1795,7 +1799,9 @@ async fn pump_stream_inner(
         ($result:expr) => {
             if let Err(error) = $result {
                 while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&pending, false, &metadata)
+                        .await;
                 }
                 return Err(build_failure(
                     turn,
@@ -1826,7 +1832,9 @@ async fn pump_stream_inner(
         if pending_events.is_empty() {
             if let Some(error) = pending_failure.take() {
                 while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&pending, false, &metadata)
+                        .await;
                 }
                 return Err(build_failure(
                     turn,
@@ -1843,7 +1851,9 @@ async fn pump_stream_inner(
         // Ready provider events take precedence; otherwise a completed tool
         // wakes this loop without waiting for the provider's next event.
         let user_cancel = pump.as_ref().and_then(|p| p.user_cancel).cloned();
-        let progress = pump.as_ref().filter(|p| p.settlement.is_some())
+        let progress = pump
+            .as_ref()
+            .filter(|p| p.settlement.is_some())
             .and_then(|p| p.executor.progress_waiter());
         let next = tokio::select! {
             biased;
@@ -1888,7 +1898,9 @@ async fn pump_stream_inner(
         };
         let Some(item) = next else {
             while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                output
+                    .emit_stream_event_with_metadata(&pending, false, &metadata)
+                    .await;
             }
             poll_ready_stream_tool_results(&mut pump).await;
             if pending_tool_json_error.is_none()
@@ -1914,7 +1926,9 @@ async fn pump_stream_inner(
             Ok(ev) => (ev, std::time::Instant::now()),
             Err(e) => {
                 while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&pending, false, &metadata)
+                        .await;
                 }
                 poll_ready_stream_tool_results(&mut pump).await;
                 if completion.message_started
@@ -2032,7 +2046,9 @@ async fn pump_stream_inner(
         } = &event
         {
             while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                output
+                    .emit_stream_event_with_metadata(&pending, false, &metadata)
+                    .await;
             }
             authoritative_partial_frames = true;
             let message_start = event.string_at("/type").as_deref() == Some("message_start");
@@ -2059,10 +2075,18 @@ async fn pump_stream_inner(
                     None
                 };
                 if let Some(index) = stop_index {
-                    pending_native_stops.push_back((index, event.as_json_source().to_owned(), metadata));
+                    pending_native_stops.push_back((
+                        index,
+                        event.as_json_source().to_owned(),
+                        metadata,
+                    ));
                 } else {
                     output
-                        .emit_stream_event_with_metadata(event.as_json_source(), message_start, &metadata)
+                        .emit_stream_event_with_metadata(
+                            event.as_json_source(),
+                            message_start,
+                            &metadata,
+                        )
                         .await;
                 }
             }
@@ -2091,9 +2115,14 @@ async fn pump_stream_inner(
         }
         if let HistoryEvent::ContentBlockStop { index } = &event {
             if observation_block_indices.remove(index) {
-                if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| id == index) {
+                if let Some(position) = pending_native_stops
+                    .iter()
+                    .position(|(id, _, _)| id == index)
+                {
                     if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
-                        output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                        output
+                            .emit_stream_event_with_metadata(&event, false, &metadata)
+                            .await;
                     }
                 }
                 continue;
@@ -2559,7 +2588,9 @@ async fn pump_stream_inner(
             }
             Err(e) => {
                 while let Some((_, pending, metadata)) = pending_native_stops.pop_front() {
-                    output.emit_stream_event_with_metadata(&pending, false, &metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&pending, false, &metadata)
+                        .await;
                 }
                 poll_ready_stream_tool_results(&mut pump).await;
                 return Err(build_failure(
@@ -2686,7 +2717,9 @@ async fn pump_stream_inner(
                         );
                     }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
-                        if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
+                        if let Some(row) =
+                            turn.assistant_rows.iter().find(|row| row.row_id == row_id)
+                        {
                             settlement.record_assistant_response(row);
                         } else {
                             settlement.record_assistant_row(row_id);
@@ -2694,11 +2727,17 @@ async fn pump_stream_inner(
                     }
                 }
                 if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
-                    output.emit_accepted_assistant_row(
-                        &row.row_id, &row.timestamp, row.request_id.as_deref(),
-                        &row.provider_message_id, &row.model,
-                        active_native_message_start.as_deref(), &row.content,
-                    ).await;
+                    output
+                        .emit_accepted_assistant_row(
+                            &row.row_id,
+                            &row.timestamp,
+                            row.request_id.as_deref(),
+                            &row.provider_message_id,
+                            &row.model,
+                            active_native_message_start.as_deref(),
+                            &row.content,
+                        )
+                        .await;
                 }
             }
             RouterAction::DispatchToolUse {
@@ -2764,14 +2803,25 @@ async fn pump_stream_inner(
                         .await;
                 }
                 check_transcript_owner!();
-                output.emit_accepted_assistant_row(
-                    &row.row_id, &row.timestamp, row.request_id.as_deref(),
-                    &row.provider_message_id, &row.model,
-                    active_native_message_start.as_deref(), &row.content,
-                ).await;
-                if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| *id == api_block_index) {
+                output
+                    .emit_accepted_assistant_row(
+                        &row.row_id,
+                        &row.timestamp,
+                        row.request_id.as_deref(),
+                        &row.provider_message_id,
+                        &row.model,
+                        active_native_message_start.as_deref(),
+                        &row.content,
+                    )
+                    .await;
+                if let Some(position) = pending_native_stops
+                    .iter()
+                    .position(|(id, _, _)| *id == api_block_index)
+                {
                     if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
-                        output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                        output
+                            .emit_stream_event_with_metadata(&event, false, &metadata)
+                            .await;
                     }
                 }
                 // Register the completed source row at content_block_stop.
@@ -2951,9 +3001,14 @@ async fn pump_stream_inner(
             }
         }
         if let Some(index) = completed_block_index {
-            if let Some(position) = pending_native_stops.iter().position(|(id, _, _)| *id == index) {
+            if let Some(position) = pending_native_stops
+                .iter()
+                .position(|(id, _, _)| *id == index)
+            {
                 if let Some((_, event, metadata)) = pending_native_stops.remove(position) {
-                    output.emit_stream_event_with_metadata(&event, false, &metadata).await;
+                    output
+                        .emit_stream_event_with_metadata(&event, false, &metadata)
+                        .await;
                 }
             }
         }

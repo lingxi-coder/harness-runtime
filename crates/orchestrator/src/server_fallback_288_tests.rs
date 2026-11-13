@@ -706,7 +706,9 @@ async fn cold_resume_uses_assistant_model_and_matching_notice_profiles_for_serve
         &transcript_path,
         format!(
             "{}\n{}",
-            fixed_session_mode_header(session_uuid).to_json_string().unwrap(),
+            fixed_session_mode_header(session_uuid)
+                .to_json_string()
+                .unwrap(),
             rows.iter()
                 .map(|row| serde_json::to_string(row).unwrap() + "\n")
                 .collect::<String>()
@@ -832,7 +834,9 @@ async fn cold_resume_notice_without_fallback_assistant_does_not_select_model_or_
         &transcript_path,
         format!(
             "{}\n{}",
-            fixed_session_mode_header(session_uuid).to_json_string().unwrap(),
+            fixed_session_mode_header(session_uuid)
+                .to_json_string()
+                .unwrap(),
             rows.iter()
                 .map(|row| serde_json::to_string(row).unwrap() + "\n")
                 .collect::<String>()

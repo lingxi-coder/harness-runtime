@@ -1,7 +1,7 @@
 //! Desktop policy composition for the shared nonblocking Goal proposal host.
 
-use super::{DesktopConfig, load_effective_settings_for_config};
-use crate::goal_proposal::{GoalProposalPolicy, SessionGoalProposalHost, trusted_setting};
+use super::{load_effective_settings_for_config, DesktopConfig};
+use crate::goal_proposal::{trusted_setting, GoalProposalPolicy, SessionGoalProposalHost};
 use async_trait::async_trait;
 use lingxi_core::host::goal::{GoalProposalHost, GoalProposalState, ModelProposedGoals};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -13,7 +13,7 @@ use {
     lingxi_core::{
         host::OrchestratorHandle,
         session::GoalOrigin,
-        settings::{EffectiveSettings, tracer::Source},
+        settings::{tracer::Source, EffectiveSettings},
     },
     std::sync::Mutex,
     tool_ui::ask_user_question::Question,
@@ -83,7 +83,7 @@ impl GoalProposalHost for DesktopGoalProposalHost {
 mod tests {
     use super::*;
     const PENDING_MESSAGE: &str = "A goal proposal is already awaiting the user's decision. Keep working; if it is approved you will receive a kickoff message.";
-    use lingxi_core::settings::{SettingsRawLayer, schema::SettingsJson};
+    use lingxi_core::settings::{schema::SettingsJson, SettingsRawLayer};
 
     fn settings(layers: &[(Source, &str)]) -> EffectiveSettings {
         let mut settings = EffectiveSettings {
@@ -224,7 +224,7 @@ mod tests {
 
     async fn fixture() -> Fixture {
         use orchestrator::test_support::{
-            MockApiClient, MockOutputStream, StaticMemoryProvider, noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
         };
         let root = tempfile::tempdir().unwrap();
         let mut config = DesktopConfig::default();
