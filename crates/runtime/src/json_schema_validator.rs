@@ -119,6 +119,7 @@ impl From<SchemaProfile> for SchemaProfileWire {
 struct SchemaRecord {
     schema_id: String,
     schema: Utf16JsonProjection,
+    compiled: bool,
 }
 
 #[derive(Default)]
@@ -266,6 +267,7 @@ impl BunSessionLease {
                     state.schemas.push(SchemaRecord {
                         schema_id: schema_id.clone(),
                         schema: schema.clone(),
+                        compiled: true,
                     });
                     state.worker_generation = Some(generation);
                     return Ok(Arc::new(BunCompiledJsonSchema {
@@ -274,9 +276,17 @@ impl BunSessionLease {
                     }));
                 }
                 Some("schema_error") => {
-                    return Err(SchemaCompileError::InvalidSchema(
-                        exact_detail(&reply).map_err(SchemaCompileError::Worker)?,
-                    ));
+                    let detail = exact_detail(&reply).map_err(SchemaCompileError::Worker)?;
+                    // Ajv can register an $id before a deterministic compile
+                    // error (for example an unresolved forward reference).
+                    // Later successful schemas may depend on that registration.
+                    state.schemas.push(SchemaRecord {
+                        schema_id: schema_id.clone(),
+                        schema: schema.clone(),
+                        compiled: false,
+                    });
+                    state.worker_generation = Some(generation);
+                    return Err(SchemaCompileError::InvalidSchema(detail));
                 }
                 Some("worker_error") => {
                     return Err(SchemaCompileError::Worker(
@@ -328,12 +338,6 @@ impl BunSessionLease {
                     .exchange(&request, &request_id)
                     .await
                     .map_err(SchemaCompileError::Worker)?;
-                if reply.get("kind").and_then(Value::as_str) != Some("compiled") {
-                    return Err(SchemaCompileError::Worker(
-                        detail_display(&reply)
-                            .unwrap_or_else(|_| "could not restore validator session".into()),
-                    ));
-                }
                 if self
                     .inner
                     .ensure_started()
@@ -343,6 +347,18 @@ impl BunSessionLease {
                 {
                     replay_changed_generation = true;
                     break;
+                }
+                match reply.get("kind").and_then(Value::as_str) {
+                    Some("compiled") => {}
+                    // Recreate registration side effects without promoting the
+                    // retained negative snapshot to a compiled output contract.
+                    Some("schema_error") if !record.compiled => {}
+                    _ => {
+                        return Err(SchemaCompileError::Worker(
+                            detail_display(&reply)
+                                .unwrap_or_else(|_| "could not restore validator session".into()),
+                        ));
+                    }
                 }
             }
 
@@ -1120,6 +1136,64 @@ done
     #[tokio::test]
     async fn compile_replays_cross_schema_refs_after_other_session_worker_exit() {
         reference_compile_generation_race(true).await;
+    }
+
+    #[tokio::test]
+    async fn restart_replays_negative_forward_reference_registration_events() {
+        for retire_by_drop in [false, true] {
+            let validator = BunJsonSchemaValidator::new_from_host_environment();
+            let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
+            let forward = Utf16JsonProjection::parse(
+                r#"{"$id":"https://schema.example/outer","type":"object","required":["ok"],"properties":{"x":{"$ref":"https://schema.example/later"}}}"#,
+            ).unwrap();
+            let later = Utf16JsonProjection::parse(
+                r#"{"$id":"https://schema.example/later","type":"string"}"#,
+            )
+            .unwrap();
+            let reference =
+                Utf16JsonProjection::parse(r#"{"$ref":"https://schema.example/outer"}"#).unwrap();
+            assert!(matches!(
+                session.compile(&forward).await,
+                Err(SchemaCompileError::InvalidSchema(_))
+            ));
+            let _later_plan = session.compile(&later).await.unwrap();
+            let plan = session.compile(&reference).await.unwrap();
+            let good = Utf16JsonProjection::parse(r#"{"ok":true,"x":"fine"}"#).unwrap();
+            let bad = Utf16JsonProjection::parse(r#"{"ok":true,"x":42}"#).unwrap();
+            assert_eq!(
+                plan.validate(&good).await.unwrap(),
+                JsonSchemaValidation::Valid
+            );
+            assert!(matches!(
+                plan.validate(&bad).await.unwrap(),
+                JsonSchemaValidation::Invalid { .. }
+            ));
+            let old_generation = {
+                let mut slot = validator.inner.worker.lock().await;
+                let generation = slot.as_ref().unwrap().generation;
+                if retire_by_drop {
+                    // The cancellation guard retires its owned worker this way.
+                    slot.take();
+                } else {
+                    slot.as_mut().unwrap().child.kill().await.unwrap();
+                }
+                generation
+            };
+            for _ in 0..2 {
+                assert_eq!(
+                    plan.validate(&good).await.unwrap(),
+                    JsonSchemaValidation::Valid
+                );
+                assert!(matches!(
+                    plan.validate(&bad).await.unwrap(),
+                    JsonSchemaValidation::Invalid { .. }
+                ));
+            }
+            assert_ne!(
+                validator.inner.ensure_started().await.unwrap(),
+                old_generation
+            );
+        }
     }
 
     #[tokio::test]

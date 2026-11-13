@@ -2734,6 +2734,7 @@ impl ApiService {
     ) -> Result<HistoryResponse, LlmError> {
         request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        crate::anthropic_extra_body::capture(&mut request)?;
         let sub = self.effective_subscriber();
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -8436,6 +8437,8 @@ impl ApiService {
         policy: NonStreamDrivePolicy,
     ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
         Box::pin(async move {
+            let mut req = req;
+            crate::anthropic_extra_body::capture(&mut req)?;
             let client = self.client.account_call_snapshot().await?;
             let owner = Arc::as_ptr(&self.client) as usize;
             ACCOUNT_CALL_CLIENT
@@ -10322,6 +10325,7 @@ impl ApiService {
         mut request: LlmRequest,
         exact: bool,
     ) -> Result<Option<u64>, LlmError> {
+        crate::anthropic_extra_body::capture(&mut request)?;
         let runtime = self.client.account_call_snapshot().await?;
         let owner = Arc::as_ptr(&self.client) as usize;
         ACCOUNT_CALL_CLIENT
@@ -10743,6 +10747,8 @@ impl ApiService {
     ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
         Box::pin(async move {
+            let mut req = req;
+            crate::anthropic_extra_body::capture(&mut req)?;
             let client = self.client.account_call_snapshot().await?;
             let owner = Arc::as_ptr(&self.client) as usize;
             ACCOUNT_CALL_CLIENT

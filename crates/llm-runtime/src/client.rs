@@ -1836,6 +1836,8 @@ impl ModelRuntime {
         transport: Option<Arc<dyn Transport>>,
         authenticate: bool,
     ) -> Result<PreparedLlmCall, LlmError> {
+        let captured = crate::anthropic_extra_body::captured(request)?;
+        let request = captured.as_ref();
         let resolved_route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
@@ -1846,6 +1848,7 @@ impl ModelRuntime {
 
         let effective_protocol =
             self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
+        crate::anthropic_extra_body::validate(request, effective_protocol)?;
         // ToolSearch discovers local function tools on every provider. Only
         // Anthropic-wire routes understand its native deferred schemas and
         // tool_reference receipts. Adapt a request-local clone, including
@@ -1988,17 +1991,7 @@ impl ModelRuntime {
         // Evaluate the native structured-output kill switch per selected route,
         // before capability validation and SDK encoding. Keep the caller's
         // schema intact so a fallback to another provider can still use it.
-        let extra_body = if matches!(
-            effective_protocol,
-            ProtocolFamily::AnthropicMessages
-                | ProtocolFamily::BedrockClaude
-                | ProtocolFamily::VertexClaude
-                | ProtocolFamily::FoundryClaude
-        ) {
-            crate::service::extra_body_object()?
-        } else {
-            None
-        };
+        let extra_body = crate::anthropic_extra_body::body(request, effective_protocol).cloned();
         let suppress_schema = crate::structured_output::disabled_for(
             request,
             &resolved_route.provider_id,
@@ -2833,14 +2826,6 @@ impl ModelRuntime {
         &self,
         request: &LlmRequest,
     ) -> Result<u64, LlmError> {
-        if let Some(tokens) = request
-            .execution
-            .context_usage_estimate
-            .as_ref()
-            .and_then(|usage| usage.tokens_for(request))
-        {
-            return Ok(tokens);
-        }
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
@@ -2849,6 +2834,27 @@ impl ModelRuntime {
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let mut projected = request.clone();
+        crate::anthropic_extra_body::capture(&mut projected)?;
+        crate::anthropic_extra_body::validate(&projected, entry.protocol)?;
+        // A logical builder already recorded this route's protocol/profile.
+        // Preserve its bound fingerprint when only the optional physical slot
+        // is absent. Reroutes must still project and bind independently.
+        if projected
+            .execution
+            .context_usage_protocol
+            .or(projected.execution.input_protocol)
+            == Some(entry.protocol)
+            && projected.execution.prompt_projection_profile.as_ref() == Some(&entry.profile)
+        {
+            if let Some(tokens) = projected
+                .execution
+                .context_usage_estimate
+                .as_ref()
+                .and_then(|usage| usage.tokens_for(&projected))
+            {
+                return Ok(tokens);
+            }
+        }
         projected.execution.context_usage_protocol = Some(entry.protocol);
         projected.execution.prompt_projection_profile = Some(entry.profile.clone());
         Ok(crate::model::count_tokens::estimate_input_tokens(
@@ -2860,6 +2866,7 @@ impl ModelRuntime {
         &self,
         request: &mut LlmRequest,
     ) -> Result<(), LlmError> {
+        crate::anthropic_extra_body::capture(request)?;
         let Some(binding) = request.execution.context_usage_binding.clone() else {
             return Ok(());
         };
@@ -2888,6 +2895,8 @@ impl ModelRuntime {
         ),
         LlmError,
     > {
+        let captured = crate::anthropic_extra_body::captured(request)?;
+        let request = captured.as_ref();
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
@@ -2896,13 +2905,14 @@ impl ModelRuntime {
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let mut owned;
+        crate::anthropic_extra_body::validate(request, entry.protocol)?;
         let request = if crate::structured_output::disabled_for(
             request,
             &route.provider_id,
             entry.protocol,
             &route.request_model,
             route.capabilities.structured_output,
-            None,
+            crate::anthropic_extra_body::body(request, entry.protocol),
         ) {
             owned = request.clone();
             owned.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
@@ -2944,6 +2954,22 @@ impl ModelRuntime {
             (lingxi_llm_client::RequestMode::CountTokens, None),
         )
         .await?;
+        if let Some(extra) = crate::anthropic_extra_body::count(request, entry.protocol) {
+            use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy;
+            AnthropicRequestPolicy {
+                protocol: entry.protocol,
+                request_kind: request.execution.anthropic_request_kind,
+                extra_body: extra.clone(),
+                ..Default::default()
+            }
+            .apply(
+                &mut host.body_json,
+                &mut host.headers,
+                &mut host.json_string_overrides,
+                &mut host.url,
+            )
+            .map_err(crate::upstream::error)?;
+        }
         if request.execution.read_token_count {
             // Native322 d8t counts one scalar user string with an explicitly
             // empty tool list. Keep exact text coordinates synchronized when

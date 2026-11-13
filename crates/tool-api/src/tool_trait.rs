@@ -74,6 +74,13 @@ pub trait Tool: Send + Sync {
     /// Canonical tool name (e.g. `"Read"`, `"Bash"`).
     fn name(&self) -> &str;
 
+    /// The logical key this reader publishes for a supplied model path.
+    /// This is pure lexical normalization, without filesystem I/O, translation
+    /// into guest backing storage, or permission authority.
+    fn read_state_request_path(&self, path: &std::path::Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
     /// Translate a read-state key into the current filesystem I/O namespace.
     /// This grants no content-read permission; reminder callers still check the
     /// captured route before reading. Readers backed by a guest filesystem must

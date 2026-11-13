@@ -12012,4 +12012,90 @@ async fn implicit_http_oauth_grants_partition_discovery_without_config_mutation(
     ));
 }
 
+#[tokio::test]
+async fn static_authorization_uses_same_cache_partition_with_and_without_sdk_grants() {
+    let _lock = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    for explicit_oauth in [false, true] {
+        for stored_grant in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+            let mut config = http_cfg("static", "https://mcp.example.invalid/v1");
+            if let McpTransportSpec::Http { headers, oauth, .. } = &mut config.spec {
+                headers.insert(
+                    "aUtHoRiZaTiOn".into(),
+                    "Bearer static-fixture-access".into(),
+                );
+                *oauth = explicit_oauth.then_some(lingxi_core::host::McpOAuthConfigDto {
+                    client_id: None,
+                    callback_port: None,
+                    auth_server_metadata_url: None,
+                    scopes: None,
+                    xaa: None,
+                });
+            }
+            let storage: Arc<dyn lingxi_core::host::SecureStorage> =
+                Arc::new(XaaMemStorage::default());
+            let clock: Arc<dyn lingxi_core::host::Clock> =
+                Arc::new(FixedClock(std::time::UNIX_EPOCH));
+            if stored_grant {
+                oauth::store_tokens(
+                    &storage,
+                    &clock,
+                    &oauth::server_key(&config.name, &config.spec),
+                    &oauth::StoredTokens {
+                        access_token: "sdk-fixture-access".into(),
+                        refresh_token: Some("sdk-fixture-refresh".into()),
+                        expires_at_millis: oauth::OAuthExpiry::Undefined,
+                        client_id: None,
+                        client_secret: None,
+                        step_up_scope: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let mock = Arc::new(BridgeMock::new(&["worker"]));
+            let make_registry = || {
+                McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+                    .with_discovery_cache_store(store.clone())
+                    .with_oauth(OAuthDeps {
+                        http: GatedXaaHttp::new(),
+                        clock: clock.clone(),
+                        storage: storage.clone(),
+                        on_authorization_url: Arc::new(|_| {
+                            panic!("static header must not authorize OAuth")
+                        }),
+                        xaa_config: None,
+                    })
+            };
+            let warm = make_registry();
+            let grant = warm
+                .current_grant_provenance(&config)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(grant, GrantProvenance::unbound());
+            warm.connect(config.clone()).await.unwrap();
+            let reader = make_registry();
+            reader.connect(config.clone()).await.unwrap();
+            assert!(
+                matches!(
+                    reader.connections.read().await.get("static"),
+                    Some(McpConnectionState::Cached { .. })
+                ),
+                "explicit_oauth={explicit_oauth}, stored_grant={stored_grant}"
+            );
+            assert_eq!(
+                mock.connect_calls.load(Ordering::SeqCst),
+                1,
+                "a fresh catalog must not redial because of an unused OAuth grant"
+            );
+        }
+    }
+}
+
 include!("output_schema_publication.rs");

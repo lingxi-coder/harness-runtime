@@ -152,7 +152,7 @@ fn without_cache_control(
     }
 }
 
-fn block_array_without_cache_controls(
+pub(crate) fn block_array_without_cache_controls(
     value: &JsonPayload,
     encoding: lingxi_llm_client::exact_json::JsonEncoding,
 ) -> Result<JsonPayload, lingxi_llm_client::protocol::LlmError> {
@@ -166,7 +166,7 @@ fn block_array_without_cache_controls(
     JsonPayload::array_from_items(&blocks, encoding)
 }
 
-fn message_without_cache_controls(
+pub(crate) fn message_without_cache_controls(
     value: &JsonPayload,
     encoding: lingxi_llm_client::exact_json::JsonEncoding,
 ) -> Result<JsonPayload, lingxi_llm_client::protocol::LlmError> {

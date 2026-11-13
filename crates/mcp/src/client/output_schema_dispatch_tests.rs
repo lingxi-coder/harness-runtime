@@ -320,6 +320,59 @@ mod output_schema_dispatch {
     }
 
     #[tokio::test]
+    async fn physical_wire_name_selects_its_own_schema_when_model_names_collide() {
+        let (client, _, tx, mut rx) = client(false).await;
+        let listing = {
+            let client = client.clone();
+            tokio::spawn(async move { client.list_tools().await })
+        };
+        let req = request(&mut rx, "tools/list").await;
+        reply(&tx, &req, serde_json::json!({"tools":[
+            {"name":"a.b","inputSchema":{"type":"object"},"outputSchema":{"required":["first"]}},
+            {"name":"a_b","inputSchema":{"type":"object"},"outputSchema":{"required":["second"]}}
+        ]}), false).await;
+        assert_eq!(listing.await.unwrap().unwrap().len(), 2);
+        for (raw, field, accepted) in [
+            ("a.b", "first", true),
+            ("a.b", "second", false),
+            ("a_b", "second", true),
+            ("a_b", "first", false),
+        ] {
+            let call = {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client
+                        .call_tool_with_wire_name(
+                            "mcp__fixture__a_b",
+                            source_string(raw),
+                            source(serde_json::json!({})),
+                            None,
+                            None,
+                        )
+                        .await
+                })
+            };
+            let req = request(&mut rx, "tools/call").await;
+            assert_eq!(req["params"]["name"], raw);
+            reply(
+                &tx,
+                &req,
+                serde_json::json!({"content":[], "structuredContent":{(field):true}}),
+                false,
+            )
+            .await;
+            let result = call.await.unwrap();
+            assert_eq!(result.is_ok(), accepted, "wire tool {raw}, field {field}");
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(McpClientError::OutputSchemaInvalid { .. })
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn deterministic_invalid_schema_is_negative_cached_until_refresh() {
         let (client, validator, tx, mut rx) = client(false).await;
         list(&client, &tx, &mut rx, Some(r#"{"required":false}"#), false).await;

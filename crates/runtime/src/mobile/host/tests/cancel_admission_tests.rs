@@ -341,6 +341,7 @@ fn cancel_admission_queued_marker_remains_withdrawn() {
             loop_state: Arc::new(tool_cron::LoopRuntime::default()),
             durable_turns: handle.durable_turns.clone(),
             active_session_uuid: handle.inner.active_session_uuid.clone(),
+            active_turn: Some(handle.active_cancel.clone()),
         };
         assert!(source.take_mid_turn_batch().await.unwrap().is_none());
         assert_eq!(

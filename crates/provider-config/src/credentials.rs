@@ -146,6 +146,16 @@ impl MultiCredentialProvider {
         }
         self.accounts.get(id).cloned()
     }
+    async fn reread_account(
+        &self,
+        account: &AccountMetadata,
+    ) -> Result<secret::AccountCredential, LlmError> {
+        self.credentials
+            .get_account_credential_uncached(&account.credential_ref)
+            .await
+            .map_err(|_| LlmError::AccountStorageUnavailable)?
+            .ok_or(LlmError::AccountStorageUnavailable)
+    }
     async fn load_account_versioned(
         &self,
         account: AccountMetadata,
@@ -162,19 +172,33 @@ impl MultiCredentialProvider {
                 .get_account_credential(&account.credential_ref)
                 .await
                 .map_err(|_| LlmError::AccountStorageUnavailable)?;
+            let mut authoritative = false;
             let mut record = match stored {
                 Some(record) => record,
-                None => self
-                    .credentials
-                    .refresh_account_credential(account.clone(), 0)
-                    .await
-                    .map_err(account_refresh_error)?
-                    .ok_or_else(|| LlmError::Authentication {
-                        message: "account requires authentication".into(),
-                    })?,
+                None => {
+                    authoritative = true;
+                    self.credentials
+                        .refresh_account_credential(account.clone(), 0)
+                        .await
+                        .map_err(account_refresh_error)?
+                        .ok_or_else(|| LlmError::Authentication {
+                            message: "account requires authentication".into(),
+                        })?
+                }
             };
             rejected_revision = Some(record.credential_revision);
-            if record.identity_generation < account.identity_generation {
+            if record.identity_generation != account.identity_generation {
+                // Another host can publish a replacement directory before
+                // this host's positive native cache expires. Adopt the exact
+                // durable slot before delegating any OAuth protocol refresh.
+                record = self.reread_account(&account).await?;
+                rejected_revision = Some(record.credential_revision);
+                authoritative = true;
+            }
+            if record.identity_generation < account.identity_generation
+                && account.auth_kind
+                    == lingxi_core::host::provider_accounts::AccountAuthKind::OAuth
+            {
                 record = self
                     .credentials
                     .refresh_account_credential(account.clone(), 0)
@@ -185,8 +209,51 @@ impl MultiCredentialProvider {
             if record.identity_generation != account.identity_generation {
                 return Err(LlmError::AccountStorageUnavailable);
             }
-            if matches!(&record.kind,secret::AccountCredentialKind::OAuth{expires_at,..} if *expires_at<=std::time::SystemTime::now()+std::time::Duration::from_secs(60))
-            {
+            if self.account_version_root.is_some() {
+                let published = self.published_revision(&account).await?;
+                if published != Some(record.credential_revision) {
+                    if !authoritative {
+                        record = self.reread_account(&account).await?;
+                        rejected_revision = Some(record.credential_revision);
+                    }
+                    if record.identity_generation != account.identity_generation {
+                        return Err(LlmError::AccountStorageUnavailable);
+                    }
+                    let published = self.published_revision(&account).await?;
+                    if published != Some(record.credential_revision) {
+                        if account.auth_kind
+                            != lingxi_core::host::provider_accounts::AccountAuthKind::OAuth
+                        {
+                            return Err(LlmError::AccountStorageUnavailable);
+                        }
+                        let rejected = if published
+                            .is_some_and(|revision| revision > record.credential_revision)
+                        {
+                            record.credential_revision
+                        } else {
+                            record.credential_revision.saturating_sub(1)
+                        };
+                        record = self
+                            .credentials
+                            .refresh_account_credential(account.clone(), rejected)
+                            .await
+                            .map_err(|_| LlmError::AccountStorageUnavailable)?
+                            .ok_or(LlmError::AccountStorageUnavailable)?;
+                        if self.published_revision(&account).await?
+                            != Some(record.credential_revision)
+                        {
+                            return Err(LlmError::AccountStorageUnavailable);
+                        }
+                    }
+                }
+            }
+            rejected_revision = Some(record.credential_revision);
+            let expires_soon = matches!(
+                &record.kind,
+                secret::AccountCredentialKind::OAuth { expires_at, .. }
+                    if *expires_at <= std::time::SystemTime::now() + std::time::Duration::from_secs(60)
+            );
+            if expires_soon {
                 record = self
                     .credentials
                     .refresh_account_credential(account.clone(), record.credential_revision)
@@ -195,25 +262,12 @@ impl MultiCredentialProvider {
                     .ok_or_else(|| LlmError::Authentication {
                         message: "account token expired".into(),
                     })?;
-            }
-            if self.account_version_root.is_some() {
-                let published = self.published_revision(&account).await?;
-                if published != Some(record.credential_revision) {
-                    let rejected =
-                        if published.is_some_and(|revision| revision > record.credential_revision) {
-                            record.credential_revision
-                        } else {
-                            record.credential_revision.saturating_sub(1)
-                        };
-                    record = self
-                        .credentials
-                        .refresh_account_credential(account.clone(), rejected)
-                        .await
-                        .map_err(|_| LlmError::AccountStorageUnavailable)?
-                        .ok_or(LlmError::AccountStorageUnavailable)?;
-                    if self.published_revision(&account).await? != Some(record.credential_revision) {
-                        return Err(LlmError::AccountStorageUnavailable);
-                    }
+                if record.identity_generation != account.identity_generation
+                    || (self.account_version_root.is_some()
+                        && self.published_revision(&account).await?
+                            != Some(record.credential_revision))
+                {
+                    return Err(LlmError::AccountStorageUnavailable);
                 }
             }
             rejected_revision = Some(record.credential_revision);
@@ -248,7 +302,7 @@ impl MultiCredentialProvider {
             if account.auth_kind != lingxi_core::host::provider_accounts::AccountAuthKind::OAuth {
                 return Ok(None);
             }
-            let current = self
+            let mut current = self
                 .credentials
                 .get_account_credential(&account.credential_ref)
                 .await
@@ -257,6 +311,14 @@ impl MultiCredentialProvider {
                     message: "account requires authentication".into(),
                 })?;
             rejected_revision = Some(current.credential_revision);
+            if current.identity_generation != account.identity_generation
+                || (self.account_version_root.is_some()
+                    && self.published_revision(&account).await?
+                        != Some(current.credential_revision))
+            {
+                current = self.reread_account(&account).await?;
+                rejected_revision = Some(current.credential_revision);
+            }
             let resolved = account_credential_to_runtime(&account, clone_record(&current)?)?;
             if self.account_version_root.is_some()
                 && self.published_revision(&account).await? != Some(current.credential_revision)
@@ -856,6 +918,557 @@ mod tests {
                 .iter()
                 .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
                     && value == "Bearer synthetic-new-principal-key"));
+        }
+    }
+
+    mod cache_regression_tests {
+        use super::*;
+        use lingxi_core::host::SecureStorage as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, SystemTime};
+
+        type Key = (String, String);
+        struct PositiveCachedStorage {
+            durable: Arc<MemStorage>,
+            cache: std::sync::Mutex<BTreeMap<Key, lingxi_core::types::SecureStorageData>>,
+            uncached_reads: AtomicUsize,
+            backend_reads: AtomicUsize,
+        }
+        impl PositiveCachedStorage {
+            fn new(durable: Arc<MemStorage>) -> Self {
+                Self {
+                    durable,
+                    cache: Default::default(),
+                    uncached_reads: AtomicUsize::new(0),
+                    backend_reads: AtomicUsize::new(0),
+                }
+            }
+            async fn authoritative(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<
+                Option<lingxi_core::types::SecureStorageData>,
+                lingxi_core::host::SecureStorageError,
+            > {
+                let key = (service.to_owned(), account.to_owned());
+                self.cache.lock().unwrap().remove(&key);
+                self.backend_reads.fetch_add(1, Ordering::SeqCst);
+                let data = self.durable.retrieve(service, account).await?;
+                if let Some(value) = &data {
+                    self.cache.lock().unwrap().insert(key, value.clone());
+                }
+                Ok(data)
+            }
+        }
+        #[async_trait::async_trait]
+        impl lingxi_core::host::SecureStorage for PositiveCachedStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: lingxi_core::types::SecureStorageData,
+            ) -> Result<(), lingxi_core::host::SecureStorageError> {
+                self.durable.store(service, account, data).await?;
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.to_owned(), account.to_owned()));
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<
+                Option<lingxi_core::types::SecureStorageData>,
+                lingxi_core::host::SecureStorageError,
+            > {
+                let cached = self
+                    .cache
+                    .lock()
+                    .unwrap()
+                    .get(&(service.to_owned(), account.to_owned()))
+                    .cloned();
+                if cached.is_some() {
+                    return Ok(cached);
+                }
+                self.authoritative(service, account).await
+            }
+            async fn retrieve_uncached(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<
+                Option<lingxi_core::types::SecureStorageData>,
+                lingxi_core::host::SecureStorageError,
+            > {
+                self.uncached_reads.fetch_add(1, Ordering::SeqCst);
+                self.authoritative(service, account).await
+            }
+            async fn delete(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<(), lingxi_core::host::SecureStorageError> {
+                self.durable.delete(service, account).await?;
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.to_owned(), account.to_owned()));
+                Ok(())
+            }
+            async fn list(
+                &self,
+                service: &str,
+            ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
+                self.durable.list(service).await
+            }
+            fn is_encrypted(&self) -> bool {
+                true
+            }
+            fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+                lingxi_core::host::SecureStorageBackend::MacOsKeychain
+            }
+        }
+        fn manager_on(
+            storage: Arc<dyn lingxi_core::host::SecureStorage>,
+        ) -> Arc<secret::CredentialManager> {
+            Arc::new(secret::CredentialManager::new(
+                storage,
+                Arc::new(FixedClock),
+                Arc::new(NoHttp),
+            ))
+        }
+        fn api_record(generation: u64, revision: u64) -> secret::AccountCredential {
+            secret::AccountCredential {
+                identity_generation: generation,
+                credential_revision: revision,
+                kind: secret::AccountCredentialKind::ApiKey {
+                    key: lingxi_core::types::Secret::new(format!("synthetic-key-r{revision}")),
+                },
+            }
+        }
+        fn oauth_record(
+            generation: u64,
+            revision: u64,
+            expires_at: SystemTime,
+        ) -> secret::AccountCredential {
+            secret::AccountCredential {
+                identity_generation: generation,
+                credential_revision: revision,
+                kind: secret::AccountCredentialKind::OAuth {
+                    access_token: lingxi_core::types::Secret::new(format!(
+                        "synthetic-oauth-r{revision}"
+                    )),
+                    refresh_token: Some(lingxi_core::types::Secret::new(
+                        "synthetic-refresh".into(),
+                    )),
+                    expires_at,
+                    scopes: vec![],
+                    issuer: "https://auth.openai.com".into(),
+                    subject: Some("fixture-user".into()),
+                    organization_id: Some("fixture-workspace".into()),
+                    email: None,
+                    fedramp: false,
+                },
+            }
+        }
+        fn publish(root: &std::path::Path, account: &AccountMetadata, revision: u64) {
+            let _lock = lingxi_core::host::rooted_fs::lock_exclusive(
+                root,
+                &std::path::PathBuf::from(format!(
+                    "provider-accounts/{}.lock",
+                    account.credential_ref.store_scope
+                )),
+                0o700,
+                0o600,
+            )
+            .unwrap();
+            crate::write_account_credential_version_locked(root, account, revision).unwrap();
+        }
+        fn directory(
+            account: &AccountMetadata,
+        ) -> lingxi_core::host::provider_accounts::SharedAccountDirectory {
+            let mut registry =
+                crate::AccountRegistry::new(account.credential_ref.store_scope.clone());
+            registry.add(account.clone(), 0).unwrap();
+            Arc::new(std::sync::RwLock::new(registry.snapshot()))
+        }
+        struct Owner {
+            writer: Arc<secret::CredentialManager>,
+            root: std::path::PathBuf,
+            calls: std::sync::Mutex<Vec<u64>>,
+            rotations: AtomicUsize,
+            fail_rotation: bool,
+        }
+        #[async_trait::async_trait]
+        impl secret::AccountCredentialRefresher for Owner {
+            async fn refresh(
+                &self,
+                account: AccountMetadata,
+                rejected: u64,
+            ) -> Result<Option<secret::AccountCredential>, secret::CredentialError> {
+                self.calls.lock().unwrap().push(rejected);
+                if account.auth_kind != lingxi_core::host::provider_accounts::AccountAuthKind::OAuth
+                {
+                    return Ok(None);
+                }
+                let mut current = self
+                    .writer
+                    .get_account_credential_uncached(&account.credential_ref)
+                    .await?
+                    .unwrap();
+                if current.credential_revision <= rejected {
+                    if self.fail_rotation {
+                        return Err(secret::CredentialError::RefreshFailed(
+                            "synthetic refresh rejected".into(),
+                        ));
+                    }
+                    self.rotations.fetch_add(1, Ordering::SeqCst);
+                    current = oauth_record(
+                        account.identity_generation,
+                        rejected + 1,
+                        SystemTime::now() + Duration::from_secs(3600),
+                    );
+                    self.writer
+                        .store_account_credential(&account.credential_ref, &current)
+                        .await?;
+                }
+                publish(&self.root, &account, current.credential_revision);
+                Ok(Some(current))
+            }
+        }
+        fn owner(writer: Arc<secret::CredentialManager>, root: &std::path::Path) -> Arc<Owner> {
+            Arc::new(Owner {
+                writer,
+                root: root.to_owned(),
+                calls: Default::default(),
+                rotations: AtomicUsize::new(0),
+                fail_rotation: false,
+            })
+        }
+
+        #[tokio::test]
+        async fn api_key_rotation_adopts_independent_hot_generation_and_revision_without_refresh() {
+            for change_generation in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let durable = Arc::new(MemStorage::default());
+                let writer = manager_on(durable.clone());
+                let storage = Arc::new(PositiveCachedStorage::new(durable));
+                let reader = manager_on(storage.clone());
+                let account = api_account("11111111-1111-4111-8111-111111111111");
+                writer
+                    .store_account_credential(&account.credential_ref, &api_record(1, 1))
+                    .await
+                    .unwrap();
+                publish(root.path(), &account, 1);
+                let directory = directory(&account);
+                let provider = MultiCredentialProvider::new(reader.clone())
+                    .with_account_directory(directory.clone())
+                    .with_account_version_root(root.path().to_owned());
+                let owner = owner(writer.clone(), root.path());
+                reader.set_account_credential_refresher(owner.clone());
+                assert_eq!(
+                    provider
+                        .load_versioned(&account_scope(&account))
+                        .await
+                        .unwrap()
+                        .credential,
+                    Credential::ApiKey("synthetic-key-r1".into())
+                );
+                assert_eq!(storage.backend_reads.load(Ordering::SeqCst), 1);
+                assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 0);
+
+                let mut live = account.clone();
+                live.config_revision = 2;
+                if change_generation {
+                    live.identity_generation = 2;
+                }
+                writer
+                    .store_account_credential(
+                        &live.credential_ref,
+                        &api_record(live.identity_generation, 2),
+                    )
+                    .await
+                    .unwrap();
+                publish(root.path(), &live, 2);
+                directory.write().unwrap().config_revision = 2;
+                directory.write().unwrap().accounts = vec![live.clone()];
+                let adopted = provider
+                    .load_versioned(&account_scope(&live))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    adopted.credential,
+                    Credential::ApiKey("synthetic-key-r2".into())
+                );
+                assert_eq!(adopted.credential_revision, Some(2));
+                assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+                assert!(
+                    owner.calls.lock().unwrap().is_empty(),
+                    "API-key adoption does not invoke OAuth authority"
+                );
+                provider
+                    .load_versioned(&account_scope(&live))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    storage.backend_reads.load(Ordering::SeqCst),
+                    2,
+                    "unchanged credentials remain positively cached"
+                );
+                assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[tokio::test]
+        async fn authoritative_api_key_rereads_keep_identity_publication_and_io_fences() {
+            for failure in [
+                "future_identity",
+                "stale_identity",
+                "unpublished",
+                "unavailable",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let durable = Arc::new(MemStorage::default());
+                let writer = manager_on(durable.clone());
+                let storage = Arc::new(PositiveCachedStorage::new(durable.clone()));
+                let reader = manager_on(storage.clone());
+                let account = api_account("11111111-1111-4111-8111-111111111111");
+                writer
+                    .store_account_credential(&account.credential_ref, &api_record(1, 1))
+                    .await
+                    .unwrap();
+                publish(root.path(), &account, 1);
+                let directory = directory(&account);
+                let provider = MultiCredentialProvider::new(reader.clone())
+                    .with_account_directory(directory.clone())
+                    .with_account_version_root(root.path().to_owned());
+                let owner = owner(writer.clone(), root.path());
+                reader.set_account_credential_refresher(owner.clone());
+                provider
+                    .load_versioned(&account_scope(&account))
+                    .await
+                    .unwrap();
+                let mut live = account.clone();
+                live.identity_generation = 2;
+                live.config_revision = 2;
+                writer
+                    .store_account_credential(
+                        &live.credential_ref,
+                        &api_record(
+                            match failure {
+                                "future_identity" => 3,
+                                "stale_identity" => 1,
+                                _ => 2,
+                            },
+                            2,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                if failure != "unpublished" {
+                    publish(root.path(), &live, 2);
+                }
+                directory.write().unwrap().config_revision = 2;
+                directory.write().unwrap().accounts = vec![live.clone()];
+                let old = provider.load_versioned(&account_scope(&account)).await;
+                assert!(
+                    matches!(old, Err(error) if matches!(error.error, LlmError::InvalidRequest { .. }))
+                );
+                assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 0);
+                durable
+                    .fail_reads
+                    .store(failure == "unavailable", Ordering::SeqCst);
+                let result = provider.load_versioned(&account_scope(&live)).await;
+                assert!(
+                    matches!(result, Err(error) if matches!(error.error, LlmError::AccountStorageUnavailable))
+                );
+                assert_eq!(
+                    storage.uncached_reads.load(Ordering::SeqCst),
+                    1,
+                    "only one authoritative reread per failed adoption"
+                );
+                assert!(owner.calls.lock().unwrap().is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn oauth_cached_rotation_is_adopted_before_expiry_refresh() {
+            let root = tempfile::tempdir().unwrap();
+            let durable = Arc::new(MemStorage::default());
+            let writer = manager_on(durable.clone());
+            let storage = Arc::new(PositiveCachedStorage::new(durable));
+            let reader = manager_on(storage.clone());
+            let mut account = api_account("11111111-1111-4111-8111-111111111111");
+            account.auth_kind = lingxi_core::host::provider_accounts::AccountAuthKind::OAuth;
+            account.execution_binding_id = "openai-chatgpt".into();
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &oauth_record(1, 1, SystemTime::now() + Duration::from_secs(3600)),
+                )
+                .await
+                .unwrap();
+            publish(root.path(), &account, 1);
+            let provider = MultiCredentialProvider::new(reader.clone())
+                .with_accounts(vec![account.clone()])
+                .with_account_version_root(root.path().to_owned());
+            provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap();
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &oauth_record(1, 2, SystemTime::UNIX_EPOCH),
+                )
+                .await
+                .unwrap();
+            publish(root.path(), &account, 2);
+            let owner = owner(writer, root.path());
+            reader.set_account_credential_refresher(owner.clone());
+            let loaded = provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap();
+            assert_eq!(loaded.credential_revision, Some(3));
+            assert!(
+                matches!(loaded.credential, Credential::ChatGptOAuth { access_token, .. } if access_token == "synthetic-oauth-r3")
+            );
+            assert_eq!(*owner.calls.lock().unwrap(), vec![2]);
+            assert_eq!(owner.rotations.load(Ordering::SeqCst), 1);
+            assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn oauth_rejection_adopts_the_current_revision_without_another_rotation() {
+            let root = tempfile::tempdir().unwrap();
+            let durable = Arc::new(MemStorage::default());
+            let writer = manager_on(durable.clone());
+            let storage = Arc::new(PositiveCachedStorage::new(durable));
+            let reader = manager_on(storage.clone());
+            let mut account = api_account("11111111-1111-4111-8111-111111111111");
+            account.auth_kind = lingxi_core::host::provider_accounts::AccountAuthKind::OAuth;
+            account.execution_binding_id = "openai-chatgpt".into();
+            let expires_at = SystemTime::now() + Duration::from_secs(3600);
+            writer
+                .store_account_credential(&account.credential_ref, &oauth_record(1, 1, expires_at))
+                .await
+                .unwrap();
+            publish(root.path(), &account, 1);
+            let provider = MultiCredentialProvider::new(reader.clone())
+                .with_accounts(vec![account.clone()])
+                .with_account_version_root(root.path().to_owned());
+            let rejected = provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap();
+            writer
+                .store_account_credential(&account.credential_ref, &oauth_record(1, 2, expires_at))
+                .await
+                .unwrap();
+            publish(root.path(), &account, 2);
+            let owner = owner(writer, root.path());
+            reader.set_account_credential_refresher(owner.clone());
+            let adopted = provider
+                .refresh_versioned(&account_scope(&account), &rejected.credential)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(adopted.credential_revision, Some(2));
+            assert!(
+                matches!(adopted.credential, Credential::ChatGptOAuth { access_token, .. } if access_token == "synthetic-oauth-r2")
+            );
+            assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+            assert!(owner.calls.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn adopted_oauth_refresh_failure_reports_the_current_credential_revision() {
+            let root = tempfile::tempdir().unwrap();
+            let durable = Arc::new(MemStorage::default());
+            let writer = manager_on(durable.clone());
+            let storage = Arc::new(PositiveCachedStorage::new(durable));
+            let reader = manager_on(storage.clone());
+            let mut account = api_account("11111111-1111-4111-8111-111111111111");
+            account.auth_kind = lingxi_core::host::provider_accounts::AccountAuthKind::OAuth;
+            account.execution_binding_id = "openai-chatgpt".into();
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &oauth_record(1, 1, SystemTime::now() + Duration::from_secs(3600)),
+                )
+                .await
+                .unwrap();
+            publish(root.path(), &account, 1);
+            let provider = MultiCredentialProvider::new(reader.clone())
+                .with_accounts(vec![account.clone()])
+                .with_account_version_root(root.path().to_owned());
+            provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap();
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &oauth_record(1, 2, SystemTime::UNIX_EPOCH),
+                )
+                .await
+                .unwrap();
+            publish(root.path(), &account, 2);
+            reader.set_account_credential_refresher(Arc::new(Owner {
+                writer,
+                root: root.path().to_owned(),
+                calls: Default::default(),
+                rotations: AtomicUsize::new(0),
+                fail_rotation: true,
+            }));
+            let failed = provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap_err();
+            assert!(matches!(failed.error, LlmError::Authentication { .. }));
+            assert_eq!(failed.credential_revision, Some(2));
+            assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn oauth_unpublished_rotation_can_still_repair_its_ledger() {
+            let root = tempfile::tempdir().unwrap();
+            let durable = Arc::new(MemStorage::default());
+            let writer = manager_on(durable.clone());
+            let storage = Arc::new(PositiveCachedStorage::new(durable));
+            let reader = manager_on(storage.clone());
+            let mut account = api_account("11111111-1111-4111-8111-111111111111");
+            account.auth_kind = lingxi_core::host::provider_accounts::AccountAuthKind::OAuth;
+            account.execution_binding_id = "openai-chatgpt".into();
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &oauth_record(1, 2, SystemTime::now() + Duration::from_secs(3600)),
+                )
+                .await
+                .unwrap();
+            publish(root.path(), &account, 1);
+            let owner = owner(writer, root.path());
+            reader.set_account_credential_refresher(owner.clone());
+            let provider = MultiCredentialProvider::new(reader)
+                .with_accounts(vec![account.clone()])
+                .with_account_version_root(root.path().to_owned());
+            let loaded = provider
+                .load_versioned(&account_scope(&account))
+                .await
+                .unwrap();
+            assert_eq!(loaded.credential_revision, Some(2));
+            assert_eq!(
+                crate::read_account_credential_version(root.path(), &account).unwrap(),
+                Some(2)
+            );
+            assert_eq!(*owner.calls.lock().unwrap(), vec![1]);
+            assert_eq!(owner.rotations.load(Ordering::SeqCst), 0);
+            assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
         }
     }
 }

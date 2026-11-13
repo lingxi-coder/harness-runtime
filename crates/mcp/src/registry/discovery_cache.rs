@@ -99,6 +99,12 @@ impl McpRegistry {
         ) {
             return Ok(Some(GrantProvenance::unbound()));
         }
+        // Match discover_live_connection: configured Authorization wins over
+        // both explicit and SDK-created OAuth grants. Such a connection writes
+        // the unbound partition, so cache reads must choose that same identity.
+        if crate::negotiation::spec_has_authorization(&config.spec) {
+            return Ok(Some(GrantProvenance::unbound()));
+        }
         let Some(deps) = &self.oauth else {
             return Ok((!explicit_oauth).then(GrantProvenance::unbound));
         };

@@ -104,6 +104,18 @@ impl Fixture {
         steps: Vec<Step>,
         wrap: impl FnOnce(Arc<tool_file::FileReadTool>) -> Arc<dyn Tool>,
     ) -> Self {
+        Self::with_recording(cwd, fs, memory, gate, steps, wrap, None).await
+    }
+
+    async fn with_recording(
+        cwd: &Path,
+        fs: Arc<dyn FileSystem>,
+        memory: Arc<dyn MemoryHierarchyProvider>,
+        gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate>,
+        steps: Vec<Step>,
+        wrap: impl FnOnce(Arc<tool_file::FileReadTool>) -> Arc<dyn Tool>,
+        transcript_writer: Option<Arc<session::JsonlWriter>>,
+    ) -> Self {
         let map = reads::new_read_file_state_map();
         let bus = Arc::new(telemetry::AnalyticsBus::new());
         let mut context =
@@ -118,7 +130,7 @@ impl Fixture {
         let (responses, streams) = scripts(&steps);
         let api = Arc::new(MockApiClient::new(responses));
         let streaming_api = Arc::new(MockStreamingApiClient::with_turns(streams));
-        let orch = ConversationOrchestrator::into_shared(with_scripted_compactor(
+        let mut orch = with_scripted_compactor(
             ConversationOrchestrator::new_with_streaming(
                 OrchestratorConfig {
                     model: "gpt-6.1-sol".into(),
@@ -140,7 +152,16 @@ impl Fixture {
             .with_config_home(cwd.join("config"))
             .without_host_environment_probes(),
             "file authority summary",
-        ));
+        );
+        if let Some(writer) = transcript_writer {
+            let id =
+                uuid::Uuid::parse_str(writer.active_path().file_stem().unwrap().to_str().unwrap())
+                    .unwrap();
+            orch = orch
+                .with_session_id(lingxi_core::types::SessionId::from_uuid(id))
+                .with_jsonl_writer(writer);
+        }
+        let orch = ConversationOrchestrator::into_shared(orch);
         orch.initialize_conversation_mode().await.unwrap();
         Self {
             orch,
@@ -467,6 +488,9 @@ impl Tool for RetargetRead {
     fn read_state_io_path(&self, path: &Path) -> Result<PathBuf, ToolError> {
         self.reader.read_state_io_path(path)
     }
+    fn read_state_request_path(&self, path: &Path) -> PathBuf {
+        self.reader.read_state_request_path(path)
+    }
     async fn validate_input(
         &self,
         _: &Utf16JsonProjection,
@@ -489,7 +513,10 @@ impl Tool for RetargetRead {
 }
 
 #[cfg(unix)]
-async fn changed_file_retarget_cannot_acquire_denied_bytes(streaming: bool) {
+async fn changed_file_retarget_cannot_acquire_denied_bytes(
+    streaming: bool,
+    noncanonical_seed: bool,
+) {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().canonicalize().unwrap();
     let allowed = cwd.join("allowed.txt");
@@ -529,13 +556,27 @@ async fn changed_file_retarget_cannot_acquire_denied_bytes(streaming: bool) {
         },
     )
     .await;
-    fixture.read(&route).await;
-    // A model-visible complete snapshot triggers the internal scan. Keep the
-    // original symlink route so the barrier can replace its landing.
-    let mut entry = reads::get(&fixture.map, &route).unwrap();
-    entry.offset = None;
-    entry.limit = None;
-    reads::set(&fixture.map, route.clone(), entry);
+    if noncanonical_seed {
+        // The public SDK seed preserves the host's original spelling. Read
+        // trims it later, so the request binding must survive that difference.
+        let raw_route = cwd.join("route.txt ");
+        save(&raw_route, "HOST_SEED_OLD\n", 1_000);
+        assert!(
+            fixture
+                .orch
+                .seed_read_state_from_host(raw_route.to_str().unwrap(), 1_000_000.0)
+                .await
+        );
+        assert!(reads::get(&fixture.map, &raw_route).is_some());
+    } else {
+        fixture.read(&route).await;
+        // A model-visible complete snapshot triggers the internal scan. Keep
+        // the original symlink route so the barrier can replace its landing.
+        let mut entry = reads::get(&fixture.map, &route).unwrap();
+        entry.offset = None;
+        entry.limit = None;
+        reads::set(&fixture.map, route.clone(), entry);
+    }
     save(&allowed, "NORMAL_EXTERNAL_UPDATE\n", 3_000);
     fixture.run(streaming).await;
     let calls = fixture.requests(streaming).await;
@@ -543,6 +584,8 @@ async fn changed_file_retarget_cannot_acquire_denied_bytes(streaming: bool) {
         .iter()
         .all(|row| !row.text_content().contains("DENIED_SECRET_BYTES")));
     assert!(reads::get(&fixture.map, &denied).is_none());
+    assert!(reads::get(&fixture.map, &route)
+        .is_none_or(|entry| !entry.content.contains("DENIED_SECRET_BYTES")));
     assert!(
         fixture
             .writer
@@ -584,13 +627,229 @@ async fn changed_file_retarget_cannot_acquire_denied_bytes(streaming: bool) {
 #[cfg(unix)]
 #[tokio::test]
 async fn batched_changed_file_retarget_preserves_deny_write_protection_and_normal_notifications() {
-    changed_file_retarget_cannot_acquire_denied_bytes(false).await;
+    changed_file_retarget_cannot_acquire_denied_bytes(false, false).await;
 }
 #[cfg(unix)]
 #[tokio::test]
 async fn streaming_changed_file_retarget_preserves_deny_write_protection_and_normal_notifications()
 {
-    changed_file_retarget_cannot_acquire_denied_bytes(true).await;
+    changed_file_retarget_cannot_acquire_denied_bytes(true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn batched_noncanonical_sdk_seed_preserves_read_binding_and_notice_dedup() {
+    changed_file_retarget_cannot_acquire_denied_bytes(false, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn streaming_noncanonical_sdk_seed_preserves_read_binding_and_notice_dedup() {
+    changed_file_retarget_cannot_acquire_denied_bytes(true, true).await;
+}
+
+#[cfg(unix)]
+async fn noncanonical_seed_keeps_existing_logical_observation(streaming: bool) {
+    for newer_alias in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let path = cwd.join("known.txt");
+        let raw = cwd.join("known.txt ");
+        let fixture = Fixture::new(
+            &cwd,
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone())),
+            Arc::new(StaticMemoryProvider::empty()),
+            Arc::new(NoOpPermissionGate),
+            vec![
+                Step::Tool(
+                    "Write",
+                    serde_json::json!({"file_path":path,"content":"OLD\n"}),
+                ),
+                Step::Done,
+                Step::Done,
+                Step::Done,
+            ],
+        )
+        .await;
+        fixture.run(streaming).await;
+        let known = reads::get(&fixture.map, &path).unwrap();
+        let seconds = known.mtime_ms as u64 / 1000;
+        save(&raw, "NEW\n", if newer_alias { seconds + 100 } else { 1 });
+        assert!(
+            fixture
+                .orch
+                .seed_read_state_from_host(raw.to_str().unwrap(), f64::MAX)
+                .await
+        );
+        save(&path, "NEW\n", seconds + 10);
+        fixture.run(streaming).await;
+        fixture.run(streaming).await;
+        let requests = fixture.requests(streaming).await;
+        let notices = |messages: &[ConversationMessage]| {
+            messages
+                .iter()
+                .filter(|message| {
+                    message
+                        .text_content()
+                        .contains("changed on disk since you last read it")
+                })
+                .map(|message| (message.id(), message.text_content()))
+                .collect::<Vec<_>>()
+        };
+        let first = notices(&requests[2]);
+        assert_eq!(
+            first.len(),
+            1,
+            "the MRU host alias cannot hide a model-visible change"
+        );
+        assert!(first[0].1.contains("NEW"));
+        assert_eq!(
+            notices(&requests[3]),
+            first,
+            "the notice keeps one stable identity"
+        );
+        assert!(reads::get(&fixture.map, &raw).is_none());
+        assert_eq!(reads::get(&fixture.map, &path).unwrap().content, "NEW\n");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn batched_noncanonical_seed_cannot_hide_or_duplicate_a_logical_file_change() {
+    noncanonical_seed_keeps_existing_logical_observation(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn streaming_noncanonical_seed_cannot_hide_or_duplicate_a_logical_file_change() {
+    noncanonical_seed_keeps_existing_logical_observation(true).await;
+}
+
+async fn cold_written_file_keeps_normalized_guard(streaming: bool) {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+    for original in [
+        "before\ntail\n",
+        "before\r\ntail\r\n",
+        "\u{feff}before\r\ntail\r\n",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let path = cwd.join("created.txt");
+        let transcript = cwd.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone()));
+        let live = Fixture::with_recording(
+            &cwd,
+            fs.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            Arc::new(NoOpPermissionGate),
+            vec![
+                Step::Tool(
+                    "Write",
+                    serde_json::json!({"file_path":path,"content":original}),
+                ),
+                Step::Done,
+            ],
+            |reader| reader,
+            Some(Arc::new(session::JsonlWriter::new(
+                transcript.clone(),
+                fs.clone(),
+            ))),
+        )
+        .await;
+        live.run(streaming).await;
+        assert_eq!(
+            reads::get(&live.map, &path).unwrap().content,
+            "before\ntail\n"
+        );
+        let id = live.orch.current_session_id().await.as_uuid();
+        let source_text = std::fs::read_to_string(&transcript).unwrap();
+        let replayed = orchestrator::resume::replay_captured_session(
+            transcript,
+            source_text.clone(),
+            session::jsonl::route_lines(&source_text),
+            id,
+        )
+        .unwrap();
+        let cold = Fixture::new(
+            &cwd,
+            fs,
+            Arc::new(StaticMemoryProvider::empty()),
+            Arc::new(NoOpPermissionGate),
+            vec![
+                Step::Tool(
+                    "Write",
+                    serde_json::json!({"file_path":path,"content":"after\n"}),
+                ),
+                Step::Done,
+            ],
+        )
+        .await;
+        cold.orch
+            .restore_captured_session_history(
+                id,
+                &replayed.messages,
+                &session::jsonl::route_lines(&source_text).messages_in_order,
+                true,
+                permission::PermissionMode::Default,
+                ConversationMode::Code,
+                &source_text,
+            )
+            .await
+            .unwrap();
+        let restored = reads::get(&cold.map, &path).unwrap();
+        assert_eq!(restored.mtime_ms, i64::MIN);
+        assert_eq!(restored.content, "before\ntail\n");
+        assert!(!restored.is_partial_view);
+
+        // Check the recovered authority before a changed-file scan can read a
+        // later edit on the model's behalf. A rollback mtime must not waive it.
+        let disk = std::fs::read(&path).unwrap();
+        save(&path, "external edit\r\n", 1);
+        let error = cold
+            .writer
+            .call(
+                source(serde_json::json!({"file_path":path,"content":"overwrite"})),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some(tool_file::FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit\r\n");
+        std::fs::write(&path, disk).unwrap();
+        cold.writer
+            .call(
+                source(serde_json::json!({"file_path":path,"content":original})),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("an unchanged CRLF file must remain writable immediately after cold restore");
+        cold.run(streaming).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            if original.starts_with('\u{feff}') {
+                "\u{feff}after\n"
+            } else {
+                "after\n"
+            },
+        );
+        assert_eq!(cold.requests(streaming).await.len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn batched_crlf_write_cold_restore_preserves_write_guard_and_next_turn() {
+    cold_written_file_keeps_normalized_guard(false).await;
+}
+
+#[tokio::test]
+async fn streaming_crlf_write_cold_restore_preserves_write_guard_and_next_turn() {
+    cold_written_file_keeps_normalized_guard(true).await;
 }
 
 struct ChangedDuringAcquisition {

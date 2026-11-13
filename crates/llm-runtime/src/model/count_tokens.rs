@@ -30,6 +30,8 @@ pub async fn count_tokens(
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
+    let captured = crate::anthropic_extra_body::captured(request)?;
+    let request = captured.as_ref();
     match try_count_tokens_exact(client, transport, request).await? {
         Some(tokens) => Ok(tokens),
         None => client.estimate_input_tokens_for_route(request),
@@ -40,6 +42,9 @@ pub async fn count_tokens(
 /// A first request or changed input/route falls back to whole-input estimation.
 #[must_use]
 pub fn estimate_input_tokens(request: &LlmRequest) -> u64 {
+    let captured = crate::anthropic_extra_body::captured(request)
+        .expect("extra-body capture defers route-specific failures");
+    let request = captured.as_ref();
     request
         .execution
         .context_usage_estimate
@@ -87,66 +92,120 @@ pub async fn try_count_tokens_exact(
 /// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
+    let captured = crate::anthropic_extra_body::captured(request)
+        .expect("extra-body capture defers route-specific failures");
+    let request = captured.as_ref();
     let projected = crate::prompt_projection::for_estimate(request);
     let request = projected.as_ref();
     let input = &request.input;
+    let extra = crate::anthropic_extra_body::prompt(request);
+    let field = |key: &str| extra.and_then(|extra| extra.payload_at(key));
     let mut byte_len = 0u64;
-    for block in &input.system {
-        byte_len = byte_len.saturating_add(serialized_len(block));
+    if let Some(system) = field("/system") {
+        byte_len = byte_len.saturating_add(serialized_len(&system));
+    } else {
+        for block in &input.system {
+            byte_len = byte_len.saturating_add(serialized_len(block));
+        }
     }
-    for (message_index, message) in input.messages.iter().enumerate() {
-        byte_len = byte_len.saturating_add(serialized_len(&message.role));
-        for (block_index, block) in message.content.iter().enumerate() {
-            byte_len = byte_len.saturating_add(estimated_block_bytes(block));
-            use lingxi_llm_client::protocol::ContentBlock;
-            let exact_text = match block {
-                ContentBlock::Text { text, .. } => Some(("text", serialized_len(text))),
-                ContentBlock::ToolResult {
-                    content,
-                    blocks: None,
-                    ..
-                } if content.is_root_string() => Some(("content", serialized_len(content))),
-                _ => None,
-            };
-            if let Some((field, display_len)) = exact_text {
-                if let Some(units) = request
-                    .execution
-                    .message_json_string_overrides
-                    .get(&format!(
-                        "/messages/{message_index}/content/{block_index}/{field}"
-                    ))
-                {
-                    byte_len = byte_len.saturating_sub(display_len).saturating_add(
-                        lingxi_llm_client::exact_json::json_string_len_from_utf16(units),
-                    );
+    if let Some(messages) = field("/messages") {
+        byte_len = byte_len.saturating_add(raw_messages_bytes(&messages));
+    } else {
+        for (message_index, message) in input.messages.iter().enumerate() {
+            byte_len = byte_len.saturating_add(serialized_len(&message.role));
+            for (block_index, block) in message.content.iter().enumerate() {
+                byte_len = byte_len.saturating_add(estimated_block_bytes(block));
+                use lingxi_llm_client::protocol::ContentBlock;
+                let exact_text = match block {
+                    ContentBlock::Text { text, .. } => Some(("text", serialized_len(text))),
+                    ContentBlock::ToolResult {
+                        content,
+                        blocks: None,
+                        ..
+                    } if content.is_root_string() => Some(("content", serialized_len(content))),
+                    _ => None,
+                };
+                if let Some((field, display_len)) = exact_text {
+                    if let Some(units) =
+                        request
+                            .execution
+                            .message_json_string_overrides
+                            .get(&format!(
+                                "/messages/{message_index}/content/{block_index}/{field}"
+                            ))
+                    {
+                        byte_len = byte_len.saturating_sub(display_len).saturating_add(
+                            lingxi_llm_client::exact_json::json_string_len_from_utf16(units),
+                        );
+                    }
                 }
             }
         }
     }
-    for tool in &input.tools {
-        // Account for the provider's function/tool wrapper in addition to the
-        // canonical declaration itself.  The server may add further chat
-        // template text; the request-level fit margin covers that uncertainty.
+    if let Some(tools) = field("/tools") {
         byte_len = byte_len
-            .saturating_add(serialized_len(tool))
-            .saturating_add(48);
-    }
-    for tool in &input.hosted_tools {
-        byte_len = byte_len
-            .saturating_add(serialized_len(tool))
-            .saturating_add(48);
+            .saturating_add(serialized_len(&tools))
+            .saturating_add(tools.array_len("").unwrap_or(0) as u64 * 48);
+    } else {
+        for tool in &input.tools {
+            // Account for the provider's function/tool wrapper in addition to the
+            // canonical declaration itself.  The server may add further chat
+            // template text; the request-level fit margin covers that uncertainty.
+            byte_len = byte_len
+                .saturating_add(serialized_len(tool))
+                .saturating_add(48);
+        }
+        for tool in &input.hosted_tools {
+            byte_len = byte_len
+                .saturating_add(serialized_len(tool))
+                .saturating_add(48);
+        }
     }
     for options in &input.native_options {
         byte_len = byte_len.saturating_add(serialized_len(options));
     }
-    if input.output_format != lingxi_llm_client::protocol::OutputFormat::Text {
+    if let Some(format) = field("/output_config/format").or_else(|| field("/output_format")) {
+        byte_len = byte_len.saturating_add(serialized_len(&format));
+    } else if field("/output_config").is_none()
+        && input.output_format != lingxi_llm_client::protocol::OutputFormat::Text
+    {
         byte_len = byte_len.saturating_add(serialized_len(&input.output_format));
     }
-    if input.tool_choice != lingxi_llm_client::protocol::ToolChoice::Auto {
+    if let Some(choice) = field("/tool_choice") {
+        byte_len = byte_len.saturating_add(serialized_len(&choice));
+    } else if input.tool_choice != lingxi_llm_client::protocol::ToolChoice::Auto {
         byte_len = byte_len.saturating_add(serialized_len(&input.tool_choice));
     }
 
     approximate_tokens_for_bytes(byte_len)
+}
+
+fn raw_messages_bytes(messages: &lingxi_llm_client::protocol::JsonPayload) -> u64 {
+    let Some(length) = messages.array_len("") else {
+        return serialized_len(messages);
+    };
+    (0..length).fold(0u64, |bytes, index| {
+        let message = messages.array_item(index).expect("array member");
+        let mut bytes = bytes.saturating_add(
+            message
+                .payload_at("/role")
+                .as_ref()
+                .map_or(0, serialized_len),
+        );
+        if let Some(content) = message.payload_at("/content") {
+            if let Some(length) = content.array_len("") {
+                for index in 0..length {
+                    bytes = bytes.saturating_add(tool_result_block_bytes(
+                        &content.array_item(index).expect("array member"),
+                        APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN,
+                    ));
+                }
+            } else {
+                bytes = bytes.saturating_add(serialized_len(&content));
+            }
+        }
+        bytes
+    })
 }
 
 /// The byte-length-divisor half of [`approximate_tokens`], exposed so a
@@ -215,25 +274,53 @@ fn tool_result_block_bytes(
     block: &lingxi_llm_client::protocol::JsonPayload,
     media_bytes: u64,
 ) -> u64 {
-    let source_kind = block.string_at("/source/type");
-    match (block.string_at("/type").as_deref(), source_kind.as_deref()) {
-        (Some("text"), _) => block.payload_at("/text").map_or_else(
-            || serialized_len(block),
-            |text| serialized_len(&text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
-        ),
-        (Some("image"), Some("base64")) => media_bytes,
-        (Some("image"), Some("url")) => media_bytes.saturating_add(
-            block
-                .string_at("/source/url")
-                .map_or(0, |url| url.len() as u64),
-        ),
-        (Some("document"), Some("base64")) => {
-            block.string_at("/source/data").map_or(media_bytes, |data| {
-                media_bytes.max(decoded_base64_len(&data))
-            })
+    let mut pending = vec![block.clone()];
+    let mut bytes = 0u64;
+    while let Some(block) = pending.pop() {
+        // Explicit overrides are source JSON too. Traverse nested content with
+        // a work list so arbitrary source depth never grows the Rust stack.
+        if block.string_at("/type").as_deref() == Some("tool_result") {
+            if let Some(content) = block.payload_at("/content") {
+                if let Some(length) = content.array_len("") {
+                    bytes = bytes
+                        .saturating_add(TOOL_RESULT_WRAPPER_BYTES)
+                        .saturating_add(
+                            block
+                                .payload_at("/tool_use_id")
+                                .as_ref()
+                                .map_or(0, serialized_len),
+                        );
+                    pending.extend((0..length).filter_map(|index| content.array_item(index)));
+                    continue;
+                }
+            }
         }
-        _ => serialized_len(block),
+        let source_kind = block.string_at("/source/type");
+        let amount = match (block.string_at("/type").as_deref(), source_kind.as_deref()) {
+            (Some("text"), _) => block.payload_at("/text").map_or_else(
+                || serialized_len(&block),
+                |text| serialized_len(&text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
+            ),
+            (Some("image"), Some("base64")) => media_bytes,
+            (Some("image"), Some("url")) => media_bytes.saturating_add(
+                block
+                    .string_at("/source/url")
+                    .map_or(0, |url| url.len() as u64),
+            ),
+            (Some("document"), Some("base64")) => {
+                block.string_at("/source/data").map_or(media_bytes, |data| {
+                    media_bytes.max(decoded_base64_len(&data))
+                })
+            }
+            (Some("document"), Some("text")) => block
+                .string_at("/source/data")
+                .map_or(media_bytes, |data| media_bytes.max(data.len() as u64)),
+            (Some("document" | "video" | "audio"), _) => media_bytes,
+            _ => serialized_len(&block),
+        };
+        bytes = bytes.saturating_add(amount);
     }
+    bytes
 }
 
 /// Decoded size of base64 `data`, never its transport expansion.

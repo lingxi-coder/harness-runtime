@@ -762,8 +762,7 @@ pub struct McpClient {
     /// One connection-owned MCP output-schema session, plus the compiled
     /// plans from the latest `tools/list` response.
     output_schema_validator: Option<Arc<dyn JsonSchemaValidator>>,
-    output_schema_plans:
-        RwLock<HashMap<String, Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>>,
+    output_schema_plans: RwLock<McpOutputSchemaCatalog>,
     /// Wire names from the current catalog, indexed by canonical and
     /// display-based call identifiers. Never reconstructed from replacement text.
     wire_tool_names: RwLock<HashMap<String, Utf16JsonProjection>>,
@@ -804,11 +803,35 @@ pub struct McpOutputSchemaSnapshot {
     plan: Option<Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>,
 }
 
+#[derive(Default)]
+pub(crate) struct McpOutputSchemaCatalog {
+    // Keep catalog rows distinct: different raw tool names can normalize to
+    // the same model-facing FQN. Compilation still shares one ordered session.
+    rows: Vec<McpOutputSchemaSnapshot>,
+    by_model_name: HashMap<String, usize>,
+    by_raw_tool_name: HashMap<String, usize>,
+}
+
+impl McpOutputSchemaCatalog {
+    pub(crate) fn snapshot(
+        &self,
+        full_name: &str,
+        raw_tool_name: Option<&str>,
+    ) -> Option<McpOutputSchemaSnapshot> {
+        let row = match raw_tool_name {
+            Some(raw) => self.by_raw_tool_name.get(raw),
+            None => self.by_model_name.get(full_name),
+        }?;
+        let snapshot = &self.rows[*row];
+        (snapshot.full_name == full_name).then(|| snapshot.clone())
+    }
+}
+
 impl McpOutputSchemaSnapshot {
     pub(crate) async fn compile_catalog(
         tools: &[McpToolDto],
         validator: Option<&Arc<dyn JsonSchemaValidator>>,
-    ) -> Result<HashMap<String, Self>, McpClientError> {
+    ) -> Result<McpOutputSchemaCatalog, McpClientError> {
         let session = if tools.iter().any(|tool| tool.output_schema.is_some()) {
             Some(
                 validator
@@ -820,7 +843,8 @@ impl McpOutputSchemaSnapshot {
         } else {
             None
         };
-        let mut plans = HashMap::new();
+        let mut catalog = McpOutputSchemaCatalog::default();
+        catalog.rows.reserve(tools.len());
         for tool in tools {
             let plan = if let Some(schema) = &tool.output_schema {
                 Some(
@@ -842,15 +866,21 @@ impl McpOutputSchemaSnapshot {
             } else {
                 None
             };
-            plans.insert(
-                tool.full_name.clone(),
-                Self {
-                    full_name: tool.full_name.clone(),
-                    plan,
-                },
-            );
+            let row = catalog.rows.len();
+            catalog
+                .by_model_name
+                .entry(tool.full_name.clone())
+                .or_insert(row);
+            catalog
+                .by_raw_tool_name
+                .entry(tool.tool_name.clone())
+                .or_insert(row);
+            catalog.rows.push(Self {
+                full_name: tool.full_name.clone(),
+                plan,
+            });
         }
-        Ok(plans)
+        Ok(catalog)
     }
 
     pub(crate) async fn compile(
@@ -1125,7 +1155,7 @@ impl McpClient {
             effective_permission_ceilings: std::sync::RwLock::new(BTreeMap::new()),
             dropped_tools: RwLock::new(Vec::new()),
             output_schema_validator: None,
-            output_schema_plans: RwLock::new(HashMap::new()),
+            output_schema_plans: RwLock::new(McpOutputSchemaCatalog::default()),
             wire_tool_names: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
@@ -1160,24 +1190,40 @@ impl McpClient {
 
     /// Retain the current plan, invalid-schema error, or schema absence for a call.
     pub async fn output_schema_snapshot(&self, full_name: &str) -> McpOutputSchemaSnapshot {
+        self.output_schema_snapshot_for_raw_tool(full_name, None)
+            .await
+    }
+
+    pub(crate) async fn output_schema_snapshot_for_raw_tool(
+        &self,
+        full_name: &str,
+        raw_tool_name: Option<&str>,
+    ) -> McpOutputSchemaSnapshot {
         let plans = self.output_schema_plans.read().await;
         let prefix = format!(
             "mcp__{}__",
             crate::normalization::normalize_name_for_mcp(&self.server_name)
         );
-        let canonical = full_name.strip_prefix(&prefix).map(|tool| {
+        let wire_name = full_name.strip_prefix(&prefix);
+        let canonical = wire_name.map(|tool| {
             format!(
                 "{prefix}{}",
                 crate::normalization::normalize_name_for_mcp(tool)
             )
         });
-        McpOutputSchemaSnapshot {
-            full_name: full_name.to_owned(),
-            plan: plans
-                .get(full_name)
-                .or_else(|| canonical.as_ref().and_then(|name| plans.get(name)))
-                .cloned(),
-        }
+        let mut snapshot = plans
+            .snapshot(full_name, raw_tool_name)
+            .or_else(|| {
+                canonical
+                    .as_ref()
+                    .and_then(|name| plans.snapshot(name, raw_tool_name.or(wire_name)))
+            })
+            .unwrap_or_else(|| McpOutputSchemaSnapshot {
+                full_name: full_name.to_owned(),
+                plan: None,
+            });
+        snapshot.full_name = full_name.to_owned();
+        snapshot
     }
 
     /// Builder that attaches the resolved per-server config options — the
@@ -2007,25 +2053,10 @@ impl McpClient {
             return Ok(());
         };
         if tools.iter().all(|tool| tool.output_schema.is_none()) {
-            self.output_schema_plans.write().await.clear();
+            *self.output_schema_plans.write().await = McpOutputSchemaCatalog::default();
             return Ok(());
         }
-        let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
-        let mut plans = HashMap::new();
-        for tool in tools {
-            if let Some(schema) = &tool.output_schema {
-                let compiled = match session.compile(schema).await {
-                    Ok(plan) => Ok(plan),
-                    Err(SchemaCompileError::InvalidSchema(detail)) => {
-                        Err(OutputSchemaCompileFailure::Invalid(detail))
-                    }
-                    Err(SchemaCompileError::Worker(detail)) => {
-                        return Err(McpClientError::Rpc(detail.into()))
-                    }
-                };
-                plans.insert(tool.full_name.clone(), compiled);
-            }
-        }
+        let plans = McpOutputSchemaSnapshot::compile_catalog(tools, Some(validator)).await?;
         *self.output_schema_plans.write().await = plans;
         Ok(())
     }
@@ -2351,7 +2382,9 @@ impl McpClient {
             });
         // The RPC may outlive a complete tools/list refresh. Capture all three
         // decisions (compiled, invalid, absent) before sending either protocol.
-        let output_schema = self.output_schema_snapshot(full_name).await;
+        let output_schema = self
+            .output_schema_snapshot_for_raw_tool(full_name, tool_source.string_at(""))
+            .await;
         if let Some(capture) = output_schema_capture {
             capture(output_schema.clone());
         }

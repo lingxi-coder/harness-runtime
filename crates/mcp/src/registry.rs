@@ -286,7 +286,7 @@ struct OutputParserBinding {
 
 struct CachedOutputSchemas {
     tools: Vec<McpToolDto>,
-    plans: tokio::sync::OnceCell<HashMap<String, crate::client::McpOutputSchemaSnapshot>>,
+    plans: tokio::sync::OnceCell<crate::client::McpOutputSchemaCatalog>,
 }
 
 /// Connection-scoped parser captured by a registered MCP tool. It retains a
@@ -296,10 +296,23 @@ struct CachedOutputSchemas {
 pub struct McpToolOutputSchemaParserHandle {
     slot: Arc<RwLock<OutputParserBinding>>,
     full_name: String,
+    raw_tool_name: Option<String>,
     validator: Option<Arc<dyn JsonSchemaValidator>>,
 }
 
 impl McpToolOutputSchemaParserHandle {
+    /// Bind the actual discovered row selected by the tool registry. The
+    /// model-facing name alone may alias several different raw tool names.
+    #[must_use]
+    pub fn for_raw_tool(&self, raw_tool_name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            slot: self.slot.clone(),
+            full_name: self.full_name.clone(),
+            raw_tool_name: Some(raw_tool_name.to_owned()),
+            validator: self.validator.clone(),
+        })
+    }
+
     /// Snapshot locally; a cached tool can validate a Mod-only substitution
     /// against its advertised schema without opening a transport.
     pub async fn snapshot(
@@ -308,15 +321,32 @@ impl McpToolOutputSchemaParserHandle {
     ) -> Result<crate::client::McpOutputSchemaSnapshot, McpClientError> {
         let binding = self.slot.read().await.clone();
         if let Some(client) = binding.client {
-            Ok(client.output_schema_snapshot(&self.full_name).await)
+            Ok(client
+                .output_schema_snapshot_for_raw_tool(&self.full_name, self.raw_tool_name.as_deref())
+                .await)
         } else if let Some(cached) = binding.cached {
-            // A schema-less tool has no catalog dependencies. In particular it
-            // must remain usable when a sibling needs an unavailable validator.
-            if cached
+            let selected = cached
                 .tools
                 .iter()
-                .any(|tool| tool.full_name == self.full_name && tool.output_schema.is_none())
-            {
+                .find(|tool| {
+                    tool.full_name == self.full_name
+                        && self
+                            .raw_tool_name
+                            .as_ref()
+                            .is_none_or(|raw| &tool.tool_name == raw)
+                })
+                .ok_or_else(|| {
+                    McpClientError::Rpc(
+                        format!(
+                            "MCP cached catalog no longer contains tool {}",
+                            self.full_name
+                        )
+                        .into(),
+                    )
+                })?;
+            // A schema-less tool has no catalog dependencies. In particular it
+            // must remain usable when a sibling needs an unavailable validator.
+            if selected.output_schema.is_none() {
                 return crate::client::McpOutputSchemaSnapshot::compile(
                     &self.full_name,
                     None,
@@ -333,15 +363,17 @@ impl McpToolOutputSchemaParserHandle {
                     )
                 })
                 .await?;
-            plans.get(&self.full_name).cloned().ok_or_else(|| {
-                McpClientError::Rpc(
-                    format!(
-                        "MCP cached catalog no longer contains tool {}",
-                        self.full_name
+            plans
+                .snapshot(&self.full_name, Some(&selected.tool_name))
+                .ok_or_else(|| {
+                    McpClientError::Rpc(
+                        format!(
+                            "MCP cached catalog no longer contains tool {}",
+                            self.full_name
+                        )
+                        .into(),
                     )
-                    .into(),
-                )
-            })
+                })
         } else {
             crate::client::McpOutputSchemaSnapshot::compile(
                 &self.full_name,
@@ -366,7 +398,11 @@ impl McpToolOutputSchemaParserHandle {
                 .into(),
             )
         })?;
-        client.parse_tool_output(&self.full_name, output).await
+        client
+            .output_schema_snapshot_for_raw_tool(&self.full_name, self.raw_tool_name.as_deref())
+            .await
+            .parse_output(output)
+            .await
     }
 }
 
@@ -1489,6 +1525,7 @@ impl McpRegistry {
         Arc::new(McpToolOutputSchemaParserHandle {
             slot: self.output_parser_slot(server_key),
             full_name: full_name.to_owned(),
+            raw_tool_name: None,
             validator: self.json_schema_validator.clone(),
         })
     }

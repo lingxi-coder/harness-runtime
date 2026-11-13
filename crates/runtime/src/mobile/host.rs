@@ -1587,6 +1587,8 @@ pub struct MobileEngineHandle {
     initial_event_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
     #[cfg(test)]
     slash_running_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
+    #[cfg(test)]
+    queued_anchor_failure_for_test: Notify,
     /// The same priority-aware message queue used by desktop/CLI. Running
     /// prompts enter at `Next` and are consumed inside the existing turn loop.
     message_queue: Arc<msgqueue::MessageQueueManager>,
@@ -3206,6 +3208,9 @@ struct ActiveTurn {
     explicit_cancel: AtomicBool,
     /// Orders only initial lifecycle publication against this owner's cancel.
     initial_event_gate: Mutex<()>,
+    /// Only this executor's admitted, unacknowledged mid-turn batches. Durable
+    /// Running metadata from an earlier executor cannot establish ownership.
+    mid_turn_batches: StdMutex<HashMap<u64, Vec<u64>>>,
     task: StdMutex<Option<MobileTurnTask>>,
     completed: AtomicBool,
     /// Set before asking the orchestrator to unwind for a platform pause.
@@ -3464,6 +3469,7 @@ struct MobileMsgQueueInput {
     loop_state: Arc<tool_cron::LoopRuntime>,
     durable_turns: Arc<DurableTurnStore>,
     active_session_uuid: Arc<std::sync::Mutex<String>>,
+    active_turn: Option<Arc<Mutex<Option<Arc<ActiveTurn>>>>>,
 }
 
 #[async_trait]
@@ -3619,6 +3625,25 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 }
                 member_turn_ids
             };
+            let active_turn = if let Some(active) = &self.active_turn {
+                active
+                    .lock()
+                    .await
+                    .clone()
+                    .filter(|turn| turn.session_id == session_id)
+            } else {
+                None
+            };
+            let admission_guard = if let Some(turn) = active_turn.as_ref() {
+                Some(turn.initial_event_gate.lock().await)
+            } else {
+                None
+            };
+            if active_turn.as_ref().is_some_and(|turn| {
+                turn.cancel.is_cancelled() || turn.completed.load(Ordering::Acquire)
+            }) {
+                return Ok(None);
+            }
             let batch = match self
                 .durable_turns
                 .prepare_mid_turn_batch(&session_id, &member_turn_ids)
@@ -3659,6 +3684,13 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 }
                 Err(error) => return Err(error.to_string()),
             };
+            if let Some(turn) = active_turn.as_ref() {
+                turn.mid_turn_batches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(batch.owner_turn_id, batch.member_turn_ids.clone());
+            }
+            drop(admission_guard);
             let mut inputs = Vec::with_capacity(batch.member_turn_ids.len());
             let mut client_turn_ids = Vec::with_capacity(batch.member_turn_ids.len());
             for turn_id in &batch.member_turn_ids {
@@ -3753,6 +3785,14 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 &identity.member_turn_ids,
             )
             .map_err(|error| error.to_string())?;
+        if let Some(active) = &self.active_turn {
+            if let Some(turn) = active.lock().await.as_ref() {
+                turn.mid_turn_batches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&identity.owner_turn_id);
+            }
+        }
         let command_ids = identity
             .member_turn_ids
             .iter()
@@ -3978,6 +4018,7 @@ impl ActiveTurn {
             cancel: CancellationToken::new(),
             explicit_cancel: AtomicBool::new(false),
             initial_event_gate: Mutex::new(()),
+            mid_turn_batches: StdMutex::new(HashMap::new()),
             task: StdMutex::new(None),
             completed: AtomicBool::new(false),
             quiescing: AtomicBool::new(false),
@@ -5780,6 +5821,27 @@ impl MobileEngineHandle {
         .await
     }
 
+    async fn publish_coalesced_cancellation(
+        &self,
+        member_ids: &[u64],
+        snapshot: client::protocol::events::TurnRecoverySnapshotDto,
+    ) {
+        // The owner envelope is the durable group commit. Every original
+        // client correlator receives that same terminal proof, including IDs
+        // that never owned an independent executor or event journal.
+        for member_id in member_ids {
+            let mut member = snapshot.clone();
+            if member.turn_id != *member_id {
+                member.turn_id = *member_id;
+                member.first_sequence = 0;
+                member.last_sequence = 0;
+            }
+            self.event_sink
+                .emit(ClientEvent::TurnRecoveryState { snapshot: member })
+                .await;
+        }
+    }
+
     async fn cancel_active_turn_for_session(
         &self,
         requested_turn_id: Option<u64>,
@@ -5790,11 +5852,11 @@ impl MobileEngineHandle {
             .as_ref()
             .filter(|turn| source_session.is_none_or(|session_id| turn.session_id == session_id))
             .cloned();
-        drop(active_guard);
         let Some(turn) = active else {
             // A paused / waiting turn has no executor owner, but its durable
             // checkpoint remains cancellable. The explicit admission fence
             // prevents a matching late send from reserving after this snapshot.
+            let mut cancelled_coalesced = None;
             let snapshot = if let Some(turn_id) = requested_turn_id {
                 let session_id = source_session
                     .map(str::to_owned)
@@ -5809,18 +5871,39 @@ impl MobileEngineHandle {
                             && checkpoint.state.is_none()
                             && checkpoint.queue_delivery == QueueDeliveryState::SlashClaimed
                     });
-                let snapshot = match self.durable_turns.cancel_pending(&session_id, turn_id) {
-                    Ok(Some(member_ids)) => {
-                        remove_mobile_prompt_dispatches(
-                            &self.message_queue,
-                            &session_id,
-                            &member_ids,
-                        )
+                let snapshot = if let Some((member_ids, snapshot)) = self
+                    .durable_turns
+                    .cancel_coalesced(&session_id, turn_id)
+                    .map_err(Self::map_durable_turn_error)?
+                {
+                    remove_mobile_prompt_dispatches(&self.message_queue, &session_id, &member_ids)
                         .await;
-                        None
-                    }
-                    Ok(None) => match self.durable_turns.cancel(&session_id, turn_id) {
-                        Ok(snapshot) => snapshot,
+                    cancelled_coalesced = Some((member_ids, snapshot));
+                    None
+                } else {
+                    match self.durable_turns.cancel_pending(&session_id, turn_id) {
+                        Ok(Some(member_ids)) => {
+                            remove_mobile_prompt_dispatches(
+                                &self.message_queue,
+                                &session_id,
+                                &member_ids,
+                            )
+                            .await;
+                            None
+                        }
+                        Ok(None) => match self.durable_turns.cancel(&session_id, turn_id) {
+                            Ok(snapshot) => snapshot,
+                            Err(DurableTurnStoreError::NotFound { .. })
+                            | Err(DurableTurnStoreError::Terminal { .. }) => None,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    requested_turn_id = turn_id,
+                                    "mobile: failed to persist inactive explicit cancel"
+                                );
+                                None
+                            }
+                        },
                         Err(DurableTurnStoreError::NotFound { .. })
                         | Err(DurableTurnStoreError::Terminal { .. }) => None,
                         Err(error) => {
@@ -5831,16 +5914,6 @@ impl MobileEngineHandle {
                             );
                             None
                         }
-                    },
-                    Err(DurableTurnStoreError::NotFound { .. })
-                    | Err(DurableTurnStoreError::Terminal { .. }) => None,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            requested_turn_id = turn_id,
-                            "mobile: failed to persist inactive explicit cancel"
-                        );
-                        None
                     }
                 };
                 if snapshot.is_none() && was_slash_claim {
@@ -5855,6 +5928,13 @@ impl MobileEngineHandle {
             } else {
                 None
             };
+            // Keep worker reservation excluded through the durable cancel and
+            // queue retirement, then release before invoking the listener.
+            drop(active_guard);
+            if let Some((member_ids, snapshot)) = cancelled_coalesced {
+                self.publish_coalesced_cancellation(&member_ids, snapshot)
+                    .await;
+            }
             if requested_turn_id.is_none() {
                 if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
                     tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
@@ -5871,50 +5951,118 @@ impl MobileEngineHandle {
             );
             return Ok(());
         };
-        let requested_turn_is_in_active_batch = requested_turn_id.is_some_and(|requested_id| {
-            let owner = self
-                .durable_turns
-                .coalesced_owner_for_member(&turn.session_id, requested_id)
-                .ok()
-                .flatten()
-                .and_then(|owner_id| self.durable_turns.load(&turn.session_id, owner_id).ok());
-            owner.is_some_and(|owner| {
-                owner
-                    .coalesced_batch
-                    .as_ref()
-                    .is_some_and(|batch| batch.member_turn_ids.contains(&requested_id))
-                    && (owner.queue_delivery == QueueDeliveryState::CoalescedClaimed
-                        || (owner.queue_delivery == QueueDeliveryState::Claimed
-                            && owner.state == Some(TurnRecoveryStateDto::Running)))
-            })
-        });
-        if !turn.matches_cancel(requested_turn_id) && !requested_turn_is_in_active_batch {
-            if let Some(turn_id) = requested_turn_id {
-                match self.durable_turns.cancel_pending(&turn.session_id, turn_id) {
-                    Ok(Some(member_ids)) => {
+        drop(active_guard);
+        let mut cancelled_batches = Vec::new();
+        if !turn.matches_cancel(requested_turn_id) {
+            // Mid-turn admission binds the batch while holding this same gate.
+            // Inspect that live binding before deciding which executor to unwind.
+            let batch_admission_guard = turn.initial_event_gate.lock().await;
+            let owner_guard = self.active_cancel.lock().await;
+            if !owner_guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &turn))
+            {
+                drop(owner_guard);
+                drop(batch_admission_guard);
+                return Box::pin(
+                    self.cancel_active_turn_for_session(requested_turn_id, source_session),
+                )
+                .await;
+            }
+            let active_batch = requested_turn_id.and_then(|requested_id| {
+                let owner = self
+                    .durable_turns
+                    .coalesced_owner_for_member(&turn.session_id, requested_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner_id| self.durable_turns.load(&turn.session_id, owner_id).ok());
+                owner.and_then(|owner| {
+                    let batch = owner.coalesced_batch.as_ref()?;
+                    let cancelling = owner.queue_delivery == QueueDeliveryState::Cancelled
+                        && owner.state == Some(TurnRecoveryStateDto::Cancelled);
+                    (batch.member_turn_ids.contains(&requested_id)
+                        && (((owner.queue_delivery == QueueDeliveryState::CoalescedClaimed
+                            || cancelling)
+                            && turn
+                                .mid_turn_batches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get(&owner.turn_id)
+                                .is_some_and(|members| members.contains(&requested_id)))
+                            || (turn.turn_id == Some(owner.turn_id)
+                                && ((owner.queue_delivery == QueueDeliveryState::Claimed
+                                    && owner.state == Some(TurnRecoveryStateDto::Running))
+                                    || cancelling))))
+                        .then(|| (owner.turn_id, batch.member_turn_ids.clone()))
+                })
+            });
+            if active_batch.is_none() {
+                if let Some(turn_id) = requested_turn_id {
+                    if let Some((member_ids, snapshot)) = self
+                        .durable_turns
+                        .cancel_coalesced(&turn.session_id, turn_id)
+                        .map_err(Self::map_durable_turn_error)?
+                    {
+                        drop(owner_guard);
+                        drop(batch_admission_guard);
                         remove_mobile_prompt_dispatches(
                             &self.message_queue,
                             &turn.session_id,
                             &member_ids,
                         )
                         .await;
+                        self.publish_coalesced_cancellation(&member_ids, snapshot)
+                            .await;
+                        return Ok(());
                     }
-                    Ok(None)
-                    | Err(DurableTurnStoreError::NotFound { .. })
-                    | Err(DurableTurnStoreError::Terminal { .. }) => {}
-                    Err(error) => tracing::warn!(
-                        %error,
-                        requested_turn_id = turn_id,
-                        "mobile: failed to persist queued prompt cancellation"
-                    ),
+                    match self.durable_turns.cancel_pending(&turn.session_id, turn_id) {
+                        Ok(Some(member_ids)) => {
+                            remove_mobile_prompt_dispatches(
+                                &self.message_queue,
+                                &turn.session_id,
+                                &member_ids,
+                            )
+                            .await;
+                        }
+                        Ok(None)
+                        | Err(DurableTurnStoreError::NotFound { .. })
+                        | Err(DurableTurnStoreError::Terminal { .. }) => {}
+                        Err(error) => tracing::warn!(
+                            %error,
+                            requested_turn_id = turn_id,
+                            "mobile: failed to persist queued prompt cancellation"
+                        ),
+                    }
                 }
+                drop(owner_guard);
+                drop(batch_admission_guard);
+                tracing::debug!(
+                    requested_turn_id,
+                    active_turn_id = turn.turn_id,
+                    "mobile: ignored stale turn cancellation"
+                );
+                return Ok(());
             }
-            tracing::debug!(
-                requested_turn_id,
-                active_turn_id = turn.turn_id,
-                "mobile: ignored stale turn cancellation"
-            );
-            return Ok(());
+            // Cancel and retire this bound group while its real executor still
+            // occupies the slot. Otherwise the queue watcher can claim it in
+            // the gap between owner release and this Cancel resuming.
+            turn.explicit_cancel.store(true, Ordering::Release);
+            turn.cancel.cancel();
+            let (batch_owner_id, member_ids) = active_batch.expect("active batch was selected");
+            cancelled_batches.push((
+                batch_owner_id,
+                self.durable_turns.cancel_coalesced(
+                    &turn.session_id,
+                    requested_turn_id.expect("active batch has a requested member"),
+                ),
+            ));
+            // Even if persistence reports an uncertain publication, prevent a
+            // warm redispatch. Return the storage error only after the owner
+            // has unwound; an explicit retry can recover every terminal proof.
+            remove_mobile_prompt_dispatches(&self.message_queue, &turn.session_id, &member_ids)
+                .await;
+            drop(owner_guard);
+            drop(batch_admission_guard);
         }
 
         // Trigger the owner immediately, before any foreign event callback,
@@ -5940,33 +6088,63 @@ impl MobileEngineHandle {
         };
         let mut cancelled_members = None;
         if let Some(turn_id) = turn.turn_id {
-            let queued_member_ids = self
-                .durable_turns
-                .load(&turn.session_id, turn_id)
-                .ok()
-                .and_then(|checkpoint| checkpoint.coalesced_batch)
-                .map(|batch| batch.member_turn_ids)
+            let checkpoint = self.durable_turns.load(&turn.session_id, turn_id).ok();
+            let queued_member_ids = checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.coalesced_batch.as_ref())
+                .map(|batch| batch.member_turn_ids.clone())
                 .unwrap_or_else(|| vec![turn_id]);
-            let cancel_result = if finalize_claimed_bash_cancel {
-                self.durable_turns
-                    .mark_claimed_bash_cancel_pending(&turn.session_id, turn_id)
-                    .map(Some)
-            } else {
-                self.durable_turns.cancel(&turn.session_id, turn_id)
-            };
-            match cancel_result {
-                Ok(Some(snapshot)) => {
-                    self.event_sink
-                        .emit(ClientEvent::TurnRecoveryState { snapshot })
-                        .await;
-                    cancelled_members = Some(queued_member_ids);
+            let mut primary_batch_retiring = cancelled_batches
+                .iter()
+                .any(|(owner_id, _)| *owner_id == turn_id);
+            if !primary_batch_retiring
+                && !finalize_claimed_bash_cancel
+                && checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint
+                        .coalesced_batch
+                        .as_ref()
+                        .is_some_and(|batch| batch.owner_turn_id == turn_id)
+                })
+            {
+                // The queue worker can own a coalesced envelope before its
+                // first row exists. Primary Stop (including legacy Cancel
+                // None) must retire and later prove every original member.
+                let retirement = self
+                    .durable_turns
+                    .cancel_coalesced(&turn.session_id, turn_id);
+                if !matches!(&retirement, Ok(None)) {
+                    cancelled_batches.push((turn_id, retirement));
+                    primary_batch_retiring = true;
+                    remove_mobile_prompt_dispatches(
+                        &self.message_queue,
+                        &turn.session_id,
+                        &queued_member_ids,
+                    )
+                    .await;
                 }
-                Ok(None) => {
-                    cancelled_members = Some(queued_member_ids);
-                }
-                Err(DurableTurnStoreError::NotFound { .. }) => {}
-                Err(error) => {
-                    tracing::warn!(%error, turn_id, "mobile: failed to persist explicit cancel");
+            }
+            if !primary_batch_retiring {
+                let cancel_result = if finalize_claimed_bash_cancel {
+                    self.durable_turns
+                        .mark_claimed_bash_cancel_pending(&turn.session_id, turn_id)
+                        .map(Some)
+                } else {
+                    self.durable_turns.cancel(&turn.session_id, turn_id)
+                };
+                match cancel_result {
+                    Ok(Some(snapshot)) => {
+                        self.event_sink
+                            .emit(ClientEvent::TurnRecoveryState { snapshot })
+                            .await;
+                        cancelled_members = Some(queued_member_ids);
+                    }
+                    Ok(None) => {
+                        cancelled_members = Some(queued_member_ids);
+                    }
+                    Err(DurableTurnStoreError::NotFound { .. }) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, turn_id, "mobile: failed to persist explicit cancel");
+                    }
                 }
             }
         }
@@ -5992,6 +6170,19 @@ impl MobileEngineHandle {
                 .await;
         }
         self.wait_for_turn_release(&turn, true).await;
+        let mut cancellation_error = None;
+        for (_, retirement) in cancelled_batches {
+            match retirement {
+                Ok(Some((member_ids, snapshot))) => {
+                    self.publish_coalesced_cancellation(&member_ids, snapshot)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    cancellation_error.get_or_insert_with(|| Self::map_durable_turn_error(error));
+                }
+            }
+        }
         // A claimed slash has a real durable input but no public Running
         // state yet. If cancellation withdrew that private claim, publish its
         // terminal only after the owner has stopped executing it.
@@ -6043,7 +6234,7 @@ impl MobileEngineHandle {
             "mobile: waiting for cancelled turn to release its owner slot"
         );
         tracing::debug!(active_turn_id = turn.turn_id, "mobile: cancel completed");
-        Ok(())
+        cancellation_error.map_or(Ok(()), Err)
     }
 
     /// Ask a live turn to unwind and wait until its owner slot is released.
@@ -8583,6 +8774,12 @@ impl MobileEngineHandle {
                     .durable_turns
                     .load(&session_id, turn_id)
                     .map_err(Self::map_durable_turn_error)?;
+                // Explicit cold resume can also precede the first public
+                // prompt. Initialize before publishing Running or reserving a
+                // driver that will hold the mode initialization turn gate.
+                if checkpoint.can_resume_without_user() {
+                    self.ensure_mobile_session_anchor().await?;
+                }
                 let (disposition, snapshot) = self
                     .durable_turns
                     .resume(&session_id, turn_id)

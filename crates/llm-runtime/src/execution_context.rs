@@ -396,6 +396,9 @@ pub struct ExecutionContext {
     /// Selected physical protocol for context measurement and prompt projection.
     /// Independent of input_protocol, which identifies native replay data.
     pub context_usage_protocol: Option<lingxi_llm_client::protocol::ProtocolFamily>,
+    /// Explicit Anthropic overrides captured once before request awaits.
+    /// Counting, generation and usage identity share this host-only snapshot.
+    pub anthropic_extra_body: Option<crate::CapturedAnthropicExtraBody>,
     /// Selected build-time route for pure prompt projection outside generation.
     pub prompt_projection_profile: Option<lingxi_llm_client::protocol::ProviderProfile>,
     /// Selected resource identity; token rotation keeps this identity stable.

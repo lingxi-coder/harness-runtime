@@ -755,12 +755,26 @@ pub async fn with_reminder_read_target<T>(
         .await
 }
 
-/// Current physical target, only for the exact internally approved request.
-pub fn reminder_read_target(requested: &Path) -> Option<PathBuf> {
+/// An internal Read tried to use a request other than the one policy approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReminderReadTargetMismatch;
+
+/// Current physical target for the exact, unmodified `file_path` input.
+///
+/// Read checks this before path normalization. A scoped request mismatch must
+/// fail closed rather than look like an ordinary, unbound explicit Read.
+pub fn reminder_read_target(
+    requested: &Path,
+) -> Result<Option<PathBuf>, ReminderReadTargetMismatch> {
     REMINDER_READ_TARGET
-        .try_with(|(route, target)| (route == requested).then(|| target.clone()))
-        .ok()
-        .flatten()
+        .try_with(|(route, target)| {
+            if route.as_os_str() == requested.as_os_str() {
+                Ok(Some(target.clone()))
+            } else {
+                Err(ReminderReadTargetMismatch)
+            }
+        })
+        .unwrap_or(Ok(None))
 }
 
 impl MemoryForkReadState {
@@ -1395,6 +1409,45 @@ fn file_object_identity(_path: &Path) -> std::io::Result<Option<FileIdentity>> {
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn reminder_binding_keeps_raw_request_identity_and_restores_nested_scopes() {
+        let raw = PathBuf::from("/workspace/source.txt ");
+        let normalized = PathBuf::from("/workspace/source.txt");
+        let approved = PathBuf::from("/workspace/approved.txt");
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+        with_reminder_read_target(raw.clone(), approved.clone(), async {
+            assert_eq!(reminder_read_target(&raw), Ok(Some(approved.clone())));
+            assert_eq!(
+                reminder_read_target(&normalized),
+                Err(ReminderReadTargetMismatch)
+            );
+            with_reminder_read_target(normalized.clone(), normalized.clone(), async {
+                assert_eq!(
+                    reminder_read_target(&normalized),
+                    Ok(Some(normalized.clone()))
+                );
+                assert_eq!(reminder_read_target(&raw), Err(ReminderReadTargetMismatch));
+            })
+            .await;
+            assert_eq!(reminder_read_target(&raw), Ok(Some(approved.clone())));
+        })
+        .await;
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+
+        // Dropping a suspended internal call must not bind the next explicit Read.
+        let mut pending = Box::pin(with_reminder_read_target(raw.clone(), approved, async {
+            assert!(reminder_read_target(&raw).unwrap().is_some());
+            std::future::pending::<()>().await;
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(pending.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(pending);
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+    }
 
     fn entry(content: &str) -> ReadFileEntry {
         ReadFileEntry {

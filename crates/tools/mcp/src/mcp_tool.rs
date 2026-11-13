@@ -1018,6 +1018,9 @@ impl MCPTool {
     /// Bind immutable host discovery provenance to this executable handle.
     #[must_use]
     pub fn with_capability_identity(mut self, identity: tool_api::McpToolIdentity) -> Self {
+        if let Some(parser) = &self.output_schema_parser {
+            self.output_schema_parser = Some(parser.for_raw_tool(&identity.raw_tool_name));
+        }
         self.capability_identity = Some(identity);
         self
     }
@@ -1159,9 +1162,13 @@ impl MCPTool {
     #[must_use]
     pub fn with_bound_server_key(mut self, key: String) -> Self {
         self.output_schema_parser = self.ctx.mcp_registry.as_ref().and_then(|registry| {
-            self.full_name
-                .as_deref()
-                .map(|full_name| registry.output_schema_parser_handle(&key, full_name))
+            self.full_name.as_deref().map(|full_name| {
+                let parser = registry.output_schema_parser_handle(&key, full_name);
+                self.capability_identity.as_ref().map_or_else(
+                    || parser.clone(),
+                    |identity| parser.for_raw_tool(&identity.raw_tool_name),
+                )
+            })
         });
         self.bound_server_key = Some(key);
         self
@@ -1173,7 +1180,10 @@ impl MCPTool {
         mut self,
         handle: Arc<McpToolOutputSchemaParserHandle>,
     ) -> Self {
-        self.output_schema_parser = Some(handle);
+        self.output_schema_parser = Some(self.capability_identity.as_ref().map_or_else(
+            || handle.clone(),
+            |identity| handle.for_raw_tool(&identity.raw_tool_name),
+        ));
         self
     }
 

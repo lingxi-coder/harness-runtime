@@ -33,7 +33,9 @@ pub use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, Sys
 pub use test_support::{
     FrameStream, RawStreamFrame, ResponsesWebSocketTransportSession, StreamingResponse,
 };
+mod anthropic_extra_body;
 mod attempt_pricing;
+pub use anthropic_extra_body::CapturedAnthropicExtraBody;
 #[cfg(test)]
 mod codec_tests;
 mod native_request_layout;

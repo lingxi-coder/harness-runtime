@@ -57,6 +57,8 @@ mod deferred_state_replay_tests;
 pub(crate) mod file_state;
 #[cfg(test)]
 mod file_state_tests;
+#[cfg(test)]
+mod mod_attachment_provenance_tests;
 mod plan_files;
 pub(crate) mod todo_state;
 
@@ -2306,7 +2308,63 @@ fn queued_task_notification_attachment_message_for_api(
     rendered_prompt_ingress_message_for_api(message, message_uuid)
 }
 
-/// Restore the provenance of model-visible hook attachments from their JSONL
+/// Resolve request-rendering provenance from a typed source, never its rendered
+/// text. Both hot and cold resume use this classification after selecting the
+/// adopted model history.
+fn mod_attachment_descriptor_from_payload(
+    attachment: &Utf16JsonProjection,
+) -> Option<(String, Value)> {
+    let kind = attachment.string_at("/type")?;
+    let is_task_notification = kind == "queued_command"
+        && attachment.string_at("/commandMode") == Some("task-notification");
+    let origin = if is_task_notification
+        || matches!(
+            kind,
+            "sandbox_instructions"
+                | "attention_budget"
+                | "environment"
+                | "model"
+                | "output_style_instructions"
+                | "language"
+                | "deferred_tools_delta"
+                | "mcp_instructions_delta"
+                | "mcp_dropped_tools_delta"
+                | "agent_listing_delta"
+                | "skill_listing"
+                | "edited_text_file"
+                | "proactivity"
+                | "auto_mode"
+                | "auto_mode_exit"
+                | "total_tokens_reminder"
+                | "budget_usd"
+                | "unknown_command_fallback"
+        ) {
+        serde_json::json!({"kind":"engine"})
+    } else {
+        match kind {
+            "hook_additional_context"
+                if matches!(
+                    attachment.string_at("/hookName"),
+                    Some("prompt.submit" | "tool.call")
+                ) =>
+            {
+                let event = attachment.string_at("/hookName")?;
+                serde_json::json!({"kind":"plugin","event":event})
+            }
+            "hook_additional_context"
+            | "hook_success"
+            | "hook_stopped_continuation"
+            | "hook_blocking_error" => {
+                let event = attachment.string_at("/hookEvent")?;
+                serde_json::json!({"kind":"hook","event":event})
+            }
+            _ => return None,
+        }
+    };
+    Some((kind.to_owned(), origin))
+}
+
+/// Restore the provenance of model-visible attachments from their JSONL
 /// rows. The replay renderer gives the derived history message the attachment
 /// row's UUID, so the same key identifies its original text on later requests.
 fn mod_attachment_descriptors_from_messages(
@@ -2318,37 +2376,8 @@ fn mod_attachment_descriptors_from_messages(
             let uuid = Uuid::parse_str(&message.uuid).ok()?;
             hook_attachment_message_for_api(message, uuid)?;
             let attachment = attachment_projection(message)?;
-            let kind = attachment.string_at("/type")?;
-            let is_task_notification = kind == "queued_command"
-                && attachment.string_at("/commandMode") == Some("task-notification");
-            let origin = if is_task_notification
-                || matches!(
-                    kind,
-                    "environment"
-                        | "model"
-                        | "deferred_tools_delta"
-                        | "mcp_dropped_tools_delta"
-                        | "agent_listing_delta"
-                        | "skill_listing"
-                        | "edited_text_file"
-                        | "total_tokens_reminder"
-                        | "budget_usd"
-                        | "unknown_command_fallback"
-                ) {
-                serde_json::json!({"kind":"engine"})
-            } else {
-                let hook_name = attachment.string_at("/hookName");
-                if kind == "hook_additional_context"
-                    && matches!(hook_name, Some("prompt.submit" | "tool.call"))
-                {
-                    let event = hook_name?;
-                    serde_json::json!({"kind":"plugin","event":event})
-                } else {
-                    let event = attachment.string_at("/hookEvent")?;
-                    serde_json::json!({"kind":"hook","event":event})
-                }
-            };
-            Some((MessageId::from_uuid(uuid), (kind.to_owned(), origin)))
+            let descriptor = mod_attachment_descriptor_from_payload(attachment)?;
+            Some((MessageId::from_uuid(uuid), descriptor))
         })
         .collect()
 }
@@ -4127,6 +4156,23 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.sent_agent_names.lock().await = agents;
         *self.prompt_runtime.sent_skill_names.lock().await = skills;
         restore_deferred_tool_state_from_history(self.tools.deferral(), &history, &attachments);
+        let active_ids = history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        let descriptors = history.iter().filter_map(|message| {
+            let id = message.id();
+            let attachment = attachments.get(&id)?;
+            Some((id, mod_attachment_descriptor_from_payload(attachment)?))
+        });
+        {
+            // Session activation cleared the old catalog. Retain registrations
+            // produced by accepted resumed-session hooks before this restore,
+            // and rebuild historical rows from their adopted raw sidecars.
+            let mut catalog = self.prompt_runtime.mod_persisted_attachments.lock().await;
+            catalog.retain(|id, _| active_ids.contains(id));
+            catalog.extend(descriptors);
+        }
         self.restore_file_read_state().await;
         self.restore_historical_read_fences_from_sidecars();
     }

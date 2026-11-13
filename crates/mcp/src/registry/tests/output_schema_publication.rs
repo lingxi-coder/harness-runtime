@@ -165,6 +165,113 @@ mod output_schema_publication {
         registry.disconnect("srv").await.unwrap();
     }
     #[derive(Default)]
+    struct UnavailableValidator;
+    impl JsonSchemaValidator for UnavailableValidator {
+        fn new_session(&self, _: SchemaProfile) -> Arc<dyn JsonSchemaValidatorSession> {
+            panic!("a selected schema-less row must not create a session")
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_and_live_output_parsers_keep_colliding_raw_tool_rows_separate() {
+        let _lock = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let config = http_cfg("srv", "https://mcp.example.com/v1");
+        let mut mock = BridgeMock::new(&["a.b", "a_b", "a?b"]);
+        for (tool, schema) in mock.tools.iter_mut().zip([
+            Some(serde_json::json!({"required":["first"]})),
+            None,
+            Some(serde_json::json!({"required":["last"]})),
+        ]) {
+            tool.full_name = "mcp__srv__a_b".into();
+            tool.server_name = "srv".into();
+            tool.output_schema = schema.as_ref().map(source_json);
+        }
+        seed_entry_with_catalog(
+            &store,
+            &crate::discovery_cache::logical_cache_key(&config),
+            0,
+            ServerCapabilitiesDto {
+                tools: true,
+                ..Default::default()
+            },
+            mock.tools.clone(),
+            vec![],
+            vec![],
+        );
+        let mock = Arc::new(mock);
+        let validator = Arc::new(CatalogValidator::default());
+        let registry = McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+            .with_json_schema_validator(validator.clone())
+            .with_discovery_cache_store(store.clone());
+        registry.connect(config.clone()).await.unwrap();
+        let plain_only = McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+            .with_json_schema_validator(Arc::new(UnavailableValidator))
+            .with_discovery_cache_store(store);
+        plain_only.connect(config).await.unwrap();
+        plain_only
+            .output_schema_parser_handle("srv", "mcp__srv__a_b")
+            .for_raw_tool("a_b")
+            .snapshot(None)
+            .await
+            .unwrap()
+            .parse_output(&source_json(&serde_json::json!({"arbitrary":true})))
+            .await
+            .unwrap();
+        for live in [false, true] {
+            if live {
+                registry.ensure_dialed_from_cache("srv").await.unwrap();
+            }
+            let plain = registry
+                .output_schema_parser_handle("srv", "mcp__srv__a_b")
+                .for_raw_tool("a_b");
+            plain
+                .snapshot(None)
+                .await
+                .unwrap()
+                .parse_output(&source_json(&serde_json::json!({"arbitrary":true})))
+                .await
+                .unwrap();
+            for (raw, required, wrong) in [("a.b", "first", "last"), ("a?b", "last", "first")] {
+                let handle = registry
+                    .output_schema_parser_handle("srv", "mcp__srv__a_b")
+                    .for_raw_tool(raw);
+                let snapshot = handle.snapshot(None).await.unwrap();
+                snapshot
+                    .parse_output(&source_json(&serde_json::json!({(required):true})))
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        snapshot
+                            .parse_output(&source_json(&serde_json::json!({(wrong):true})))
+                            .await,
+                        Err(McpClientError::OutputSchemaInvalid { .. })
+                    ),
+                    "live={live}, raw={raw}"
+                );
+            }
+            // The old model-name-only API keeps the main registry's first-row selection.
+            let selected = registry
+                .output_schema_parser_handle("srv", "mcp__srv__a_b")
+                .snapshot(None)
+                .await
+                .unwrap();
+            assert!(selected
+                .parse_output(&source_json(&serde_json::json!({"last":true})))
+                .await
+                .is_err());
+            assert_eq!(mock.connect_calls.load(Ordering::SeqCst), usize::from(live));
+            assert_eq!(validator.0.load(Ordering::SeqCst), 1 + usize::from(live));
+        }
+    }
+
+    #[derive(Default)]
     struct Validator {
         fail: AtomicBool,
         compiles: AtomicUsize,

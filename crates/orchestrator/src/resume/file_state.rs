@@ -372,8 +372,12 @@ fn without_bom(units: &[u16]) -> &[u16] {
 
 fn write_snapshot(units: &[u16]) -> RecoveredFile {
     // Write's output contains exact source text, including its optional BOM.
-    // This is historical seen state, not a guess at the original disk codec.
-    snapshot(without_bom(units).to_vec(), false)
+    // Match the live Write publication and subsequent stale-content comparison,
+    // without repairing unpaired UTF-16 units or guessing the disk codec.
+    snapshot(
+        tool_file::file_meta::normalize_to_lf_units(without_bom(units)),
+        false,
+    )
 }
 
 fn recover_snapshot(
@@ -483,7 +487,9 @@ fn recover_snapshot(
                     );
                 }
             }
-            Some(write_snapshot(&after))
+            // Edit publishes the reconstructed disk line endings, unlike
+            // Write's LF-normalized publication.
+            Some(snapshot(without_bom(&after).to_vec(), false))
         }
         "NotebookEdit" => {
             // A native successful notebook result carries the entire updated
@@ -508,7 +514,7 @@ fn recover_snapshot(
                 let notebook = Utf16JsonProjection::parse_utf16_json(without_bom(units)).ok()?;
                 notebook.array_len("/cells")?;
             }
-            Some(write_snapshot(&updated))
+            Some(snapshot(without_bom(&updated).to_vec(), false))
         }
         _ => None,
     }
@@ -747,7 +753,15 @@ mod tests {
                     append_write(&mut session, content);
                 }
                 let entry = restored(&session).unwrap();
-                assert_eq!(entry.content, content);
+                let expected = if read {
+                    content.to_owned()
+                } else {
+                    String::from_utf16(&tool_file::file_meta::normalize_to_lf_units(
+                        &content.encode_utf16().collect::<Vec<_>>(),
+                    ))
+                    .unwrap()
+                };
+                assert_eq!(entry.content, expected);
                 assert_eq!(entry.mtime_ms, i64::MIN);
                 assert_eq!(entry.from_read, read);
                 assert_eq!(entry.offset, None);
@@ -816,7 +830,7 @@ mod tests {
     fn write_bom_matches_guard_decoding_without_double_stripping_read_content() {
         let mut written = session();
         append_write(&mut written, "\u{feff}known\r\n");
-        assert_eq!(restored(&written).unwrap().content, "known\r\n");
+        assert_eq!(restored(&written).unwrap().content, "known\n");
         let mut read = session();
         // Read has already removed one disk BOM; a remaining U+FEFF is content.
         append_read(&mut read, "\u{feff}known");

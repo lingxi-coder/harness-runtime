@@ -4280,6 +4280,7 @@ fn build_mobile_engine_on_worker(
             loop_state: loop_state.clone(),
             durable_turns: durable_turns.clone(),
             active_session_uuid: inner.active_session_uuid.clone(),
+            active_turn: Some(active_cancel.clone()),
         }));
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     inner.orchestrator.set_cancel_reason(cancel_reason.clone());
@@ -4371,6 +4372,9 @@ fn build_mobile_engine_on_worker(
                         continue;
                     }
                     let _transition = loop_transition.lock().await;
+                    if active_cancel.lock().await.is_some() {
+                        continue;
+                    }
                     if let Some(handle) = queued_slash_handle.get().and_then(std::sync::Weak::upgrade) {
                         let handle = super::automation::MobileCronBorrow(Some(handle));
                         if handle.scheduled_reload.load(std::sync::atomic::Ordering::Acquire) {
@@ -4381,6 +4385,17 @@ fn build_mobile_engine_on_worker(
                                 tracing::warn!(?error, "queued turn delayed until scheduled session reload succeeds");
                                 continue;
                             }
+                        }
+                        // A recovered queue can start before the first public
+                        // prompt initialized this connection's anchor cache.
+                        // Validate and initialize while idle, before dequeue or
+                        // reservation: doing it on a later busy Send would wait
+                        // for the queued driver's turn gate for its whole life.
+                        if let Err(error) = handle.ensure_mobile_session_anchor().await {
+                            #[cfg(test)]
+                            handle.queued_anchor_failure_for_test.notify_one();
+                            tracing::warn!(?error, "queued turn delayed until session anchor validation succeeds");
+                            continue;
                         }
                     } else {
                         continue;
@@ -4920,6 +4935,8 @@ fn build_mobile_engine_on_worker(
         initial_event_test_gate: Default::default(),
         #[cfg(test)]
         slash_running_test_gate: Default::default(),
+        #[cfg(test)]
+        queued_anchor_failure_for_test: Default::default(),
         message_queue,
         loop_transition,
         cancel_reason,

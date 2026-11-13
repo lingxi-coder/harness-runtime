@@ -105,10 +105,12 @@ mod output_schema_cache {
             )
             .await
             .is_ok());
-        let in_flight = client.output_schema_plans.read().await[&tools[0].full_name]
-            .as_ref()
+        let in_flight = client
+            .output_schema_snapshot(&tools[0].full_name)
+            .await
+            .plan
             .unwrap()
-            .clone();
+            .unwrap();
         for _ in 0..16 {
             client.install_output_schemas(&tools).await.unwrap();
             assert_eq!(validator.alive.load(Ordering::SeqCst), 2);

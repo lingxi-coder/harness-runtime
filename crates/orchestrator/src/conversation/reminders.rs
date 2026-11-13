@@ -2906,11 +2906,50 @@ message with multiple tool uses so they run concurrently."
         let policy_snapshot = self.perms.read_path_policy_snapshot();
         let native_path_recheck = policy_snapshot.facts().requires_path_recheck();
 
+        // Host seeds may retain spellings that Read normalizes to the same
+        // logical key. Once Read publishes that key, retire only the original
+        // alias snapshots so their older mtimes cannot inject the notice again.
+        let mut normalized_aliases = std::collections::HashMap::<_, Vec<_>>::new();
+        for (path, entry, _) in &candidates {
+            let requested = read_tool.read_state_request_path(path);
+            if requested.as_os_str() != path.as_os_str() {
+                normalized_aliases
+                    .entry(requested)
+                    .or_default()
+                    .push((path.clone(), entry.clone()));
+            }
+        }
+        let normalized_baselines = candidates
+            .iter()
+            .filter(|(path, _, _)| normalized_aliases.contains_key(path))
+            .map(|(path, entry, _)| (path.clone(), entry.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+
         let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
-        'files: for (path, entry, requested_path_groups) in candidates {
+        'files: for (path, original_entry, requested_path_groups) in candidates {
             if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
                 break;
             }
+            if !self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .peek_snapshot(&path)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &original_entry))
+            {
+                continue;
+            }
+            // A raw host seed may describe a different on-disk spelling. It
+            // cannot replace the existing complete observation of the logical
+            // file Read will actually open, including its timestamp and diff.
+            let entry = normalized_baselines
+                .get(&read_tool.read_state_request_path(&path))
+                .filter(|entry| {
+                    entry.offset.is_none() && entry.limit.is_none() && !entry.is_partial_view
+                })
+                .cloned()
+                .unwrap_or_else(|| original_entry.clone());
             // Drop vanished routes before filtering ranged snapshots: Read
             // records an offset even when refreshing a complete file.
             // The cache key is model-owned; only its registered reader knows
@@ -2928,10 +2967,9 @@ message with multiple tool uses so they run concurrently."
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::NotFound {
                         if let Ok(mut guard) = self.prompt_runtime.read_state_map.lock() {
-                            if guard
-                                .peek_snapshot(&path)
-                                .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &entry))
-                            {
+                            if guard.peek_snapshot(&path).is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(&current, &original_entry)
+                            }) {
                                 let _ = guard.remove(&path);
                             }
                         }
@@ -3112,6 +3150,27 @@ message with multiple tool uses so they run concurrently."
                     continue;
                 }
             };
+            let published_path = read_tool.read_state_request_path(&reminder_path);
+            if let Some(aliases) = normalized_aliases.get(&published_path) {
+                let mut state = self
+                    .prompt_runtime
+                    .read_state_map
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state
+                    .peek_snapshot(&published_path)
+                    .is_some_and(|published| published.from_read && published.mtime_ms >= mtime_ms)
+                {
+                    for (alias, original) in aliases {
+                        if state
+                            .peek_snapshot(alias)
+                            .is_some_and(|current| std::sync::Arc::ptr_eq(&current, original))
+                        {
+                            state.remove(alias);
+                        }
+                    }
+                }
+            }
             // The actual Read call owns cache/state updates. Consume only the
             // Native changed-file result kinds; `new_messages` from this inner
             // call are intentionally not forwarded. A successful Read has

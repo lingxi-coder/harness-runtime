@@ -549,8 +549,10 @@ impl DurableTurnCheckpoint {
         self.first_sequence != 0 && after.saturating_add(1) < self.first_sequence
     }
 
-    fn can_resume_without_user(&self) -> bool {
-        self.state.is_some()
+    pub(crate) fn can_resume_without_user(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| !state.is_terminal())
             && self.queue_delivery == QueueDeliveryState::Claimed
             && self.safe_to_resume
             && self
@@ -1987,6 +1989,55 @@ impl DurableTurnStore {
         }))
     }
 
+    /// Cancel a coalesced envelope after the host has excluded a new executor
+    /// reservation or signalled its bound executor while retaining that slot.
+    /// The host retires volatile dispatches before releasing the executor. The
+    /// owner is the atomic commit marker for every member across a crash.
+    pub(crate) fn cancel_coalesced(
+        &self,
+        session_id: &str,
+        member_turn_id: u64,
+    ) -> Result<Option<(Vec<u64>, TurnRecoverySnapshotDto)>, DurableTurnStoreError> {
+        let mut cache = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        let Some(owner) = checkpoints.iter().find(|checkpoint| {
+            checkpoint.coalesced_batch.as_ref().is_some_and(|batch| {
+                batch.owner_turn_id == checkpoint.turn_id
+                    && batch.member_turn_ids.contains(&member_turn_id)
+            })
+        }) else {
+            return Ok(None);
+        };
+        let owner_id = owner.turn_id;
+        let member_ids = owner
+            .coalesced_batch
+            .as_ref()
+            .expect("coalesced owner was selected")
+            .member_turn_ids
+            .clone();
+        if owner.state == Some(TurnRecoveryStateDto::Cancelled)
+            && owner.queue_delivery == QueueDeliveryState::Cancelled
+        {
+            // An atomic rename can commit before its parent fsync reports an
+            // error. Retrying must re-publish every member's terminal proof.
+            return Ok(Some((member_ids, owner.snapshot())));
+        }
+        if owner.payload_is_retired() {
+            return Ok(None);
+        }
+        let snapshot = self.update_if_locked(&mut cache, session_id, owner_id, |checkpoint| {
+            checkpoint.state = Some(TurnRecoveryStateDto::Cancelled);
+            checkpoint.queue_delivery = QueueDeliveryState::Cancelled;
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("explicit_cancel".into());
+            Ok(Some(checkpoint.snapshot()))
+        })?;
+        Ok(snapshot.map(|snapshot| (member_ids, snapshot)))
+    }
+
     pub(crate) fn resume(
         &self,
         session_id: &str,
@@ -2452,6 +2503,66 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = DurableTurnStore::new(temp.path().join("turns"));
         (temp, store)
+    }
+
+    #[test]
+    fn inactive_coalesced_member_cancel_has_one_cold_recoverable_group_commit() {
+        for claimed in [false, true] {
+            for uncertain in [false, true] {
+                let (temp, store) = store();
+                for id in [11, 12, 13] {
+                    store
+                        .admit_queued_prompt(
+                            "owner",
+                            Some(id),
+                            Some(id),
+                            format!("member-{id}").into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .unwrap();
+                }
+                store.prepare_mid_turn_batch("owner", &[11, 12]).unwrap();
+                if claimed {
+                    store.claim_pending("owner", 11).unwrap();
+                }
+                if uncertain {
+                    store.fail_next_metadata_after_publish_for_test();
+                }
+                let cancelled = store.cancel_coalesced("owner", 12);
+                if uncertain {
+                    assert!(cancelled.is_err());
+                } else {
+                    let (ids, snapshot) = cancelled.unwrap().unwrap();
+                    assert_eq!(ids, [11, 12]);
+                    assert_eq!(snapshot.turn_id, 11);
+                    assert_eq!(snapshot.state, TurnRecoveryStateDto::Cancelled);
+                }
+                let cold = DurableTurnStore::new(temp.path().join("turns"));
+                for recovered in [&store, &cold] {
+                    assert_eq!(
+                        recovered.load("owner", 11).unwrap().state,
+                        Some(TurnRecoveryStateDto::Cancelled)
+                    );
+                    assert_eq!(
+                        recovered
+                            .scan_pending("owner")
+                            .unwrap()
+                            .iter()
+                            .map(|row| row.turn_id)
+                            .collect::<Vec<_>>(),
+                        [13],
+                        "the owner marker retires every member, even after uncertain fsync"
+                    );
+                    let (ids, proof) = recovered
+                        .cancel_coalesced("owner", 12)
+                        .unwrap()
+                        .expect("retry recovers the committed member terminal proof");
+                    assert_eq!(ids, [11, 12]);
+                    assert_eq!(proof.state, TurnRecoveryStateDto::Cancelled);
+                }
+            }
+        }
     }
 
     #[test]

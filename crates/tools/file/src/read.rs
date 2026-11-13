@@ -2404,9 +2404,12 @@ impl Tool for FileReadTool {
         TOOL_NAME
     }
 
+    fn read_state_request_path(&self, requested: &Path) -> PathBuf {
+        crate::normalize_model_file_path(&requested.to_string_lossy(), &self.ctx.cwd())
+    }
+
     fn read_state_io_path(&self, requested: &Path) -> Result<PathBuf, ToolError> {
-        let requested =
-            crate::normalize_model_file_path(&requested.to_string_lossy(), &self.ctx.cwd());
+        let requested = self.read_state_request_path(requested);
         if is_device_file(&requested.to_string_lossy()) {
             return Err(ToolError::PathBlocked { path: requested });
         }
@@ -2576,6 +2579,13 @@ impl Tool for FileReadTool {
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
         let requested_path = crate::checked_model_file_path(file_path, &self.ctx.cwd())?;
+        // The scanner binds the exact JSON request. Match its original input
+        // independently of trim/NFC/cwd normalization, and retain it for the
+        // open (including the screenshot fallback decision below).
+        let reminder_target = tool_api::read_file_state::reminder_read_target(Path::new(file_path))
+            .map_err(|_| ToolError::PathBlocked {
+                path: requested_path.clone(),
+            })?;
         let is_notebook = requested_path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -2651,8 +2661,9 @@ impl Tool for FileReadTool {
                 return Err(ToolError::PathBlocked { path });
             }
         };
-        if tool_api::read_file_state::reminder_read_target(&requested_path)
-            .is_some_and(|approved| approved != canon)
+        if reminder_target
+            .as_ref()
+            .is_some_and(|approved| approved != &canon)
         {
             self.emit_failed(&invocation_id, "path_blocked").await;
             return Err(ToolError::PathBlocked { path });
@@ -2701,9 +2712,9 @@ impl Tool for FileReadTool {
                 // tries the macOS-screenshot AM/PM space variant (regular space ⇄
                 // thin space, U+202F), then reports the friendly message if that
                 // variant is also absent.
-                if let Some(alt) = get_alternate_screenshot_path(&requested_path).filter(|_| {
-                    tool_api::read_file_state::reminder_read_target(&requested_path).is_none()
-                }) {
+                if let Some(alt) = get_alternate_screenshot_path(&requested_path)
+                    .filter(|_| reminder_target.is_none())
+                {
                     let alternate = run_read_job(&read_cancel, {
                         let trusted_dirs = trusted_dirs.clone();
                         move |cancel| {
@@ -3907,6 +3918,39 @@ mod tests {
             tool_api::test_support::ctx_for_file_tools(fs, bus, vec![tmp.path().to_path_buf()]),
             sink,
         )
+    }
+
+    #[tokio::test]
+    async fn reminder_matches_raw_path_before_normalization_and_rejects_other_requests() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().canonicalize().unwrap().join("source.txt");
+        std::fs::write(&target, "approved content\n").unwrap();
+        let raw = PathBuf::from(format!("{} \t", target.display()));
+        let (context, _) = make_ctx(&tmp);
+        let reader = FileReadTool::new(context);
+        let input = crate::generated_result(&json!({"file_path":raw}));
+        let read = tool_api::read_file_state::with_reminder_read_target(
+            raw.clone(),
+            target.clone(),
+            reader.call(input.clone(), fresh_ctx(), fresh_tx()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read.data.string_at("/file/content"),
+            Some("approved content\n")
+        );
+        let mismatched = tool_api::read_file_state::with_reminder_read_target(
+            target.clone(),
+            target.clone(),
+            reader.call(input.clone(), fresh_ctx(), fresh_tx()),
+        )
+        .await;
+        assert!(
+            matches!(mismatched, Err(ToolError::PathBlocked { .. })),
+            "a mismatched internal request may not silently become an explicit Read"
+        );
+        reader.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
     }
 
     #[cfg(not(feature = "image-read"))]

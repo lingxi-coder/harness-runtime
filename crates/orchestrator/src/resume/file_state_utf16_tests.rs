@@ -194,8 +194,8 @@ fn resume_reads_keep_exact_surrogates_and_compare_partial_views_without_display_
 }
 
 #[test]
-fn resume_write_sidecars_and_writerless_inputs_preserve_exact_source_and_bom() {
-    let units = [0xfeff, 0xd800, 97, 0xdc00, 10];
+fn resume_write_sidecars_and_writerless_inputs_match_live_normalization_and_exact_units() {
+    let units = [0xfeff, 0xd800, 97, 0xdc00, 13, 10];
     for raw_sidecar in [false, true] {
         let mut session = session();
         append_read(&mut session, FILE, &[0xd801, 10]);
@@ -212,7 +212,7 @@ fn resume_write_sidecars_and_writerless_inputs_preserve_exact_source_and_bom() {
         let map = restore(&session);
         assert_eq!(
             get_content_units(&map, Path::new(FILE)),
-            Some(units[1..].to_vec())
+            Some(vec![0xd800, 97, 0xdc00, 10])
         );
         assert!(!get(&map, Path::new(FILE)).unwrap().from_read);
     }

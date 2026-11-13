@@ -98,6 +98,7 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let inputs = source
@@ -219,6 +220,7 @@ async fn mobile_midturn_batches_stop_at_bash_and_never_join_commands() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let normal_batch = source
@@ -345,6 +347,7 @@ async fn cancel_before_midturn_admission_keeps_uncancelled_mobile_dispatch_membe
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store,
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
     assert!(source.take_mid_turn_batch().await.unwrap().is_none());
     assert_eq!(
