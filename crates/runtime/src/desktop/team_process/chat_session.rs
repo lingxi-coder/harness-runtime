@@ -1,12 +1,16 @@
 //! Bot×Chat uses the existing session journal, captured resume and transcript writer.
 use super::TeamProcessError;
 use crate::desktop::session_state::{
-    team_chat::{BotChatCursor, BotChatScope, ChatAuthor, ChatInputBatch, ChatSourceMessage},
+    team_chat::{
+        BotChatCursor, BotChatScope, ChatAuthor, ChatInputBatch, ChatInputFile, ChatSourceMessage,
+    },
     SessionStateCoordinator,
 };
 use crate::desktop::{team_invocation::TeamInvocationProfile, DesktopRuntime};
 use lingxi_core::host::OrchestratorHandle;
-use lingxi_core::types::{ConversationMessage, MessageId};
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -167,17 +171,126 @@ fn text(source: &ChatSourceMessage) -> Result<String, TeamProcessError> {
         .map(|json| format!("<shared_chat_message>\n{json}\n</shared_chat_message>"))
         .map_err(|_| TeamProcessError::Protocol)
 }
+/// The bytes of the files the host handed over with one batch. They are taken
+/// out of the batch before anything is journaled: the journal keeps which
+/// files were given, the transcript row keeps what the model was shown.
+pub(super) struct InputFiles {
+    batch_id: String,
+    bytes: HashMap<String, Vec<u8>>,
+}
+impl InputFiles {
+    /// Every file the batch names comes with its bytes, whole and matching its digest.
+    pub(super) fn take(batch: &mut ChatInputBatch) -> Result<Self, TeamProcessError> {
+        use base64::Engine as _;
+        let mut bytes = HashMap::new();
+        for file in &mut batch.files {
+            let data = file.data.take().ok_or(TeamProcessError::Protocol)?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| TeamProcessError::Protocol)?;
+            if decoded.len() as u64 != file.byte_length
+                || format!("{:x}", Sha256::digest(&decoded)) != file.sha256
+            {
+                return Err(TeamProcessError::Protocol);
+            }
+            bytes.insert(file.attachment_id.clone(), decoded);
+        }
+        Ok(Self {
+            batch_id: batch.batch_id.clone(),
+            bytes,
+        })
+    }
+    fn of<'a>(&'a self, batch: &ChatInputBatch, file: &ChatInputFile) -> Option<&'a [u8]> {
+        (self.batch_id == batch.batch_id)
+            .then(|| self.bytes.get(&file.attachment_id).map(Vec::as_slice))
+            .flatten()
+    }
+}
+/// Text of a text file as the model is shown it: at most this many bytes, cut at a character.
+const FILE_TEXT_BYTES: usize = 256 * 1024;
+/// A batch's files as model input, after the text of its current message: a
+/// label naming the file and the message that carries it, then the picture or
+/// the PDF itself, or the text of a text file inside the label.
+fn file_blocks(
+    batch: &ChatInputBatch,
+    files: &InputFiles,
+) -> Result<Vec<ContentBlock>, TeamProcessError> {
+    use base64::Engine as _;
+    let mut blocks = Vec::new();
+    for file in &batch.files {
+        let bytes = files.of(batch, file).ok_or(TeamProcessError::Protocol)?;
+        let mut label = serde_json::json!({"messageId":file.message_id,"attachmentId":file.attachment_id,
+            "name":file.name,"mime":file.mime,"byteLength":file.byte_length,"sha256":file.sha256});
+        let text = |text: String| ContentBlock::Text {
+            text,
+            citations: None,
+        };
+        if file.mime == "text/plain" {
+            let whole = String::from_utf8_lossy(bytes);
+            let mut end = whole.len().min(FILE_TEXT_BYTES);
+            while !whole.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end < whole.len() {
+                label["shownBytes"] = end.into();
+            }
+            blocks.push(text(format!(
+                "<shared_chat_file>\n{label}\n{}\n</shared_chat_file>",
+                &whole[..end]
+            )));
+            continue;
+        }
+        blocks.push(text(format!(
+            "<shared_chat_file>\n{label}\n</shared_chat_file>"
+        )));
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        blocks.push(if file.mime == "application/pdf" {
+            ContentBlock::Document {
+                source: DocumentSource::Base64 {
+                    media_type: file.mime.clone(),
+                    data,
+                },
+            }
+        } else {
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: file.mime.clone(),
+                    data,
+                },
+            }
+        });
+    }
+    Ok(blocks)
+}
+/// The files that go into this source's row: the batch's files, with the
+/// message that asked the Bot, when their bytes are at hand. A batch of an
+/// earlier task is re-projected without them; its row already holds them.
+fn carried<'a>(
+    batch: &ChatInputBatch,
+    source: &ChatSourceMessage,
+    files: &'a InputFiles,
+) -> Option<&'a InputFiles> {
+    (source.message_id == batch.current_message_id
+        && !batch.files.is_empty()
+        && files.batch_id == batch.batch_id)
+        .then_some(files)
+}
 fn message(
     batch: &ChatInputBatch,
     source: &ChatSourceMessage,
+    files: &InputFiles,
 ) -> Result<ConversationMessage, TeamProcessError> {
-    Ok(ConversationMessage::user(
-        MessageId::from_uuid(uuid(&format!(
-            "{}:{}:{}",
-            batch.batch_id, source.message_id, source.change_id
-        ))),
-        text(source)?,
-    ))
+    let id = MessageId::from_uuid(uuid(&format!(
+        "{}:{}:{}",
+        batch.batch_id, source.message_id, source.change_id
+    )));
+    let mut message = ConversationMessage::user(id, text(source)?);
+    if let (Some(files), ConversationMessage::User { content, .. }) =
+        (carried(batch, source, files), &mut message)
+    {
+        content.extend(file_blocks(batch, files)?);
+    }
+    Ok(message)
 }
 fn source_map(batches: &[ChatInputBatch]) -> BTreeMap<u64, ChatSourceMessage> {
     let mut values = BTreeMap::new();
@@ -206,6 +319,7 @@ async fn project_batch(
     projected: &mut HashMap<String, serde_json::Value>,
     echo_tasks: &HashSet<String>,
     last_unconfirmed: &mut Option<(session::JsonlMessage, bool)>,
+    files: &InputFiles,
 ) -> Result<(), TeamProcessError> {
     let session_id = batch
         .scope()
@@ -249,7 +363,7 @@ async fn project_batch(
         if batch.changes.is_empty() && own_echo(&source, &batch.scope(), echo_tasks) {
             continue;
         }
-        let msg = message(batch, &source)?;
+        let msg = message(batch, &source, files)?;
         let mut row = base(msg.id().as_uuid());
         row["timestamp"] = chrono::DateTime::from_timestamp_millis(source.created_at as i64)
             .ok_or(TeamProcessError::Protocol)?
@@ -258,15 +372,38 @@ async fn project_batch(
         row["origin"] =
             serde_json::json!({"kind":"shared_chat","batchId":batch.batch_id,"source":source});
         row["message"] = serde_json::json!({"role":"user","content":text(&source)?});
+        if carried(batch, &source, files).is_some() {
+            // The row says which files it shows the model, and holds them as the model is sent them.
+            row["origin"]["files"] = batch.files.iter().map(|file| serde_json::json!({"attachmentId":file.attachment_id,"sha256":file.sha256})).collect();
+            if let ConversationMessage::User { content, .. } = &msg {
+                row["message"]["content"] = serde_json::to_value(content).map_err(storage_error)?;
+            }
+        }
         let row: session::JsonlMessage = serde_json::from_value(row).map_err(storage_error)?;
         project_row(rt, row, Some(msg), false, projected, last_unconfirmed).await?;
     }
     Ok(())
 }
+/// What a projected row may never change: everything but its place in the
+/// chain and its time. A row that shows files is compared by the text of its
+/// source alone, so the batch of an earlier task, whose file bytes are gone,
+/// still matches the row that holds them.
 fn immutable_row(mut row: serde_json::Value) -> serde_json::Value {
     if let Some(object) = row.as_object_mut() {
         object.remove("parentUuid");
         object.remove("timestamp");
+    }
+    if let Some(origin) = row
+        .get_mut("origin")
+        .and_then(|origin| origin.as_object_mut())
+    {
+        origin.remove("files");
+    }
+    if let Some(text) = row["message"]["content"][0]["text"]
+        .as_str()
+        .map(str::to_owned)
+    {
+        row["message"]["content"] = text.into();
     }
     row
 }
@@ -283,6 +420,13 @@ async fn project_row(
         if immutable_row(actual.clone()) != expected {
             return Err(TeamProcessError::Protocol);
         }
+        // The duplicate that certifies the prefix is the row as it stands: one
+        // that shows files is never rebuilt without them.
+        let row = if actual["origin"]["files"].is_array() {
+            serde_json::from_value(actual.clone()).map_err(storage_error)?
+        } else {
+            row
+        };
         *last_unconfirmed = Some((row, reset));
         return Ok(());
     }
@@ -295,7 +439,10 @@ async fn project_row(
     index.insert(id, expected);
     Ok(())
 }
-pub(super) async fn repair_projection(rt: &DesktopRuntime) -> Result<(), TeamProcessError> {
+pub(super) async fn repair_projection(
+    rt: &DesktopRuntime,
+    files: &InputFiles,
+) -> Result<(), TeamProcessError> {
     let batches = rt
         .session_state
         .chat_input_batches()
@@ -337,6 +484,7 @@ pub(super) async fn repair_projection(rt: &DesktopRuntime) -> Result<(), TeamPro
             &mut projected,
             &echo_tasks,
             &mut last_unconfirmed,
+            files,
         )
         .await?;
     }
@@ -356,6 +504,7 @@ pub(super) async fn admit(
     rt: &DesktopRuntime,
     profile: &TeamInvocationProfile,
     batch: ChatInputBatch,
+    files: &InputFiles,
     cancel: CancellationToken,
 ) -> Result<(), TeamProcessError> {
     batch
@@ -377,7 +526,7 @@ pub(super) async fn admit(
     };
     let candidate = incoming
         .iter()
-        .map(|s| message(&batch, s))
+        .map(|s| message(&batch, s, files))
         .collect::<Result<Vec<_>, _>>()?;
     let incoming_tokens = compaction::grouping::estimate_tokens_for_range(&candidate) as u64;
     let snapshot = rt
@@ -434,7 +583,7 @@ pub(super) async fn admit(
         .append_chat_input(batch)
         .await
         .map_err(storage_error)?;
-    repair_projection(rt).await?;
+    repair_projection(rt, files).await?;
     rt.orchestrator.protect_external_input_from_compaction();
     Ok(())
 }

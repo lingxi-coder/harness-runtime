@@ -65,6 +65,50 @@ pub enum ChatAuthor {
         display_name: String,
     },
 }
+/// File limits of one Team message, and of the files handed over with one batch.
+pub const CHAT_FILE_BYTES: u64 = 10 * 1024 * 1024;
+pub const CHAT_FILES: usize = 5;
+pub const CHAT_FILES_BYTES: u64 = 20 * 1024 * 1024;
+const CHAT_FILE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "application/pdf", "text/plain"];
+fn file_facts(attachment_id: &str, name: &str, mime: &str, byte_length: u64, sha256: &str) -> bool {
+    id(attachment_id)
+        && !name.is_empty()
+        && name.encode_utf16().count() <= 120
+        && !name.chars().any(char::is_control)
+        && CHAT_FILE_TYPES.contains(&mime)
+        && (1..=CHAT_FILE_BYTES).contains(&byte_length)
+        && sha256.len() == 64
+        && sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+/// A file a Chat message carries, as the message names it. `revoked`: its
+/// sender took it back and its bytes are gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChatSourceAttachment {
+    pub attachment_id: String,
+    pub name: String,
+    pub mime: String,
+    pub byte_length: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<bool>,
+}
+/// A file handed to the model with a batch. The host sends its bytes in
+/// `data` (base64); the journal keeps the facts only, never the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChatInputFile {
+    pub message_id: String,
+    pub attachment_id: String,
+    pub name: String,
+    pub mime: String,
+    pub byte_length: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ChatSourceMessage {
@@ -90,6 +134,9 @@ pub struct ChatSourceMessage {
     /// Set on a Bot's question to its requester and on the requester's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_id: Option<String>,
+    /// The files the message carries. Their bytes are not here: see `ChatInputBatch::files`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChatSourceAttachment>,
 }
 /// This is the exact model input fact, not a queryable replica of the Chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +156,9 @@ pub struct ChatInputBatch {
     pub current_message_id: String,
     pub messages: Vec<ChatSourceMessage>,
     pub changes: Vec<ChatSourceMessage>,
+    /// Files of Chat messages given to the model together with this batch's current message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ChatInputFile>,
 }
 impl ChatInputBatch {
     pub fn scope(&self) -> BotChatScope {
@@ -183,10 +233,38 @@ impl ChatInputBatch {
                     })
                 })
                 || !ids.insert(&message.message_id)
-                || (message.recalled == Some(true) && !message.text.is_empty())
+                || (message.recalled == Some(true)
+                    && (!message.text.is_empty() || !message.attachments.is_empty()))
+                || message.attachments.len() > CHAT_FILES
+                || message.attachments.iter().any(|file| {
+                    !file_facts(
+                        &file.attachment_id,
+                        &file.name,
+                        &file.mime,
+                        file.byte_length,
+                        &file.sha256,
+                    )
+                })
             {
                 return Err(rejected("invalid Chat source metadata or sequence"));
             }
+        }
+        let mut files = std::collections::HashSet::new();
+        if self.files.len() > CHAT_FILES
+            || self.files.iter().map(|file| file.byte_length).sum::<u64>() > CHAT_FILES_BYTES
+            || self.files.iter().any(|file| {
+                !id(&file.message_id)
+                    || !file_facts(
+                        &file.attachment_id,
+                        &file.name,
+                        &file.mime,
+                        file.byte_length,
+                        &file.sha256,
+                    )
+                    || !files.insert(&file.attachment_id)
+            })
+        {
+            return Err(rejected("invalid Chat input files"));
         }
         Ok(())
     }
@@ -270,6 +348,9 @@ impl SessionStateCoordinator {
         batch: ChatInputBatch,
     ) -> Result<ChatInputAck, CostPersistError> {
         batch.validate(self.state.session_id)?;
+        if batch.files.iter().any(|file| file.data.is_some()) {
+            return Err(rejected("Chat input file bytes are never journaled"));
+        }
         let (permit, pin) = self.acquire_session_mutation_permit().await?;
         let (ack, receive) = tokio::sync::oneshot::channel();
         permit.send(QueuedMutation {
@@ -375,6 +456,7 @@ mod tests {
             bootstrap: revision == 0,
             current_message_id: format!("message_{to:04}"),
             changes: Vec::new(),
+            files: Vec::new(),
             messages: ((from + 1)..=to)
                 .map(|seq| ChatSourceMessage {
                     message_id: format!("message_{seq:04}"),
@@ -394,6 +476,7 @@ mod tests {
                     delivery_id: None,
                     artifact_id: None,
                     wait_id: None,
+                    attachments: Vec::new(),
                 })
                 .collect(),
         }

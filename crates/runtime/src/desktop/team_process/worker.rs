@@ -230,7 +230,7 @@ impl PermissionRequestSink for PermissionSink {
 async fn run(
     mut cfg: DesktopConfig,
     profile: &TeamInvocationProfile,
-    batch: crate::desktop::session_state::team_chat::ChatInputBatch,
+    mut batch: crate::desktop::session_state::team_chat::ChatInputBatch,
     task_id: String,
     dispatch_limit: u32,
     cancel: CancellationToken,
@@ -245,6 +245,8 @@ async fn run(
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
         return Err(TeamProcessError::RouteUnsupported);
     }
+    // From here on the batch is as the journal keeps it: file facts without bytes.
+    let files = super::chat_session::InputFiles::take(&mut batch)?;
     interaction.authorize().await?;
     let path = session::jsonl::session_path(
         &cfg.lingxi_home,
@@ -365,7 +367,7 @@ async fn run(
         let _ = rt.shutdown().await;
         return Err(error);
     }
-    if let Err(error) = super::chat_session::repair_projection(&rt).await {
+    if let Err(error) = super::chat_session::repair_projection(&rt, &files).await {
         let _ = rt.shutdown().await;
         return Err(error);
     }
@@ -373,7 +375,9 @@ async fn run(
     let current_message_id = batch.current_message_id.clone();
     let (scope, batch_id) = (batch.scope(), batch.batch_id.clone());
     if resumed.is_none() {
-        if let Err(error) = super::chat_session::admit(&rt, profile, batch, cancel.clone()).await {
+        if let Err(error) =
+            super::chat_session::admit(&rt, profile, batch, &files, cancel.clone()).await
+        {
             let _ = rt.shutdown().await;
             return Err(error);
         }

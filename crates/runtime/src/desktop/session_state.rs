@@ -48,7 +48,8 @@ use lingxi_core::host::{
     ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
 };
 pub use team_chat::{
-    BotChatCursor, BotChatScope, ChatAuthor, ChatInputAck, ChatInputBatch, ChatSourceMessage,
+    BotChatCursor, BotChatScope, ChatAuthor, ChatInputAck, ChatInputBatch, ChatInputFile,
+    ChatSourceAttachment, ChatSourceMessage,
 };
 use tool_execution::ToolProjection;
 

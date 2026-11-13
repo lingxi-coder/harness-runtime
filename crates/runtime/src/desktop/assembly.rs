@@ -74,6 +74,9 @@ use super::{
     TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
 };
 
+/// The longest row a Team Bot's transcript takes. Ordinary transcripts keep the writer's own limit.
+const TEAM_TRANSCRIPT_RECORD_BYTES: usize = 48 * 1024 * 1024;
+
 /// Rebuild the slash-command MCP partition from the same generation-checked
 /// connection snapshot that serves prompts/get. Holding both read/write guards
 /// while projecting prevents a concurrent plugin disable from restoring a
@@ -2281,10 +2284,17 @@ pub async fn build_with_credential_stack(
     // retargeting share one authority.
     let main_jsonl_writer = if cfg.session_persistence && !is_app_chat {
         let coordinator = &session_state;
-        let durable_writer = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
+        let durable_writer = session::jsonl::DurableTranscriptWriter::from_pinned(
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
-        ));
+        );
+        // A Team Chat row can hold the files of one message as the model is
+        // sent them: 20 MiB of files is under 28 MiB of base64.
+        let durable_writer = Arc::new(if cfg.team_invocation.is_some() {
+            durable_writer.with_max_scan_bytes(TEAM_TRANSCRIPT_RECORD_BYTES)
+        } else {
+            durable_writer
+        });
         let writer = Arc::new(
             Arc::try_unwrap(main_jsonl_writer)
                 .map_err(|_| {

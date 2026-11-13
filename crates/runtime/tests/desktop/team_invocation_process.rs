@@ -275,7 +275,7 @@ async fn read_http(stream: &mut TcpStream) -> Captured {
         let size = stream.read(&mut buf).await.unwrap();
         assert!(size > 0);
         bytes.extend_from_slice(&buf[..size]);
-        assert!(bytes.len() < 4 * 1024 * 1024);
+        assert!(bytes.len() < 64 * 1024 * 1024);
         if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
             break index + 4;
         }
@@ -289,9 +289,9 @@ async fn read_http(stream: &mut TcpStream) -> Captured {
                 .then(|| value.trim().parse::<usize>().unwrap())
         })
         .expect("actual SDK request must have a byte body");
-    assert!(len < 4 * 1024 * 1024);
+    assert!(len < 64 * 1024 * 1024);
     while bytes.len() - end < len {
-        let mut buf = [0; 4096];
+        let mut buf = [0; 65536];
         let size = stream.read(&mut buf).await.unwrap();
         assert!(size > 0);
         bytes.extend_from_slice(&buf[..size]);
@@ -930,4 +930,287 @@ async fn preflight_compacts_only_consumed_history_and_counts_authorized_summary_
     assert_eq!(resumed_request.matches("SOURCE_0201").count(), 1);
     assert_eq!(resumed_request.matches("SOURCE_0202").count(), 1);
     assert!(!resumed_request.contains("SOURCE_0001"));
+}
+
+/// A file of a Chat message as the host hands it over, and as the message names it.
+fn file(message: &str, id: &str, name: &str, mime: &str, bytes: &[u8]) -> (Value, Value) {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let facts = json!({"attachmentId":id,"name":name,"mime":mime,"byteLength":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))});
+    let mut handed = facts.clone();
+    handed["messageId"] = message.into();
+    handed["data"] = base64::engine::general_purpose::STANDARD
+        .encode(bytes)
+        .into();
+    (facts, handed)
+}
+fn with_files(
+    input: harness_runtime::desktop::session_state::ChatInputBatch,
+    files: &[(Value, Value)],
+) -> harness_runtime::desktop::session_state::ChatInputBatch {
+    let mut value = serde_json::to_value(input).unwrap();
+    let last = value["messages"].as_array().unwrap().len() - 1;
+    value["messages"][last]["attachments"] = files.iter().map(|file| file.0.clone()).collect();
+    value["files"] = files.iter().map(|file| file.1.clone()).collect();
+    serde_json::from_value(value).unwrap()
+}
+/// Every content block of every message of a captured request.
+fn blocks(body: &Value) -> Vec<Value> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+        .collect()
+}
+#[tokio::test]
+async fn files_of_a_chat_message_are_real_model_input_and_stay_until_the_message_changes() {
+    use base64::Engine as _;
+    let (_temp, root) = root();
+    let server = Server::new(vec![
+        Reply::Text("Read all three files".into()),
+        Reply::Text("Second result".into()),
+        Reply::Text("Third result".into()),
+    ])
+    .await;
+    let picture = [b"\x89PNG\r\n\x1a\n".as_slice(), &[7u8; 900]].concat();
+    let paper = [b"%PDF-1.7\n".as_slice(), &[9u8; 1200]].concat();
+    let notes = "FILE_TEXT_SENTINEL 2026-11-20 at 18:30, 12 people".as_bytes();
+    let files = [
+        file(
+            "message_0002",
+            "attachment_01",
+            "plan.png",
+            "image/png",
+            &picture,
+        ),
+        file(
+            "message_0002",
+            "attachment_02",
+            "paper.pdf",
+            "application/pdf",
+            &paper,
+        ),
+        file(
+            "message_0002",
+            "attachment_03",
+            "notes.txt",
+            "text/plain",
+            notes,
+        ),
+    ];
+    let first = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            with_files(batch(0, 2, 0), &files),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.outcome, TeamProcessOutcome::Completed);
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let shown = |body: &Value| {
+        let blocks = blocks(body);
+        (
+            blocks.iter().any(|block| {
+                block["type"] == "image"
+                    && block["source"]["type"] == "base64"
+                    && block["source"]["media_type"] == "image/png"
+                    && block["source"]["data"] == encoded(&picture)
+            }),
+            blocks.iter().any(|block| {
+                block["type"] == "document"
+                    && block["source"]["media_type"] == "application/pdf"
+                    && block["source"]["data"] == encoded(&paper)
+            }),
+            blocks.iter().any(|block| {
+                block["type"] == "text"
+                    && block["text"].as_str().is_some_and(|text| {
+                        text.contains("<shared_chat_file>")
+                            && text.contains("notes.txt")
+                            && text.contains("FILE_TEXT_SENTINEL 2026-11-20 at 18:30, 12 people")
+                    })
+            }),
+        )
+    };
+    {
+        let records = server.requests.lock().unwrap();
+        assert_eq!(shown(&records[0].body), (true, true, true));
+        let body = records[0].body.to_string();
+        // The message itself names its files, and each file is labelled with the message that carries it.
+        assert!(
+            body.contains("plan.png")
+                && body.contains("attachment_02")
+                && body.contains("message_0002")
+        );
+    }
+    // The next task of the same Chat has no files of its own: the earlier row keeps them, and the journal is not asked for bytes.
+    let second = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(2, 3, 1),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(
+        shown(&server.requests.lock().unwrap()[1].body),
+        (true, true, true)
+    );
+    // Its sender takes a file back: the Chat's sources are rebuilt from what the messages say now, without any bytes.
+    let mut third = batch(3, 4, 2);
+    let mut changed = with_files(batch(0, 2, 0), &files).messages;
+    changed[1].change_seq = 5;
+    changed[1].change_id = "change_revoke_01".into();
+    changed[1].attachments[0].revoked = Some(true);
+    third.changes = vec![changed.remove(1)];
+    third.last_change_seq = 5;
+    let third = run(
+        &root,
+        request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), third),
+    )
+    .await
+    .unwrap();
+    assert_eq!(third.outcome, TeamProcessOutcome::Completed);
+    let records = server.requests.lock().unwrap();
+    assert_eq!(shown(&records[2].body), (false, false, false));
+    assert!(records[2].body.to_string().contains("plan.png"));
+    // The journal holds which files were given, never their bytes.
+    fn holds(dir: &Path, needle: &[u8], found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                holds(&path, needle, found);
+            } else if std::fs::read(&path)
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+            {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    holds(
+        &root.join("scopes"),
+        encoded(&picture).as_bytes(),
+        &mut found,
+    );
+    assert!(!found.is_empty());
+    assert!(
+        found
+            .iter()
+            .all(|path| path.extension().is_some_and(|ending| ending == "jsonl")),
+        "{found:?}"
+    );
+}
+#[tokio::test]
+async fn files_larger_than_an_ordinary_transcript_row_are_projected_and_sent() {
+    use base64::Engine as _;
+    let (_temp, root) = root();
+    let server = Server::new(vec![
+        Reply::Text("Read both".into()),
+        Reply::Text("Again".into()),
+    ])
+    .await;
+    // In base64 this is over the 2 MiB an ordinary transcript row may be. The full 20 MiB is left to an optimized build:
+    // an unoptimized worker takes minutes over a row that long.
+    let big = vec![5u8; 1600 * 1024];
+    let files = [file(
+        "message_0002",
+        "attachment_01",
+        "a.pdf",
+        "application/pdf",
+        &big,
+    )];
+    let first = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            with_files(batch(0, 2, 0), &files),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.outcome, TeamProcessOutcome::Completed);
+    let second = run(
+        &root,
+        request(
+            &root,
+            server.endpoint.clone(),
+            uuid::Uuid::new_v4(),
+            batch(2, 3, 1),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.outcome, TeamProcessOutcome::Completed);
+    let data = base64::engine::general_purpose::STANDARD.encode(&big);
+    for record in server.requests.lock().unwrap().iter() {
+        assert!(blocks(&record.body)
+            .iter()
+            .any(|block| block["type"] == "document" && block["source"]["data"] == data));
+    }
+}
+#[tokio::test]
+async fn files_that_are_not_what_the_batch_says_are_refused_before_anything_is_kept() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("never".into())]).await;
+    let good = file(
+        "message_0002",
+        "attachment_01",
+        "plan.png",
+        "image/png",
+        b"0123456789",
+    );
+    let cases: Vec<Box<dyn Fn(&mut Value)>> = vec![
+        Box::new(|value| value["files"][0]["data"] = "MDEyMzQ1Njc4OA==".into()), // other bytes of the same length
+        Box::new(|value| {
+            value["files"][0].as_object_mut().unwrap().remove("data");
+        }),
+        Box::new(|value| value["files"][0]["mime"] = "image/gif".into()),
+        Box::new(|value| value["files"][0]["byteLength"] = (10 * 1024 * 1024 + 1).into()),
+        Box::new(|value| {
+            let copy = value["files"][0].clone();
+            value["files"].as_array_mut().unwrap().push(copy);
+        }),
+    ];
+    for change in cases {
+        let mut value =
+            serde_json::to_value(with_files(batch(0, 2, 0), std::slice::from_ref(&good))).unwrap();
+        change(&mut value);
+        // Written as the host would write it: the worker and the starting process both read this file.
+        let input: Result<harness_runtime::desktop::session_state::ChatInputBatch, _> =
+            serde_json::from_value(value);
+        let Ok(input) = input else { continue };
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            request(&root, server.endpoint.clone(), uuid::Uuid::new_v4(), input)
+        }));
+        let Ok(prepared) = prepared else { continue };
+        let Ok(start) = TeamProcessStart::prepare(&root, prepared) else {
+            continue;
+        };
+        let outcome = start
+            .run_with_broker(
+                &worker(),
+                CancellationToken::new(),
+                Arc::new(Broker::default()),
+            )
+            .await;
+        assert!(outcome.is_err());
+    }
+    assert!(server.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .session_revision,
+        0
+    );
 }
