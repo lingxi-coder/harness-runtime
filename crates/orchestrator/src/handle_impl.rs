@@ -1753,7 +1753,20 @@ impl ConversationOrchestrator {
                 let _transition = self.lifecycle_runtime.goal_transition.lock().await;
                 self.activate_prepared_transcript_switch(prepared_transcript)
                     .await?;
+                // A same-session remount keeps the live diagnostic source's
+                // consumed cursor. Carry its unsent row across the prompt
+                // generation reset; another session must never inherit it.
+                let pending_diagnostics = (old_session_id == session_id)
+                    .then(|| self.pending_diagnostics_reminder())
+                    .flatten();
                 self.reset_session_scoped_runtime().await;
+                if let Some(message) = pending_diagnostics {
+                    self.retain_pending_step_reminder(
+                        "diagnostics",
+                        message,
+                        crate::conversation::pending_reminders::Acknowledgement::Diagnostics,
+                    );
+                }
                 self.prompt_runtime
                     .install_silent_clocks(restored_silent_clocks);
                 self.restore_prompt_suggestion_api_errors(

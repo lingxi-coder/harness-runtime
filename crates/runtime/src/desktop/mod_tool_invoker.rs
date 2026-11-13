@@ -1432,4 +1432,5 @@ mod tests {
     }
 
     include!("mod_tool_invoker/cache_schema_tests.rs");
+    include!("mod_tool_invoker/refresh_schema_tests.rs");
 }

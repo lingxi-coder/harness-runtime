@@ -9,6 +9,8 @@ mod session_owner_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
+#[path = "cache14_ownership_tests.rs"]
+mod cache14_ownership_tests;
 #[path = "cache_regression_tests.rs"]
 mod cache_regression_tests;
 #[path = "cancel_admission_tests.rs"]

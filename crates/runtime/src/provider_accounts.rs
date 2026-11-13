@@ -273,6 +273,8 @@ pub struct ProviderAccountStore {
     data_dir: PathBuf,
     store_scope: String,
     credentials: Arc<CredentialManager>,
+    #[cfg(test)]
+    probe_transport: Option<Arc<dyn llm_runtime::Transport>>,
 }
 impl ProviderAccountStore {
     pub fn new(
@@ -287,6 +289,8 @@ impl ProviderAccountStore {
             data_dir,
             store_scope,
             credentials,
+            #[cfg(test)]
+            probe_transport: None,
         }
     }
     /// Use host-owned settings with the latest published catalog for each operation.
@@ -992,6 +996,15 @@ impl ProviderAccountStore {
     pub async fn test_account(&self, account_id: &str) -> Result<AccountSnapshot, String> {
         self.frozen_catalog().test_account_inner(account_id).await
     }
+    fn account_probe_transport(&self) -> Result<Arc<dyn llm_runtime::Transport>, String> {
+        #[cfg(test)]
+        if let Some(transport) = &self.probe_transport {
+            return Ok(transport.clone());
+        }
+        platform_common::provider_transport()
+            .map(|transport| Arc::new(transport) as Arc<dyn llm_runtime::Transport>)
+            .map_err(|_| "provider test transport unavailable".into())
+    }
     async fn test_account_inner(&self, account_id: &str) -> Result<AccountSnapshot, String> {
         use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
         let snapshot = self.snapshot().await?;
@@ -1011,6 +1024,17 @@ impl ProviderAccountStore {
             .await
             .map_err(|_| "credential storage unavailable")?
             .ok_or("account requires authentication")?;
+        if record.identity_generation != account.identity_generation
+            || provider_config::read_account_credential_version(&self.data_dir, account)?
+                != Some(record.credential_revision)
+        {
+            record = self
+                .credentials
+                .get_account_credential_uncached(&account.credential_ref)
+                .await
+                .map_err(|_| "credential storage unavailable")?
+                .ok_or("account requires authentication")?;
+        }
         if record.identity_generation != account.identity_generation {
             return Err("account credential generation mismatch".into());
         }
@@ -1022,6 +1046,10 @@ impl ProviderAccountStore {
                 .await
                 .map_err(|_| "provider account refresh failed")?
                 .ok_or("account requires authentication")?;
+        }
+        self.verify_account(account).await?;
+        if record.identity_generation != account.identity_generation {
+            return Err("account credential generation mismatch".into());
         }
         if provider_config::read_account_credential_version(&self.data_dir, account)?
             != Some(record.credential_revision)
@@ -1060,10 +1088,9 @@ impl ProviderAccountStore {
                 _ => ProbeProtocol::OpenAi,
             }
         };
-        let transport = platform_common::provider_transport()
-            .map_err(|_| "provider test transport unavailable")?;
+        let transport = self.account_probe_transport()?;
         let result = llm_runtime::services::sdk::directory::probe::probe(
-            &transport,
+            &*transport,
             &profile.base_url,
             protocol,
             &credential,
@@ -3010,12 +3037,15 @@ import json, pathlib, sys, time
 root = pathlib.Path(ROOT)
 request = json.load(sys.stdin)
 state = root / request.get('account', 'unused')
+with (root / 'broker-operations').open('a') as log: log.write(request['op'] + '\n')
 reply = {'ok': True, 'protocol_version': 1}
 pause = root / ('pause-next-' + request['op'])
-if request['op'] in ('store', 'delete') and pause.exists():
+if request['op'] in ('store', 'delete', 'retrieve') and pause.exists():
     pause.rename(root / 'mutation-entered')
     while not (root / 'release-mutation').exists(): time.sleep(0.01)
-if request['op'] == 'store': state.write_text(request['payload'])
+if (root / 'broker-fail').exists() or (request['op'] == 'retrieve' and (root / 'broker-fail-retrieve').exists()):
+    reply = {'ok': False, 'protocol_version': 1, 'error_kind': 'unavailable', 'error': 'synthetic broker unavailable'}
+elif request['op'] == 'store': state.write_text(request['payload'])
 elif request['op'] == 'delete': state.unlink(missing_ok=True)
 elif request['op'] == 'retrieve' and state.exists(): reply['payload'] = state.read_text()
 elif request['op'] == 'contains': reply['present'] = state.exists()
@@ -3087,6 +3117,391 @@ json.dump(reply, sys.stdout)
             ));
             (credentials, store)
         })
+    }
+
+    #[cfg(unix)]
+    fn broker_retrieve_count(root: &Path) -> usize {
+        std::fs::read_to_string(root.join("broker-operations"))
+            .unwrap()
+            .lines()
+            .filter(|operation| *operation == "retrieve")
+            .count()
+    }
+
+    #[cfg(unix)]
+    struct AccountProbeHttp {
+        expected_key: String,
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl AccountProbeHttp {
+        fn new(expected_key: &str) -> Self {
+            Self {
+                expected_key: expected_key.into(),
+                sends: Default::default(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for AccountProbeHttp {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            assert!(request
+                .headers
+                .iter()
+                .any(|(_, value)| value == &self.expected_key
+                    || value == &format!("Bearer {}", self.expected_key)));
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(lingxi_llm_client::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"data":[]}"#.to_vec().into(),
+            }
+            .into())
+        }
+    }
+
+    #[cfg(unix)]
+    async fn cached_test_replacement(
+        root: &Path,
+        change_generation: bool,
+    ) -> (
+        Arc<CredentialManager>,
+        Arc<ProviderAccountStore>,
+        ProviderAccountStore,
+        AccountSnapshot,
+    ) {
+        let [(writer, writing), (reader, reading)] = independent_broker_stores(root);
+        let initial = writing
+            .execute(add(AccountAuthKind::ApiKey, 0), Some("synthetic-K1".into()))
+            .await
+            .unwrap();
+        let account = &initial.accounts[0];
+        assert_eq!(
+            reader
+                .get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            1
+        );
+        let current = if change_generation {
+            writing
+                .execute(
+                    ProviderAccountCommand {
+                        expected_revision: initial.config_revision,
+                        operation_id: None,
+                        action: ProviderAccountAction::SetCredential {
+                            account_id: account.account_id.clone(),
+                        },
+                    },
+                    Some("synthetic-K2".into()),
+                )
+                .await
+                .unwrap()
+        } else {
+            writer
+                .store_account_credential(
+                    &account.credential_ref,
+                    &AccountCredential {
+                        identity_generation: account.identity_generation,
+                        credential_revision: 2,
+                        kind: AccountCredentialKind::ApiKey {
+                            key: lingxi_core::types::Secret::new("synthetic-K2".into()),
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+            publish_account_credential_version(
+                root.to_owned(),
+                initial.store_scope.clone(),
+                AccountCredentialVersion {
+                    account_id: account.account_id.clone(),
+                    identity_generation: account.identity_generation,
+                    credential_revision: 2,
+                },
+            )
+            .await
+            .unwrap();
+            initial
+        };
+        (writer, writing, (*reading).clone(), current)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_adopts_published_generation_and_revision_once() {
+        for change_generation in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_, _, mut reading, current) =
+                cached_test_replacement(root.path(), change_generation).await;
+            let wire = Arc::new(AccountProbeHttp::new("synthetic-K2"));
+            reading.probe_transport = Some(wire.clone());
+            let before = broker_retrieve_count(root.path());
+            reading
+                .test_account(&current.accounts[0].account_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                broker_retrieve_count(root.path()),
+                before + 1,
+                "a stale positive cache needs one authoritative exact-slot read"
+            );
+            reading
+                .test_account(&current.accounts[0].account_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                broker_retrieve_count(root.path()),
+                before + 1,
+                "an unchanged subsequent Test keeps the refreshed positive cache"
+            );
+            assert_eq!(wire.sends.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_reread_keeps_identity_publication_and_io_fences() {
+        for failure in [
+            "stale_identity",
+            "future_identity",
+            "unpublished",
+            "missing",
+            "unavailable",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (writer, _, mut reading, current) =
+                cached_test_replacement(root.path(), true).await;
+            let account = &current.accounts[0];
+            match failure {
+                "missing" => writer
+                    .delete_account_credential(&account.credential_ref)
+                    .await
+                    .unwrap(),
+                "unavailable" => {
+                    std::fs::write(root.path().join("broker-fail-retrieve"), b"").unwrap()
+                }
+                _ => writer
+                    .store_account_credential(
+                        &account.credential_ref,
+                        &AccountCredential {
+                            identity_generation: match failure {
+                                "stale_identity" => 1,
+                                "future_identity" => 3,
+                                _ => 2,
+                            },
+                            credential_revision: 3,
+                            kind: AccountCredentialKind::ApiKey {
+                                key: lingxi_core::types::Secret::new(
+                                    "synthetic-unpublished".into(),
+                                ),
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            }
+            let wire = Arc::new(AccountProbeHttp::new("must-not-be-probed"));
+            reading.probe_transport = Some(wire.clone());
+            let before = broker_retrieve_count(root.path());
+            assert!(
+                reading.test_account(&account.account_id).await.is_err(),
+                "{failure}"
+            );
+            assert_eq!(broker_retrieve_count(root.path()), before + 1, "{failure}");
+            assert_eq!(
+                wire.sends.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{failure}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_revalidates_metadata_after_authoritative_reread() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, writing, mut reading, current) = cached_test_replacement(root.path(), true).await;
+        let account_id = current.accounts[0].account_id.clone();
+        let wire = Arc::new(AccountProbeHttp::new("must-not-be-probed"));
+        reading.probe_transport = Some(wire.clone());
+        let before = broker_retrieve_count(root.path());
+        let pause = BrokerMutationPause::arm(root.path(), "retrieve");
+        let testing_id = account_id.clone();
+        let testing = tokio::spawn(async move { reading.test_account(&testing_id).await });
+        pause.entered().await;
+        writing
+            .execute(
+                ProviderAccountCommand {
+                    expected_revision: current.config_revision,
+                    operation_id: None,
+                    action: ProviderAccountAction::Update {
+                        account_id,
+                        display_name: "Changed during Test".into(),
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        pause.release();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), testing)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(broker_retrieve_count(root.path()), before + 1);
+        assert_eq!(wire.sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_scope_keeps_accounts_connected_through_fallback_and_restart() {
+        use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
+        let root = tempfile::tempdir().unwrap();
+        let [primary, restarted_primary] = cached_broker_pair(root.path());
+        let fallback_directory = root.path().join("native-fallback");
+        let lock_directory = root.path().join("fallback-locks");
+        let fallback = Arc::new(
+            platform_posix::secure_storage::PlainTextSecureStorage::new(fallback_directory.clone())
+                .await
+                .unwrap(),
+        );
+        // Exercise the production Linux fallback wrapper without native host credentials.
+        let storage = platform_posix::secure_storage::factory::runtime_fallback_storage_for_test(
+            Ok(primary),
+            SecureStorageBackend::MacOsKeychain,
+            fallback,
+            lock_directory.clone(),
+        );
+        let manager = |storage| {
+            Arc::new(CredentialManager::new(
+                storage,
+                Arc::new(platform_posix::PosixClock::new()),
+                Arc::new(platform_posix::PosixHttp::new()),
+            ))
+        };
+        let credentials = manager(storage.clone());
+        let scope = |credentials: &CredentialManager| {
+            account_store_scope(
+                root.path(),
+                &format!("{:?}", credentials.account_storage_backend()),
+            )
+        };
+        let original_scope = scope(&credentials);
+        let store = |credentials: Arc<CredentialManager>| {
+            ProviderAccountStore::new(root.path().to_owned(), scope(&credentials), credentials)
+        };
+        store(credentials.clone())
+            .execute(
+                add(AccountAuthKind::ApiKey, 0),
+                Some("synthetic-native-K1".into()),
+            )
+            .await
+            .unwrap();
+        std::fs::write(root.path().join("broker-fail"), b"").unwrap();
+        storage
+            .store(
+                "unrelated",
+                "unrelated",
+                lingxi_core::types::SecureStorageData::new(
+                    b"synthetic-unrelated".to_vec(),
+                    lingxi_core::types::SecureStorageMetadata {
+                        created_at: std::time::SystemTime::UNIX_EPOCH,
+                        last_accessed: None,
+                        kind: lingxi_core::types::SecretKindDto("fixture".into()),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(storage.backend(), SecureStorageBackend::PlainText);
+        assert_eq!(scope(&credentials), original_scope);
+        assert_eq!(
+            store(credentials.clone())
+                .snapshot_metadata()
+                .await
+                .unwrap()
+                .accounts
+                .len(),
+            1
+        );
+        let connected = store(credentials.clone())
+            .execute(
+                add(AccountAuthKind::ApiKey, 1),
+                Some("synthetic-fallback-K2".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(connected.store_scope, original_scope);
+        assert_eq!(connected.accounts.len(), 2);
+        let second = connected.accounts[1].clone();
+
+        let memory_only =
+            platform_posix::secure_storage::factory::runtime_fallback_storage_for_test(
+                Err(SecureStorageError::BackendUnavailable(
+                    "synthetic native initialization failed".into(),
+                )),
+                SecureStorageBackend::MacOsKeychain,
+                Arc::new(InMemorySecureStorage::new()),
+                lock_directory.clone(),
+            );
+        let isolated_credentials = manager(memory_only);
+        assert_eq!(scope(&isolated_credentials), original_scope);
+        assert!(
+            isolated_credentials
+                .get_account_credential(&second.credential_ref)
+                .await
+                .unwrap()
+                .is_none(),
+            "a memory fallback never reads the plaintext policy's credentials"
+        );
+
+        std::fs::remove_file(root.path().join("broker-fail")).unwrap();
+        let restarted = platform_posix::secure_storage::factory::runtime_fallback_storage_for_test(
+            Ok(restarted_primary),
+            SecureStorageBackend::MacOsKeychain,
+            Arc::new(
+                platform_posix::secure_storage::PlainTextSecureStorage::new(fallback_directory)
+                    .await
+                    .unwrap(),
+            ),
+            lock_directory,
+        );
+        let restarted_credentials = manager(restarted.clone());
+        assert_eq!(scope(&restarted_credentials), original_scope);
+        assert_eq!(
+            store(restarted_credentials.clone())
+                .snapshot()
+                .await
+                .unwrap()
+                .accounts
+                .len(),
+            2
+        );
+        let loaded = restarted_credentials
+            .get_account_credential(&second.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(loaded.kind, AccountCredentialKind::ApiKey { key }
+            if key.expose_secret() == "synthetic-fallback-K2"));
+        assert_eq!(restarted.backend(), SecureStorageBackend::MacOsKeychain);
+        assert_eq!(scope(&restarted_credentials), original_scope);
+        assert!(!storage.contains("unrelated", "absent").await.unwrap());
+        assert_eq!(storage.backend(), SecureStorageBackend::MacOsKeychain);
+        assert_eq!(scope(&credentials), original_scope);
     }
 
     #[cfg(unix)]
@@ -3298,6 +3713,210 @@ json.dump(reply, sys.stdout)
                 .into(),
             }
             .into())
+        }
+    }
+
+    #[cfg(unix)]
+    struct ExpiredAdoptionInferenceHttp {
+        writer: Arc<CredentialManager>,
+        root: PathBuf,
+        account: AccountMetadata,
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for ExpiredAdoptionInferenceHttp {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            let attempt = self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let authorization = request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .unwrap();
+            if attempt == 0 {
+                assert_eq!(authorization.1, "Bearer synthetic-old-access");
+                let mut expired = initial_device_grant();
+                expired.credential_revision = 2;
+                if let AccountCredentialKind::OAuth {
+                    access_token,
+                    expires_at,
+                    ..
+                } = &mut expired.kind
+                {
+                    *access_token =
+                        lingxi_core::types::Secret::new("synthetic-expired-access".into());
+                    *expires_at = std::time::SystemTime::UNIX_EPOCH;
+                }
+                self.writer
+                    .store_account_credential(&self.account.credential_ref, &expired)
+                    .await
+                    .unwrap();
+                publish_account_credential_version(
+                    self.root.clone(),
+                    self.account.credential_ref.store_scope.clone(),
+                    AccountCredentialVersion {
+                        account_id: self.account.account_id.clone(),
+                        identity_generation: self.account.identity_generation,
+                        credential_revision: 2,
+                    },
+                )
+                .await
+                .unwrap();
+                return Err(lingxi_llm_client::protocol::LlmError::Authentication {
+                    message: "synthetic old access token rejected".into(),
+                });
+            }
+            assert_eq!(authorization.1, "Bearer synthetic-rotated-access");
+            Err(lingxi_llm_client::protocol::LlmError::Transport {
+                message: "synthetic inference reached with renewed credential".into(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    async fn expired_adoption_request(
+        service: &llm_runtime::ApiService,
+        model: &str,
+        streaming: bool,
+    ) -> Result<(), llm_runtime::LlmError> {
+        let mut request = llm_runtime::LlmRequest::new(model)
+            .with_profile("openai-chatgpt")
+            .with_user_text("synthetic expired adoption");
+        request.input.max_tokens = Some(128);
+        if streaming {
+            use futures::StreamExt;
+            let mut stream = service.stream_request(request).await?;
+            while let Some(event) = stream.next().await {
+                event?;
+            }
+            Ok(())
+        } else {
+            service
+                .execute_side_query_request(request)
+                .await
+                .map(|_| ())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_service_refreshes_expired_adoption_without_installing_needs_auth() {
+        for streaming in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let [(writer, writing), (reader, reading)] = independent_broker_stores(root.path());
+            let snapshot = writing
+                .execute_metadata(add(AccountAuthKind::OAuth, 0))
+                .await
+                .unwrap();
+            let account = snapshot.accounts[0].clone();
+            writer
+                .store_account_credential(&account.credential_ref, &initial_device_grant())
+                .await
+                .unwrap();
+            publish_account_credential_version(
+                root.path().to_owned(),
+                snapshot.store_scope.clone(),
+                AccountCredentialVersion {
+                    account_id: account.account_id.clone(),
+                    identity_generation: account.identity_generation,
+                    credential_revision: 1,
+                },
+            )
+            .await
+            .unwrap();
+            let refresh_http = Arc::new(SingleUseRefreshHttp::default());
+            reader.set_account_credential_refresher(Arc::new(AccountOAuthCoordinator::new(
+                reading,
+                Arc::new(llm_runtime::auth::openai::AccountOAuthClient::new(
+                    Default::default(),
+                    refresh_http.clone(),
+                )),
+            )));
+            let directory = Arc::new(std::sync::RwLock::new(snapshot.clone()));
+            let provider = Arc::new(
+                provider_config::MultiCredentialProvider::new(reader)
+                    .with_account_directory(directory.clone())
+                    .with_account_version_root(root.path().to_owned()),
+            );
+            let mut profile = llm_runtime::builtin_presets()
+                .providers
+                .into_iter()
+                .find(|profile| profile.profile_name == "openai-chatgpt")
+                .unwrap();
+            profile.base_url = "https://synthetic.invalid/v1".into();
+            profile.models.truncate(1);
+            let model = profile.models[0].request_model.clone();
+            let mut config = llm_runtime::ClientConfig {
+                providers: vec![profile],
+            };
+            provider_config::assemble_account_client_config(&mut config, &snapshot.accounts)
+                .unwrap();
+            let pool = Arc::new(llm_runtime::accounts::AccountPool::from_directory(
+                directory.clone(),
+                Arc::new(
+                    crate::account_pool_store::FileAccountPoolStore::new(root.path().to_owned())
+                        .with_directory_authority(directory),
+                ),
+            ));
+            let runtime = llm_runtime::ModelRuntime::from_config(config)
+                .unwrap()
+                .with_credential_provider(provider);
+            let (runtime, _source) =
+                crate::account_pool_store::attach_mobile_account_runtime(runtime, pool);
+            let wire = Arc::new(ExpiredAdoptionInferenceHttp {
+                writer,
+                root: root.path().to_owned(),
+                account: account.clone(),
+                sends: Default::default(),
+            });
+            let service = llm_runtime::ApiService::new(
+                Arc::new(runtime),
+                wire.clone(),
+                Default::default(),
+                Default::default(),
+                "synthetic",
+                None,
+                None,
+            );
+            let first = llm_runtime::catalog_task::scope(expired_adoption_request(
+                &service, &model, streaming,
+            ))
+            .await;
+            assert!(matches!(
+                first,
+                Err(llm_runtime::LlmError::Transport { .. })
+            ));
+            assert_eq!(wire.sends.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(refresh_http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                provider_config::read_account_credential_version(root.path(), &account).unwrap(),
+                Some(3)
+            );
+            let health = crate::account_pool_store::read_health(
+                root.path().to_owned(),
+                snapshot.store_scope,
+            )
+            .await
+            .unwrap();
+            assert!(!serde_json::to_string(&health)
+                .unwrap()
+                .contains("needs_auth"));
+            let next = llm_runtime::catalog_task::scope(expired_adoption_request(
+                &service, &model, streaming,
+            ))
+            .await;
+            assert!(matches!(next, Err(llm_runtime::LlmError::Transport { .. })));
+            assert_eq!(
+                wire.sends.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "a subsequent logical request must not be blocked by NeedsAuth"
+            );
+            assert_eq!(refresh_http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
 

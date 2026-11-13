@@ -534,34 +534,40 @@ mod tests {
         std::fs::write(&input, "unused").unwrap();
         let ready = tmp.path().join("ready");
         let leaked = tmp.path().join("descendant-ran");
+        let release = tmp.path().join("release-descendant");
         let wrapper = executable(
             tmp.path(),
             &format!(
-                "(sleep 1; printf leaked > {}) &\nprintf ready > {}\nwait",
+                "(while [ ! -e {} ]; do sleep 0.01; done; printf leaked > {}) &\nprintf ready > {}\nwait",
+                shell_quote(&release),
                 shell_quote(&leaked),
                 shell_quote(&ready)
             ),
         );
         let token = CancellationToken::new();
         let cancel = token.clone();
-        let observer = std::thread::spawn(move || {
-            let start = Instant::now();
-            while !ready.exists() {
-                assert!(start.elapsed() < Duration::from_secs(3));
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            cancel.cancel();
-        });
         let (control, _owner) =
             SearchControl::new(Instant::now() + Duration::from_secs(10), Some(token));
+        let cancel_ready = ready.clone();
+        // Trigger the real token only after the child has started. A separate
+        // observer's short startup deadline can fail before cancellation is
+        // exercised, and a timed descendant can run before a delayed observer.
+        let control = control.with_test_stop(move || {
+            if cancel_ready.is_file() {
+                cancel.cancel();
+            }
+            None
+        });
         let result = search(
             &mut File::open(&input).unwrap(),
             options(&wrapper, "unused"),
             &control,
             None,
         );
-        observer.join().unwrap();
+        assert!(ready.is_file(), "fixture did not start: {result:?}");
         assert_eq!(result.unwrap_err(), SearchWalkError::Cancelled);
+        // Only a descendant surviving search's kill-and-reap can observe this.
+        std::fs::write(&release, "release").unwrap();
         std::thread::sleep(Duration::from_millis(1100));
         assert!(!leaked.exists());
     }

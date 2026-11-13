@@ -28,11 +28,18 @@ enum Step {
 }
 
 fn scripts(steps: &[Step]) -> (Vec<HistoryResponse>, Vec<Vec<HistoryEvent>>) {
+    scripts_for_model(steps, "gpt-6.1-sol")
+}
+
+fn scripts_for_model(
+    steps: &[Step],
+    model: &str,
+) -> (Vec<HistoryResponse>, Vec<Vec<HistoryEvent>>) {
     let mut responses = Vec::new();
     let mut streams = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         let id = format!("authority-step-{index}");
-        let mut events = vec![message_start(&id, "gpt-6.1-sol")];
+        let mut events = vec![message_start(&id, model)];
         let (blocks, stop) = match step {
             Step::Tool(name, input) => {
                 let call = format!("authority-call-{index}");
@@ -69,7 +76,7 @@ fn scripts(steps: &[Step]) -> (Vec<HistoryResponse>, Vec<Vec<HistoryEvent>>) {
         ]);
         let mut response = mock_message_response(blocks, Some(stop));
         response.id = id;
-        response.model = "gpt-6.1-sol".into();
+        response.model = model.into();
         responses.push(response);
         streams.push(events);
     }
@@ -1144,4 +1151,325 @@ async fn batched_utf16_compaction_uses_read_decoding_and_exact_attachment_units(
 #[tokio::test]
 async fn streaming_utf16_compaction_uses_read_decoding_and_exact_attachment_units() {
     utf16_compaction_restores_exact_read_content(true).await;
+}
+
+async fn screenshot_fallback_observes_target_policy(streaming: bool) {
+    use base64::Engine;
+
+    let links: &[bool] = if cfg!(unix) { &[false, true] } else { &[false] };
+    for &linked in links {
+        for guest in [false, true] {
+            for denied in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let cwd = root.path().canonicalize().unwrap();
+                let guest_root = format!("/file-fallback-{}", uuid::Uuid::new_v4());
+                let requested_root = if guest {
+                    PathBuf::from(&guest_root)
+                } else {
+                    cwd.clone()
+                };
+                let missing = requested_root.join("private AM.png");
+                let alternate = requested_root.join("private\u{202f}AM.png");
+                let host = cwd.join("private\u{202f}AM.png");
+                let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAC0lEQVR4nGNgQAYAAA4AAamRc7EAAAAASUVORK5CYII=";
+                std::fs::write(
+                    &host,
+                    base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .unwrap(),
+                )
+                .unwrap();
+                if linked {
+                    let landing = cwd.join("secret.png");
+                    std::fs::rename(&host, &landing).unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&landing, &host).unwrap();
+                }
+                let policy = permission::PermissionPolicy::new(permission::PermissionMode::Default)
+                    .with_roots(permission::FsRoots {
+                        cwd: cwd.clone(),
+                        home: Some(cwd.join("home")),
+                        lingxi_home: cwd.join(".lingxi"),
+                    });
+                let gate = Arc::new(permission::PolicyPermissionGate::new(
+                    Arc::new(policy),
+                    Arc::new(NoOpPermissionGate),
+                ));
+                if denied {
+                    gate.apply_permission_update(&source(serde_json::json!({
+                        "type": "addRules",
+                        "rules": [{"toolName": "Read", "ruleContent": if linked {
+                            "./secret.png"
+                        } else { "./private\u{202f}AM.png" }}],
+                        "behavior": "deny", "destination": "session",
+                    })));
+                }
+                let fixture = Fixture::new(
+                    &cwd,
+                    tool_api::test_support::make_guest_alias_fs(&guest_root, &cwd, "/fenced"),
+                    Arc::new(StaticMemoryProvider::empty()),
+                    gate,
+                    vec![
+                        Step::Tool("Read", serde_json::json!({"file_path": missing})),
+                        Step::Done,
+                    ],
+                )
+                .await;
+                fixture.run(streaming).await;
+                let requests = fixture.requests(streaming).await;
+                let result = requests[1]
+                    .iter()
+                    .find_map(|message| match message {
+                        ConversationMessage::User { content, .. } => {
+                            content.iter().find_map(|block| match block {
+                                HistoryBlock::ToolResult { is_error, .. } => {
+                                    Some(*is_error == Some(true))
+                                }
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .expect("the Read produces its actual tool result");
+                assert_eq!(
+                    result, denied,
+                    "linked={linked}, guest={guest}, denied={denied}"
+                );
+                if denied {
+                    assert!(!serde_json::to_string(&requests[1])
+                        .unwrap()
+                        .contains(encoded));
+                    assert!(reads::get(&fixture.map, &alternate).is_none());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn batched_screenshot_fallback_rechecks_target_read_policy() {
+    screenshot_fallback_observes_target_policy(false).await;
+}
+
+#[tokio::test]
+async fn streaming_screenshot_fallback_rechecks_target_read_policy() {
+    screenshot_fallback_observes_target_policy(true).await;
+}
+
+async fn complete_read_raw_alias_does_not_invent_change(streaming: bool) {
+    for canonical_mru in [false, true] {
+        for seed_alias in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cwd = root.path().canonicalize().unwrap();
+            let path = cwd.join("known.txt");
+            let raw = cwd.join("known.txt ");
+            save(&path, "ALREADY_SEEN_CONTENT\n", 2_000);
+            save(&raw, "UNRELATED_HOST_SEED_OLD\n", 1_000);
+            let fixture = Fixture::new(
+                &cwd,
+                Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone())),
+                Arc::new(StaticMemoryProvider::empty()),
+                Arc::new(NoOpPermissionGate),
+                vec![
+                    Step::Tool("Read", serde_json::json!({"file_path": path})),
+                    Step::Done,
+                    Step::Done,
+                    Step::Done,
+                ],
+            )
+            .await;
+            fixture.run(streaming).await;
+            let complete = reads::get(&fixture.map, &path).unwrap();
+            assert_eq!(complete.offset, Some(1));
+            assert!(complete.limit.is_none() && !complete.is_partial_view);
+            if seed_alias {
+                assert!(
+                    fixture
+                        .orch
+                        .seed_read_state_from_host(raw.to_str().unwrap(), f64::MAX)
+                        .await
+                );
+            }
+            if canonical_mru {
+                reads::get(&fixture.map, &path).unwrap();
+            }
+            fixture.run(streaming).await;
+            fixture.run(streaming).await;
+            let requests = fixture.requests(streaming).await;
+            for request in &requests[2..] {
+                assert!(
+                    request.iter().all(|message| !message
+                        .text_content()
+                        .contains("changed on disk since you last read it")),
+                    "canonical_mru={canonical_mru}, seed_alias={seed_alias}"
+                );
+            }
+            assert_eq!(reads::get(&fixture.map, &path).unwrap(), complete);
+            if seed_alias {
+                assert!(reads::get(&fixture.map, &raw).is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn batched_complete_read_raw_alias_does_not_invent_change() {
+    complete_read_raw_alias_does_not_invent_change(false).await;
+}
+
+#[tokio::test]
+async fn streaming_complete_read_raw_alias_does_not_invent_change() {
+    complete_read_raw_alias_does_not_invent_change(true).await;
+}
+
+async fn partial_edit_restore_fixture(
+    cwd: &Path,
+    fs: Arc<dyn FileSystem>,
+    gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate>,
+    steps: Vec<Step>,
+    transcript: Option<Arc<session::JsonlWriter>>,
+) -> Fixture {
+    let map = reads::new_read_file_state_map();
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let mut context =
+        tool_api::test_support::ctx_for_file_tools(fs, bus.clone(), vec![cwd.to_path_buf()]);
+    context.read_file_state = map.clone();
+    context.permission_gate = Some(gate.clone());
+    let reader = Arc::new(tool_file::FileReadTool::new(context.clone()));
+    let writer = Arc::new(tool_file::FileWriteTool::new(context.clone()));
+    let mut tools = tool_api::ToolRegistry::new();
+    tools.register_builtin(reader.clone());
+    tools.register_builtin(writer.clone());
+    tools.register_builtin(Arc::new(tool_file::FileEditTool::new(context)));
+    let (responses, streams) = scripts_for_model(&steps, "claude-sonnet-4-6");
+    let api = Arc::new(MockApiClient::new(responses));
+    let streaming_api = Arc::new(MockStreamingApiClient::with_turns(streams));
+    let mut orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            model: "claude-sonnet-4-6".into(),
+            max_turns: 8,
+            system_prompt_override: Some("Partial Edit restoration fixture.".into()),
+            ..Default::default()
+        },
+        api.clone(),
+        streaming_api.clone(),
+        Arc::new(tools),
+        noop_hook_executor(),
+        gate,
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        cwd.to_path_buf(),
+    )
+    .with_analytics_bus(bus)
+    .with_read_state_map(map.clone())
+    .with_config_home(cwd.join("config"))
+    .without_host_environment_probes();
+    if let Some(writer) = transcript {
+        let id = uuid::Uuid::parse_str(writer.active_path().file_stem().unwrap().to_str().unwrap())
+            .unwrap();
+        orch = orch
+            .with_session_id(lingxi_core::types::SessionId::from_uuid(id))
+            .with_jsonl_writer(writer);
+    }
+    let orch = ConversationOrchestrator::into_shared(orch);
+    orch.initialize_conversation_mode().await.unwrap();
+    Fixture {
+        orch,
+        reader,
+        writer,
+        map,
+        api,
+        streaming_api,
+    }
+}
+
+#[test]
+fn cold_partial_edit_replay_preserves_write_fence_both_drivers() {
+    // The supported Read limit and production's once-published permission
+    // probe belong to this process. Isolate them from parallel integration tests.
+    const CHILD: &str = "HARNESS_PARTIAL_EDIT_REPLAY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cold_partial_edit_replay_preserves_write_fence_both_drivers",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env(tool_file::read::MAX_OUTPUT_TOKENS_ENV, "100")
+            .env("RUST_MIN_STACK", "33554432")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+
+        let common = tempfile::tempdir().unwrap();
+        let root = common.path().canonicalize().unwrap();
+        let policy = Arc::new(permission::PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            [permission::PermissionRule::allow_tool_session("Read")],
+        ).with_roots(permission::FsRoots {
+            cwd: root.clone(), home: Some(root.join("home")), lingxi_home: root.join(".lingxi"),
+        }));
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(Arc::new(
+            permission::read_auto_allow::PolicyReadAutoAllow::new(
+                policy.clone(), vec!["Read".into(), "Edit".into(), "Write".into()],
+            ),
+        ));
+        let gate = Arc::new(permission::PolicyPermissionGate::new(policy, Arc::new(NoOpPermissionGate)));
+        for streaming in [false, true] {
+            let temp = tempfile::tempdir_in(&root).unwrap();
+            let cwd = temp.path().canonicalize().unwrap();
+            let path = cwd.join("dense.txt");
+            let original = (0..220u32).map(|index| format!("line {index:05}\n"))
+                .collect::<String>();
+            std::fs::write(&path, &original).unwrap();
+            assert!(tool_file::read_requirement_waived(Some("claude-sonnet-4-6"), &path));
+            let transcript = cwd.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+            let fs: Arc<dyn FileSystem> =
+                Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone()));
+            let live = partial_edit_restore_fixture(&cwd, fs.clone(), gate.clone(), vec![
+                Step::Tool("Read", serde_json::json!({"file_path": path})),
+                Step::Tool("Edit", serde_json::json!({"file_path": path,
+                    "old_string": "line 00000", "new_string": "EDITED FIRST LINE"})),
+                Step::Done,
+            ], Some(Arc::new(session::JsonlWriter::new(transcript.clone(), fs.clone())))).await;
+            live.run(streaming).await;
+            assert!(reads::get(&live.map, &path).unwrap().is_partial_view);
+            let before_restore = std::fs::read(&path).unwrap();
+            assert!(String::from_utf8_lossy(&before_restore).starts_with("EDITED FIRST LINE\n"));
+            let replacement = source(serde_json::json!({"file_path": path, "content": "overwrite"}));
+            let error = live.writer.call(replacement.clone(),
+                tool_api::test_support::fresh_ctx(), tool_api::test_support::fresh_tx()).await.unwrap_err();
+            assert_eq!(error.model_facing_message().string_at(""), Some(tool_file::FILE_NOT_READ_ERROR));
+
+            let id = live.orch.current_session_id().await.as_uuid();
+            let raw = std::fs::read_to_string(&transcript).unwrap();
+            assert!(raw.contains("contentNotInModelContext"));
+            let replay = orchestrator::resume::replay_captured_session(
+                transcript, raw.clone(), session::jsonl::route_lines(&raw), id,
+            ).unwrap();
+            let cold = partial_edit_restore_fixture(&cwd, fs, gate.clone(), vec![Step::Done], None).await;
+            cold.orch.restore_captured_session_history(
+                id, &replay.messages, &session::jsonl::route_lines(&raw).messages_in_order,
+                true, permission::PermissionMode::Default, ConversationMode::Code, &raw,
+            ).await.unwrap();
+            let restored = reads::get(&cold.map, &path).unwrap();
+            assert!(restored.is_partial_view);
+            assert_eq!(restored.mtime_ms, i64::MIN);
+            let error = cold.writer.call(replacement,
+                tool_api::test_support::fresh_ctx(), tool_api::test_support::fresh_tx()).await.unwrap_err();
+            assert_eq!(error.model_facing_message().string_at(""), Some(tool_file::FILE_NOT_READ_ERROR));
+            assert_eq!(std::fs::read(&path).unwrap(), before_restore);
+        }
+    });
 }

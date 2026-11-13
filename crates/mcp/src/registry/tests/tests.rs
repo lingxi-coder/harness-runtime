@@ -12099,3 +12099,4 @@ async fn static_authorization_uses_same_cache_partition_with_and_without_sdk_gra
 }
 
 include!("output_schema_publication.rs");
+include!("cache_identity_retry.rs");

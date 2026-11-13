@@ -4375,6 +4375,15 @@ fn build_mobile_engine_on_worker(
                     if active_cancel.lock().await.is_some() {
                         continue;
                     }
+                    let recovery_session = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
+                    match durable_turns.has_inactive_recovery(&recovery_session) {
+                        Ok(false) => {},
+                        Ok(true) => continue,
+                        Err(error) => {
+                            tracing::warn!(%error, "queued turn delayed until durable recovery is readable");
+                            continue;
+                        }
+                    }
                     if let Some(handle) = queued_slash_handle.get().and_then(std::sync::Weak::upgrade) {
                         let handle = super::automation::MobileCronBorrow(Some(handle));
                         if handle.scheduled_reload.load(std::sync::atomic::Ordering::Acquire) {
@@ -4585,6 +4594,11 @@ fn build_mobile_engine_on_worker(
                     ));
                     *active = Some(turn.clone());
                     drop(active);
+                    let mut startup = super::MobileTurnStartupGuard {
+                        turn: turn.clone(), active: active_cancel.clone(), durable: durable_turns.clone(),
+                        queue: message_queue.clone(), permissions: permission_gate.clone(), events: sink.clone(),
+                        runtime: tokio::runtime::Handle::current(), tasks: child_turn_tasks.clone(), input: None, armed: true,
+                    };
                     cancel_reason.reset();
                     message_queue
                         .register_active_turn(turn.cancel.clone())
@@ -4602,13 +4616,13 @@ fn build_mobile_engine_on_worker(
                                 .as_ref()
                                 .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                             {
+                                message_queue.clear_active_turn().await;
                                 *active = None;
                             }
                             drop(active);
                             if let Some(owner_id) = turn.permission_owner_id {
                                 permission_gate.end_main_turn(owner_id);
                             }
-                            message_queue.clear_active_turn().await;
                             turn.mark_completed();
                             if let Some(command) = scheduled.clone() {
                                 message_queue.enqueue(command).await;
@@ -4632,13 +4646,23 @@ fn build_mobile_engine_on_worker(
                                 if let Some((loaded, _)) = mobile_delivery.as_mut() {
                                     *loaded = checkpoint.clone();
                                 }
-                                sink.emit(ClientEvent::TurnRecoveryState {
+                                if !super::emit_mobile_initial_event(&sink, &turn, ClientEvent::TurnRecoveryState {
                                     snapshot: checkpoint.snapshot(),
-                                })
-                                .await;
-                                client::adapter::TurnEventEmitter::new(sink.clone())
-                                    .emit_turn_started(Some(checkpoint.turn_id))
-                                    .await;
+                                }).await || !super::emit_mobile_initial_event(&sink, &turn, ClientEvent::TurnStarted {
+                                    turn_id: Some(checkpoint.turn_id),
+                                }).await {
+                                    // Explicit Cancel/Pause owns the durable
+                                    // transition. Withdrawing this initial
+                                    // callback is a normal startup return,
+                                    // not an abandoned foreign future.
+                                    super::clear_mobile_turn_slot(&active_cancel, &message_queue, &turn).await;
+                                    if let Some(owner_id) = turn.permission_owner_id {
+                                        permission_gate.end_main_turn(owner_id);
+                                    }
+                                    turn.mark_completed();
+                                    startup.disarm();
+                                    continue;
+                                }
                             }
                             Err(crate::mobile::turn_durability::DurableTurnStoreError::Terminal { .. })
                             | Err(crate::mobile::turn_durability::DurableTurnStoreError::NotFound { .. }) => {
@@ -4658,13 +4682,13 @@ fn build_mobile_engine_on_worker(
                                     .as_ref()
                                     .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                                 {
-                                    *active = None;
+                                    message_queue.clear_active_turn().await;
+                                *active = None;
                                 }
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 continue;
                             }
@@ -4674,13 +4698,13 @@ fn build_mobile_engine_on_worker(
                                     .as_ref()
                                     .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                                 {
-                                    *active = None;
+                                    message_queue.clear_active_turn().await;
+                                *active = None;
                                 }
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 if let Some(command) = scheduled.clone() {
                                     message_queue.enqueue(command).await;
@@ -4876,16 +4900,17 @@ fn build_mobile_engine_on_worker(
                             .as_ref()
                             .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
                         {
-                            *active = None;
+                            message_queue.clear_active_turn().await;
+                                *active = None;
                         }
                         drop(active);
                         if let Some(owner_id) = task_turn.permission_owner_id {
                             permission_gate.end_main_turn(owner_id);
                         }
-                        message_queue.clear_active_turn().await;
                         task_turn.mark_completed();
                     })));
                     turn.set_task_handle(task);
+                    startup.disarm();
                 }
             }))
     };

@@ -7,7 +7,6 @@
 
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use serde::ser::SerializeSeq;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{future::Future, io::Write, sync::Arc};
 
@@ -56,8 +55,6 @@ impl ContextUsagePrefix {
     }
 
     pub(crate) fn new(request: &crate::LlmRequest, history: HistoryPrefix) -> Option<Self> {
-        let captured = crate::anthropic_extra_body::captured(request).ok()?;
-        let request = captured.as_ref();
         let history_replaced = crate::anthropic_extra_body::replaces(request, "messages");
         Some(Self {
             schema: 2,
@@ -154,8 +151,6 @@ impl ContextUsageBinding {
 
 impl ContextUsageMeasurement {
     pub(crate) fn bind(self, request: &crate::LlmRequest) -> Option<ContextUsageEstimate> {
-        let captured = crate::anthropic_extra_body::captured(request).ok()?;
-        let request = captured.as_ref();
         if self
             .prefix
             .as_ref()
@@ -322,10 +317,8 @@ fn history_fingerprint(history: &[ConversationMessage]) -> Option<String> {
 }
 
 fn prompt_fingerprint(request: &crate::LlmRequest) -> Option<String> {
-    let captured = crate::anthropic_extra_body::captured(request).ok()?;
-    let request = captured.as_ref();
-    let projected = crate::prompt_projection::for_estimate(request);
-    let input = &projected.input;
+    let system = crate::prompt_projection::system_for_estimate(request);
+    let input = &request.input;
     let replaces = |field| crate::anthropic_extra_body::replaces(request, field);
     digest(&(
         &input.model,
@@ -336,7 +329,7 @@ fn prompt_fingerprint(request: &crate::LlmRequest) -> Option<String> {
             .context_usage_protocol
             .or(request.execution.input_protocol),
         &request.execution.prompt_projection_profile,
-        (!replaces("system")).then_some(&input.system),
+        (!replaces("system")).then_some(system.as_ref()),
         (!replaces("tools")).then_some(&input.tools),
         (!replaces("tools")).then_some(&input.hosted_tools),
         &input.native_options,
@@ -443,8 +436,6 @@ impl ContextUsageEstimate {
 }
 
 fn input_fingerprint(request: &crate::LlmRequest) -> Option<[u8; 32]> {
-    let captured = crate::anthropic_extra_body::captured(request).ok()?;
-    let request = captured.as_ref();
     // Hash without retaining another copy of potentially large replay blocks.
     struct HashWriter(Sha256);
     impl Write for HashWriter {
@@ -457,8 +448,8 @@ fn input_fingerprint(request: &crate::LlmRequest) -> Option<[u8; 32]> {
             Ok(())
         }
     }
-    let projected = crate::prompt_projection::for_estimate(request);
-    let input = &projected.input;
+    let system = crate::prompt_projection::system_for_estimate(request);
+    let input = &request.input;
     let replaces = |field| crate::anthropic_extra_body::replaces(request, field);
     let mut writer = HashWriter(Sha256::new());
     // Output ceilings/effort and cache markers may change during preparation;
@@ -473,7 +464,7 @@ fn input_fingerprint(request: &crate::LlmRequest) -> Option<[u8; 32]> {
             &request.execution.input_protocol,
             &request.execution.context_usage_protocol,
             &request.execution.prompt_projection_profile,
-            (!replaces("system")).then_some(&input.system),
+            (!replaces("system")).then_some(system.as_ref()),
             (!replaces("messages")).then_some(&input.messages),
             (!replaces("tools")).then_some(&input.tools),
             (!replaces("tools")).then_some(&input.hosted_tools),

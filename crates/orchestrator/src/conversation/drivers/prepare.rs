@@ -1542,17 +1542,10 @@ impl ConversationOrchestrator {
                 .nested_memory_reminder_messages(context_attachments)
                 .await
             {
-                if let Some(reminder) = self
-                    .prepare_engine_attachment(
-                        &mut engine_reminder_sources,
-                        "nested_memory",
-                        reminder,
-                        None,
-                    )
-                    .await
-                {
-                    model_reminders.push((transient.len(), reminder));
-                }
+                // Keep its raw identity in the reusable suffix even when a
+                // Mod suppresses the outgoing view. The common persisted-row
+                // screen below renders it once for this request and every retry.
+                model_reminders.push((transient.len(), reminder));
             }
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
                 self.push_engine_attachment(

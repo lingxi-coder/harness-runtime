@@ -1546,6 +1546,29 @@ fn open_rooted_file(
     lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
 }
 
+fn check_read_route_policy(
+    policy: &dyn lingxi_core::host::permission_gate::ReadPathPolicySnapshot,
+    requested: &Path,
+    translated: &Path,
+    approved: &Path,
+) -> Result<(), ToolError> {
+    use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+
+    for spelling in [requested, translated, approved] {
+        let check = policy.check_path(spelling);
+        if check.denied_by_read_rule != ReadPathPolicyMatch::NoMatch
+            || ((spelling == translated || spelling == approved)
+                && check.held_outside != ReadPathPolicyMatch::NoMatch)
+            || policy.denied_search_path(spelling) != ReadPathPolicyMatch::NoMatch
+        {
+            return Err(ToolError::PathBlocked {
+                path: requested.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
 struct LoadedRead {
     identity: Option<tool_api::read_file_state::ReadFileIdentity>,
     snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot,
@@ -1758,6 +1781,21 @@ impl FileReadTool {
             .as_ref()
             .map(|c| c.lock().unwrap().clone())
             .unwrap_or_else(|| self.ctx.cwd())
+    }
+
+    fn read_path_policy_snapshot(
+        &self,
+    ) -> Arc<dyn lingxi_core::host::permission_gate::ReadPathPolicySnapshot> {
+        self.ctx
+            .permission_gate
+            .as_ref()
+            .map(|gate| gate.read_path_policy_snapshot())
+            .unwrap_or_else(|| {
+                permission::read_deny_globs::read_deny_search_snapshot(
+                    self.ctx.permission_policy.clone(),
+                    Some(&self.ctx.cwd()),
+                )
+            })
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
@@ -2430,35 +2468,8 @@ impl Tool for FileReadTool {
         let trusted_dirs = self.ctx.read_roots().await;
         let approved = canonicalize_and_validate(&path, &trusted_dirs)
             .map_err(|_| ToolError::PathBlocked { path: path.clone() })?;
-        let policy = self
-            .ctx
-            .permission_gate
-            .as_ref()
-            .map(|gate| gate.read_path_policy_snapshot())
-            .unwrap_or_else(|| {
-                permission::read_deny_globs::read_deny_search_snapshot(
-                    self.ctx.permission_policy.clone(),
-                    Some(&self.ctx.cwd()),
-                )
-            });
-        use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
-        for spelling in [&requested, &path, &approved] {
-            let check = policy.check_path(spelling);
-            if check.denied_by_read_rule != ReadPathPolicyMatch::NoMatch
-                // Working-directory holds apply to the translated I/O route;
-                // a guest spelling need not exist in the host namespace.
-                || ((spelling == &path || spelling == &approved)
-                    && check.held_outside != ReadPathPolicyMatch::NoMatch)
-                // Unlike changed-file path sets, this entry point has not
-                // enumerated symlink landing spellings. The direct-Read rule
-                // matcher checks those forms as well as the supplied spelling.
-                || policy.denied_search_path(spelling) != ReadPathPolicyMatch::NoMatch
-            {
-                return Err(ToolError::PathBlocked {
-                    path: requested.clone(),
-                });
-            }
-        }
+        let policy = self.read_path_policy_snapshot();
+        check_read_route_policy(policy.as_ref(), &requested, &path, &approved)?;
         tokio::task::spawn_blocking(move || open_rooted_file(&path, &approved, &trusted_dirs))
             .await
             .map_err(|error| ToolError::Io(error.to_string().into()))?
@@ -2715,21 +2726,27 @@ impl Tool for FileReadTool {
                 if let Some(alt) = get_alternate_screenshot_path(&requested_path)
                     .filter(|_| reminder_target.is_none())
                 {
+                    // The original permission decision did not authorize this
+                    // alternate filename. Recheck its current logical, guest
+                    // backing and symlink landing routes before reading bytes.
+                    let alt_path = self.read_state_io_path(&alt)?;
+                    let policy = self.read_path_policy_snapshot();
                     let alternate = run_read_job(&read_cancel, {
                         let trusted_dirs = trusted_dirs.clone();
                         move |cancel| {
-                            Ok(canonicalize_and_validate(&alt, &trusted_dirs).ok().map(
-                                |alt_canon| {
-                                    let snapshot = load_rooted_read(
-                                        &alt,
-                                        &alt_canon,
-                                        &trusted_dirs,
-                                        load_policy,
-                                        cancel,
-                                    );
-                                    (alt_canon, snapshot)
-                                },
-                            ))
+                            let Ok(alt_canon) = canonicalize_and_validate(&alt_path, &trusted_dirs)
+                            else {
+                                return Ok(None);
+                            };
+                            check_read_route_policy(policy.as_ref(), &alt, &alt_path, &alt_canon)?;
+                            let snapshot = load_rooted_read(
+                                &alt_path,
+                                &alt_canon,
+                                &trusted_dirs,
+                                load_policy,
+                                cancel,
+                            );
+                            Ok(Some((alt_canon, snapshot)))
                         }
                     })
                     .await?;

@@ -1091,6 +1091,104 @@ impl DurableTurnStore {
         Ok(checkpoints)
     }
 
+    /// A cold/paused executor must be explicitly repaired before queued work
+    /// can take its slot. Private pending inputs do not themselves block it.
+    pub(crate) fn has_inactive_recovery(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, DurableTurnStoreError> {
+        let mut cache = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        relative_path(session_id, 0)?;
+        let indexed = self
+            .session_turn_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session_id)
+            .cloned();
+        let Some(turn_ids) = indexed else {
+            // Initialize the existing index once. Warm watcher polls borrow
+            // cached metadata instead of cloning active prompts and images.
+            return Ok(self
+                .read_session_checkpoints(&mut cache, session_id)?
+                .iter()
+                .any(|checkpoint| {
+                    checkpoint
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| !state.is_terminal())
+                        && !checkpoint.payload_is_retired()
+                }));
+        };
+        for turn_id in turn_ids {
+            let relative = relative_path(session_id, turn_id)?;
+            if self
+                .scan_summaries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&relative)
+            {
+                continue;
+            }
+            let checkpoint = &self.load_cached_turn(&mut cache, &relative)?.checkpoint;
+            if checkpoint.session_id != session_id || checkpoint.turn_id != turn_id {
+                return Err(DurableTurnStoreError::InvalidIdentity(format!(
+                    "checkpoint path {session_id}/{turn_id}.json does not match its metadata"
+                )));
+            }
+            if checkpoint
+                .state
+                .as_ref()
+                .is_some_and(|state| !state.is_terminal())
+                && !checkpoint.payload_is_retired()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn query_admissions(
+        &self,
+        session_id: &str,
+        turn_ids: &[u64],
+    ) -> Result<Vec<super::host::MobileTurnAdmissionDto>, DurableTurnStoreError> {
+        let mut cache = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        Ok(turn_ids
+            .iter()
+            .map(|id| {
+                let member = checkpoints
+                    .iter()
+                    .find(|checkpoint| checkpoint.turn_id == *id);
+                let owner = checkpoints.iter().find(|checkpoint| {
+                    checkpoint.coalesced_batch.as_ref().is_some_and(|batch| {
+                        batch.owner_turn_id == checkpoint.turn_id
+                            && batch.member_turn_ids.contains(id)
+                    })
+                });
+                let checkpoint = owner.or(member);
+                super::host::MobileTurnAdmissionDto {
+                    turn_id: *id,
+                    admitted: member.is_some() || owner.is_some(),
+                    queued: checkpoint.is_some_and(|checkpoint| {
+                        checkpoint.state.is_none()
+                            && matches!(
+                                checkpoint.queue_delivery,
+                                QueueDeliveryState::Pending
+                                    | QueueDeliveryState::CoalescedPending
+                                    | QueueDeliveryState::CoalescedClaimed
+                            )
+                    }),
+                    settled: checkpoint.is_some_and(DurableTurnCheckpoint::payload_is_retired),
+                    executor_active: false,
+                    recovery: checkpoint
+                        .filter(|checkpoint| checkpoint.state.is_some())
+                        .map(DurableTurnCheckpoint::snapshot),
+                }
+            })
+            .collect())
+    }
+
     /// Persist the aggregate row identity and claim the in-turn delivery under
     /// one store lock. The first member owns the envelope; Native's coalesced
     /// row identity comes from the last member.

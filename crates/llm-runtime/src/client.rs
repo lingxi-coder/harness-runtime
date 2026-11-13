@@ -45,6 +45,17 @@ pub(crate) struct RouteEntry {
     websocket_connect_timeout_ms: Option<u64>,
 }
 
+impl RouteEntry {
+    fn effective_protocol(&self, route: &crate::registry::ResolvedRoute) -> ProtocolFamily {
+        lingxi_llm_client::providers::github_copilot::responses_protocol_override(
+            &route.profile_name,
+            &self.protocol,
+            &route.request_model,
+        )
+        .unwrap_or(self.protocol)
+    }
+}
+
 /// Project local discovery into ordinary function schemas for generic routes.
 fn portable_local_tool_discovery(
     request: &LlmRequest,
@@ -127,6 +138,55 @@ fn portable_local_tool_discovery(
         }
     }
     Ok(std::borrow::Cow::Owned(request))
+}
+
+/// Pure physical-input projection shared by generation, counting and fit
+/// estimates. Borrow unchanged inputs; only a real route/content rewrite owns
+/// a clone, with replay provenance and exact-string positions kept together.
+fn project_route_input(
+    request: &LlmRequest,
+    protocol: ProtocolFamily,
+    reasoning_supported: bool,
+) -> Result<std::borrow::Cow<'_, LlmRequest>, LlmError> {
+    let mut projected = if crate::anthropic_extra_body::is_anthropic(protocol) {
+        std::borrow::Cow::Borrowed(request)
+    } else {
+        portable_local_tool_discovery(request)?
+    };
+    if let Some(source) = projected.execution.input_protocol.filter(|source| {
+        lingxi_llm_client::replay::native_family(*source)
+            != lingxi_llm_client::replay::native_family(protocol)
+    }) {
+        projected = std::borrow::Cow::Owned(crate::upstream::adapt_request(
+            projected.as_ref(),
+            source,
+            protocol,
+        )?);
+    }
+    let reasoning_block = |block: &lingxi_llm_client::protocol::ContentBlock| {
+        matches!(
+            block,
+            lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+                | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
+        )
+    };
+    if !reasoning_supported
+        && (projected.input.thinking.is_some()
+            || projected
+                .input
+                .messages
+                .iter()
+                .any(|message| message.content.iter().any(reasoning_block)))
+    {
+        let request = projected.to_mut();
+        request.input.thinking = None;
+        crate::model::thinking_signature::retain_input_blocks(
+            request,
+            |_, block| !reasoning_block(block),
+            None,
+        );
+    }
+    Ok(projected)
 }
 
 fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
@@ -451,14 +511,7 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
-        Ok(
-            lingxi_llm_client::providers::github_copilot::responses_protocol_override(
-                &route.profile_name,
-                &entry.protocol,
-                &route.request_model,
-            )
-            .unwrap_or(entry.protocol),
-        )
+        Ok(entry.effective_protocol(&route))
     }
 
     /// Whether this exact route can use the Responses WebSocket transport.
@@ -1836,8 +1889,6 @@ impl ModelRuntime {
         transport: Option<Arc<dyn Transport>>,
         authenticate: bool,
     ) -> Result<PreparedLlmCall, LlmError> {
-        let captured = crate::anthropic_extra_body::captured(request)?;
-        let request = captured.as_ref();
         let resolved_route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
@@ -1849,61 +1900,6 @@ impl ModelRuntime {
         let effective_protocol =
             self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
         crate::anthropic_extra_body::validate(request, effective_protocol)?;
-        // ToolSearch discovers local function tools on every provider. Only
-        // Anthropic-wire routes understand its native deferred schemas and
-        // tool_reference receipts. Adapt a request-local clone, including
-        // replay history, after account routing; never mutate stored history.
-        let portable;
-        let request = if !matches!(
-            effective_protocol,
-            ProtocolFamily::AnthropicMessages
-                | ProtocolFamily::VertexClaude
-                | ProtocolFamily::BedrockClaude
-                | ProtocolFamily::FoundryClaude
-        ) {
-            portable = portable_local_tool_discovery(request)?;
-            portable.as_ref()
-        } else {
-            request
-        };
-        let adapted;
-        let request = if let Some(source) = request.execution.input_protocol.filter(|source| {
-            lingxi_llm_client::replay::native_family(*source)
-                != lingxi_llm_client::replay::native_family(effective_protocol)
-        }) {
-            adapted = crate::upstream::adapt_request(request, source, effective_protocol)?;
-            &adapted
-        } else {
-            request
-        };
-
-        // Soft-degrade `reasoning` rather than hard-failing: it is a best-effort
-        // enhancement driven by the SESSION thinking config, so switching to a
-        // model that doesn't advertise reasoning (e.g. an OpenRouter free model
-        // like `qwen/qwen3-coder:free`) must silently drop it — not break the turn
-        // with "unsupported capability: reasoning". This covers BOTH the top-level
-        // `request.input.thinking` field AND any `Reasoning`/`RedactedThinking` blocks
-        // left in message HISTORY from an earlier thinking-capable model —
-        // `validate_capabilities` rejects those blocks independently, so a
-        // mid-conversation downgrade (not just a first turn) must strip them from
-        // the request that gets validated AND encoded. (streaming / tools /
-        // structured_output stay hard errors unless the explicit experimental
-        // beta policy suppresses an automatic Anthropic JSON schema.)
-        let is_reasoning_block = |b: &lingxi_llm_client::protocol::ContentBlock| {
-            matches!(
-                b,
-                lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
-                    | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
-            )
-        };
-        let needs_reasoning_degrade = !resolved_route.capabilities.reasoning
-            && (request.input.thinking.is_some()
-                || request
-                    .input
-                    .messages
-                    .iter()
-                    .any(|m| m.content.iter().any(is_reasoning_block)));
-
         let entry = self
             .routes
             .get(&resolved_route.profile_name)
@@ -1921,6 +1917,8 @@ impl ModelRuntime {
         // Select effort from the current request/environment before the first
         // credential await. Authentication may have host-side effects, but it
         // must not change the controls selected for this preparation.
+        // Preserve explicit effort and disabled-mode caps before the physical
+        // input projection removes unsupported reasoning controls.
         let effort_policy = crate::model::effort::prepare(
             request,
             effective_protocol,
@@ -1929,6 +1927,12 @@ impl ModelRuntime {
             &resolved_route.request_model,
             native_route_admitted,
         );
+        let projected = project_route_input(
+            request,
+            effective_protocol,
+            resolved_route.capabilities.reasoning,
+        )?;
+        let request = projected.as_ref();
         let host_failure = Arc::new(Mutex::new(None));
         let authenticator = Arc::new(
             crate::execution::HostAuthenticator::for_request(
@@ -2017,21 +2021,12 @@ impl ModelRuntime {
         })
         .flatten();
         let mut owned: Option<LlmRequest> = None;
-        if needs_reasoning_degrade
-            || needs_speed_degrade
+        if needs_speed_degrade
             || suppress_schema
             || effort_policy.is_some()
             || native_per_turn_effort.is_some()
         {
             let mut r = request.clone();
-            if needs_reasoning_degrade {
-                r.input.thinking = None;
-                crate::model::thinking_signature::retain_input_blocks(
-                    &mut r,
-                    |_, block| !is_reasoning_block(block),
-                    None,
-                );
-            }
             if needs_speed_degrade {
                 r.input.service_tier = None;
             }
@@ -2833,32 +2828,32 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
-        let mut projected = request.clone();
-        crate::anthropic_extra_body::capture(&mut projected)?;
-        crate::anthropic_extra_body::validate(&projected, entry.protocol)?;
+        let protocol = entry.effective_protocol(&route);
+        crate::anthropic_extra_body::validate(request, protocol)?;
         // A logical builder already recorded this route's protocol/profile.
         // Preserve its bound fingerprint when only the optional physical slot
         // is absent. Reroutes must still project and bind independently.
-        if projected
+        if request
             .execution
             .context_usage_protocol
-            .or(projected.execution.input_protocol)
-            == Some(entry.protocol)
-            && projected.execution.prompt_projection_profile.as_ref() == Some(&entry.profile)
+            .or(request.execution.input_protocol)
+            == Some(protocol)
+            && request.execution.prompt_projection_profile.as_ref() == Some(&entry.profile)
         {
-            if let Some(tokens) = projected
+            if let Some(tokens) = request
                 .execution
                 .context_usage_estimate
                 .as_ref()
-                .and_then(|usage| usage.tokens_for(&projected))
+                .and_then(|usage| usage.tokens_for(request))
             {
                 return Ok(tokens);
             }
         }
-        projected.execution.context_usage_protocol = Some(entry.protocol);
-        projected.execution.prompt_projection_profile = Some(entry.profile.clone());
-        Ok(crate::model::count_tokens::estimate_input_tokens(
-            &projected,
+        let projected = project_route_input(request, protocol, route.capabilities.reasoning)?;
+        Ok(crate::model::count_tokens::approximate_tokens_for_route(
+            projected.as_ref(),
+            Some(&entry.profile),
+            protocol,
         ))
     }
 
@@ -2866,7 +2861,6 @@ impl ModelRuntime {
         &self,
         request: &mut LlmRequest,
     ) -> Result<(), LlmError> {
-        crate::anthropic_extra_body::capture(request)?;
         let Some(binding) = request.execution.context_usage_binding.clone() else {
             return Ok(());
         };
@@ -2877,7 +2871,8 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
-        request.execution.context_usage_protocol = Some(entry.protocol);
+        let protocol = entry.effective_protocol(&route);
+        request.execution.context_usage_protocol = Some(protocol);
         request.execution.prompt_projection_profile = Some(entry.profile.clone());
         binding.bind(request);
         Ok(())
@@ -2895,8 +2890,6 @@ impl ModelRuntime {
         ),
         LlmError,
     > {
-        let captured = crate::anthropic_extra_body::captured(request)?;
-        let request = captured.as_ref();
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
@@ -2904,15 +2897,18 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
+        let protocol = entry.effective_protocol(&route);
         let mut owned;
-        crate::anthropic_extra_body::validate(request, entry.protocol)?;
+        crate::anthropic_extra_body::validate(request, protocol)?;
+        let visible = project_route_input(request, protocol, route.capabilities.reasoning)?;
+        let request = visible.as_ref();
         let request = if crate::structured_output::disabled_for(
             request,
             &route.provider_id,
-            entry.protocol,
+            protocol,
             &route.request_model,
             route.capabilities.structured_output,
-            crate::anthropic_extra_body::body(request, entry.protocol),
+            crate::anthropic_extra_body::body(request, protocol),
         ) {
             owned = request.clone();
             owned.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
@@ -2921,13 +2917,13 @@ impl ModelRuntime {
             request
         };
         validate_capabilities(request, route.capabilities)?;
-        if !matches!(entry.protocol, ProtocolFamily::AnthropicMessages) {
+        if !matches!(protocol, ProtocolFamily::AnthropicMessages) {
             return Err(LlmError::InvalidRequest {
                 message: "count_tokens is only available on AnthropicMessages routes".into(),
             });
         }
         let projected =
-            crate::prompt_projection::for_count(request, Some(&entry.profile), entry.protocol);
+            crate::prompt_projection::for_count(request, Some(&entry.profile), protocol);
         let request = projected.as_ref();
         let failure = Arc::new(Mutex::new(None));
         let auth = Arc::new(
@@ -2954,10 +2950,11 @@ impl ModelRuntime {
             (lingxi_llm_client::RequestMode::CountTokens, None),
         )
         .await?;
-        if let Some(extra) = crate::anthropic_extra_body::count(request, entry.protocol) {
+        crate::prompt_projection::apply_count_output_format(request, &mut host.body_json)?;
+        if let Some(extra) = crate::anthropic_extra_body::count(request, protocol) {
             use lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy;
             AnthropicRequestPolicy {
-                protocol: entry.protocol,
+                protocol,
                 request_kind: request.execution.anthropic_request_kind,
                 extra_body: extra.clone(),
                 ..Default::default()
@@ -3019,11 +3016,12 @@ impl ModelRuntime {
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
         if !matches!(
-            self.routes
-                .get(&route.profile_name)
-                .ok_or(LlmError::ModelUnavailable)?
-                .protocol,
+            entry.effective_protocol(&route),
             ProtocolFamily::AnthropicMessages
         ) {
             return Ok(None);

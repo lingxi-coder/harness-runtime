@@ -100,7 +100,8 @@ pub use host::{
     FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
     MobileBuildError, MobileConfig, MobileCronAdmission, MobileCronOwnerAdmission,
     MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileRuntime,
-    MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
+    MobileSessionDiscoveryScope, MobileTurnAdmissionDto, ProviderCatalogEntryDto,
+    RealtimeAgentSessionIo,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;

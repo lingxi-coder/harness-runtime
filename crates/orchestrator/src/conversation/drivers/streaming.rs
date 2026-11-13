@@ -271,6 +271,7 @@ struct PumpedStreamingIteration<'a> {
     did_fall_back_to_non_streaming: bool,
     /// Exact physical history for the successful stream or its recovery request.
     cache_request_history: Vec<ConversationMessage>,
+    diagnostic_acknowledgement: Option<MessageId>,
     /// Inline Native context is removed from cache-safe fork history by identity.
     cache_inline_context: Option<ConversationMessage>,
     /// PTL/529 rows passed through session.append before W1 dispatch, so the
@@ -478,6 +479,7 @@ fn mod_turn_step_stream(
             let fallback_components = captured_components.clone();
             let fallback_main_api = main_api.clone();
             let fallback_model_state = worker_model.clone();
+            let fallback_owner = Arc::clone(&owner);
             let source = move |forwarded: Utf16JsonProjection| {
                 let owner = Arc::clone(&owner);
                 let previous_components = source_components.clone();
@@ -662,6 +664,7 @@ fn mod_turn_step_stream(
                     typed_attachment_ids.extend(owner.typed_attachment_ids_for_snapshot(&snapshot));
                     components.reminders.messages = turn_reminders;
                     components.request_history = Some(snapshot.clone());
+                    let diagnostic_ack = owner.pending_diagnostics_id_in_request(&snapshot);
                     *effective_model.lock().unwrap() = Some(CapturedModRequest::capture(
                         main_api.as_ref(),
                         components.clone(),
@@ -732,11 +735,13 @@ fn mod_turn_step_stream(
                     let response_accumulator = Arc::new(StdMutex::new(Some(
                         llm_runtime::stream_accumulator::ResponseAccumulator::default(),
                     )));
+                    let diagnostic_owner = Arc::clone(&owner);
                     let stream = stream.then(move |item| {
                         let response_accumulator = response_accumulator.clone();
                         let chunk_wire = chunk_wire.clone();
                         let chunk_refs = chunk_refs.clone();
                         let physical_error = physical_error.clone();
+                        let diagnostic_owner = diagnostic_owner.clone();
                         async move {
                             match item {
                                 Ok(event) => {
@@ -744,6 +749,9 @@ fn mod_turn_step_stream(
                                         &mut response_accumulator.lock().unwrap(),
                                         &event,
                                     );
+                                    if streamed_response.is_some() {
+                                        diagnostic_owner.acknowledge_diagnostics_id(diagnostic_ack);
+                                    }
                                     let held = {
                                         let mut wire = chunk_wire.lock().unwrap();
                                         let held = wire.push(event).clone();
@@ -865,6 +873,8 @@ fn mod_turn_step_stream(
                                 ),
                                 chat_dispatch_check.clone(),
                             );
+                        let diagnostic_ack =
+                            fallback_owner.pending_diagnostics_id_in_request(&fallback_snapshot);
                         *fallback_model_state.lock().unwrap() = Some(CapturedModRequest::capture(
                             fallback_main_api.as_ref(),
                             fallback_components.clone(),
@@ -907,7 +917,21 @@ fn mod_turn_step_stream(
                                     .map(output_accounting_impl::MainOutputObservation::fork);
                                 let mut stream =
                                     output_accounting_impl::account_stream(stream, observation);
+                                let mut response_accumulator = Some(
+                                    llm_runtime::stream_accumulator::ResponseAccumulator::default(),
+                                );
                                 while let Some(item) = stream.next().await {
+                                    if let Ok(event) = &item {
+                                        if observe_mod_stream_response(
+                                            &mut response_accumulator,
+                                            event,
+                                        )
+                                        .is_some()
+                                        {
+                                            fallback_owner
+                                                .acknowledge_diagnostics_id(diagnostic_ack);
+                                        }
+                                    }
                                     let terminal = matches!(
                                         item,
                                         Ok(HistoryEvent::MessageStop
@@ -3441,6 +3465,14 @@ impl StreamingTurnDriver<'_> {
                 api_call_started.elapsed(),
             );
         }
+        let diagnostic_acknowledgement = if !turn_step_hook_active || did_fall_back_to_non_streaming
+        {
+            orch.pending_diagnostics_id_in_request(&cache_request_history)
+        } else {
+            // Mod sources ACK each completed physical request directly. A
+            // synthetic visible response is not an additional delivery.
+            None
+        };
         let next_mod_response = if turn_step_hook_active {
             match remaining {
                 Some(stream) => {
@@ -3513,6 +3545,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
             cache_request_history,
+            diagnostic_acknowledgement,
             cache_inline_context,
             assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
@@ -3593,6 +3626,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
             cache_request_history,
+            diagnostic_acknowledgement,
             cache_inline_context,
             assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
@@ -3742,8 +3776,11 @@ impl StreamingTurnDriver<'_> {
             return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
         if partial_finalize.is_none() {
-            orch.acknowledge_step_reminders(&cache_request_history)
-                .await;
+            orch.acknowledge_step_reminders_with_diagnostics_ack(
+                &cache_request_history,
+                diagnostic_acknowledgement,
+            )
+            .await;
         }
         orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,

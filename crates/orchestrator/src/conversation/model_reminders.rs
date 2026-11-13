@@ -455,6 +455,20 @@ impl ConversationOrchestrator {
         message: ConversationMessage,
         attachment: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ConversationMessage {
+        // Nested memory is durable raw context, just like the initial typed
+        // ingress rows. Register its source before publishing history so every
+        // request, including retries and resumed requests, screens the original
+        // copy rather than retaining only the fresh collector's Mod result.
+        let nested_memory = attachment.string_at("/type") == Some("nested_memory");
+        let _publication = nested_memory.then(crate::request_context::preparation_commit_scope);
+        if nested_memory {
+            self.register_mod_persisted_attachment(
+                &message,
+                "nested_memory",
+                serde_json::json!({"kind":"engine"}),
+            )
+            .await;
+        }
         {
             let mut session = self.session.lock().await;
             self.transcript

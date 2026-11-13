@@ -11,6 +11,7 @@ pub(crate) enum Acknowledgement {
     Listing(PromptListingMembership),
     Memory(memory::surfacing::SurfacedMemory),
     Skills(Vec<skill::DiscoveredSkill>),
+    Diagnostics,
 }
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ impl Acknowledgement {
         match (self, other) {
             (Self::Memory(a), Self::Memory(b)) => a.path == b.path,
             (Self::Skills(_), Self::Skills(_)) => true,
+            (Self::Diagnostics, Self::Diagnostics) => true,
             (
                 Self::Listing(PromptListingMembership::Skills { .. }),
                 Self::Listing(PromptListingMembership::Skills { .. }),
@@ -181,6 +183,72 @@ impl ConversationOrchestrator {
             })
     }
 
+    pub(crate) fn pending_diagnostics_reminder(&self) -> Option<ConversationMessage> {
+        let generation = self
+            .prompt_runtime
+            .listing_membership_generation
+            .load(Ordering::Acquire);
+        self.prompt_runtime
+            .pending_step_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|row| {
+                row.generation == generation
+                    && matches!(row.acknowledgement, Acknowledgement::Diagnostics)
+            })
+            .map(|row| row.message.clone())
+    }
+
+    pub(crate) fn pending_diagnostics_id_in_request(
+        &self,
+        request: &[ConversationMessage],
+    ) -> Option<lingxi_core::types::MessageId> {
+        let generation = self
+            .prompt_runtime
+            .listing_membership_generation
+            .load(Ordering::Acquire);
+        let pending = self
+            .prompt_runtime
+            .pending_step_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pending
+            .iter()
+            .find(|row| {
+                row.generation == generation
+                    && matches!(row.acknowledgement, Acknowledgement::Diagnostics)
+            })?
+            .message
+            .id();
+        request
+            .iter()
+            .any(|message| message.id() == id)
+            .then_some(id)
+    }
+
+    /// Complete the consume-once source at physical response completion. A Mod
+    /// may discard or replace that response afterwards, or issue another next
+    /// call which fails; neither can revoke this exact delivery evidence.
+    pub(crate) fn acknowledge_diagnostics_id(&self, id: Option<lingxi_core::types::MessageId>) {
+        let Some(id) = id else {
+            return;
+        };
+        let generation = self
+            .prompt_runtime
+            .listing_membership_generation
+            .load(Ordering::Acquire);
+        self.prompt_runtime
+            .pending_step_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|row| {
+                !(row.generation == generation
+                    && row.message.id() == id
+                    && matches!(row.acknowledgement, Acknowledgement::Diagnostics))
+            });
+    }
+
     pub(crate) fn discard_pending_step_reminder(&self, kind: &'static str) {
         self.prompt_runtime
             .pending_step_reminders
@@ -189,7 +257,23 @@ impl ConversationOrchestrator {
             .retain(|row| row.kind != kind);
     }
 
+    #[cfg(test)]
     pub(crate) async fn acknowledge_step_reminders(&self, request: &[ConversationMessage]) {
+        self.acknowledge_step_reminders_with_diagnostics_ack(
+            request,
+            self.pending_diagnostics_id_in_request(request),
+        )
+        .await;
+    }
+
+    /// Other reminder families retain their existing response semantics. A
+    /// consumed diagnostic needs separate evidence that its exact identity was
+    /// included in a successful physical response, not a synthetic Mod reply.
+    pub(crate) async fn acknowledge_step_reminders_with_diagnostics_ack(
+        &self,
+        request: &[ConversationMessage],
+        diagnostic_ack: Option<lingxi_core::types::MessageId>,
+    ) {
         let ids = request
             .iter()
             .map(ConversationMessage::id)
@@ -200,7 +284,13 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|row| ids.contains(&row.message.id()))
+            .filter(|row| {
+                if matches!(row.acknowledgement, Acknowledgement::Diagnostics) {
+                    diagnostic_ack == Some(row.message.id())
+                } else {
+                    ids.contains(&row.message.id())
+                }
+            })
             .cloned()
             .collect::<Vec<_>>();
         for row in candidates {
@@ -238,6 +328,9 @@ impl ConversationOrchestrator {
                         surfaced.extend(names.into_iter().map(|skill| skill.name));
                     }
                 }
+                // The source already advanced its cursor when this exact row
+                // was retained. Successful use of its UUID is the only ACK.
+                Acknowledgement::Diagnostics => {}
             }
             // Never remove a recovery copy before the asynchronous set update.
             self.prompt_runtime
@@ -253,7 +346,12 @@ impl ConversationOrchestrator {
             .pending_step_reminders
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|row| matches!(row.acknowledgement, Acknowledgement::Listing(_)));
+            .retain(|row| {
+                !matches!(
+                    row.acknowledgement,
+                    Acknowledgement::Memory(_) | Acknowledgement::Skills(_)
+                )
+            });
     }
 }
 

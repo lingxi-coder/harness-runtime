@@ -2417,67 +2417,76 @@ mod tests {
     async fn model_validation_request_is_minimal_and_never_retries() {
         use lingxi_llm_client::protocol::{CacheBreakpoint, CachePosition, CacheTtl, JsonPayload};
 
-        let transport = FakeTransport::sequence(vec![
-            FakeResponse::Ok(ProviderResponse {
-                status: 429,
-                headers: BTreeMap::from([("x-should-retry".into(), "true".into())]),
-                body_json: provider_payload(serde_json::json!({
-                    "type": "error",
-                    "error": {"type": "overloaded_error", "message": "try again"}
-                })),
-                request_id: Some("validation-429".into()),
-            }),
-            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
-        ]);
-        let service = make_adapter(transport.clone());
-        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
-        request.input.model_source = Some(JsonPayload::string("claude-unlisted-validation-model"));
-        request.input.max_tokens = Some(1);
-        request
-            .input
-            .prompt_cache
-            .breakpoints
-            .push(CacheBreakpoint {
-                scope: None,
-                position: CachePosition::Message { index: 0, block: 0 },
-                ttl: CacheTtl::FiveMinutes,
-            });
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        for extra in [
+            r#"{"model":"inherited-model","max_tokens":4096,"system":"inherited system","tools":[],"thinking":{"type":"adaptive"},"temperature":0.5,"output_config":{"effort":"max","format":{"type":"json_schema","schema":{"type":"boolean"}}},"stop_sequences":["inherited stop"]}"#,
+            r#"{"betas":{"toString":null}}"#,
+        ] {
+            std::env::set_var("CLAUDE_CODE_EXTRA_BODY", extra);
+            let transport = FakeTransport::sequence(vec![
+                FakeResponse::Ok(ProviderResponse {
+                    status: 429,
+                    headers: BTreeMap::from([("x-should-retry".into(), "true".into())]),
+                    body_json: provider_payload(serde_json::json!({
+                        "type": "error",
+                        "error": {"type": "overloaded_error", "message": "try again"}
+                    })),
+                    request_id: Some("validation-429".into()),
+                }),
+                FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            ]);
+            let service = make_adapter(transport.clone());
+            let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+            request.input.model_source =
+                Some(JsonPayload::string("claude-unlisted-validation-model"));
+            request.input.max_tokens = Some(1);
+            request
+                .input
+                .prompt_cache
+                .breakpoints
+                .push(CacheBreakpoint {
+                    scope: None,
+                    position: CachePosition::Message { index: 0, block: 0 },
+                    ttl: CacheTtl::FiveMinutes,
+                });
 
-        let result = service.execute_model_validation_request(request).await;
-        assert!(result.is_err(), "a retryable 429 is returned to the caller");
-        assert_eq!(
-            transport.seen_count(),
-            1,
-            "a failed probe must not be retried"
-        );
+            let result = service.execute_model_validation_request(request).await;
+            assert!(result.is_err(), "a retryable 429 is returned to the caller");
+            assert_eq!(
+                transport.seen_count(),
+                1,
+                "a failed probe must not be retried"
+            );
 
-        let seen = transport.seen.lock().unwrap();
-        let sent = &seen[0];
-        let body = request_body_value(&sent.body_json);
-        assert_eq!(body["model"], "claude-unlisted-validation-model");
-        assert_eq!(body["max_tokens"], 1);
-        assert_eq!(body["messages"][0]["content"][0]["text"], "Hi");
-        assert_eq!(
-            body["messages"][0]["content"][0]["cache_control"],
-            serde_json::json!({"type": "ephemeral"})
-        );
-        assert!(
-            body.get("system").is_none(),
-            "the probe has no inherited system"
-        );
-        assert!(body.get("tools").is_none(), "the probe has no tools");
-        assert!(
-            body.get("thinking").is_none(),
-            "the probe has no thinking policy"
-        );
-        assert!(body.get("temperature").is_none());
-        assert!(body.get("output_config").is_none());
-        assert!(body.get("effort").is_none());
-        assert!(body.get("stop_sequences").is_none());
-        assert!(
-            !sent.headers.contains_key(DISPATCH_ID_HEADER),
-            "model-validation traffic is auxiliary"
-        );
+            let seen = transport.seen.lock().unwrap();
+            let sent = &seen[0];
+            let body = request_body_value(&sent.body_json);
+            assert_eq!(body["model"], "claude-unlisted-validation-model");
+            assert_eq!(body["max_tokens"], 1);
+            assert_eq!(body["messages"][0]["content"][0]["text"], "Hi");
+            assert_eq!(
+                body["messages"][0]["content"][0]["cache_control"],
+                serde_json::json!({"type": "ephemeral"})
+            );
+            assert!(
+                body.get("system").is_none(),
+                "the probe has no inherited system"
+            );
+            assert!(body.get("tools").is_none(), "the probe has no tools");
+            assert!(
+                body.get("thinking").is_none(),
+                "the probe has no thinking policy"
+            );
+            assert!(body.get("temperature").is_none());
+            assert!(body.get("output_config").is_none());
+            assert!(body.get("effort").is_none());
+            assert!(body.get("stop_sequences").is_none());
+            assert!(
+                !sent.headers.contains_key(DISPATCH_ID_HEADER),
+                "model-validation traffic is auxiliary"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8201,19 +8210,42 @@ mod tests {
 
     // ── CLAUDE_CODE_EXTRA_BODY merge (claude-code B0t; parity 2.1.207) ────────
 
-    /// Prepare `request` on `adapter` and run the header injectors (which now also
-    /// run the `CLAUDE_CODE_EXTRA_BODY` merge), returning the outgoing body.
+    /// Exercise ApiService's logical capture and physical dispatch. A fixed
+    /// terminal response lets every wire family expose its request unchanged.
+    async fn request_after_service_dispatch(
+        adapter: &ApiService,
+        request: &LlmRequest,
+    ) -> ProviderRequest {
+        let transport = FakeTransport::always(ProviderResponse::json(
+            400,
+            serde_json::json!({"error":{"type":"invalid_request_error","message":"fixture captured request"}}),
+        ));
+        let mut service = adapter.fork_independent();
+        service.transport = transport.clone();
+        let error = service
+            .execute_non_stream_request(
+                request.clone(),
+                NonStreamingRequestClass::Main,
+                Default::default(),
+            )
+            .await
+            .expect_err("fixture returns a terminal HTTP 400");
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "fixture must dispatch once: {error:?}"
+        );
+        let sent = transport.seen.lock().unwrap()[0].clone();
+        sent
+    }
+
     async fn body_after_inject(
         adapter: &ApiService,
         request: &LlmRequest,
     ) -> lingxi_llm_client::protocol::JsonPayload {
-        let mut request = request.clone();
-        request.execution.resolve_native_effort = true;
-        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
-        adapter
-            .inject_headers(&mut prepared, DispatchHeaderState::default())
-            .unwrap();
-        prepared.provider_request.body_json
+        request_after_service_dispatch(adapter, request)
+            .await
+            .body_json
     }
 
     #[tokio::test]
@@ -8228,18 +8260,46 @@ mod tests {
         )));
         let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
 
-        // Header policy places main requests in the SDK's Native top-level order.
+        // Header policy retains Native top-level order; the public service's
+        // conversation session adds its initial thread-create field at seal.
         let unset = body_after_inject(&adapter, &request).await;
         assert_eq!(
             unset.as_json_source(),
-            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":32000}"#,
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":32000,"thread":{"type":"create"}}"#,
             "unset extra body retains the Native main-template source"
         );
 
-        // (1) valid object → new key appended at the tail; (2) a colliding key
-        // (`max_tokens`) keeps its original body position but takes the extra value.
+        // Caller fields cross the public dispatch boundary before the session
+        // appends its thread field, retaining Native's complete source order.
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"bar"}"#);
+        let dispatched = body_after_inject(&adapter, &request).await;
+        assert_eq!(
+            dispatched.as_json_source(),
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":32000,"foo":"bar","thread":{"type":"create"}}"#,
+            "extra fields retain the public Native main-template source"
+        );
+
+        // A different output ceiling is a pre-seal merge-policy check: sealing
+        // separately enforces the SDK's already resolved output-budget fence.
+        // The collision must replace the value without moving its original key.
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"bar","max_tokens":99}"#);
-        let merged = body_after_inject(&adapter, &request).await;
+        let mut captured = request.clone();
+        captured.execution.resolve_native_effort = true;
+        crate::anthropic_extra_body::capture(&mut captured).unwrap();
+        let mut prepared = adapter.client.prepare(&captured).await.unwrap();
+        assert_eq!(
+            request_body_value(&prepared.provider_request.body_json)["max_tokens"],
+            serde_json::json!(32000)
+        );
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        let merged = prepared.provider_request.body_json;
+        assert_eq!(
+            merged.as_json_source(),
+            r#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[],"max_tokens":99,"foo":"bar"}"#,
+            "the pre-seal override retains the complete Native source order"
+        );
         let merged_value = request_body_value(&merged);
         assert_eq!(merged_value["foo"], serde_json::json!("bar"));
         assert_eq!(merged_value["max_tokens"], serde_json::json!(99));
@@ -8598,32 +8658,41 @@ mod tests {
             r#"{"output_config":{"format":{"type":"json_schema","name":"explicit","schema":{"type":"object"},"strict":true}}}"#,
         );
         let request = LlmRequest::new(model).with_user_text("Keep explicit format.");
-        let mut prepared = adapter
-            .client
-            .prepare(&request)
-            .await
-            .expect("extra-body format is caller-authored");
-        adapter
-            .inject_headers(&mut prepared, DispatchHeaderState::default())
-            .unwrap();
+        let sent = request_after_service_dispatch(&adapter, &request).await;
         assert_eq!(
-            prepared
-                .provider_request
-                .body_json
+            sent.body_json
                 .string_at("/output_config/format/name")
                 .as_deref(),
             Some("explicit"),
             "Native B6 does not delete an explicit extra-body format"
         );
         assert!(!request_header_has_beta(
-            &prepared.provider_request.headers,
+            &sent.headers,
             crate::model::betas::STRUCTURED_OUTPUTS,
         ));
 
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"betas":["caller-only"]}"#);
+        let mut captured = adapter.build_json_schema_request_with_thinking(
+            model,
+            None,
+            None,
+            None,
+            vec![text_user_msg("Return JSON.")],
+            serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"}},"additionalProperties":false}),
+            Some(8192),
+            None,
+            Some(crate::model::thinking::ThinkingConfig::Disabled),
+            None,
+            None,
+        ).unwrap();
+        // Inspect the main-only pre-spread candidate snapshot using the
+        // public builder's saved body, without rereading the environment.
+        captured.execution.anthropic_request_kind =
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main;
+        crate::anthropic_extra_body::capture(&mut captured).unwrap();
         let mut prepared = adapter
             .client
-            .prepare(&make_schema_request())
+            .prepare(&captured)
             .await
             .expect("Native output format is present before the caller beta spread");
         adapter

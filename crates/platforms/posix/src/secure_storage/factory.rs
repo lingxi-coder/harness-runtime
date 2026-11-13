@@ -116,6 +116,7 @@ impl SecureStorage for DeferredPlainTextStorage {
 struct RuntimeFallbackStorage {
     primary: Arc<dyn SecureStorage>,
     fallback: Arc<dyn SecureStorage>,
+    account_ownership_backend: SecureStorageBackend,
     fallback_active: Arc<AtomicBool>,
     warned: Arc<AtomicBool>,
     lock_directory: PathBuf,
@@ -127,9 +128,11 @@ impl RuntimeFallbackStorage {
         fallback: Arc<dyn SecureStorage>,
         lock_directory: PathBuf,
     ) -> Self {
+        let account_ownership_backend = primary.account_ownership_backend();
         Self {
             primary,
             fallback,
+            account_ownership_backend,
             fallback_active: Arc::new(AtomicBool::new(false)),
             warned: Arc::new(AtomicBool::new(false)),
             lock_directory,
@@ -579,6 +582,87 @@ impl SecureStorage for RuntimeFallbackStorage {
             self.primary.backend()
         }
     }
+
+    fn account_ownership_backend(&self) -> SecureStorageBackend {
+        self.account_ownership_backend
+    }
+}
+
+struct UnavailableNativeStorage {
+    backend: SecureStorageBackend,
+    error: SecureStorageError,
+}
+
+#[async_trait]
+impl SecureStorage for UnavailableNativeStorage {
+    async fn store(
+        &self,
+        _service: &str,
+        _account: &str,
+        _data: SecureStorageData,
+    ) -> Result<(), SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn retrieve(
+        &self,
+        _service: &str,
+        _account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    fn is_encrypted(&self) -> bool {
+        true
+    }
+
+    fn backend(&self) -> SecureStorageBackend {
+        self.backend
+    }
+}
+
+fn native_or_fallback_storage(
+    primary: Result<Arc<dyn SecureStorage>, SecureStorageError>,
+    native_backend: SecureStorageBackend,
+    fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
+) -> Arc<dyn SecureStorage> {
+    let (primary, unavailable) = match primary {
+        Ok(primary) => (primary, false),
+        Err(error) => (
+            Arc::new(UnavailableNativeStorage {
+                backend: native_backend,
+                error,
+            }) as Arc<dyn SecureStorage>,
+            true,
+        ),
+    };
+    let storage = RuntimeFallbackStorage::new(primary, fallback, lock_directory);
+    if unavailable {
+        storage.fallback_active.store(true, Ordering::Release);
+        storage.warned.store(true, Ordering::Release);
+    }
+    Arc::new(storage)
+}
+
+/// Build the production fallback wrapper over isolated synthetic backends.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn runtime_fallback_storage_for_test(
+    primary: Result<Arc<dyn SecureStorage>, SecureStorageError>,
+    native_backend: SecureStorageBackend,
+    fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
+) -> Arc<dyn SecureStorage> {
+    native_or_fallback_storage(primary, native_backend, fallback, lock_directory)
 }
 
 fn fallback_lock_directory(plaintext_path: &Path) -> PathBuf {
@@ -664,28 +748,27 @@ pub async fn secure_storage_for_policy(
         // plaintext (with the documented warning) when it cannot initialise —
         // the same try-keychain-then-plaintext shape as the macOS arm.
         let default_dir = default_lingxi_dir();
-        match super::linux::LinuxSecretStorage::new(
+        let primary = super::linux::LinuxSecretStorage::new(
             user.clone(),
             config_dir.clone(),
             default_dir,
             String::new(),
-        ) {
-            Ok(secret) => {
-                return Ok(Arc::new(RuntimeFallbackStorage::new(
-                    Arc::new(secret),
-                    fallback,
-                    fallback_lock_directory(&plaintext_path),
-                )));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "lingxi::secure_storage",
-                    error = %e,
-                    policy = ?policy,
-                    "Warning: native credential storage unavailable during init."
-                );
-            }
+        )
+        .map(|storage| Arc::new(storage) as Arc<dyn SecureStorage>);
+        if let Err(error) = &primary {
+            tracing::warn!(
+                target: "lingxi::secure_storage",
+                %error,
+                policy = ?policy,
+                "Warning: native credential storage unavailable during init."
+            );
         }
+        return Ok(native_or_fallback_storage(
+            primary,
+            SecureStorageBackend::LinuxLibsecret,
+            fallback,
+            fallback_lock_directory(&plaintext_path),
+        ));
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -700,7 +783,7 @@ pub async fn secure_storage_for_policy(
         let _ = &user;
         let _ = &config_dir;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Ok(fallback)
     }
@@ -789,6 +872,7 @@ mod tests {
         unavailable: AtomicBool,
         fail_delete: AtomicBool,
         encrypted: bool,
+        backend: SecureStorageBackend,
     }
 
     impl MemoryStorage {
@@ -798,7 +882,17 @@ mod tests {
                 unavailable: AtomicBool::new(false),
                 fail_delete: AtomicBool::new(false),
                 encrypted,
+                backend: if encrypted {
+                    SecureStorageBackend::MacOsKeychain
+                } else {
+                    SecureStorageBackend::PlainText
+                },
             }
+        }
+
+        fn with_backend(mut self, backend: SecureStorageBackend) -> Self {
+            self.backend = backend;
+            self
         }
 
         fn set_unavailable(&self, unavailable: bool) {
@@ -882,11 +976,7 @@ mod tests {
         }
 
         fn backend(&self) -> SecureStorageBackend {
-            if self.encrypted {
-                SecureStorageBackend::MacOsKeychain
-            } else {
-                SecureStorageBackend::PlainText
-            }
+            self.backend
         }
     }
 
@@ -1120,6 +1210,174 @@ mod tests {
         .await
         .expect("isolated bridge storage");
         assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
+        assert_eq!(
+            storage.account_ownership_backend(),
+            SecureStorageBackend::MemorySession
+        );
+    }
+
+    #[tokio::test]
+    async fn account_ownership_stays_native_during_fallback_recovery_and_reopen() {
+        for memory_only in [false, true] {
+            let root = tempdir().unwrap();
+            let primary = Arc::new(
+                MemoryStorage::new(true).with_backend(SecureStorageBackend::LinuxLibsecret),
+            );
+            let fallback: Arc<dyn SecureStorage> = if memory_only {
+                Arc::new(InMemorySecureStorage::new())
+            } else {
+                Arc::new(DeferredPlainTextStorage::new(root.path().join("fallback")))
+            };
+            let storage = RuntimeFallbackStorage::new(
+                primary.clone(),
+                fallback.clone(),
+                root.path().join("locks"),
+            );
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            primary.set_unavailable(true);
+            storage
+                .store("fixture", "key", test_payload(b"synthetic-key"))
+                .await
+                .unwrap();
+            assert_eq!(storage.backend(), fallback.backend());
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            let reopened =
+                RuntimeFallbackStorage::new(primary.clone(), fallback, root.path().join("locks"));
+            assert_eq!(
+                reopened.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            primary.set_unavailable(false);
+            assert!(reopened.retrieve("fixture", "key").await.unwrap().is_some());
+            assert_eq!(reopened.backend(), SecureStorageBackend::LinuxLibsecret);
+            assert_eq!(
+                reopened.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            assert!(!storage.contains("unrelated", "absent").await.unwrap());
+            assert_eq!(storage.backend(), SecureStorageBackend::LinuxLibsecret);
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_fallback_keeps_native_ownership_without_cross_policy_secret_access() {
+        let root = tempdir().unwrap();
+        let plaintext = root.path().join("fallback");
+        let missing = || {
+            Err(SecureStorageError::BackendUnavailable(
+                "synthetic native executable missing".into(),
+            ))
+        };
+        let storage = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext.clone())),
+            root.path().join("locks"),
+        );
+        assert_eq!(storage.backend(), SecureStorageBackend::PlainText);
+        assert_eq!(
+            storage.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        storage
+            .store("fixture", "key", test_payload(b"synthetic-persistent-key"))
+            .await
+            .unwrap();
+
+        let isolated = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(InMemorySecureStorage::new()),
+            root.path().join("locks"),
+        );
+        assert_eq!(isolated.backend(), SecureStorageBackend::MemorySession);
+        assert_eq!(
+            isolated.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        assert!(
+            isolated.retrieve("fixture", "key").await.unwrap().is_none(),
+            "NativeOrMemory must not read NativePreferred's plaintext sidecar"
+        );
+        isolated
+            .store(
+                "fixture",
+                "memory-only",
+                test_payload(b"synthetic-session-key"),
+            )
+            .await
+            .unwrap();
+        let memory_restarted = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(InMemorySecureStorage::new()),
+            root.path().join("locks"),
+        );
+        assert_eq!(
+            memory_restarted.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        assert!(memory_restarted
+            .retrieve("fixture", "memory-only")
+            .await
+            .unwrap()
+            .is_none());
+
+        let restarted = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext.clone())),
+            root.path().join("locks"),
+        );
+        assert!(restarted
+            .retrieve("fixture", "key")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            restarted.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        let recovered = native_or_fallback_storage(
+            Ok(Arc::new(
+                MemoryStorage::new(true).with_backend(SecureStorageBackend::LinuxLibsecret),
+            )),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext)),
+            root.path().join("locks"),
+        );
+        assert!(recovered
+            .retrieve("fixture", "key")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(recovered.backend(), SecureStorageBackend::LinuxLibsecret);
+        assert_eq!(
+            recovered.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        let fixture = secure_storage_for_policy(
+            "synthetic".into(),
+            root.path().to_owned(),
+            root.path().join("explicit-fixture"),
+            CredentialStoragePolicy::PlainTextFixture,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture.account_ownership_backend(),
+            SecureStorageBackend::PlainText
+        );
     }
 
     #[test]

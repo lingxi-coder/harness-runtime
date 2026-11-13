@@ -434,6 +434,7 @@ fn descriptor_preserves_typed_engine_hook_and_plugin_origins() {
         "mcp_dropped_tools_delta",
         "agent_listing_delta",
         "skill_listing",
+        "nested_memory",
         "edited_text_file",
         "proactivity",
         "auto_mode",

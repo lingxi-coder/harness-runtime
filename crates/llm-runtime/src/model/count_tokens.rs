@@ -30,8 +30,6 @@ pub async fn count_tokens(
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
-    let captured = crate::anthropic_extra_body::captured(request)?;
-    let request = captured.as_ref();
     match try_count_tokens_exact(client, transport, request).await? {
         Some(tokens) => Ok(tokens),
         None => client.estimate_input_tokens_for_route(request),
@@ -42,9 +40,6 @@ pub async fn count_tokens(
 /// A first request or changed input/route falls back to whole-input estimation.
 #[must_use]
 pub fn estimate_input_tokens(request: &LlmRequest) -> u64 {
-    let captured = crate::anthropic_extra_body::captured(request)
-        .expect("extra-body capture defers route-specific failures");
-    let request = captured.as_ref();
     request
         .execution
         .context_usage_estimate
@@ -92,19 +87,31 @@ pub async fn try_count_tokens_exact(
 /// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
-    let captured = crate::anthropic_extra_body::captured(request)
-        .expect("extra-body capture defers route-specific failures");
-    let request = captured.as_ref();
-    let projected = crate::prompt_projection::for_estimate(request);
-    let request = projected.as_ref();
+    approximate_tokens_for_route(
+        request,
+        request.execution.prompt_projection_profile.as_ref(),
+        request
+            .execution
+            .context_usage_protocol
+            .or(request.execution.input_protocol)
+            .unwrap_or(crate::ProtocolFamily::AnthropicMessages),
+    )
+}
+
+pub(crate) fn approximate_tokens_for_route(
+    request: &LlmRequest,
+    profile: Option<&lingxi_llm_client::protocol::ProviderProfile>,
+    protocol: crate::ProtocolFamily,
+) -> u64 {
     let input = &request.input;
-    let extra = crate::anthropic_extra_body::prompt(request);
+    let system = crate::prompt_projection::system_for_route(request, profile, protocol);
+    let extra = crate::anthropic_extra_body::prompt_for_protocol(request, protocol);
     let field = |key: &str| extra.and_then(|extra| extra.payload_at(key));
     let mut byte_len = 0u64;
     if let Some(system) = field("/system") {
         byte_len = byte_len.saturating_add(serialized_len(&system));
     } else {
-        for block in &input.system {
+        for block in system.as_ref() {
             byte_len = byte_len.saturating_add(serialized_len(block));
         }
     }

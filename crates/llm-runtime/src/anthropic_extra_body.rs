@@ -5,12 +5,12 @@ use crate::{LlmError, LlmRequest, ProtocolFamily};
 use lingxi_llm_client::{
     protocol::JsonPayload, providers::anthropic::request_policy::AnthropicRequestKind,
 };
-use std::borrow::Cow;
 
 /// Host-owned capture; `None` inside a capture is an authoritative empty
 /// environment, including across credential awaits and physical retries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedAnthropicExtraBody {
+    kind: AnthropicRequestKind,
     body: Option<JsonPayload>,
     count: Option<JsonPayload>,
     prompt: Option<JsonPayload>,
@@ -18,40 +18,35 @@ pub struct CapturedAnthropicExtraBody {
 }
 
 pub(crate) fn capture(request: &mut LlmRequest) -> Result<(), LlmError> {
-    if request.execution.anthropic_extra_body.is_none() {
-        let body = if request.execution.read_token_count {
+    let kind = request.execution.anthropic_request_kind;
+    let body = match request.execution.anthropic_extra_body.as_ref() {
+        Some(captured) if captured.kind == kind || captured.failure.is_some() => return Ok(()),
+        // Auxiliary builders can select their kind after the common builder.
+        // Reproject the saved body, never reread the operation's environment.
+        Some(captured) => Ok(captured.body.clone()),
+        None if request.execution.read_token_count => {
             // Read counts one scalar source, independently of generation.
             Ok(None)
-        } else {
-            crate::service::extra_body_object()
-        };
-        // Preserve a failure too, but only an actual Anthropic-family route
-        // may surface it. A Responses primary can still fail over later using
-        // the original capture without observing an intervening env change.
-        request.execution.anthropic_extra_body = Some(
-            match body.and_then(|body| {
-                CapturedAnthropicExtraBody::new(body, request.execution.anthropic_request_kind)
-            }) {
-                Ok(capture) => capture,
-                Err(error) => CapturedAnthropicExtraBody {
-                    body: None,
-                    count: None,
-                    prompt: None,
-                    failure: Some(error),
-                },
+        }
+        None => crate::service::extra_body_object(),
+    };
+    // ApiService alone owns the environment. Raw ModelRuntime operations use
+    // only explicit request input and never call this capture function.
+    // Preserve a failure too, but only an actual Anthropic-family route may
+    // surface it, including after a non-Anthropic primary fails over.
+    request.execution.anthropic_extra_body = Some(
+        match body.and_then(|body| CapturedAnthropicExtraBody::new(body, kind)) {
+            Ok(capture) => capture,
+            Err(error) => CapturedAnthropicExtraBody {
+                kind,
+                body: None,
+                count: None,
+                prompt: None,
+                failure: Some(error),
             },
-        );
-    }
+        },
+    );
     Ok(())
-}
-
-pub(crate) fn captured(request: &LlmRequest) -> Result<Cow<'_, LlmRequest>, LlmError> {
-    if request.execution.anthropic_extra_body.is_some() {
-        return Ok(Cow::Borrowed(request));
-    }
-    let mut request = request.clone();
-    capture(&mut request)?;
-    Ok(Cow::Owned(request))
 }
 
 pub(crate) fn is_anthropic(protocol: ProtocolFamily) -> bool {
@@ -104,6 +99,13 @@ pub(crate) fn prompt(request: &LlmRequest) -> Option<&JsonPayload> {
         .context_usage_protocol
         .or(request.execution.input_protocol)
         .unwrap_or(ProtocolFamily::AnthropicMessages);
+    prompt_for_protocol(request, protocol)
+}
+
+pub(crate) fn prompt_for_protocol(
+    request: &LlmRequest,
+    protocol: ProtocolFamily,
+) -> Option<&JsonPayload> {
     is_anthropic(protocol).then_some(())?;
     request
         .execution
@@ -126,6 +128,7 @@ impl CapturedAnthropicExtraBody {
     ) -> Result<Self, LlmError> {
         let Some(extra) = body.as_ref() else {
             return Ok(Self {
+                kind,
                 body: None,
                 count: None,
                 prompt: None,
@@ -149,11 +152,9 @@ impl CapturedAnthropicExtraBody {
             let Some(value) = extra.payload_at(&format!("/{key}")) else {
                 continue;
             };
-            if key != "output_format" {
-                count = count
-                    .with_object_field(key, &value)
-                    .map_err(crate::upstream::error)?;
-            }
+            count = count
+                .with_object_field(key, &value)
+                .map_err(crate::upstream::error)?;
             let clean = match key {
                 "system" | "tools" => {
                     crate::prompt_cache::block_array_without_cache_controls(&value, encoding)
@@ -191,6 +192,9 @@ impl CapturedAnthropicExtraBody {
             // Main merges config fields; an effort-only override leaves the
             // computed format intact. Side queries replace the whole slot.
             if kind != AnthropicRequestKind::Main || config.payload_at("/format").is_some() {
+                count = count
+                    .with_object_field("output_config", &format)
+                    .map_err(crate::upstream::error)?;
                 prompt = prompt
                     .with_object_field("output_config", &format)
                     .map_err(crate::upstream::error)?;
@@ -202,6 +206,7 @@ impl CapturedAnthropicExtraBody {
                 .map_err(crate::upstream::error)?;
         }
         Ok(Self {
+            kind,
             body,
             count: (count.object_len("") != Some(0)).then_some(count),
             prompt: (prompt.object_len("") != Some(0)).then_some(prompt),
@@ -221,6 +226,7 @@ mod tests {
         };
         let mut request = LlmRequest::new("m");
         request.execution.anthropic_extra_body = Some(CapturedAnthropicExtraBody {
+            kind: AnthropicRequestKind::Main,
             body: None,
             count: None,
             prompt: None,
@@ -242,9 +248,10 @@ mod tests {
         let count = snapshot.count.unwrap();
         assert_eq!(count.string_at("/system").as_deref(), Some("text"));
         assert!(count.payload_at("/thinking").is_some());
-        for field in ["/metadata", "/max_tokens", "/stream", "/output_config"] {
+        for field in ["/metadata", "/max_tokens", "/stream"] {
             assert!(count.payload_at(field).is_none(), "{field}");
         }
+        assert!(count.payload_at("/output_config/format").is_some());
         assert!(snapshot
             .prompt
             .unwrap()
@@ -254,5 +261,28 @@ mod tests {
         read.execution.read_token_count = true;
         capture(&mut read).unwrap();
         assert!(body(&read, ProtocolFamily::AnthropicMessages).is_none());
+    }
+
+    #[test]
+    fn changing_query_kind_reprojects_the_captured_body_without_recapturing() {
+        let snapshot = CapturedAnthropicExtraBody::new(
+            Some(JsonPayload::parse(r#"{"output_config":{"effort":"high"}}"#).unwrap()),
+            AnthropicRequestKind::Main,
+        )
+        .unwrap();
+        assert!(snapshot.count.is_none());
+        let mut request = LlmRequest::new("m");
+        request.execution.anthropic_extra_body = Some(snapshot);
+        request.execution.anthropic_request_kind = AnthropicRequestKind::SideQuery;
+        capture(&mut request).unwrap();
+        let count = count(&request, ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(
+            count.payload_at("/output_config").unwrap().object_len(""),
+            Some(0)
+        );
+        assert!(body(&request, ProtocolFamily::AnthropicMessages)
+            .unwrap()
+            .payload_at("/output_config/effort")
+            .is_some());
     }
 }

@@ -854,6 +854,26 @@ fn mobile_public_stale_coalesced_cancel_preserves_unrelated_stream_and_followup(
             .await
             .unwrap();
         seed_cancellable_coalesced(&first, &session, true);
+        first
+            .durable_turns
+            .begin(
+                &session,
+                900,
+                "new independent owner".into(),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        first
+            .durable_turns
+            .transition(
+                &session,
+                900,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("explicit continuation fixture".into()),
+            )
+            .unwrap();
         session
     });
     drop(first);
@@ -874,13 +894,10 @@ fn mobile_public_stale_coalesced_cancel_preserves_unrelated_stream_and_followup(
             .await
             .unwrap();
         handle
-            .submit(ClientCommand::SendPrompt {
-                text: "new independent owner".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(900),
-                visualization_context: None,
-            })
+            // A cold Running group deliberately blocks new automatic work.
+            // Explicit continuation is authorized to establish a separate
+            // live owner without making that stale group its own input.
+            .submit(ClientCommand::ResumeTurn { turn_id: 900 })
             .await
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
@@ -888,6 +905,22 @@ fn mobile_public_stale_coalesced_cancel_preserves_unrelated_stream_and_followup(
             .unwrap()
             .unwrap();
         let owner = handle.active_cancel.lock().await.clone().unwrap();
+        assert_eq!(owner.turn_id, Some(900));
+        let calls = stream.captured_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0]
+                .messages
+                .iter()
+                .filter(|row| row.text_content() == "new independent owner")
+                .count(),
+            1
+        );
+        assert!(calls[0]
+            .messages
+            .iter()
+            .all(|row| !row.text_content().contains("queued-811")
+                && !row.text_content().contains("queued-812")));
         handle
             .submit(ClientCommand::Cancel { turn_id: Some(812) })
             .await
@@ -1237,7 +1270,7 @@ fn mobile_public_bound_member_cancel_retires_group_before_owner_release() {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum CoalescedClaimBoundary {
     Running,
     Started,
@@ -1248,6 +1281,14 @@ struct CoalescedWatcherClaimListener {
     recorded: FakeListener,
     entered: Notify,
     release: Notify,
+    release_probe: StdMutex<Option<CoalescedClaimReleaseProbe>>,
+    early_proof: AtomicBool,
+}
+
+#[derive(Clone)]
+struct CoalescedClaimReleaseProbe {
+    owner: Arc<super::super::ActiveTurn>,
+    slot: Arc<tokio::sync::Mutex<Option<Arc<super::super::ActiveTurn>>>>,
 }
 
 impl CoalescedWatcherClaimListener {
@@ -1257,6 +1298,8 @@ impl CoalescedWatcherClaimListener {
             recorded: FakeListener::default(),
             entered: Notify::new(),
             release: Notify::new(),
+            release_probe: StdMutex::new(None),
+            early_proof: AtomicBool::new(false),
         }
     }
 }
@@ -1264,6 +1307,19 @@ impl CoalescedWatcherClaimListener {
 #[async_trait]
 impl ClientEventListener for CoalescedWatcherClaimListener {
     async fn on_event(&self, event: ClientEvent) {
+        if matches!(&event, Ev::TurnRecoveryState { snapshot }
+            if [811, 812].contains(&snapshot.turn_id)
+                && snapshot.state == TurnRecoveryStateDto::Cancelled)
+        {
+            let probe = self.release_probe.lock().unwrap().clone();
+            if let Some(probe) = probe {
+                let completed = probe.owner.completed.load(Ordering::Acquire);
+                let released = probe.slot.lock().await.is_none();
+                if !completed || !released {
+                    self.early_proof.store(true, Ordering::Release);
+                }
+            }
+        }
         let selected = match (self.boundary, &event) {
             (CoalescedClaimBoundary::Running, Ev::TurnRecoveryState { snapshot }) => {
                 snapshot.turn_id == 811 && snapshot.state == TurnRecoveryStateDto::Running
@@ -1331,6 +1387,10 @@ fn mobile_public_watcher_claim_cancel_proves_every_unconsumed_member_after_relea
                         .unwrap();
                     let owner = handle.active_cancel.lock().await.clone().unwrap();
                     assert_eq!(owner.turn_id, Some(811));
+                    *listener.release_probe.lock().unwrap() = Some(CoalescedClaimReleaseProbe {
+                        owner: owner.clone(),
+                        slot: handle.active_cancel.clone(),
+                    });
                     assert_eq!(
                         handle.durable_turns.load(&session, 811).unwrap().queue_delivery,
                         QueueDeliveryState::Claimed
@@ -1364,36 +1424,28 @@ fn mobile_public_watcher_claim_cancel_proves_every_unconsumed_member_after_relea
                     // The commit becomes visible before queue retirement's
                     // await. This gate also waits for that retirement to end.
                     drop(owner.initial_event_gate.lock().await);
-                    // The worker is still inside its real claim callback,
-                    // before it can spawn a driver or append a user row.
+                    // The foreign initial callback stays permanently parked.
+                    // Cancellation may drop that callback; only the actual
+                    // native owner completion and slot release are barriers.
                     let warm_pending = handle.durable_turns.scan_pending(&session).unwrap();
                     let cold_pending = DurableTurnStore::new(handle.lingxi_home.join("mobile-turns"))
                         .scan_pending(&session)
                         .unwrap();
                     let dispatches = handle.message_queue.snapshot().await;
-                    let retry = handle.submit(ClientCommand::Cancel { turn_id: requested });
-                    tokio::pin!(retry);
-                    let retry_before_release = futures_util::poll!(retry.as_mut());
-                    let retry_returned_before_release = retry_before_release.is_ready();
-                    let proof_before_release = listener.recorded.received.lock().await.iter().any(|event|
-                        matches!(event, Ev::TurnRecoveryState { snapshot }
-                            if [811, 812].contains(&snapshot.turn_id)
-                                && snapshot.state == TurnRecoveryStateDto::Cancelled));
-                    let original_returned_before_release = cancellation.is_finished();
-                    listener.release.notify_one();
                     let result = tokio::time::timeout(wait, cancellation).await.unwrap().unwrap();
-                    let retry_result = match retry_before_release {
-                        std::task::Poll::Ready(result) => result,
-                        std::task::Poll::Pending => tokio::time::timeout(wait, retry).await.unwrap(),
-                    };
-                    assert!(!original_returned_before_release);
-                    assert!(!retry_returned_before_release);
-                    assert!(!proof_before_release, "group proof must follow the worker's release");
+                    assert!(owner.completed.load(Ordering::Acquire));
+                    assert!(handle.active_cancel.lock().await.is_none());
+                    assert!(!handle.message_queue.has_active_turn().await);
+                    assert!(!listener.early_proof.load(Ordering::Acquire), "every group proof must follow native owner completion and slot release");
+                    // After release, Cancel(None) has no target. Retry the
+                    // exact durable member explicitly so uncertain publication
+                    // still proves the whole group, with or without an owner.
+                    tokio::time::timeout(wait, handle.submit(ClientCommand::Cancel { turn_id: Some(812) }))
+                        .await.unwrap().unwrap();
                     assert!(warm_pending.is_empty());
                     assert!(cold_pending.is_empty());
                     assert!(dispatches.iter().all(|command| !is_mobile_dispatch_command(&command.uuid)));
-                    assert!(owner.completed.load(Ordering::Acquire));
-                    retry_result.unwrap();
+                    assert!(!listener.early_proof.load(Ordering::Acquire));
                     if uncertain {
                         assert!(result.is_err());
                     } else {
@@ -1408,7 +1460,7 @@ fn mobile_public_watcher_claim_cancel_proves_every_unconsumed_member_after_relea
                             Ev::TurnRecoveryState { snapshot } if snapshot.turn_id == member
                                 && snapshot.state == TurnRecoveryStateDto::Cancelled)).count(),
                             if uncertain { 1 } else { 2 },
-                            "each successful Cancel publishes one proof per original member");
+                            "each successful Cancel publishes one proof per original member; boundary={boundary:?}, requested={requested:?}, uncertain={uncertain}, events={events:?}");
                     }
                 });
             }

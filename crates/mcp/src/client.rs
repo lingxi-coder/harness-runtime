@@ -789,6 +789,7 @@ pub struct McpClient {
 #[derive(Debug, Clone)]
 enum OutputSchemaCompileFailure {
     Invalid(Utf16JsonProjection),
+    MissingTool,
 }
 
 /// Host-only handoff invoked immediately before a physical tool RPC.
@@ -810,6 +811,7 @@ pub(crate) struct McpOutputSchemaCatalog {
     rows: Vec<McpOutputSchemaSnapshot>,
     by_model_name: HashMap<String, usize>,
     by_raw_tool_name: HashMap<String, usize>,
+    initialized: bool,
 }
 
 impl McpOutputSchemaCatalog {
@@ -843,7 +845,10 @@ impl McpOutputSchemaSnapshot {
         } else {
             None
         };
-        let mut catalog = McpOutputSchemaCatalog::default();
+        let mut catalog = McpOutputSchemaCatalog {
+            initialized: true,
+            ..McpOutputSchemaCatalog::default()
+        };
         catalog.rows.reserve(tools.len());
         for tool in tools {
             let plan = if let Some(schema) = &tool.output_schema {
@@ -916,6 +921,7 @@ impl McpOutputSchemaSnapshot {
         &self,
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, McpClientError> {
+        self.ensure_catalog_tool()?;
         let Some(plan) = self.plan.as_ref() else {
             return Ok(output.clone());
         };
@@ -927,6 +933,7 @@ impl McpOutputSchemaSnapshot {
                     detail: detail.clone(),
                 }
             }
+            OutputSchemaCompileFailure::MissingTool => self.missing_tool_error(),
         })?;
         match plan.validate(output).await.map_err(|error| {
             McpClientError::Rpc(
@@ -944,10 +951,32 @@ impl McpOutputSchemaSnapshot {
         }
     }
 
+    fn missing_tool_error(&self) -> McpClientError {
+        McpClientError::Rpc(
+            format!(
+                "MCP live catalog no longer contains tool {}",
+                self.full_name
+            )
+            .into(),
+        )
+    }
+
+    fn ensure_catalog_tool(&self) -> Result<(), McpClientError> {
+        if matches!(
+            self.plan,
+            Some(Err(OutputSchemaCompileFailure::MissingTool))
+        ) {
+            Err(self.missing_tool_error())
+        } else {
+            Ok(())
+        }
+    }
+
     async fn validate_result(
         &self,
         mut result: McpToolResultDto,
     ) -> Result<McpToolResultDto, McpClientError> {
+        self.ensure_catalog_tool()?;
         if let Some(output) = result.structured_content.as_ref() {
             result.structured_content = Some(self.parse_output(output).await?);
         }
@@ -1220,7 +1249,9 @@ impl McpClient {
             })
             .unwrap_or_else(|| McpOutputSchemaSnapshot {
                 full_name: full_name.to_owned(),
-                plan: None,
+                plan: plans
+                    .initialized
+                    .then_some(Err(OutputSchemaCompileFailure::MissingTool)),
             });
         snapshot.full_name = full_name.to_owned();
         snapshot
@@ -2052,10 +2083,6 @@ impl McpClient {
         let Some(validator) = &self.output_schema_validator else {
             return Ok(());
         };
-        if tools.iter().all(|tool| tool.output_schema.is_none()) {
-            *self.output_schema_plans.write().await = McpOutputSchemaCatalog::default();
-            return Ok(());
-        }
         let plans = McpOutputSchemaSnapshot::compile_catalog(tools, Some(validator)).await?;
         *self.output_schema_plans.write().await = plans;
         Ok(())
@@ -2385,6 +2412,7 @@ impl McpClient {
         let output_schema = self
             .output_schema_snapshot_for_raw_tool(full_name, tool_source.string_at(""))
             .await;
+        output_schema.ensure_catalog_tool()?;
         if let Some(capture) = output_schema_capture {
             capture(output_schema.clone());
         }

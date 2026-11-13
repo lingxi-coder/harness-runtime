@@ -71,6 +71,13 @@ pub trait SecureStorage: Send + Sync {
     /// Concrete backend in use. Useful for logging, telemetry, and user-facing
     /// "where are my secrets stored?" diagnostics.
     fn backend(&self) -> SecureStorageBackend;
+
+    /// Stable credential ownership used to scope durable provider accounts.
+    /// Fallback wrappers must retain their configured ownership when the active
+    /// diagnostic backend changes; explicitly isolated stores keep their own domain.
+    fn account_ownership_backend(&self) -> SecureStorageBackend {
+        self.backend()
+    }
 }
 
 /// Identifies the concrete secure-storage backend in use.

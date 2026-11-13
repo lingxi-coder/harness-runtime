@@ -2812,6 +2812,14 @@ impl ApiService {
         request.execution.query_source = Some("model_validation".to_owned());
         request.execution.anthropic_request_kind =
             lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        // Validation owns its minimal caller-supplied body. Pin an empty
+        // capture so the common driver cannot inherit session environment.
+        request.execution.anthropic_extra_body = Some(
+            crate::anthropic_extra_body::CapturedAnthropicExtraBody::new(
+                None,
+                request.execution.anthropic_request_kind,
+            )?,
+        );
 
         let mut retry_control = RetryControl {
             primary_model: request.input.model.clone(),
@@ -10011,6 +10019,7 @@ impl ApiService {
             }
         }
         req.set_effort(effort)?;
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 
@@ -10060,6 +10069,7 @@ impl ApiService {
         if query_source.is_some() {
             req.execution.query_source = query_source.map(str::to_string);
         }
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 
@@ -13516,6 +13526,7 @@ impl ApiService {
         if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
             req.set_effort(Some(effort))?;
         }
+        crate::anthropic_extra_body::capture(&mut req)?;
         req.execution.context_usage_binding = context_history.clone().map(|history| {
             crate::context_usage::ContextUsageBinding::new(history, context_measurement.clone())
         });
@@ -13636,6 +13647,7 @@ impl ApiService {
         req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         self.apply_side_query_thinking(&mut req, &model, Some(thinking), None);
         req.set_effort(effort)?;
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 

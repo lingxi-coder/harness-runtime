@@ -79,6 +79,65 @@ mod output_schema_cache {
             requires_user_interaction: false,
         }
     }
+
+    #[tokio::test]
+    async fn schema_less_live_catalog_keeps_membership_without_starting_a_validator_session() {
+        struct NeverStarted;
+        impl JsonSchemaValidator for NeverStarted {
+            fn new_session(&self, _: SchemaProfile) -> Arc<dyn JsonSchemaValidatorSession> {
+                panic!("schema-less catalog must not create a worker session")
+            }
+        }
+        let (connection, _peer_tx, _peer_rx) = paired_connection();
+        let client = McpClient::new("fixture", PathBuf::from("/tmp"), connection)
+            .await
+            .with_json_schema_validator(Arc::new(NeverStarted));
+        let mut plain = tool();
+        plain.output_schema = None;
+        client
+            .install_output_schemas(&[plain.clone()])
+            .await
+            .unwrap();
+        let arbitrary = Utf16JsonProjection::parse(r#"{"arbitrary":true}"#).unwrap();
+        client
+            .output_schema_snapshot_for_raw_tool(&plain.full_name, Some(&plain.tool_name))
+            .await
+            .parse_output(&arbitrary)
+            .await
+            .unwrap();
+        assert!(client
+            .output_schema_snapshot_for_raw_tool(&plain.full_name, Some("removed"))
+            .await
+            .parse_output(&arbitrary)
+            .await
+            .is_err());
+        client.install_output_schemas(&[]).await.unwrap();
+        assert!(client
+            .output_schema_snapshot(&plain.full_name)
+            .await
+            .parse_output(&arbitrary)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_live_client_without_validator_keeps_its_existing_availability_contract() {
+        let (connection, _peer_tx, _peer_rx) = paired_connection();
+        let client = McpClient::new("fixture", PathBuf::from("/tmp"), connection).await;
+        let advertised = tool();
+        client
+            .install_output_schemas(&[advertised.clone()])
+            .await
+            .unwrap();
+        assert!(!client.output_schema_plans.read().await.initialized);
+        client
+            .output_schema_snapshot(&advertised.full_name)
+            .await
+            .parse_output(&Utf16JsonProjection::parse("{}").unwrap())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn worker_failure_does_not_poison_recovery_and_catalog_sessions_retire() {
         let (connection, _peer_tx, _peer_rx) = paired_connection();

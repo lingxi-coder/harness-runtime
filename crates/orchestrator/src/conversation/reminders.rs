@@ -2943,10 +2943,16 @@ message with multiple tool uses so they run concurrently."
             // A raw host seed may describe a different on-disk spelling. It
             // cannot replace the existing complete observation of the logical
             // file Read will actually open, including its timestamp and diff.
+            let logical_path = read_tool.read_state_request_path(&path);
             let entry = normalized_baselines
-                .get(&read_tool.read_state_request_path(&path))
+                .get(&logical_path)
                 .filter(|entry| {
-                    entry.offset.is_none() && entry.limit.is_none() && !entry.is_partial_view
+                    entry.offset.unwrap_or(1) <= 1
+                        && !entry.is_partial_view
+                        && entry.limit.is_none_or(|limit| {
+                            !entry.content.is_empty()
+                                && (entry.content.matches('\n').count() as u64 + 1) < limit
+                        })
                 })
                 .cloned()
                 .unwrap_or_else(|| original_entry.clone());
@@ -2980,6 +2986,25 @@ message with multiple tool uses so they run concurrently."
             // Partial views still suppress content reads and reminders; their
             // presence must not suppress the missing-route cleanup above.
             if entry.offset.is_some() || entry.limit.is_some() {
+                // A complete logical Read already owns this observation. Its
+                // offset-one shape follows Native's no-reminder branch; retire
+                // only the unchanged raw seed folded into that same key.
+                if !std::sync::Arc::ptr_eq(&entry, &original_entry) {
+                    let mut state = self
+                        .prompt_runtime
+                        .read_state_map
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state
+                        .peek_snapshot(&logical_path)
+                        .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &entry))
+                        && state.peek_snapshot(&path).is_some_and(|current| {
+                            std::sync::Arc::ptr_eq(&current, &original_entry)
+                        })
+                    {
+                        state.remove(&path);
+                    }
+                }
                 continue;
             }
             if mtime_ms <= entry.mtime_ms {
@@ -3273,6 +3298,12 @@ message with multiple tool uses so they run concurrently."
     /// (@236015184) contains no envelope of its own, so the two tags nest.
     /// Appended ONLY to the outgoing snapshot (never `session.history` / JSONL).
     pub(crate) async fn new_diagnostics_reminder_message(&self) -> Option<ConversationMessage> {
+        let staged = crate::request_context::has_prompt_context();
+        if staged {
+            if let Some(pending) = self.pending_diagnostics_reminder() {
+                return Some(pending);
+            }
+        }
         let block = self
             .prompt_runtime
             .new_diagnostics_source
@@ -3280,10 +3311,19 @@ message with multiple tool uses so they run concurrently."
             .take_new_diagnostics_block()
             .await?;
         let block = lingxi_core::types::utf16_json::Utf16JsonProjection::from(block);
-        Some(source_user_meta(
-            MessageId::new(),
-            wrap_system_reminder_source(&block),
-        ))
+        let message = source_user_meta(MessageId::new(), wrap_system_reminder_source(&block));
+        // Retain synchronously after consuming the source. Cancellation can
+        // discard a request snapshot, but must not lose the source's advanced
+        // dedup cursor or drain newer diagnostics before this row is delivered.
+        Some(if staged {
+            self.retain_pending_step_reminder(
+                "diagnostics",
+                message,
+                super::pending_reminders::Acknowledgement::Diagnostics,
+            )
+        } else {
+            message
+        })
     }
 
     /// Consume actual per-context Read/readFor triggers, independent of LRU

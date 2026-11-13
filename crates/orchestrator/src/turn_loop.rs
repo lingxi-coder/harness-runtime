@@ -796,7 +796,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                 );
                 let tool_result_reminder_suffixes =
                     orch.tool_result_reminder_suffixes_for_snapshot(&history_snapshot);
-                lingxi_core::host::refusal_driver::scope_fallback_target(
+                let outcome = lingxi_core::host::refusal_driver::scope_fallback_target(
                     fallback_context,
                     call_api_with_ptl_recovery(
                         orch,
@@ -820,7 +820,16 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         None,
                     ),
                 )
-                .await
+                .await;
+                // The plain provider path has no Mod physical-response
+                // capture. Complete consume-once diagnostics here too, before
+                // later publication awaits can be cancelled.
+                if let Ok(PtlCallOutcome::Response { request_history, .. }) = &outcome {
+                    orch.acknowledge_diagnostics_id(
+                        orch.pending_diagnostics_id_in_request(request_history),
+                    );
+                }
+                outcome
             }
         })),
     )

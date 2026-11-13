@@ -252,6 +252,54 @@ fn resume_edits_apply_exact_hunks_and_preserve_proven_line_endings() {
 }
 
 #[test]
+fn resume_edits_preserve_partial_context_until_a_complete_read() {
+    for flag in [
+        None,
+        Some(json!(false)),
+        Some(json!(true)),
+        Some(json!("true")),
+    ] {
+        let mut session = session();
+        let before = [97, 0xd800, 10];
+        let after = [98, 0xd800, 10];
+        append_read(&mut session, FILE, &before);
+        let id = call(&mut session, "Edit", source(json!({"file_path": FILE})));
+        let mut data = Utf16JsonProjection::parse(
+            r#"{"filePath":"/workspace/file.txt","originalFile":"a\ud800\n",
+            "structuredPatch":[{"oldStart":1,"newStart":1,"oldLines":1,"newLines":1,
+            "lines":["-a\ud800","+b\ud800"]}]}"#,
+        )
+        .unwrap();
+        if let Some(flag) = &flag {
+            data.set_field("contentNotInModelContext", source(flag.clone()))
+                .unwrap();
+        }
+        result(&mut session, id, Some(data), false);
+        let map = restore(&session);
+        if flag.as_ref().is_some_and(|flag| flag.is_string()) {
+            assert!(get(&map, Path::new(FILE)).is_none());
+            continue;
+        }
+        assert_eq!(
+            get_content_units(&map, Path::new(FILE)),
+            Some(after.to_vec())
+        );
+        assert_eq!(
+            get(&map, Path::new(FILE)).unwrap().is_partial_view,
+            flag == Some(json!(true))
+        );
+
+        append_read(&mut session, FILE, &after);
+        let map = restore(&session);
+        assert!(!get(&map, Path::new(FILE)).unwrap().is_partial_view);
+        assert_eq!(
+            get_content_units(&map, Path::new(FILE)),
+            Some(after.to_vec())
+        );
+    }
+}
+
+#[test]
 fn resume_notebook_edits_retain_complete_source_even_with_literal_surrogates() {
     let mut original = r#"{"cells":[{"cell_type":"code","source":""#
         .encode_utf16()

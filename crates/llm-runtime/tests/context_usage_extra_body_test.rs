@@ -459,11 +459,17 @@ fn physical_overrides_reach_readonly_count_and_generation_without_losing_exact_s
             );
             let transport = Arc::new(FakeTransport::default());
             let api = service(transport.clone(), false);
-            let mut raw = llm_runtime::LlmRequest::new(MODEL)
-                .with_profile(PROFILE)
-                .with_user_text("logical");
-            raw.input.max_tokens = Some(64);
-            let read_only = runtime(false).prepare_count_tokens(&raw).await.unwrap();
+            let captured = api
+                .build_scheduled_request(
+                    request("logical", opaque_history()),
+                    llm_runtime::model::thinking::ThinkingConfig::Disabled,
+                    None,
+                )
+                .unwrap();
+            let read_only = runtime(false)
+                .prepare_count_tokens(&captured)
+                .await
+                .unwrap();
             // Exact JavaScript strings can live in the prepared request's
             // string sidecar. Compare the actual wire projection, as the
             // transport does, rather than its display-only body value.
@@ -543,8 +549,8 @@ fn unsupported_counter_falls_back_to_physical_extra_input_and_responses_ignore_i
         let big = "large fallback system ".repeat(6000);
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", extra_system(&big));
         let raw = llm_runtime::LlmRequest::new(MODEL).with_user_text("hi");
-        assert!(llm_runtime::model::count_tokens::approximate_tokens(&raw) > BUDGET);
-        assert!(llm_runtime::model::count_tokens::estimate_input_tokens(&raw) > BUDGET);
+        assert!(llm_runtime::model::count_tokens::approximate_tokens(&raw) < BUDGET);
+        assert!(llm_runtime::model::count_tokens::estimate_input_tokens(&raw) < BUDGET);
         let transport = Arc::new(FakeTransport {
             count_unsupported: true,
             ..Default::default()

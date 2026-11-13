@@ -489,7 +489,16 @@ fn recover_snapshot(
             }
             // Edit publishes the reconstructed disk line endings, unlike
             // Write's LF-normalized publication.
-            Some(snapshot(without_bom(&after).to_vec(), false))
+            let mut recovered = snapshot(without_bom(&after).to_vec(), false);
+            // The full originalFile sidecar is UI/replay evidence, not proof
+            // that a truncated Read's unseen suffix entered model context.
+            // Live Edit preserves this fence until a complete Read replaces it.
+            recovered.entry.is_partial_view = match data.at_pointer("/contentNotInModelContext") {
+                Some(value) => value.as_bool()?,
+                None => false,
+            } || prior
+                .is_some_and(|prior| prior.entry.is_partial_view);
+            Some(recovered)
         }
         "NotebookEdit" => {
             // A native successful notebook result carries the entire updated

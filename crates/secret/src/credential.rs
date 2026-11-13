@@ -285,9 +285,9 @@ impl CredentialManager {
             None => Ok(None),
         }
     }
-    /// Actual backend identity, used with the configured host root to scope account slots.
+    /// Stable storage ownership, used with the configured host root to scope account slots.
     pub fn account_storage_backend(&self) -> lingxi_core::host::SecureStorageBackend {
-        self.storage.backend()
+        self.storage.account_ownership_backend()
     }
 
     /// Install a host-owned credential without writing platform storage.

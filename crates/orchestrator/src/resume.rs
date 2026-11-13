@@ -59,8 +59,12 @@ pub(crate) mod file_state;
 mod file_state_tests;
 #[cfg(test)]
 mod mod_attachment_provenance_tests;
+#[cfg(test)]
+mod nested_memory_mod_recovery_tests;
 mod plan_files;
 pub(crate) mod todo_state;
+#[cfg(test)]
+mod typed_policy_recovery_tests;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
 #[derive(Debug, thiserror::Error)]
@@ -2106,9 +2110,13 @@ fn hook_attachment_message_for_api(
                 content.string_units("")?,
             ))
         }
-        "auto_mode" | "auto_mode_exit" => {
-            // These NAr rows are durable model history as well as inputs to
-            // the next auto-mode producer (`latest_auto_mode`). Restore only
+        "auto_mode"
+        | "auto_mode_exit"
+        | "sandbox_instructions"
+        | "attention_budget"
+        | "proactivity" => {
+            // Policy NAr rows are durable model history as well as inputs to
+            // later delta producers. Restore only
             // the exact rendered cache; an absent, empty, or unsupported
             // rendering must not be reconstructed from the raw payload.
             if message
@@ -2331,6 +2339,7 @@ fn mod_attachment_descriptor_from_payload(
                 | "mcp_dropped_tools_delta"
                 | "agent_listing_delta"
                 | "skill_listing"
+                | "nested_memory"
                 | "edited_text_file"
                 | "proactivity"
                 | "auto_mode"

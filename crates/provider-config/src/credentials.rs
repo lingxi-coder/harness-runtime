@@ -325,7 +325,12 @@ impl MultiCredentialProvider {
             {
                 return Err(LlmError::AccountStorageUnavailable);
             }
-            if &resolved != rejected {
+            let expires_soon = matches!(
+                &current.kind,
+                secret::AccountCredentialKind::OAuth { expires_at, .. }
+                    if *expires_at <= std::time::SystemTime::now() + std::time::Duration::from_secs(60)
+            );
+            if &resolved != rejected && !expires_soon {
                 return Ok(Some(llm_runtime::VersionedCredential {
                     credential: resolved,
                     credential_revision: Some(current.credential_revision),
@@ -1386,6 +1391,67 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn oauth_rejection_refreshes_an_expired_adopted_revision() {
+            for remaining in [0, 30] {
+                let root = tempfile::tempdir().unwrap();
+                let durable = Arc::new(MemStorage::default());
+                let writer = manager_on(durable.clone());
+                let storage = Arc::new(PositiveCachedStorage::new(durable));
+                let reader = manager_on(storage.clone());
+                let mut account = api_account("11111111-1111-4111-8111-111111111111");
+                account.auth_kind = lingxi_core::host::provider_accounts::AccountAuthKind::OAuth;
+                account.execution_binding_id = "openai-chatgpt".into();
+                writer
+                    .store_account_credential(
+                        &account.credential_ref,
+                        &oauth_record(1, 1, SystemTime::now() + Duration::from_secs(3600)),
+                    )
+                    .await
+                    .unwrap();
+                publish(root.path(), &account, 1);
+                let provider = MultiCredentialProvider::new(reader.clone())
+                    .with_accounts(vec![account.clone()])
+                    .with_account_version_root(root.path().to_owned());
+                let rejected = provider
+                    .load_versioned(&account_scope(&account))
+                    .await
+                    .unwrap();
+                let expires_at = if remaining == 0 {
+                    SystemTime::UNIX_EPOCH
+                } else {
+                    SystemTime::now() + Duration::from_secs(remaining)
+                };
+                writer
+                    .store_account_credential(
+                        &account.credential_ref,
+                        &oauth_record(1, 2, expires_at),
+                    )
+                    .await
+                    .unwrap();
+                publish(root.path(), &account, 2);
+                let owner = owner(writer, root.path());
+                reader.set_account_credential_refresher(owner.clone());
+                let refreshed = provider
+                    .refresh_versioned(&account_scope(&account), &rejected.credential)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(refreshed.credential_revision, Some(3));
+                assert!(
+                    matches!(refreshed.credential, Credential::ChatGptOAuth { access_token, .. }
+                    if access_token == "synthetic-oauth-r3")
+                );
+                assert_eq!(
+                    *owner.calls.lock().unwrap(),
+                    vec![2],
+                    "refresh the adopted revision"
+                );
+                assert_eq!(owner.rotations.load(Ordering::SeqCst), 1);
+                assert_eq!(storage.uncached_reads.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[tokio::test]
         async fn adopted_oauth_refresh_failure_reports_the_current_credential_revision() {
             let root = tempfile::tempdir().unwrap();
             let durable = Arc::new(MemStorage::default());
@@ -1406,7 +1472,7 @@ mod tests {
             let provider = MultiCredentialProvider::new(reader.clone())
                 .with_accounts(vec![account.clone()])
                 .with_account_version_root(root.path().to_owned());
-            provider
+            let rejected = provider
                 .load_versioned(&account_scope(&account))
                 .await
                 .unwrap();
@@ -1425,6 +1491,15 @@ mod tests {
                 rotations: AtomicUsize::new(0),
                 fail_rotation: true,
             }));
+            let failed_refresh = provider
+                .refresh_versioned(&account_scope(&account), &rejected.credential)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failed_refresh.error,
+                LlmError::Authentication { .. }
+            ));
+            assert_eq!(failed_refresh.credential_revision, Some(2));
             let failed = provider
                 .load_versioned(&account_scope(&account))
                 .await

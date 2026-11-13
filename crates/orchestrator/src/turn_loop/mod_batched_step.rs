@@ -482,6 +482,9 @@ pub(super) async fn dispatch(
                                 return Err(hooks::mods::ModError::Hook(message));
                             }
                         };
+                        orch.acknowledge_diagnostics_id(
+                            orch.pending_diagnostics_id_in_request(&request_history),
+                        );
                         let physical = PhysicalStepResponse::capture(
                             orch,
                             response.as_ref().clone(),
