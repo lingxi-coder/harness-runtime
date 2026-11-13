@@ -97,10 +97,18 @@ fn orch(files: Vec<MemoryFile>, cwd: PathBuf, map: ReadFileStateMap) -> Conversa
         Arc::new(UnusedHttp),
         Arc::new(UnusedRuntime),
     ));
+    let mut tools = ToolRegistry::new();
+    let mut read_context = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![cwd.clone()],
+    );
+    read_context.read_file_state = map.clone();
+    tools.register_builtin(Arc::new(tool_file::FileReadTool::new(read_context)));
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(tools),
         hooks,
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),

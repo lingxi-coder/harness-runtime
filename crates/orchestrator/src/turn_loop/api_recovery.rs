@@ -827,6 +827,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 orch.output.emit_compaction_phase("skipped").await;
             }
             if result.was_compacted {
+                let pending_acks = orch.pending_step_acknowledgements(&turn_reminders);
                 // Apply the post-compact transition (history swap + boundary
                 // marker + CompactionCompleted) via the shared helper.
                 // `cancel: None` — the reactive PTL fallback has no
@@ -841,6 +842,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     None,
                 )
                 .await;
+                orch.restore_step_acknowledgements(pending_acks);
                 let history_raw = {
                     let s = orch.session.lock().await;
                     s.model_context_history()

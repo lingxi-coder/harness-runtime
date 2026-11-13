@@ -5,8 +5,29 @@ async fn read_fixture(raw: &[u8], max_bytes: usize) -> (String, bool) {
     let path = dir.path().join("read.txt");
     std::fs::write(&path, raw).unwrap();
     let file = std::fs::File::open(path).unwrap();
-    let (content, truncated, _) = read_restored_text_prefix(file, max_bytes).await.unwrap();
-    (content, truncated)
+    let (content, truncated, _, _) = read_restored_text_prefix(file, max_bytes).await.unwrap();
+    (String::from_utf16_lossy(&content), truncated)
+}
+
+#[tokio::test]
+async fn post_compact_reader_uses_bom_selected_utf16_and_retains_exact_surrogates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("utf16.txt");
+    let units = [0xfeff, 97, 13, 10, 0xd800, 98];
+    std::fs::write(
+        &path,
+        units
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let (content, truncated, _, _) =
+        read_restored_text_prefix(std::fs::File::open(path).unwrap(), 100)
+            .await
+            .unwrap();
+    assert_eq!(content, [97, 10, 0xd800, 98]);
+    assert!(!truncated);
 }
 
 #[tokio::test]

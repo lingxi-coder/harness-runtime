@@ -88,16 +88,19 @@ impl McpRegistry {
         &self,
         config: &McpServerConfig,
     ) -> Result<Option<GrantProvenance>, crate::discovery_cache::MissReason> {
-        let has_oauth = matches!(
+        let explicit_oauth = matches!(
             &config.spec,
             McpTransportSpec::Sse { oauth: Some(_), .. }
                 | McpTransportSpec::Http { oauth: Some(_), .. }
         );
-        if !has_oauth {
+        if !matches!(
+            &config.spec,
+            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
+        ) {
             return Ok(Some(GrantProvenance::unbound()));
         }
         let Some(deps) = &self.oauth else {
-            return Ok(None);
+            return Ok((!explicit_oauth).then(GrantProvenance::unbound));
         };
         let key = oauth::server_key(config.storage_name(), &config.spec);
         let storage = self.oauth_storage_for_config(config, &deps.storage);
@@ -105,7 +108,7 @@ impl McpRegistry {
             .await
             .map_err(|_| crate::discovery_cache::MissReason::NoFingerprint)?;
         let Some(grant_token) = grant_token else {
-            return Ok(None);
+            return Ok((!explicit_oauth).then(GrantProvenance::unbound));
         };
         Ok(Some(GrantProvenance::from_grant_token(&grant_token, true)))
     }
@@ -407,6 +410,8 @@ impl McpRegistry {
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
         }
+        self.set_cached_output_parser_catalog(key, entry.tools.clone())
+            .await;
         connections.insert(
             key.to_string(),
             McpConnectionState::Cached {

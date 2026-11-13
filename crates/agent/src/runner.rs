@@ -1993,6 +1993,15 @@ impl Drop for PromptTranscriptCancellationGuard {
     }
 }
 
+/// Construct the large phase state outside its caller's poll stack frame.
+#[inline(never)]
+fn boxed_agent_future<'a, T, F>(create: impl FnOnce() -> F) -> llm_runtime::BoxFuture<'a, T>
+where
+    F: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(create())
+}
+
 /// Subagent state-machine loop.
 ///
 /// Drives the multi-turn loop and emits [`SubagentEvent`]s on `out_tx`.
@@ -2042,7 +2051,7 @@ pub async fn run_subagent(
         .and_then(|budget| budget.model_safety_observer())
         .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
     let inner: llm_runtime::BoxFuture<'static, ()> =
-        Box::pin(run_subagent_inner(ctx, event_rx, out_tx));
+        boxed_agent_future(|| run_subagent_inner(ctx, event_rx, out_tx));
     let inner: llm_runtime::BoxFuture<'static, ()> = if let Some(observer) = safety_observer {
         Box::pin(lingxi_core::host::model_safety::scope_model_safety(
             observer, inner,
@@ -2277,24 +2286,28 @@ async fn run_subagent_inner(
         };
         // Run the body against the proxy, then drop our proxy sender so the
         // forwarder's `recv()` loop ends and we can read the captured status.
-        Box::pin(run_subagent_loop(
-            ctx,
-            event_rx,
-            proxy_tx,
-            &mut live_hook_transcript,
-            &mut live_hook_model_selection,
-        ))
+        boxed_agent_future(|| {
+            run_subagent_loop(
+                ctx,
+                event_rx,
+                proxy_tx,
+                &mut live_hook_transcript,
+                &mut live_hook_model_selection,
+            )
+        })
         .await;
         forwarder.await.unwrap_or(None)
     } else {
         // No frontmatter hooks: straight passthrough, no proxy overhead.
-        Box::pin(run_subagent_loop(
-            ctx,
-            event_rx,
-            out_tx,
-            &mut live_hook_transcript,
-            &mut live_hook_model_selection,
-        ))
+        boxed_agent_future(|| {
+            run_subagent_loop(
+                ctx,
+                event_rx,
+                out_tx,
+                &mut live_hook_transcript,
+                &mut live_hook_model_selection,
+            )
+        })
         .await;
         None
     };

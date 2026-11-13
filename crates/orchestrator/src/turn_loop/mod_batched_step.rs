@@ -108,11 +108,12 @@ impl PhysicalStepResponse {
         duration: Duration,
         params: &PhysicalObservation,
         mut prompt_components: ReselectedPromptComponents,
+        cache_snapshot: Option<llm_runtime::prompt_cache::RequestSnapshot>,
     ) -> Result<Self, lingxi_core::settings::SettingsError> {
         let retries = orch.api.last_retry_count();
-        let request_id = orch.api.last_request_id();
         let cache_read = response.usage.counts().cache_read_tokens;
         let cache_create = response.usage.counts().cache_write_tokens;
+        let request_id = orch.api.last_request_id();
         // Submit as soon as the physical request succeeds. If a later Mod
         // throws or the cancelable turn drops its future, the cost supervisor
         // still owns this observed charge.
@@ -156,19 +157,8 @@ impl PhysicalStepResponse {
                 );
             (receipt, model_ref)
         });
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
-        orch.model_runtime
-            .prompt_cache_ledger
-            .lock()
-            .await
-            .ledger
-            .record(cost::prompt_cache_ledger::RequestFacts {
-                at_ms: now_ms,
-                input_tokens: response.usage.counts().input_tokens,
-                cache_read_tokens: cache_read,
-                cache_creation_tokens: cache_create,
-                ttl: cost::prompt_cache_ledger::CacheTtl::FiveMinutes,
-            });
+        orch.record_prompt_cache_usage_for_request(&response.usage, cache_snapshot)
+            .await;
         orch.record_mod_turn_provider_usage(&response.usage, &response.model);
         orch.record_response_input_tokens(&response.usage);
         orch.record_inline_prompt_tools_after_success(&params.tools)
@@ -443,30 +433,34 @@ pub(super) async fn dispatch(
                         );
                         let tool_result_reminder_suffixes =
                             orch.tool_result_reminder_suffixes_for_snapshot(&params.history);
-                        let outcome = lingxi_core::host::refusal_driver::scope_fallback_target(
-                            fallback_context,
-                            crate::provider_adapter::with_mod_turn_step_effort(
-                                effort_override,
-                                call_api_with_ptl_recovery(
-                                    orch,
-                                    params.system.as_ref(),
-                                    params.skip_global_cache_for_system_prompt,
-                                    &model,
-                                    profile.as_deref(),
-                                    params.history,
-                                    params.rewriter,
-                                    params.tools,
-                                    params.max_tokens,
-                                    params.deferred,
-                                    params.date_change,
-                                    params.reminders.messages.clone(),
-                                    tool_result_reminder_suffixes,
-                                    &mut params.guarded_async_hook_reminders,
-                                    &params.context_announcements,
-                                    params.cost_scope.as_ref(),
-                                    params.native_anthropic_request_context.clone(),
-                                    None,
-                                    None,
+                        let cache_capture = llm_runtime::prompt_cache::RequestCapture::default();
+                        let outcome = crate::request_context::with_physical_cache_capture(
+                            cache_capture.clone(),
+                            lingxi_core::host::refusal_driver::scope_fallback_target(
+                                fallback_context,
+                                crate::provider_adapter::with_mod_turn_step_effort(
+                                    effort_override,
+                                    call_api_with_ptl_recovery(
+                                        orch,
+                                        params.system.as_ref(),
+                                        params.skip_global_cache_for_system_prompt,
+                                        &model,
+                                        profile.as_deref(),
+                                        params.history,
+                                        params.rewriter,
+                                        params.tools,
+                                        params.max_tokens,
+                                        params.deferred,
+                                        params.date_change,
+                                        params.reminders.messages.clone(),
+                                        tool_result_reminder_suffixes,
+                                        &mut params.guarded_async_hook_reminders,
+                                        &params.context_announcements,
+                                        params.cost_scope.as_ref(),
+                                        params.native_anthropic_request_context.clone(),
+                                        None,
+                                        None,
+                                    ),
                                 ),
                             ),
                         )
@@ -497,6 +491,7 @@ pub(super) async fn dispatch(
                             started.elapsed(),
                             &observation,
                             components,
+                            cache_capture.take(),
                         )
                         .await
                         .map_err(|error| {
@@ -603,28 +598,32 @@ pub(super) async fn dispatch(
             );
             let tool_result_reminder_suffixes =
                 orch.tool_result_reminder_suffixes_for_snapshot(&params.history);
-            let outcome = lingxi_core::host::refusal_driver::scope_fallback_target(
-                fallback_context,
-                call_api_with_ptl_recovery(
-                    orch,
-                    params.system.as_ref(),
-                    params.skip_global_cache_for_system_prompt,
-                    &params.model,
-                    params.profile.as_deref(),
-                    params.history,
-                    params.rewriter,
-                    params.tools,
-                    params.max_tokens,
-                    params.deferred,
-                    params.date_change,
-                    params.reminders.messages.clone(),
-                    tool_result_reminder_suffixes,
-                    &mut params.guarded_async_hook_reminders,
-                    &params.context_announcements,
-                    params.cost_scope.as_ref(),
-                    params.native_anthropic_request_context.clone(),
-                    None,
-                    None,
+            let cache_capture = llm_runtime::prompt_cache::RequestCapture::default();
+            let outcome = crate::request_context::with_physical_cache_capture(
+                cache_capture.clone(),
+                lingxi_core::host::refusal_driver::scope_fallback_target(
+                    fallback_context,
+                    call_api_with_ptl_recovery(
+                        orch,
+                        params.system.as_ref(),
+                        params.skip_global_cache_for_system_prompt,
+                        &params.model,
+                        params.profile.as_deref(),
+                        params.history,
+                        params.rewriter,
+                        params.tools,
+                        params.max_tokens,
+                        params.deferred,
+                        params.date_change,
+                        params.reminders.messages.clone(),
+                        tool_result_reminder_suffixes,
+                        &mut params.guarded_async_hook_reminders,
+                        &params.context_announcements,
+                        params.cost_scope.as_ref(),
+                        params.native_anthropic_request_context.clone(),
+                        None,
+                        None,
+                    ),
                 ),
             )
             .await?;
@@ -642,6 +641,7 @@ pub(super) async fn dispatch(
                         started.elapsed(),
                         &observation,
                         captured_components.clone(),
+                        cache_capture.take(),
                     )
                     .await?,
                 ],

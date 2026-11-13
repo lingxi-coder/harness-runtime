@@ -535,10 +535,23 @@ impl ConversationOrchestrator {
                 .clone(),
             ..Default::default()
         };
-        llm_runtime::context_usage::ContextUsageEstimator::new(move |model, profile, history| {
-            measured_route_matches(history, &metadata, model, profile)
-                .then(|| live_context_tokens(history, &metadata))
-        })
+        llm_runtime::context_usage::ContextUsageEstimator::with_prefix(
+            move |model, profile, history| {
+                if !measured_route_matches(history, &metadata, model, profile) {
+                    return None;
+                }
+                let (index, _) = usage_anchor(history, &metadata)?;
+                let source = metadata.assistant_usage.get(&history[index].id())?;
+                let prefix_source = source
+                    .subprojection("/usage/lingxi_context_usage_prefix")
+                    .ok()?;
+                let prefix: llm_runtime::context_usage::ContextUsagePrefix =
+                    serde_json::from_str(&prefix_source.to_json_string().ok()?).ok()?;
+                prefix
+                    .matches_history(history)
+                    .then(|| (live_context_tokens(history, &metadata), prefix))
+            },
+        )
     }
 
     /// Each API round captures fresh usage. Concurrent chats and side queries
@@ -546,7 +559,11 @@ impl ConversationOrchestrator {
     pub(crate) async fn scope_main_request<F: std::future::Future>(&self, future: F) -> F::Output {
         self.main_context_usage_estimator()
             .await
-            .scope(self.model_runtime.prompt_cache_capture.scope(future))
+            .scope(
+                crate::request_context::physical_cache_capture()
+                    .unwrap_or_else(|| self.model_runtime.prompt_cache_capture.clone())
+                    .scope(future),
+            )
             .await
     }
 
@@ -616,9 +633,15 @@ mod tests {
         {
             let mut state = orch.session.lock().await;
             state.history = history.clone();
-            state.native_request_history.assistant_usage.insert(measured.id(), Source::parse(
-                r#"{"providerMessageId":"last-response","requestedModel":"requested","requestedProfile":"openai","usage":{"input_tokens":3,"cache_creation_input_tokens":106617,"cache_read_input_tokens":20709,"output_tokens":638}}"#,
-            ).unwrap());
+            let request = llm_runtime::LlmRequest::new("requested").with_profile("openai");
+            let prefix =
+                llm_runtime::context_usage::ContextUsagePrefix::capture(&request, &history[..1])
+                    .unwrap();
+            state.native_request_history.assistant_usage.insert(measured.id(), Source::from_serde_value(&serde_json::json!({
+                "providerMessageId":"last-response", "requestedModel":"requested", "requestedProfile":"openai",
+                "usage":{"input_tokens":3,"cache_creation_input_tokens":106617,"cache_read_input_tokens":20709,"output_tokens":638,
+                    "lingxi_context_usage_prefix":prefix}
+            })).unwrap());
         }
         let estimator = orch.main_context_usage_estimator().await;
         assert_eq!(
@@ -636,6 +659,18 @@ mod tests {
             estimator.estimate("requested", Some("openai"), &history[2..]),
             None,
             "compacted or rewritten history cannot retain an absent usage anchor"
+        );
+
+        let mut rewritten = history.clone();
+        if let ConversationMessage::Assistant { content, .. } = &mut rewritten[0] {
+            *content = vec![ContentBlock::Text {
+                text: "changed old prefix".into(),
+                citations: None,
+            }];
+        }
+        assert_eq!(
+            estimator.estimate("requested", Some("openai"), &rewritten),
+            None
         );
 
         let mut grown = history;
@@ -672,6 +707,23 @@ mod tests {
                 .estimate("requested", Some("openai"), &grown),
             None,
             "the next API round captures fresh usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_without_original_prompt_identity_is_not_rebound_to_a_new_request() {
+        let orch = test_orchestrator();
+        let message = assistant(MessageId::new(), "legacy response");
+        let history = vec![message.clone()];
+        orch.session.lock().await.native_request_history.assistant_usage.insert(message.id(), Source::parse(
+            r#"{"requestedModel":"m","requestedProfile":"p","usage":{"input_tokens":100,"output_tokens":2}}"#,
+        ).unwrap());
+        assert_eq!(orch.current_live_context_usage_for(&history).await, 102);
+        assert_eq!(
+            orch.main_context_usage_estimator()
+                .await
+                .estimate("m", Some("p"), &history),
+            None
         );
     }
 
@@ -931,13 +983,18 @@ mod tests {
     async fn cold_resume_restores_outer_requested_model_and_profile() {
         let session = uuid::Uuid::new_v4();
         let id = uuid::Uuid::new_v4();
+        let prefix = llm_runtime::context_usage::ContextUsagePrefix::capture(
+            &llm_runtime::LlmRequest::new("requested-large").with_profile("same-provider"),
+            &[],
+        )
+        .unwrap();
         let raw = serde_json::to_string(&serde_json::json!({
             "type":"assistant", "uuid":id.to_string(), "parentUuid":null,
             "isSidechain":false, "timestamp":"2026-11-09T00:00:00Z", "cwd":"/fixture",
             "version":"test", "sessionId":session.to_string(),
             "requestedModel":"requested-large", "requestedModelProfile":"same-provider",
             "message":{"id":id.to_string(), "role":"assistant", "model":"served-small",
-                "usage":{"input_tokens":200000,"output_tokens":100}, "stop_reason":"end_turn",
+                "usage":{"input_tokens":200000,"output_tokens":100,"lingxi_context_usage_prefix":prefix}, "stop_reason":"end_turn",
                 "content":[{"type":"text","text":"answer"}]}
         }))
         .unwrap();

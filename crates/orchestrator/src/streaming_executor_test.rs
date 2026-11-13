@@ -4409,6 +4409,7 @@ mod tests {
     struct ReleaseFirstOnSecondAssistantRow {
         release_first: Arc<Notify>,
         release_second: Arc<Notify>,
+        result_delivered: Arc<Notify>,
         events: Arc<Mutex<Vec<String>>>,
     }
 
@@ -4438,6 +4439,7 @@ mod tests {
             _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
             self.events.lock().unwrap().push(format!("result:{id}"));
+            self.result_delivered.notify_one();
         }
         async fn emit_end_turn(
             &self,
@@ -6554,12 +6556,9 @@ mod tests {
 
     #[tokio::test]
     async fn live_pump_settles_ready_results_into_raw_je_and_event_journal() {
-        let orch = ConversationOrchestrator::into_shared(orch_with_safe_tool());
-        let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
-            .await
-            .unwrap();
         let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
         let tool_id = ToolUseId::new();
+        let result_delivered = Arc::new(Notify::new());
         let events = vec![
             Ok(message_start("live-settlement", "model")),
             Ok(content_block_start_tool_use(
@@ -6569,15 +6568,43 @@ mod tests {
             )),
             Ok(input_json_delta(0, "{}")),
             Ok(content_block_stop(0)),
-            Ok(content_block_start_text(1)),
+        ];
+        let provider_wait = {
+            let result_delivered = result_delivered.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    result_delivered.notified(),
+                )
+                .await
+                .expect("pending provider input allows the ready result to settle");
+                Ok(content_block_start_text(1))
+            }
+        };
+        let tail = vec![
             Ok(text_delta(1, "assistant tail")),
             Ok(content_block_stop(1)),
             Ok(crate::test_support_stream::message_delta_stop("tool_use")),
             Ok(message_stop()),
         ];
-        let output: Arc<dyn lingxi_core::host::OutputStream> = Arc::new(MockOutputStream::new());
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
+            Arc::new(ReleaseFirstOnSecondAssistantRow {
+                release_first: Arc::new(Notify::new()),
+                release_second: Arc::new(Notify::new()),
+                result_delivered,
+                events: Arc::new(Mutex::new(Vec::new())),
+            });
+        let mut base = orch_with_safe_tool();
+        base.output = output.clone();
+        let orch = ConversationOrchestrator::into_shared(base);
+        let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
         let (turn, _) = crate::streaming_loop::pump_stream_with_executor_tracked_remaining(
-            stream::iter(events).boxed(),
+            stream::iter(events)
+                .chain(stream::once(provider_wait))
+                .chain(stream::iter(tail))
+                .boxed(),
             &output,
             crate::streaming_loop::ExecutorPump {
                 executor: &mut executor,
@@ -6622,10 +6649,12 @@ mod tests {
         let second_started = Arc::new(Notify::new());
         let release_second = Arc::new(Notify::new());
         let events_seen = Arc::new(Mutex::new(Vec::new()));
+        let result_delivered = Arc::new(Notify::new());
         let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(ReleaseFirstOnSecondAssistantRow {
                 release_first: release_first.clone(),
                 release_second: release_second.clone(),
+                result_delivered: result_delivered.clone(),
                 events: events_seen.clone(),
             });
         let mut registry = ToolRegistry::new();
@@ -6669,9 +6698,15 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), second_started.notified())
                 .await
                 .expect("bounded stage=second-serial-tool-start");
-            // B can start only after A is completed and available to Tn.
-            // This provider delta has no completed assistant row, so A is
-            // settled before the following text block stop creates row C.
+            // B can start after A completes, before its visible settlement.
+            // Keep provider input pending until Tn actually emits A's result;
+            // immediately ready provider events intentionally win the pump race.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                result_delivered.notified(),
+            )
+            .await
+            .expect("A settles while the provider is waiting");
             Ok(text_delta(2, "event row"))
         };
         let after_gate = vec![
@@ -6741,9 +6776,8 @@ mod tests {
             })
             .collect();
         assert_eq!(result_ids, [first_id.clone(), second_id.clone()]);
-        // Native Xl handles each provider event before Tn. The text delta
-        // above is released only after B starts, proving A is ready at that
-        // boundary. Row C then releases B, fixing both result positions.
+        // The provider waits for A's visible settlement before completing row
+        // C. Row C then releases B, fixing both result positions without sleeps.
         let expected_journal_order = matches!(
             settlement.journal.as_slice(),
             [

@@ -1911,6 +1911,9 @@ async fn enrich_candidate(
     )
     .await?;
     let skipped = *skipped_files > skipped_before;
+    if skipped {
+        return Ok(result);
+    }
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

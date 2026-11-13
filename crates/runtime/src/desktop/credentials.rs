@@ -854,12 +854,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential
     // id passes straight through unchanged.
-    let copilot_creds = llm_runtime::CopilotExchangeCredentialProvider::new(
-        Arc::new(composite),
-        llm_transport.clone(),
-        "github-copilot",
-    );
-    client = client.with_credential_provider(Arc::new(copilot_creds));
+    let copilot_creds =
+        crate::credential_provider::with_token_exchange(Arc::new(composite), llm_transport.clone());
+    client = client.with_credential_provider(copilot_creds);
     if let Some(pool) = account_pool {
         client = crate::account_pool_store::attach_account_runtime(client, pool, &catalog_registry);
     }

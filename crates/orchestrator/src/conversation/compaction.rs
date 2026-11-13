@@ -2,13 +2,19 @@
 
 use super::*;
 
-/// Current Ake/aW text read: bound disk bytes, decode lossily, then normalize
+/// Current Ake/aW text read: bound disk bytes, use Read's BOM-selected decoder, then normalize
 /// the complete retained body before the caller applies its token budget.
 pub(super) async fn read_restored_text_prefix(
     file: std::fs::File,
     max_bytes: usize,
-) -> std::io::Result<(String, bool, i64)> {
+) -> std::io::Result<(
+    Vec<u16>,
+    bool,
+    i64,
+    Option<tool_api::read_file_state::ReadFileIdentity>,
+)> {
     use tokio::io::AsyncReadExt as _;
+    let identity = tool_api::read_file_state::opened_read_file_identity(&file).ok();
     let file = tokio::fs::File::from_std(file);
     // Associate the contents with metadata from this opened file before the
     // read. A later editor write must advance beyond this timestamp rather
@@ -25,15 +31,13 @@ pub(super) async fn read_restored_text_prefix(
         .await?;
     let truncated = bytes.len() > max_bytes;
     bytes.truncate(max_bytes);
-    let read = String::from_utf8_lossy(&bytes);
-    let mut content = read
-        .strip_prefix('\u{feff}')
-        .unwrap_or(&read)
-        .replace("\r\n", "\n");
-    if content.ends_with('\r') {
+    let decoded = tool_file::file_meta::decode_native_text_units(&bytes);
+    let decoded = decoded.strip_prefix(&[0xfeff]).unwrap_or(&decoded);
+    let mut content = tool_file::file_meta::normalize_to_lf_units(decoded);
+    if content.last() == Some(&13) {
         content.pop();
     }
-    Ok((content, truncated, mtime_ms))
+    Ok((content, truncated, mtime_ms, identity))
 }
 
 /// Which side of the surviving messages the fresh summary lands on.
@@ -2859,8 +2863,9 @@ impl ConversationOrchestrator {
         enum FreshFileAttachment {
             Content {
                 path: std::path::PathBuf,
-                content: String,
+                content: Vec<u16>,
                 mtime_ms: i64,
+                identity: Option<tool_api::read_file_state::ReadFileIdentity>,
             },
             Reference {
                 path: std::path::PathBuf,
@@ -2894,11 +2899,11 @@ impl ConversationOrchestrator {
                 None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
             };
             match read {
-                Ok((content, truncated, mtime_ms)) => {
+                Ok((content, truncated, mtime_ms, identity)) => {
                     // Native Ake/aW normalizes a full text read before token
                     // budgeting and counting lines, including its empty final
                     // fragment. Apply the same body to the restored Read state.
-                    let units = content.encode_utf16().count() as u64;
+                    let units = content.len() as u64;
                     let extension = candidate
                         .path
                         .extension()
@@ -2923,6 +2928,7 @@ impl ConversationOrchestrator {
                             path: candidate.path,
                             content,
                             mtime_ms,
+                            identity,
                         });
                     }
                 }
@@ -2942,7 +2948,10 @@ impl ConversationOrchestrator {
                     path,
                     content,
                     mtime_ms,
+                    identity,
                 } => {
+                    let content_units = content;
+                    let content = String::from_utf16_lossy(&content_units);
                     let entry = tool_api::read_file_state::ReadFileEntry {
                         content: content.clone(),
                         mtime_ms,
@@ -2961,9 +2970,19 @@ impl ConversationOrchestrator {
                             "totalLines": lines,
                         }},
                     });
-                    let data = CompactSource::from_serde_value(&value)
+                    let mut data = CompactSource::from_serde_value(&value)
                         .expect("new file attachment is valid JSON");
-                    (path, data, Some(entry))
+                    let mut body = data.subprojection("/content").expect("file content");
+                    let mut file = body.subprojection("/file").expect("text file");
+                    file.set_field(
+                        "content",
+                        CompactSource::root_string(content.clone(), content_units.clone())
+                            .expect("exact decoded text"),
+                    )
+                    .expect("file object");
+                    body.set_field("file", file).expect("content object");
+                    data.set_field("content", body).expect("attachment object");
+                    (path, data, Some((entry, identity, content_units)))
                 }
                 FreshFileAttachment::Reference { path } => {
                     let value = serde_json::json!({
@@ -3023,13 +3042,14 @@ impl ConversationOrchestrator {
             running_tokens = running_tokens.saturating_add(cost);
             // Only attachments admitted to the model context may establish a
             // full Read. A budget-dropped file must remain eligible for Read.
-            if let Some(entry) = read_entry {
-                tool_api::read_file_state::set_with_requested_path(
+            if let Some((entry, identity, content_units)) = read_entry {
+                tool_api::read_file_state::set_from_opened_file(
                     read_state_map,
                     path.clone(),
                     entry,
-                    true,
-                    Some(path.clone()),
+                    vec![path.clone()],
+                    Some(content_units),
+                    identity,
                 );
             }
             let message = Self::file_attachment_projection(id, &data)
@@ -3267,6 +3287,7 @@ impl ConversationOrchestrator {
         if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return None;
         }
+        let compact_commit = crate::request_context::preparation_commit_scope();
         self.api.reset_conversation_context();
         // Query auto/PTL success (`DCr(..., u4(w))`, 2.1.286) rolls the
         // complete last-assistant usage before replacing the model context.
@@ -3592,12 +3613,75 @@ impl ConversationOrchestrator {
                 .total_tokens_reminder_usage
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        {
+            let s = self.session.lock().await;
+            let retained_ids = s
+                .model_context_history()
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<std::collections::HashSet<_>>();
+            drop(s);
+            let mut context = self.prompt_runtime.instruction_context.lock().await;
+            if let Some(context) = context.as_mut() {
+                let mut retained_paths = context
+                    .eager_instructions
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|file| String::from_utf16(&file.path_units()).ok())
+                    .map(std::path::PathBuf::from)
+                    .collect::<std::collections::HashSet<_>>();
+                let mut owners = self
+                    .prompt_runtime
+                    .agent_instruction_owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                owners.retain(|_, owner| retained_ids.contains(owner));
+                retained_paths.extend(owners.keys().cloned());
+                let attachments = self
+                    .transcript
+                    .model_reminder_attachments
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for id in &retained_ids {
+                    if let Some(source) = attachments.get(id) {
+                        let complete = match source.string_at("/type") {
+                            Some("nested_memory") => {
+                                source
+                                    .at_pointer("/content/startOnly")
+                                    .and_then(|value| value.as_bool())
+                                    != Some(true)
+                                    && source.string_units("/content/content").is_some()
+                            }
+                            Some("file") => {
+                                crate::resume::file_state::complete_file_attachment_path(source)
+                                    .is_some()
+                            }
+                            _ => false,
+                        };
+                        if !complete {
+                            continue;
+                        }
+                        if let Some(path) = source
+                            .string_at("/path")
+                            .or_else(|| source.string_at("/filename"))
+                        {
+                            retained_paths.insert(std::path::PathBuf::from(path));
+                        }
+                    }
+                }
+                context
+                    .sent_paths
+                    .retain(|path| retained_paths.contains(path));
+            }
+        }
         self.expect_prompt_cache_rebuild().await;
         // Relevant-memory and skill reminders live only in outgoing request
         // snapshots. Once compaction discards those snapshots, they may surface
         // again; restored file attachments remain deduplicated by
         // `read_state_map`. Drop in-flight pre-compact queries as well so stale
         // selections cannot be injected against the new history.
+        self.discard_pending_surfacing();
         self.prompt_runtime
             .surfaced_memory_paths
             .lock()
@@ -3666,6 +3750,7 @@ impl ConversationOrchestrator {
             .collect::<Vec<_>>();
         self.persist_messages_to_jsonl_batch(&post_compact_rows, false)
             .await;
+        drop(compact_commit);
 
         // Claude closes the compact command status before the query driver
         // publishes its boundary. Preserve this order for stream-json clients.

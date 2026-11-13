@@ -2348,6 +2348,8 @@ mod command_describe_impl;
 mod compaction_impl;
 #[path = "conversation/context_usage.rs"]
 pub(crate) mod context_usage;
+#[path = "conversation/pending_reminders.rs"]
+pub(crate) mod pending_reminders;
 mod task_delivery;
 pub(crate) use compaction_impl::{
     SessionCompactCore, SessionCompactCoreOutput, SessionCompactDecision,

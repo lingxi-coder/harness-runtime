@@ -3,6 +3,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+/// A context-beta refusal belongs to one physical provider connection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Context1mRouteKey {
+    pub(crate) provider: String,
+    pub(crate) profile: String,
+    pub(crate) endpoint: String,
+    pub(crate) protocol: crate::ProtocolFamily,
+    pub(crate) model: Vec<u16>,
+}
+
 #[derive(Default)]
 struct State {
     server_betas: HashMap<
@@ -15,7 +25,7 @@ struct State {
     stripped: bool,
     native_tool_search: NativeToolSearchState,
     native_thinking_binding_controls: NativeThinkingBindingControlsAttempt,
-    context_1m_refused_models: HashSet<Vec<u16>>,
+    context_1m_refused_models: HashSet<Context1mRouteKey>,
     recorder: Option<Arc<RecoveryRecorder>>,
 }
 
@@ -413,25 +423,42 @@ impl ThinkingRecoveryScope {
         }
     }
 
-    /// Whether Native previously completed a successful no-context-1m retry
-    /// for this exact `Fn(model)` UTF-16 key in the current conversation.
-    #[must_use]
-    pub fn context_1m_refused(&self, model_key: &[u16]) -> bool {
+    pub(crate) fn context_1m_refused_for(&self, key: &Context1mRouteKey) -> bool {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .context_1m_refused_models
-            .contains(model_key)
+            .contains(key)
     }
 
-    /// Commit Native's ordinary context-1m refusal only after a successful
-    /// non-stream response or the first accepted streaming MessageStart.
-    pub fn mark_context_1m_refused(&self, model_key: &[u16]) {
+    /// Commit only the connection captured by a successful physical retry.
+    pub(crate) fn mark_context_1m_refused_for(&self, key: Context1mRouteKey) {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .context_1m_refused_models
-            .insert(model_key.to_vec());
+            .insert(key);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn context_1m_refused(&self, model_key: &[u16]) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .context_1m_refused_models
+            .iter()
+            .any(|key| key.model == model_key)
+    }
+
+    #[cfg(test)]
+    fn mark_context_1m_refused(&self, model_key: &[u16]) {
+        self.mark_context_1m_refused_for(Context1mRouteKey {
+            provider: String::new(),
+            profile: String::new(),
+            endpoint: String::new(),
+            protocol: crate::ProtocolFamily::AnthropicMessages,
+            model: model_key.to_vec(),
+        });
     }
 
     /// Whether this conversation has observed a rejection for one of its

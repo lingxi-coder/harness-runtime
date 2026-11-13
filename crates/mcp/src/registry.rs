@@ -18,8 +18,8 @@ use futures_util::FutureExt as _;
 use indexmap::IndexMap;
 use lingxi_core::host::json_schema_validator::JsonSchemaValidator;
 use lingxi_core::host::{
-    Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpTransport,
-    McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
+    Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpToolDto,
+    McpTransport, McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, McpConnectionId};
@@ -278,22 +278,86 @@ struct RegisteredClient {
     client: Arc<McpClient>,
 }
 
+#[derive(Clone, Default)]
+struct OutputParserBinding {
+    client: Option<Arc<McpClient>>,
+    cached: Option<Arc<CachedOutputSchemas>>,
+}
+
+struct CachedOutputSchemas {
+    tools: Vec<McpToolDto>,
+    plans: tokio::sync::OnceCell<HashMap<String, crate::client::McpOutputSchemaSnapshot>>,
+}
+
 /// Connection-scoped parser captured by a registered MCP tool. It retains a
 /// stable server slot so Cached/lazy tools can be constructed before a live
 /// client is installed, and never performs a registry lookup while parsing.
 #[derive(Clone)]
 pub struct McpToolOutputSchemaParserHandle {
-    slot: Arc<RwLock<Option<Arc<McpClient>>>>,
+    slot: Arc<RwLock<OutputParserBinding>>,
     full_name: String,
+    validator: Option<Arc<dyn JsonSchemaValidator>>,
 }
 
 impl McpToolOutputSchemaParserHandle {
+    /// Snapshot locally; a cached tool can validate a Mod-only substitution
+    /// against its advertised schema without opening a transport.
+    pub async fn snapshot(
+        &self,
+        cached_schema: Option<&Utf16JsonProjection>,
+    ) -> Result<crate::client::McpOutputSchemaSnapshot, McpClientError> {
+        let binding = self.slot.read().await.clone();
+        if let Some(client) = binding.client {
+            Ok(client.output_schema_snapshot(&self.full_name).await)
+        } else if let Some(cached) = binding.cached {
+            // A schema-less tool has no catalog dependencies. In particular it
+            // must remain usable when a sibling needs an unavailable validator.
+            if cached
+                .tools
+                .iter()
+                .any(|tool| tool.full_name == self.full_name && tool.output_schema.is_none())
+            {
+                return crate::client::McpOutputSchemaSnapshot::compile(
+                    &self.full_name,
+                    None,
+                    self.validator.as_ref(),
+                )
+                .await;
+            }
+            let plans = cached
+                .plans
+                .get_or_try_init(|| {
+                    crate::client::McpOutputSchemaSnapshot::compile_catalog(
+                        &cached.tools,
+                        self.validator.as_ref(),
+                    )
+                })
+                .await?;
+            plans.get(&self.full_name).cloned().ok_or_else(|| {
+                McpClientError::Rpc(
+                    format!(
+                        "MCP cached catalog no longer contains tool {}",
+                        self.full_name
+                    )
+                    .into(),
+                )
+            })
+        } else {
+            crate::client::McpOutputSchemaSnapshot::compile(
+                &self.full_name,
+                cached_schema,
+                self.validator.as_ref(),
+            )
+            .await
+        }
+    }
+
     /// Apply the schema plan held by the currently bound connection.
     pub async fn parse_output(
         &self,
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, McpClientError> {
-        let client = self.slot.read().await.clone().ok_or_else(|| {
+        let client = self.slot.read().await.client.clone().ok_or_else(|| {
             McpClientError::Rpc(
                 format!(
                     "MCP server for tool {} has no connected output schema parser",
@@ -358,6 +422,9 @@ struct LazyUpgradeSlot {
     key: String,
     cached_connection_id: McpConnectionId,
     expected_config: McpServerConfig,
+    // A foreground lazy dial temporarily publishes Connecting. Retain its
+    // admitted cache for catalog fallback and retryable local preparation errors.
+    cached_state: Option<McpConnectionState>,
     refresh_partition: Option<DiscoveryCachePartition>,
     /// Actual protocol era recorded by the stale entry. This is distinct
     /// from the partition's expected era: auto negotiation can select the
@@ -384,6 +451,7 @@ impl LazyUpgradeSlot {
             key,
             cached_connection_id,
             expected_config,
+            cached_state: None,
             refresh_partition,
             refresh_entry_era,
             negotiation_mode,
@@ -478,6 +546,10 @@ struct CatalogFetchFailures {
 enum BackgroundInstallOutcome {
     Installed(McpConnectionId),
     Rejected(LiveDiscovery),
+    PreparationFailed {
+        discovery: LiveDiscovery,
+        error: McpError,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -713,7 +785,7 @@ pub struct McpRegistry {
         Arc<RwLock<HashMap<McpConnectionId, (String, Vec<McpDroppedToolRecord>)>>>,
     /// Stable per-server slots captured by MCP tool parser handles. These are
     /// not registry lookups at result time; registration updates each slot.
-    output_parser_slots: Arc<StdMutex<HashMap<String, Arc<RwLock<Option<Arc<McpClient>>>>>>>,
+    output_parser_slots: Arc<StdMutex<HashMap<String, Arc<RwLock<OutputParserBinding>>>>>,
     /// Fan-out for inbound server catalog invalidations. The engine subscribes
     /// once and refreshes the shared tool registry after a successful
     /// `tools/list`; lagged consumers reconcile against the latest shared active
@@ -1378,19 +1450,32 @@ impl McpRegistry {
         self
     }
 
-    fn output_parser_slot(&self, server_key: &str) -> Arc<RwLock<Option<Arc<McpClient>>>> {
+    fn output_parser_slot(&self, server_key: &str) -> Arc<RwLock<OutputParserBinding>> {
         let mut slots = self
             .output_parser_slots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         slots
             .entry(server_key.to_owned())
-            .or_insert_with(|| Arc::new(RwLock::new(None)))
+            .or_insert_with(|| Arc::new(RwLock::new(OutputParserBinding::default())))
             .clone()
     }
 
     async fn set_output_parser_client(&self, server_key: &str, client: Option<Arc<McpClient>>) {
-        *self.output_parser_slot(server_key).write().await = client;
+        *self.output_parser_slot(server_key).write().await = OutputParserBinding {
+            client,
+            cached: None,
+        };
+    }
+
+    async fn set_cached_output_parser_catalog(&self, server_key: &str, tools: Vec<McpToolDto>) {
+        *self.output_parser_slot(server_key).write().await = OutputParserBinding {
+            client: None,
+            cached: Some(Arc::new(CachedOutputSchemas {
+                tools,
+                plans: tokio::sync::OnceCell::new(),
+            })),
+        };
     }
 
     /// Capture the stable parser slot for one server/tool pair. The slot can
@@ -1404,6 +1489,7 @@ impl McpRegistry {
         Arc::new(McpToolOutputSchemaParserHandle {
             slot: self.output_parser_slot(server_key),
             full_name: full_name.to_owned(),
+            validator: self.json_schema_validator.clone(),
         })
     }
 
@@ -2645,6 +2731,34 @@ impl McpRegistry {
         key_is_internal: bool,
         sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        self.call_tool_with_output_schema_capture(
+            server,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            guard,
+            key_is_internal,
+            sdk_verdict,
+            None,
+        )
+        .await
+    }
+
+    /// Preserve the exact dispatched plan for host middleware, after lazy dial
+    /// and every authentication retry have selected their real live client.
+    pub async fn call_tool_with_output_schema_capture(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+        key_is_internal: bool,
+        sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
+        output_schema_capture: Option<crate::client::McpOutputSchemaCallback>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
         let key = if key_is_internal {
             server.to_owned()
         } else {
@@ -2660,6 +2774,7 @@ impl McpRegistry {
             on_progress,
             guard,
             sdk_verdict,
+            output_schema_capture,
         )
         .await
     }
@@ -2673,6 +2788,7 @@ impl McpRegistry {
         on_progress: Option<crate::client::McpProgressCallback>,
         guard: Option<crate::tool_identity::McpToolDispatchGuard>,
         sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
+        output_schema_capture: Option<crate::client::McpOutputSchemaCallback>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
         self.verify_tool_dispatch_guard(server, full_name, &guard)
             .await?;
@@ -2749,12 +2865,13 @@ impl McpRegistry {
             .await?;
         let config = self.get_config_by_key(server).await;
         let first = client
-            .call_tool_with_progress_and_sdk_verdict(
+            .call_tool_with_output_schema_capture(
                 full_name,
                 input.clone(),
                 tool_use_id,
                 on_progress.clone(),
                 sdk_verdict.as_ref().zip(config.as_ref()),
+                output_schema_capture.clone(),
             )
             .await;
         let Err(error) = first else {
@@ -2853,12 +2970,13 @@ impl McpRegistry {
             .await?;
         let config = self.get_config_by_key(server).await;
         let second = refreshed
-            .call_tool_with_progress_and_sdk_verdict(
+            .call_tool_with_output_schema_capture(
                 full_name,
                 input,
                 tool_use_id,
                 on_progress,
                 sdk_verdict.as_ref().zip(config.as_ref()),
+                output_schema_capture.clone(),
             )
             .await;
         if let Err(error) = &second {
@@ -3595,6 +3713,7 @@ impl McpRegistry {
             Cached {
                 connection_id: McpConnectionId,
                 config: McpServerConfig,
+                cached_state: McpConnectionState,
             },
             Connecting {
                 config: McpServerConfig,
@@ -3608,13 +3727,16 @@ impl McpRegistry {
                 Some(McpConnectionState::Connected { connection_id, .. }) => {
                     CachedDialState::Connected(*connection_id)
                 }
-                Some(McpConnectionState::Cached {
-                    connection_id,
-                    config,
-                    ..
-                }) => CachedDialState::Cached {
+                Some(
+                    state @ McpConnectionState::Cached {
+                        connection_id,
+                        config,
+                        ..
+                    },
+                ) => CachedDialState::Cached {
                     connection_id: *connection_id,
                     config: config.clone(),
+                    cached_state: state.clone(),
                 },
                 Some(McpConnectionState::Connecting { config, .. }) => {
                     CachedDialState::Connecting {
@@ -3632,6 +3754,7 @@ impl McpRegistry {
             CachedDialState::Cached {
                 connection_id,
                 config,
+                cached_state,
             } => {
                 if let Some(slot) = self.lazy_upgrade_slot(key).await {
                     if slot.matches(connection_id, &config) {
@@ -3656,7 +3779,7 @@ impl McpRegistry {
                 let negotiation_mode = cached_context
                     .as_ref()
                     .map_or(negotiation_mode, |context| context.negotiation_mode);
-                let slot = Arc::new(LazyUpgradeSlot::new(
+                let mut slot = LazyUpgradeSlot::new(
                     key.to_string(),
                     connection_id,
                     config.clone(),
@@ -3664,7 +3787,9 @@ impl McpRegistry {
                     refresh_entry_era,
                     negotiation_mode,
                     mode,
-                ));
+                );
+                slot.cached_state = Some(cached_state);
+                let slot = Arc::new(slot);
                 if mode == LazyUpgradeMode::Foreground {
                     self.connections.write().await.insert(
                         key.to_string(),
@@ -3729,10 +3854,9 @@ impl McpRegistry {
         config: &McpServerConfig,
         discovery: &LiveDiscovery,
         retired_connection_id: Option<McpConnectionId>,
-    ) {
-        let _ = self
-            .publish_connected_state_with_guard(key, config, discovery, retired_connection_id, None)
-            .await;
+    ) -> Result<(), McpError> {
+        self.publish_connected_state_with_guard(key, config, discovery, retired_connection_id, None)
+            .await
     }
 
     async fn publish_connected_state_with_guard(
@@ -3743,6 +3867,27 @@ impl McpRegistry {
         retired_connection_id: Option<McpConnectionId>,
         operation_guard: Option<&McpOperationGuard>,
     ) -> Result<(), McpError> {
+        // The caller owns this server's lifecycle lock. Select the final tools
+        // before preparing the new client: a failed list keeps the old catalog.
+        // Never hold the global connections lock across worker compilation.
+        let tools = {
+            let conns = self.connections.read().await;
+            match conns.get(key) {
+                Some(McpConnectionState::Connected { tools, .. })
+                | Some(McpConnectionState::Cached { tools, .. })
+                    if discovery.catalog_failures.tools =>
+                {
+                    tools.clone()
+                }
+                _ => discovery.tools.clone(),
+            }
+        };
+        if let Some(client) = &discovery.client {
+            client
+                .install_output_schemas(&tools)
+                .await
+                .map_err(|error| McpError::Connection(error.to_string().into()))?;
+        }
         let mut conns = self.connections.write().await;
         #[cfg(test)]
         self.maybe_pause_before_client_publish().await;
@@ -3751,24 +3896,13 @@ impl McpRegistry {
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
         }
-        let (tools, resources, prompts) = match conns.get(key) {
+        let (resources, prompts) = match conns.get(key) {
             Some(McpConnectionState::Connected {
-                tools,
-                resources,
-                prompts,
-                ..
+                resources, prompts, ..
             })
             | Some(McpConnectionState::Cached {
-                tools,
-                resources,
-                prompts,
-                ..
+                resources, prompts, ..
             }) => (
-                if discovery.catalog_failures.tools {
-                    tools.clone()
-                } else {
-                    discovery.tools.clone()
-                },
                 if discovery.catalog_failures.resources {
                     resources.clone()
                 } else {
@@ -3780,11 +3914,7 @@ impl McpRegistry {
                     discovery.prompts.clone()
                 },
             ),
-            _ => (
-                discovery.tools.clone(),
-                discovery.resources.clone(),
-                discovery.prompts.clone(),
-            ),
+            _ => (discovery.resources.clone(), discovery.prompts.clone()),
         };
         conns.insert(
             key.to_string(),
@@ -3812,7 +3942,10 @@ impl McpRegistry {
         } else {
             clients.shift_remove(key);
         }
-        *self.output_parser_slot(key).write().await = discovery.client.clone();
+        *self.output_parser_slot(key).write().await = OutputParserBinding {
+            client: discovery.client.clone(),
+            cached: None,
+        };
         prompt_predecessors.retain(|_, predecessor| predecessor.key != key);
         if let Some(cached_connection_id) = retired_connection_id {
             prompt_predecessors.insert(
@@ -4231,7 +4364,7 @@ impl McpRegistry {
             }
 
 
-            LiveDiscovery {
+            Ok::<_, McpError>(LiveDiscovery {
                 connection_id,
                 connection_duration_ms,
                 negotiated,
@@ -4247,12 +4380,16 @@ impl McpRegistry {
                 discovery_cache_partition,
                 client,
                 listener_connection,
-            }
+            })
         })
         .catch_unwind()
         .await
         {
-            Ok(discovery) => Ok(discovery),
+            Ok(Ok(discovery)) => Ok(discovery),
+            Ok(Err(error)) => {
+                self.disconnect_or_schedule_cleanup(conn.connection_id).await;
+                Err(error)
+            },
             Err(_) => {
                 self.disconnect_or_schedule_cleanup(conn.connection_id)
                     .await;
@@ -4303,6 +4440,12 @@ impl McpRegistry {
                 BackgroundInstallOutcome::Installed(connection_id) => {
                     self.remove_lazy_upgrade_slot_if_matches(&key, &slot).await;
                     (LazyUpgradeTerminal::Success(connection_id), None)
+                }
+                BackgroundInstallOutcome::PreparationFailed { discovery, error } => {
+                    let terminal = self
+                        .finish_lazy_upgrade_preparation_failure_locked(&key, &slot, &error)
+                        .await;
+                    (terminal, Some(discovery))
                 }
                 BackgroundInstallOutcome::Rejected(discovery) => {
                     self.remove_lazy_upgrade_slot_if_matches(&key, &slot).await;
@@ -4427,8 +4570,27 @@ impl McpRegistry {
         &self,
         key: &str,
         slot: &Arc<LazyUpgradeSlot>,
-        discovery: LiveDiscovery,
+        mut discovery: LiveDiscovery,
     ) -> BackgroundInstallOutcome {
+        if slot.mode == LazyUpgradeMode::Foreground {
+            if let Some(McpConnectionState::Cached {
+                tools,
+                resources,
+                prompts,
+                ..
+            }) = slot.cached_state.as_ref()
+            {
+                if discovery.catalog_failures.tools {
+                    discovery.tools = tools.clone();
+                }
+                if discovery.catalog_failures.resources {
+                    discovery.resources = resources.clone();
+                }
+                if discovery.catalog_failures.prompts {
+                    discovery.prompts = prompts.clone();
+                }
+            }
+        }
         let server_name = slot.expected_config.name.clone();
         let shared_server = key == server_name;
         let capabilities = discovery.capabilities.clone();
@@ -4490,14 +4652,23 @@ impl McpRegistry {
                         }
                         false
                     } else {
-                        self.publish_connected_state(
-                            key,
-                            &slot.expected_config,
-                            &discovery,
-                            Some(slot.cached_connection_id),
-                        )
-                        .await;
-                        true
+                        match self
+                            .publish_connected_state(
+                                key,
+                                &slot.expected_config,
+                                &discovery,
+                                Some(slot.cached_connection_id),
+                            )
+                            .await
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                return BackgroundInstallOutcome::PreparationFailed {
+                                    discovery,
+                                    error,
+                                }
+                            }
+                        }
                     }
                 } else {
                     false
@@ -4596,6 +4767,56 @@ impl McpRegistry {
                 discovery.prompts.clone(),
             ),
         }
+    }
+
+    /// A local schema-worker failure did not invalidate the admitted cache or
+    /// publish a client. Restore the exact cache generation so the next call can
+    /// retry; transport/authentication failures keep their normal failure path.
+    async fn finish_lazy_upgrade_preparation_failure_locked(
+        &self,
+        key: &str,
+        slot: &Arc<LazyUpgradeSlot>,
+        error: &McpError,
+    ) -> LazyUpgradeTerminal {
+        let Some(cached_state) = slot.cached_state.as_ref() else {
+            return self
+                .finish_lazy_upgrade_failure_locked(key, slot, error)
+                .await;
+        };
+        let current_slot = self.lazy_upgrade_slots.read().await.get(key).cloned();
+        if matches!(current_slot.as_ref(), Some(current) if Arc::ptr_eq(current, slot)) {
+            let current_generation = match self.connections.read().await.get(key) {
+                Some(McpConnectionState::Cached {
+                    connection_id,
+                    config,
+                    ..
+                }) => {
+                    *connection_id == slot.cached_connection_id
+                        && Self::same_config_snapshot(config, &slot.expected_config)
+                }
+                Some(McpConnectionState::Connecting { config, .. }) => {
+                    slot.mode == LazyUpgradeMode::Foreground
+                        && Self::same_config_snapshot(config, &slot.expected_config)
+                }
+                _ => false,
+            };
+            if current_generation {
+                self.connections
+                    .write()
+                    .await
+                    .insert(key.to_owned(), cached_state.clone());
+                self.cached_discovery_contexts.write().await.insert(
+                    key.to_owned(),
+                    CachedDiscoveryContext {
+                        connection_id: slot.cached_connection_id,
+                        partition: slot.refresh_partition.clone(),
+                        negotiation_mode: slot.negotiation_mode,
+                    },
+                );
+            }
+            self.remove_lazy_upgrade_slot_if_matches(key, slot).await;
+        }
+        LazyUpgradeTerminal::Error(Arc::new(clone_mcp_error(error)))
     }
 
     async fn finish_lazy_upgrade_failure_locked(

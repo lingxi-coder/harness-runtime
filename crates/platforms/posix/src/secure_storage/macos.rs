@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 type CacheKey = (String, String);
 const BROKER_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -67,6 +67,7 @@ struct BrokerResponse {
     error: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct MacOsKeychainStorage {
     #[allow(dead_code)]
     user: String,
@@ -74,17 +75,101 @@ pub struct MacOsKeychainStorage {
     default_config_dir: PathBuf,
     oauth_suffix: String,
     broker_client: PathBuf,
+    broker_timeout: std::time::Duration,
     cache: Arc<RwLock<HashMap<CacheKey, CachedEntry>>>,
     generation: Arc<AtomicU64>,
-    inflight: Arc<Mutex<HashMap<CacheKey, Arc<InflightLookup>>>>,
+    inflight: Arc<Mutex<HashMap<CacheKey, Weak<KeyOperation>>>>,
 }
 
-struct InflightLookup {
-    notify: Notify,
-    result: Mutex<Option<Result<Option<SecureStorageData>, SecureStorageError>>>,
+#[derive(Default)]
+struct KeyOperation {
+    lock: Arc<Mutex<()>>,
+    attempt: AtomicU64,
+    result: std::sync::Mutex<Option<(u64, Result<Option<SecureStorageData>, SecureStorageError>)>>,
 }
 
 impl MacOsKeychainStorage {
+    async fn operation_gate(&self, key: &CacheKey) -> Arc<KeyOperation> {
+        let mut gates = self.inflight.lock().await;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(key).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(KeyOperation::default());
+        gates.insert(key.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
+    async fn retrieve_with_cache(
+        &self,
+        service: &str,
+        account: &str,
+        use_cache: bool,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        let key = (service.to_string(), account.to_string());
+        let gate = self.operation_gate(&key).await;
+        let observed_attempt = gate.attempt.load(Ordering::Acquire);
+        let _operation = gate.lock.lock().await;
+        let generation = self.generation.load(Ordering::Acquire);
+        if use_cache {
+            if let Some(entry) = self.cache.read().await.get(&key).cloned() {
+                if entry.generation == generation && entry.fetched_at.elapsed() < KEYCHAIN_CACHE_TTL
+                {
+                    return Ok(Some(entry.data));
+                }
+            }
+            if gate.attempt.load(Ordering::Acquire) != observed_attempt {
+                if let Some((result_generation, result)) = gate
+                    .result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    if *result_generation == generation {
+                        return result.clone();
+                    }
+                }
+            }
+        }
+        // An authoritative miss/error must not leave the previous positive value hot.
+        self.cache.write().await.remove(&key);
+        let result = async {
+            let address = self.broker_address(service, account);
+            let request = BrokerRequest {
+                op: "retrieve",
+                service: Some(&address.service),
+                account: Some(&address.account),
+                payload: None,
+            };
+            let response = self.invoke_broker(&request).await?;
+            require_success("retrieve", &response)?;
+            let data = response
+                .payload
+                .as_deref()
+                .map(decode_storage_payload)
+                .transpose()?;
+            if let Some(data) = data.clone() {
+                self.cache.write().await.insert(
+                    key,
+                    CachedEntry {
+                        data,
+                        fetched_at: Instant::now(),
+                        generation,
+                    },
+                );
+            }
+            Ok(data)
+        }
+        .await;
+        *gate
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((generation, result.clone()));
+        gate.attempt.fetch_add(1, Ordering::AcqRel);
+        result
+    }
+
     pub fn new(
         user: String,
         config_dir: PathBuf,
@@ -97,6 +182,7 @@ impl MacOsKeychainStorage {
             default_config_dir,
             oauth_suffix,
             broker_client: resolve_broker_client()?,
+            broker_timeout: BROKER_COMMAND_TIMEOUT,
             cache: Arc::new(RwLock::new(HashMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -154,8 +240,10 @@ impl MacOsKeychainStorage {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    #[cfg(test)]
-    fn with_broker_for_test(
+    /// Use a synthetic broker without resolving or accessing the native broker.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_broker_for_test(
         config_dir: PathBuf,
         default_config_dir: PathBuf,
         broker_client: PathBuf,
@@ -166,6 +254,7 @@ impl MacOsKeychainStorage {
             default_config_dir,
             oauth_suffix: String::new(),
             broker_client,
+            broker_timeout: BROKER_COMMAND_TIMEOUT,
             cache: Arc::new(RwLock::new(HashMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -195,22 +284,24 @@ impl MacOsKeychainStorage {
                 "failed to launch the macOS credential client: {error}"
             ))
         })?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&payload).await.map_err(|error| {
-                SecureStorageError::Io(format!("credential client stdin write: {error}"))
-            })?;
-            stdin.shutdown().await.map_err(|error| {
-                SecureStorageError::Io(format!("credential client stdin shutdown: {error}"))
-            })?;
-        }
-        let output = tokio::time::timeout(BROKER_COMMAND_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                SecureStorageError::BackendUnavailable(
-                    "macOS credential client timed out".to_string(),
-                )
-            })?
-            .map_err(|error| SecureStorageError::Io(format!("credential client wait: {error}")))?;
+        let output = tokio::time::timeout(self.broker_timeout, async move {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&payload).await.map_err(|error| {
+                    SecureStorageError::Io(format!("credential client stdin write: {error}"))
+                })?;
+                stdin.shutdown().await.map_err(|error| {
+                    SecureStorageError::Io(format!("credential client stdin shutdown: {error}"))
+                })?;
+            }
+            child
+                .wait_with_output()
+                .await
+                .map_err(|error| SecureStorageError::Io(format!("credential client wait: {error}")))
+        })
+        .await
+        .map_err(|_| {
+            SecureStorageError::BackendUnavailable("macOS credential client timed out".into())
+        })??;
         if output.stdout.len() > MAX_BROKER_RESPONSE_BYTES {
             return Err(SecureStorageError::BackendUnavailable(
                 "macOS credential client response exceeded the size limit".to_string(),
@@ -253,28 +344,41 @@ impl SecureStorage for MacOsKeychainStorage {
         account: &str,
         data: SecureStorageData,
     ) -> Result<(), SecureStorageError> {
-        let key = (service.to_string(), account.to_string());
-        self.cache.write().await.remove(&key);
-        self.bump_generation();
-        let address = self.broker_address(service, account);
-        let request = BrokerRequest {
-            op: "store",
-            service: Some(&address.service),
-            account: Some(&address.account),
-            payload: Some(encode_storage_payload(&data)?),
-        };
-        let response = self.invoke_broker(&request).await?;
-        require_success("store", &response)?;
-        let generation = self.generation.load(Ordering::Acquire);
-        self.cache.write().await.insert(
-            key,
-            CachedEntry {
-                data,
-                fetched_at: Instant::now(),
-                generation,
-            },
-        );
-        Ok(())
+        let key = (service.to_owned(), account.to_owned());
+        let gate = self.operation_gate(&key).await;
+        let guard = Arc::clone(&gate.lock).lock_owned().await;
+        let storage = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            *gate
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            gate.attempt.fetch_add(1, Ordering::AcqRel);
+            storage.cache.write().await.remove(&key);
+            storage.bump_generation();
+            let address = storage.broker_address(&key.0, &key.1);
+            let request = BrokerRequest {
+                op: "store",
+                service: Some(&address.service),
+                account: Some(&address.account),
+                payload: Some(encode_storage_payload(&data)?),
+            };
+            let response = storage.invoke_broker(&request).await?;
+            require_success("store", &response)?;
+            let generation = storage.generation.load(Ordering::Acquire);
+            storage.cache.write().await.insert(
+                key,
+                CachedEntry {
+                    data,
+                    fetched_at: Instant::now(),
+                    generation,
+                },
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|error| SecureStorageError::BackendUnavailable(error.to_string()))?
     }
 
     async fn retrieve(
@@ -282,84 +386,15 @@ impl SecureStorage for MacOsKeychainStorage {
         service: &str,
         account: &str,
     ) -> Result<Option<SecureStorageData>, SecureStorageError> {
-        let key = (service.to_string(), account.to_string());
-        let now = Instant::now();
-        let current_generation = self.generation.load(Ordering::Acquire);
-        if let Some(entry) = self.cache.read().await.get(&key).cloned() {
-            if entry.generation == current_generation
-                && now.duration_since(entry.fetched_at) < KEYCHAIN_CACHE_TTL
-            {
-                return Ok(Some(entry.data));
-            }
-        }
+        self.retrieve_with_cache(service, account, true).await
+    }
 
-        let (lookup, is_leader) = {
-            let mut inflight = self.inflight.lock().await;
-            if let Some(existing) = inflight.get(&key).cloned() {
-                (existing, false)
-            } else {
-                let lookup = Arc::new(InflightLookup {
-                    notify: Notify::new(),
-                    result: Mutex::new(None),
-                });
-                inflight.insert(key.clone(), lookup.clone());
-                (lookup, true)
-            }
-        };
-        if !is_leader {
-            loop {
-                let notified = lookup.notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if let Some(result) = lookup.result.lock().await.clone() {
-                    return result;
-                }
-                notified.await;
-            }
-        }
-
-        let address = self.broker_address(service, account);
-        let request = BrokerRequest {
-            op: "retrieve",
-            service: Some(&address.service),
-            account: Some(&address.account),
-            payload: None,
-        };
-        let result = match self.invoke_broker(&request).await {
-            Ok(response) => {
-                async {
-                    require_success("retrieve", &response)?;
-                    let data = if let Some(payload) = response.payload.as_deref() {
-                        Some(decode_storage_payload(payload)?)
-                    } else {
-                        None
-                    };
-                    if let Some(data) = data.clone() {
-                        let post_generation = self.generation.load(Ordering::Acquire);
-                        if post_generation == current_generation {
-                            self.cache.write().await.insert(
-                                key.clone(),
-                                CachedEntry {
-                                    data: data.clone(),
-                                    fetched_at: Instant::now(),
-                                    generation: post_generation,
-                                },
-                            );
-                        }
-                        Ok(Some(data))
-                    } else {
-                        Ok(None)
-                    }
-                }
-                .await
-            }
-            Err(error) => Err(error),
-        };
-
-        *lookup.result.lock().await = Some(result.clone());
-        self.inflight.lock().await.remove(&key);
-        lookup.notify.notify_waiters();
-        result
+    async fn retrieve_uncached(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        self.retrieve_with_cache(service, account, false).await
     }
 
     async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
@@ -376,18 +411,31 @@ impl SecureStorage for MacOsKeychainStorage {
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
-        let key = (service.to_string(), account.to_string());
-        self.cache.write().await.remove(&key);
-        self.bump_generation();
-        let address = self.broker_address(service, account);
-        let request = BrokerRequest {
-            op: "delete",
-            service: Some(&address.service),
-            account: Some(&address.account),
-            payload: None,
-        };
-        let response = self.invoke_broker(&request).await?;
-        require_success("delete", &response)
+        let key = (service.to_owned(), account.to_owned());
+        let gate = self.operation_gate(&key).await;
+        let guard = Arc::clone(&gate.lock).lock_owned().await;
+        let storage = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            *gate
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            gate.attempt.fetch_add(1, Ordering::AcqRel);
+            storage.cache.write().await.remove(&key);
+            storage.bump_generation();
+            let address = storage.broker_address(&key.0, &key.1);
+            let request = BrokerRequest {
+                op: "delete",
+                service: Some(&address.service),
+                account: Some(&address.account),
+                payload: None,
+            };
+            let response = storage.invoke_broker(&request).await?;
+            require_success("delete", &response)
+        })
+        .await
+        .map_err(|error| SecureStorageError::BackendUnavailable(error.to_string()))?
     }
 
     async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
@@ -550,6 +598,363 @@ mod tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&path, permissions).expect("chmod");
         path
+    }
+
+    fn gated_broker() -> (tempfile::TempDir, Arc<MacOsKeychainStorage>) {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("broker");
+        let program = r#"#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(ROOT)
+req = json.load(sys.stdin)
+op = req['op']
+with (root / 'calls').open('a') as f: f.write(op + '\n')
+if (root / (op + '-block')).exists():
+    (root / (op + '-entered')).touch()
+    while not (root / (op + '-release')).exists(): time.sleep(.005)
+state = root / req.get('account', 'key')
+reply = {'ok': True, 'protocol_version': 1}
+if (root / 'fail').exists(): reply = {'ok': False, 'protocol_version': 1, 'error_kind': 'unavailable', 'error': 'fixture offline'}
+elif op == 'store': state.write_text(req['payload'])
+elif op == 'delete': state.unlink(missing_ok=True)
+elif op == 'retrieve' and state.exists(): reply['payload'] = state.read_text()
+json.dump(reply, sys.stdout)
+"#.replace("ROOT", &serde_json::to_string(root.path().to_str().unwrap()).unwrap());
+        fs::write(&script, program).unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script, permissions).unwrap();
+        let storage = Arc::new(MacOsKeychainStorage::with_broker_for_test(
+            root.path().to_owned(),
+            root.path().to_owned(),
+            script,
+        ));
+        (root, storage)
+    }
+
+    async fn broker_entered(root: &std::path::Path, operation: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join(format!("{operation}-entered")).exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn authoritative_reads_bypass_hot_values_and_evict_missing_or_failed_values() {
+        let (root, first) = gated_broker();
+        let second = MacOsKeychainStorage::with_broker_for_test(
+            root.path().to_owned(),
+            root.path().to_owned(),
+            first.broker_client.clone(),
+        );
+        first
+            .store("fixture", "key", sample_data(b"old"))
+            .await
+            .unwrap();
+        second
+            .store("fixture", "key", sample_data(b"new"))
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .retrieve("fixture", "key")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret_bytes(),
+            b"old"
+        );
+        assert_eq!(
+            first
+                .retrieve_uncached("fixture", "key")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret_bytes(),
+            b"new"
+        );
+        second.delete("fixture", "key").await.unwrap();
+        assert!(first
+            .retrieve_uncached("fixture", "key")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(first.retrieve("fixture", "key").await.unwrap().is_none());
+        second
+            .store("fixture", "key", sample_data(b"recovered"))
+            .await
+            .unwrap();
+        assert!(first
+            .retrieve_uncached("fixture", "key")
+            .await
+            .unwrap()
+            .is_some());
+        fs::write(root.path().join("fail"), "").unwrap();
+        assert!(first.retrieve_uncached("fixture", "key").await.is_err());
+        fs::remove_file(root.path().join("fail")).unwrap();
+        second.delete("fixture", "key").await.unwrap();
+        assert!(
+            first.retrieve("fixture", "key").await.unwrap().is_none(),
+            "an authoritative error must evict its previous positive cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_stdin_is_bounded_after_the_mutation_caller_is_cancelled() {
+        let (root, mut storage) = gated_broker();
+        let inner = Arc::get_mut(&mut storage).unwrap();
+        inner.broker_timeout = std::time::Duration::from_millis(500);
+        fs::write(
+            &inner.broker_client,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\n: > '{}'\nexec sleep 5\n",
+                root.path().join("broker-pid").display(),
+                root.path().join("store-entered").display()
+            ),
+        )
+        .unwrap();
+        let data = sample_data(&vec![0; 30000]);
+        let encoded = encode_storage_payload(&data).unwrap();
+        let address = storage.broker_address("fixture", "key");
+        let request = serde_json::to_vec(&BrokerRequest {
+            op: "store",
+            service: Some(&address.service),
+            account: Some(&address.account),
+            payload: Some(encoded.clone()),
+        })
+        .unwrap();
+        eprintln!(
+            "synthetic blocked-stdin fixture: encoded_bytes={} request_bytes={} limit_bytes={}",
+            encoded.len(),
+            request.len(),
+            MAX_BROKER_REQUEST_BYTES
+        );
+        assert!(request.len() < MAX_BROKER_REQUEST_BYTES);
+        let clone = storage.clone();
+        let started = Instant::now();
+        let mut mutation = tokio::spawn(async move { clone.store("fixture", "key", data).await });
+        tokio::select! {
+            biased;
+            _ = broker_entered(root.path(), "store") => {
+                eprintln!(
+                    "synthetic broker marker observed after {:?}; broker_pid={:?}",
+                    started.elapsed(),
+                    fs::read_to_string(root.path().join("broker-pid")).ok()
+                );
+            }
+            result = &mut mutation => {
+                panic!(
+                    "synthetic store finished before broker marker: result={result:?}, elapsed={:?}, marker_exists={}, broker_pid={:?}",
+                    started.elapsed(),
+                    root.path().join("store-entered").exists(),
+                    fs::read_to_string(root.path().join("broker-pid")).ok()
+                );
+            }
+        }
+        mutation.abort();
+        let _ = mutation.await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            storage.retrieve("fixture", "key")
+        )
+        .await
+        .unwrap()
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_delete_keeps_new_readers_behind_the_owned_mutation() {
+        let (root, storage) = gated_broker();
+        storage
+            .store("fixture", "key", sample_data(b"old"))
+            .await
+            .unwrap();
+        fs::write(root.path().join("delete-block"), "").unwrap();
+        let clone = storage.clone();
+        let deletion = tokio::spawn(async move { clone.delete("fixture", "key").await });
+        broker_entered(root.path(), "delete").await;
+        deletion.abort();
+        let _ = deletion.await;
+        let mut reading = Box::pin(storage.retrieve("fixture", "key"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(reading.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        fs::write(root.path().join("delete-release"), "").unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), reading)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_stores_publish_in_their_mutation_order() {
+        let (root, storage) = gated_broker();
+        fs::write(root.path().join("store-block"), "").unwrap();
+        let clone = storage.clone();
+        let first =
+            tokio::spawn(async move { clone.store("fixture", "key", sample_data(b"first")).await });
+        broker_entered(root.path(), "store").await;
+        let mut second = Box::pin(storage.store("fixture", "key", sample_data(b"second")));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        fs::write(root.path().join("store-release"), "").unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap();
+        let value = storage.retrieve("fixture", "key").await.unwrap().unwrap();
+        assert_eq!(
+            encode_storage_payload(&value).unwrap(),
+            encode_storage_payload(&sample_data(b"second")).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_read_leader_does_not_poison_followers() {
+        let (root, storage) = gated_broker();
+        fs::write(root.path().join("retrieve-block"), "").unwrap();
+        let first_storage = storage.clone();
+        let first = tokio::spawn(async move { first_storage.retrieve("fixture", "key").await });
+        broker_entered(root.path(), "retrieve").await;
+        let follower_storage = storage.clone();
+        let follower =
+            tokio::spawn(async move { follower_storage.retrieve("fixture", "key").await });
+        first.abort();
+        let _ = first.await;
+        fs::write(root.path().join("retrieve-release"), "").unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), follower)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        assert!(storage.retrieve("fixture", "key").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_missing_and_failed_reads_share_only_their_attempt() {
+        for fail in [false, true] {
+            let (root, storage) = gated_broker();
+            let _retained_gate = storage
+                .operation_gate(&("fixture".into(), "key".into()))
+                .await;
+            fs::write(root.path().join("retrieve-block"), "").unwrap();
+            if fail {
+                fs::write(root.path().join("fail"), "").unwrap();
+            }
+            let leader_storage = storage.clone();
+            let leader =
+                tokio::spawn(async move { leader_storage.retrieve("fixture", "key").await });
+            broker_entered(root.path(), "retrieve").await;
+            let mut follower = Box::pin(storage.retrieve("fixture", "key"));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(follower.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            fs::write(root.path().join("retrieve-release"), "").unwrap();
+            let first = leader.await.unwrap();
+            let second = follower.await;
+            assert_eq!(first.is_err(), fail);
+            assert_eq!(second.is_err(), fail);
+            assert_eq!(
+                fs::read_to_string(root.path().join("calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+            let _ = fs::remove_file(root.path().join("fail"));
+            fs::write(
+                root.path().join("key"),
+                encode_storage_payload(&sample_data(b"recovered")).unwrap(),
+            )
+            .unwrap();
+            assert!(storage.retrieve("fixture", "key").await.unwrap().is_some());
+            assert_eq!(
+                fs::read_to_string(root.path().join("calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_mutation_keeps_its_gate_until_publication() {
+        let (root, storage) = gated_broker();
+        fs::write(root.path().join("store-block"), "").unwrap();
+        let storing = storage.clone();
+        let first =
+            tokio::spawn(async move { storing.store("fixture", "key", sample_data(b"new")).await });
+        broker_entered(root.path(), "store").await;
+        first.abort();
+        let _ = first.await;
+        let mut later = Box::pin(storage.retrieve("fixture", "key"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(later.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        fs::write(root.path().join("store-release"), "").unwrap();
+        let value = tokio::time::timeout(std::time::Duration::from_secs(5), later)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            encode_storage_payload(&value).unwrap(),
+            encode_storage_payload(&sample_data(b"new")).unwrap()
+        );
+        storage.delete("fixture", "key").await.unwrap();
+        assert!(storage.retrieve("fixture", "key").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_after_an_old_read_fences_new_reads_and_preserves_other_keys() {
+        let (root, storage) = gated_broker();
+        fs::write(
+            root.path().join("key"),
+            encode_storage_payload(&sample_data(b"old")).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.path().join("retrieve-block"), "").unwrap();
+        let reading = storage.clone();
+        let old = tokio::spawn(async move { reading.retrieve("fixture", "key").await });
+        broker_entered(root.path(), "retrieve").await;
+        let mut deletion = Box::pin(storage.delete("fixture", "key"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(deletion.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let mut new_read = Box::pin(storage.retrieve("fixture", "key"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(new_read.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // A different key owns a different gate, even while this read is blocked.
+        storage
+            .store("fixture", "other", sample_data(b"other"))
+            .await
+            .unwrap();
+        fs::write(root.path().join("retrieve-release"), "").unwrap();
+        assert!(old.await.unwrap().unwrap().is_some());
+        deletion.await.unwrap();
+        assert!(new_read.await.unwrap().is_none());
     }
 
     #[tokio::test]

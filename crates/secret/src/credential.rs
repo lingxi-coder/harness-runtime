@@ -308,6 +308,23 @@ impl CredentialManager {
         &self,
         reference: &lingxi_core::host::provider_accounts::CredentialRef,
     ) -> Result<Option<AccountCredential>, CredentialError> {
+        self.read_account_credential(reference, false).await
+    }
+
+    /// Re-read a durable account while its cross-process refresh lock is held.
+    /// Explicit host-managed injections remain authoritative for worker hosts.
+    pub async fn get_account_credential_uncached(
+        &self,
+        reference: &lingxi_core::host::provider_accounts::CredentialRef,
+    ) -> Result<Option<AccountCredential>, CredentialError> {
+        self.read_account_credential(reference, true).await
+    }
+
+    async fn read_account_credential(
+        &self,
+        reference: &lingxi_core::host::provider_accounts::CredentialRef,
+        uncached: bool,
+    ) -> Result<Option<AccountCredential>, CredentialError> {
         let service = account_slot(reference)?;
         if let Some(value) = self
             .account_credentials
@@ -320,14 +337,20 @@ impl CredentialManager {
         if self.provider_keys_host_managed.load(Ordering::Acquire) {
             return Ok(None);
         }
-        self.storage
-            .retrieve(&service, &reference.secret_ref)
-            .await?
-            .map(|data| {
-                serde_json::from_slice(data.expose_secret_bytes())
-                    .map_err(|_| CredentialError::Unavailable)
-            })
-            .transpose()
+        let data = if uncached {
+            self.storage
+                .retrieve_uncached(&service, &reference.secret_ref)
+                .await?
+        } else {
+            self.storage
+                .retrieve(&service, &reference.secret_ref)
+                .await?
+        };
+        data.map(|data| {
+            serde_json::from_slice(data.expose_secret_bytes())
+                .map_err(|_| CredentialError::Unavailable)
+        })
+        .transpose()
     }
     /// Presence-only read for account settings. Does not decrypt on native backends.
     pub async fn has_account_credential(

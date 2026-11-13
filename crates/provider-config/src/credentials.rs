@@ -5,6 +5,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use lingxi_core::host::provider_accounts::AccountMetadata;
+
 use llm_runtime::{
     BoxFuture, Credential, CredentialProvider, CredentialScope, CredentialSource as Source,
     LlmError,
@@ -16,6 +18,8 @@ pub struct MultiCredentialProvider {
     account_directory: Option<lingxi_core::host::provider_accounts::SharedAccountDirectory>,
     accounts: BTreeMap<String, lingxi_core::host::provider_accounts::AccountMetadata>,
     credentials: Arc<secret::CredentialManager>,
+    #[cfg(test)]
+    after_account_resolved: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for MultiCredentialProvider {
@@ -36,6 +40,8 @@ impl MultiCredentialProvider {
             account_version_root: None,
             accounts: BTreeMap::new(),
             credentials,
+            #[cfg(test)]
+            after_account_resolved: None,
         }
     }
 
@@ -90,12 +96,19 @@ impl MultiCredentialProvider {
             })
             .map_err(|_| LlmError::AccountStorageUnavailable)
     }
-    fn verify_account_scope(&self, scope: &CredentialScope) -> Result<(), LlmError> {
+    fn account_for_scope(
+        &self,
+        scope: &CredentialScope,
+    ) -> Result<Option<AccountMetadata>, LlmError> {
+        // Resolve and fence the same owned metadata. A second live-directory
+        // lookup could select a new principal after checking the old scope.
+        let account = scope
+            .credential_id
+            .as_deref()
+            .and_then(|id| self.account(id));
         if let Some(expected) = scope.expected_identity_generation {
-            if scope
-                .credential_id
-                .as_deref()
-                .and_then(|id| self.account(id))
+            if account
+                .as_ref()
                 .is_none_or(|a| a.identity_generation != expected)
             {
                 return Err(LlmError::InvalidRequest {
@@ -103,7 +116,23 @@ impl MultiCredentialProvider {
                 });
             }
         }
-        Ok(())
+        #[cfg(test)]
+        if let Some(hook) = &self.after_account_resolved {
+            hook();
+        }
+        Ok(account)
+    }
+
+    fn required_account(&self, scope: &CredentialScope) -> Result<AccountMetadata, LlmError> {
+        let account = self.account_for_scope(scope)?;
+        if scope.credential_id.is_none() {
+            return Err(LlmError::Authentication {
+                message: "account credential required".into(),
+            });
+        }
+        account.ok_or_else(|| LlmError::Authentication {
+            message: "unknown account".into(),
+        })
     }
     fn account(&self, id: &str) -> Option<lingxi_core::host::provider_accounts::AccountMetadata> {
         if let Some(directory) = &self.account_directory {
@@ -119,13 +148,10 @@ impl MultiCredentialProvider {
     }
     async fn load_account_versioned(
         &self,
-        id: &str,
+        account: AccountMetadata,
     ) -> Result<llm_runtime::VersionedCredential, llm_runtime::VersionedCredentialError> {
         let mut rejected_revision = None;
         let result: Result<_, LlmError> = async {
-            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
-                message: "unknown account".into(),
-            })?;
             if !account.enabled {
                 return Err(LlmError::Authentication {
                     message: "account disabled".into(),
@@ -205,23 +231,20 @@ impl MultiCredentialProvider {
             credential_revision: rejected_revision,
         })
     }
-    async fn load_account(&self, id: &str) -> Result<Credential, LlmError> {
-        self.load_account_versioned(id)
+    async fn load_account(&self, account: AccountMetadata) -> Result<Credential, LlmError> {
+        self.load_account_versioned(account)
             .await
             .map(|value| value.credential)
             .map_err(|error| error.error)
     }
     async fn refresh_account_versioned(
         &self,
-        id: &str,
+        account: AccountMetadata,
         rejected: &Credential,
     ) -> Result<Option<llm_runtime::VersionedCredential>, llm_runtime::VersionedCredentialError>
     {
         let mut rejected_revision = None;
         let result: Result<_, LlmError> = async {
-            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
-                message: "unknown account".into(),
-            })?;
             if account.auth_kind != lingxi_core::host::provider_accounts::AccountAuthKind::OAuth {
                 return Ok(None);
             }
@@ -276,10 +299,10 @@ impl MultiCredentialProvider {
 
     async fn refresh_account(
         &self,
-        id: &str,
+        account: AccountMetadata,
         rejected: &Credential,
     ) -> Result<Option<Credential>, LlmError> {
-        self.refresh_account_versioned(id, rejected)
+        self.refresh_account_versioned(account, rejected)
             .await
             .map(|value| value.map(|value| value.credential))
             .map_err(|error| error.error)
@@ -295,14 +318,8 @@ impl CredentialProvider for MultiCredentialProvider {
         Result<llm_runtime::VersionedCredential, llm_runtime::VersionedCredentialError>,
     > {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            let id = scope
-                .credential_id
-                .as_deref()
-                .ok_or_else(|| LlmError::Authentication {
-                    message: "account credential required".into(),
-                })?;
-            self.load_account_versioned(id).await
+            let account = self.required_account(scope)?;
+            self.load_account_versioned(account).await
         })
     }
 
@@ -315,13 +332,8 @@ impl CredentialProvider for MultiCredentialProvider {
         Result<Option<llm_runtime::VersionedCredential>, llm_runtime::VersionedCredentialError>,
     > {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            match scope
-                .credential_id
-                .as_deref()
-                .filter(|id| self.account(id).is_some())
-            {
-                Some(id) => self.refresh_account_versioned(id, rejected).await,
+            match self.account_for_scope(scope)? {
+                Some(account) => self.refresh_account_versioned(account, rejected).await,
                 None => Ok(None),
             }
         })
@@ -332,12 +344,7 @@ impl CredentialProvider for MultiCredentialProvider {
         scope: &'a CredentialScope,
     ) -> BoxFuture<'a, Result<Option<u64>, LlmError>> {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            match scope
-                .credential_id
-                .as_deref()
-                .and_then(|id| self.account(id))
-            {
+            match self.account_for_scope(scope)? {
                 Some(account) => self.published_revision(&account).await,
                 None => Ok(None),
             }
@@ -346,11 +353,11 @@ impl CredentialProvider for MultiCredentialProvider {
 
     fn source<'a>(&'a self, scope: &'a CredentialScope) -> BoxFuture<'a, Result<Source, LlmError>> {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            let Some(id) = scope.credential_id.as_deref() else {
+            let account = self.account_for_scope(scope)?;
+            if scope.credential_id.is_none() {
                 return Ok(Source::None);
-            };
-            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
+            }
+            let account = account.ok_or_else(|| LlmError::Authentication {
                 message: "unknown account".into(),
             })?;
             self.credentials
@@ -386,13 +393,8 @@ impl CredentialProvider for MultiCredentialProvider {
         rejected: &'a Credential,
     ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            match scope
-                .credential_id
-                .as_deref()
-                .filter(|id| self.account(id).is_some())
-            {
-                Some(id) => self.refresh_account(id, rejected).await,
+            match self.account_for_scope(scope)? {
+                Some(account) => self.refresh_account(account, rejected).await,
                 None => Ok(None),
             }
         })
@@ -403,14 +405,8 @@ impl CredentialProvider for MultiCredentialProvider {
         scope: &'a CredentialScope,
     ) -> BoxFuture<'a, Result<Credential, LlmError>> {
         Box::pin(async move {
-            self.verify_account_scope(scope)?;
-            let id = scope
-                .credential_id
-                .as_deref()
-                .ok_or_else(|| LlmError::Authentication {
-                    message: "account credential required".into(),
-                })?;
-            self.load_account(id).await
+            let account = self.required_account(scope)?;
+            self.load_account(account).await
         })
     }
 }
@@ -734,6 +730,133 @@ mod tests {
             replaced.source(&original_scope).await,
             Err(LlmError::InvalidRequest { .. })
         ));
+    }
+
+    #[derive(Default)]
+    struct CapturingWire {
+        requests: std::sync::Mutex<Vec<lingxi_llm_client::HttpRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_llm_client::Transport for CapturingWire {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            self.requests.lock().unwrap().push(request);
+            Err(lingxi_llm_client::protocol::LlmError::Transport {
+                message: "synthetic wire captured after authentication".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_replacement_during_resolution_never_authenticates_an_old_request_as_g2() {
+        use lingxi_core::host::provider_accounts::AccountSnapshot;
+        for streaming in [false, true] {
+            let cm = manager();
+            let old = api_account("11111111-1111-4111-8111-111111111111");
+            let mut new = old.clone();
+            new.identity_generation = 2;
+            new.config_revision = 2;
+            // Secure storage is committed before metadata is published. Pause
+            // resolution across exactly that directory publication boundary.
+            cm.store_account_credential(
+                &new.credential_ref,
+                &secret::AccountCredential {
+                    credential_revision: 2,
+                    identity_generation: 2,
+                    kind: secret::AccountCredentialKind::ApiKey {
+                        key: lingxi_core::types::Secret::new("synthetic-new-principal-key".into()),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            let snapshot = AccountSnapshot {
+                store_scope: old.credential_ref.store_scope.clone(),
+                config_revision: 1,
+                accounts: vec![old.clone()],
+                provider_policies: Default::default(),
+                health: vec![],
+                model_entitlements: vec![],
+                model_availability: vec![],
+                scoped_health: vec![],
+            };
+            let mut replacement = snapshot.clone();
+            replacement.config_revision = 2;
+            replacement.accounts = vec![new];
+            let directory = Arc::new(std::sync::RwLock::new(snapshot.clone()));
+            let mut provider =
+                MultiCredentialProvider::new(cm.clone()).with_account_directory(directory.clone());
+            let published = directory.clone();
+            let next = replacement.clone();
+            provider.after_account_resolved = Some(Arc::new(move || {
+                *published.write().unwrap() = next.clone();
+            }));
+            let mut profile = llm_runtime::builtin_presets()
+                .providers
+                .into_iter()
+                .find(|profile| profile.profile_name == "openai")
+                .unwrap();
+            let model = profile.models[0].request_model.clone();
+            profile.profile_name = format!("account.{}", old.account_id);
+            profile.credential = llm_runtime::CredentialConfig::Static {
+                id: old.credential_ref.secret_ref.clone(),
+            };
+            let config = llm_runtime::ClientConfig {
+                providers: vec![profile],
+            };
+            let client = ModelRuntime::from_config(config.clone())
+                .unwrap()
+                .with_credential_provider(Arc::new(provider))
+                .reconfigured_with_account_snapshot(config.clone(), &snapshot)
+                .unwrap();
+            let mut request = LlmRequest::new(model).with_user_text("synthetic generation fence");
+            request.stream = streaming;
+            let wire = Arc::new(CapturingWire::default());
+            let result = if streaming {
+                client
+                    .execute_stream(&request, wire.clone())
+                    .await
+                    .map(|_| ())
+            } else {
+                client.execute(&request, wire.clone()).await.map(|_| ())
+            };
+            assert!(matches!(result, Err(LlmError::AccountStorageUnavailable)));
+            assert_eq!(directory.read().unwrap().accounts[0].identity_generation, 2);
+            assert!(
+                wire.requests.lock().unwrap().is_empty(),
+                "an old route must never send the replacement principal's credential"
+            );
+
+            // A fresh ordinary request still reaches the physical stream/non-
+            // stream envelope with the newly published principal's key.
+            let fresh = ModelRuntime::from_config(config.clone())
+                .unwrap()
+                .with_credential_provider(Arc::new(
+                    MultiCredentialProvider::new(cm).with_account_directory(directory),
+                ))
+                .reconfigured_with_account_snapshot(config, &replacement)
+                .unwrap();
+            let result = if streaming {
+                fresh
+                    .execute_stream(&request, wire.clone())
+                    .await
+                    .map(|_| ())
+            } else {
+                fresh.execute(&request, wire.clone()).await.map(|_| ())
+            };
+            assert!(matches!(result, Err(LlmError::Transport { .. })));
+            let requests = wire.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0]
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    && value == "Bearer synthetic-new-principal-key"));
+        }
     }
 }
 

@@ -215,3 +215,59 @@ async fn live_anthropic_auth_updates_headers_subscriber_and_body_policy_between_
         );
     }
 }
+
+#[tokio::test]
+async fn kimi_main_requests_adapt_only_generated_cache_controls_in_both_modes() {
+    for name in ["kimi-code-anthropic", "kimi-anthropic-intl"] {
+        let profile = lingxi_llm_client::builtin_providers()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.profile_name == name)
+            .unwrap();
+        let model = profile.models[0].request_model.clone();
+        let catalog = crate::catalog::catalog_from_profiles(vec![profile]);
+        let client = ModelRuntime::from_config(ClientConfig {
+            providers: catalog.providers,
+        })
+        .unwrap()
+        .with_credential_provider(Arc::new(crate::StaticCredentialProvider::new(
+            Credential::ApiKey("synthetic-key".into()),
+        )));
+        for stream in [false, true] {
+            for enabled in [false, true] {
+                let mut req = request();
+                req.input.model = model.clone();
+                req.profile = Some(name.into());
+                req.stream = stream;
+                req.input.max_tokens = Some(1024);
+                req.execution.enable_prompt_caching = Some(enabled);
+                client
+                    .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{name} stream={stream} cache={enabled}: {error:?}")
+                    });
+            }
+            let mut req = request();
+            req.input.model = model.clone();
+            req.profile = Some(name.into());
+            req.stream = stream;
+            req.input.max_tokens = Some(1024);
+            req.input
+                .prompt_cache
+                .breakpoints
+                .push(lingxi_llm_client::protocol::CacheBreakpoint {
+                    position: lingxi_llm_client::protocol::CachePosition::System { index: 0 },
+                    ttl: lingxi_llm_client::protocol::CacheTtl::FiveMinutes,
+                    scope: None,
+                });
+            assert!(
+                client
+                    .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+                    .await
+                    .is_err(),
+                "explicit unsupported cache controls must not be silently removed"
+            );
+        }
+    }
+}

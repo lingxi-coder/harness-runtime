@@ -124,7 +124,18 @@ fn changes(previous: &RequestSnapshot, current: &RequestSnapshot) -> MissAttribu
 
 impl ConversationOrchestrator {
     pub(crate) async fn record_prompt_cache_usage(&self, usage: &llm_runtime::ExecutionUsage) {
-        let current = self.model_runtime.prompt_cache_capture.take();
+        self.record_prompt_cache_usage_for_request(
+            usage,
+            self.model_runtime.prompt_cache_capture.take(),
+        )
+        .await;
+    }
+
+    pub(crate) async fn record_prompt_cache_usage_for_request(
+        &self,
+        usage: &llm_runtime::ExecutionUsage,
+        current: Option<llm_runtime::prompt_cache::RequestSnapshot>,
+    ) {
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
         let at_ms = current.as_ref().map_or(now_ms, |request| request.at_ms);
         let counts = usage.counts();
@@ -233,6 +244,40 @@ mod tests {
             defer_loading: false,
             messages: vec![[0; 32]],
         }
+    }
+
+    #[tokio::test]
+    async fn physical_request_accounting_selects_the_session_and_preserves_its_ttl() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+        let session_id = orch.session.lock().await.session_id;
+        let mut physical = snapshot();
+        physical.ttl_1h = true;
+        let mut usage = llm_runtime::ExecutionUsage::default();
+        usage.counts_mut().cache_write_tokens = 1000;
+        orch.record_prompt_cache_usage_for_request(&usage, Some(physical.clone()))
+            .await;
+        let ledger = orch.model_runtime.prompt_cache_ledger.lock().await;
+        assert!(ledger.ledger_for_session(session_id).is_some());
+        assert_eq!(
+            ledger.model_switch_cache_state(1, CacheTtl::FiveMinutes).1,
+            CacheTtl::OneHour
+        );
+        assert_eq!(ledger.baseline.as_ref(), Some(&physical));
     }
 
     #[test]

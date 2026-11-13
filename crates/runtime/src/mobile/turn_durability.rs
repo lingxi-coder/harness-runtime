@@ -329,6 +329,24 @@ struct CachedTurn {
 }
 
 impl DurableTurnCheckpoint {
+    fn payload_is_retired(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| state.is_terminal())
+            || matches!(
+                self.queue_delivery,
+                QueueDeliveryState::Delivered | QueueDeliveryState::Cancelled
+            )
+    }
+
+    fn scan_summary(&self) -> Self {
+        let mut summary = self.clone();
+        summary.prompt = Utf16JsonProjection::from("");
+        summary.images = Vec::new();
+        summary.events = Vec::new();
+        summary.skill_prompt = None;
+        summary.bash_result = None;
+        summary
+    }
+
     pub(crate) fn initial_prompt_inputs(
         &self,
     ) -> Result<Vec<orchestrator::QueuedPromptInput>, DurableTurnStoreError> {
@@ -773,8 +791,11 @@ pub(crate) struct DurableTurnStore {
     /// The first scan indexes checkpoint filenames for a session. Store writes
     /// keep an existing index current so later admissions do not rescan disk.
     session_turn_ids: Mutex<HashMap<String, Vec<u64>>>,
+    scan_summaries: Mutex<HashMap<PathBuf, DurableTurnCheckpoint>>,
     #[cfg(test)]
     journal_sync_count: AtomicUsize,
+    #[cfg(test)]
+    fail_next_metadata_after_publish: std::sync::atomic::AtomicBool,
 }
 
 impl DurableTurnStore {
@@ -783,8 +804,11 @@ impl DurableTurnStore {
             root,
             lock: Mutex::new(HashMap::new()),
             session_turn_ids: Mutex::new(HashMap::new()),
+            scan_summaries: Mutex::new(HashMap::new()),
             #[cfg(test)]
             journal_sync_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            fail_next_metadata_after_publish: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -963,7 +987,8 @@ impl DurableTurnStore {
             .try_exists()
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?
         {
-            let existing = self.read_relative(&relative)?.checkpoint;
+            let cached = self.read_relative(&relative)?;
+            let existing = &cached.checkpoint;
             if existing.prompt == prompt
                 && existing.queue_operation == queue_operation
                 && existing.prompt_mode == prompt_mode
@@ -974,7 +999,10 @@ impl DurableTurnStore {
                     QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 )
             {
-                return Ok(existing);
+                let checkpoint = existing.clone();
+                cache.insert(relative, cached);
+                self.remember_turn_id(session_id, turn_id);
+                return Ok(checkpoint);
             }
             return Err(DurableTurnStoreError::AlreadyExists {
                 session_id: session_id.to_string(),
@@ -1495,13 +1523,51 @@ impl DurableTurnStore {
         let mut checkpoints = Vec::with_capacity(turn_ids.len());
         for turn_id in turn_ids {
             let relative = relative_path(session_id, turn_id)?;
+            if let Some(summary) = self
+                .scan_summaries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&relative)
+                .cloned()
+            {
+                checkpoints.push(summary);
+                continue;
+            }
             let cached = self.load_cached_turn(cache, &relative)?;
             if cached.checkpoint.session_id != session_id || cached.checkpoint.turn_id != turn_id {
                 return Err(DurableTurnStoreError::InvalidIdentity(format!(
                     "checkpoint path {session_id}/{turn_id}.json does not match its metadata"
                 )));
             }
-            checkpoints.push(cached.checkpoint.clone());
+            let checkpoint = cached.checkpoint.clone();
+            if checkpoint.payload_is_retired() {
+                let summary = checkpoint.scan_summary();
+                self.scan_summaries
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(relative.clone(), summary.clone());
+                cache.remove(&relative);
+                checkpoints.push(summary);
+            } else {
+                checkpoints.push(checkpoint);
+            }
+        }
+        let retired_members = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.payload_is_retired())
+            .filter_map(|checkpoint| checkpoint.coalesced_batch.as_ref())
+            .flat_map(|batch| batch.member_turn_ids.iter().copied())
+            .collect::<std::collections::HashSet<_>>();
+        for checkpoint in &mut checkpoints {
+            if retired_members.contains(&checkpoint.turn_id) {
+                let relative = relative_path(session_id, checkpoint.turn_id)?;
+                *checkpoint = checkpoint.scan_summary();
+                self.scan_summaries
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(relative.clone(), checkpoint.clone());
+                cache.remove(&relative);
+            }
         }
         Ok(checkpoints)
     }
@@ -2055,8 +2121,17 @@ impl DurableTurnStore {
         };
         checkpoint.reconcile_sequences();
         checkpoint.revision = checkpoint.revision.saturating_add(1);
-        self.sync_journal_relative(&relative)?;
-        self.write_metadata_relative(&relative, &checkpoint)?;
+        if let Err(error) = self
+            .sync_journal_relative(&relative)
+            .and_then(|()| self.write_metadata_relative(&relative, &checkpoint))
+        {
+            cache.remove(&relative);
+            self.scan_summaries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&relative);
+            return Err(error);
+        }
         cache.insert(
             relative,
             CachedTurn {
@@ -2064,6 +2139,41 @@ impl DurableTurnStore {
                 journal_event_count: cached.journal_event_count,
             },
         );
+        let retired = cache
+            .iter()
+            .filter(|(_, turn)| turn.checkpoint.payload_is_retired())
+            .map(|(path, turn)| (path.clone(), turn.checkpoint.scan_summary()))
+            .collect::<Vec<_>>();
+        let mut summaries = self
+            .scan_summaries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let retired_members = retired
+            .iter()
+            .flat_map(|(_, summary)| {
+                summary
+                    .coalesced_batch
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(move |batch| {
+                        batch
+                            .member_turn_ids
+                            .iter()
+                            .map(move |id| (summary.session_id.clone(), *id))
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (path, summary) in retired {
+            summaries.insert(path.clone(), summary);
+            cache.remove(&path);
+        }
+        for (owner_session, member) in retired_members {
+            let path = relative_path(&owner_session, member)?;
+            if let Some(turn) = cache.remove(&path) {
+                summaries.insert(path, turn.checkpoint.scan_summary());
+            }
+        }
+
         Ok(Some(value))
     }
 
@@ -2098,7 +2208,16 @@ impl DurableTurnStore {
         relative: &Path,
     ) -> Result<&'a mut CachedTurn, DurableTurnStoreError> {
         use std::collections::hash_map::Entry;
-
+        {
+            let retired = self
+                .scan_summaries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            cache.retain(|key, turn| {
+                key == relative
+                    || (!turn.checkpoint.payload_is_retired() && !retired.contains_key(key))
+            });
+        }
         match cache.entry(relative.to_path_buf()) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
             Entry::Vacant(entry) => {
@@ -2136,13 +2255,45 @@ impl DurableTurnStore {
         let mut body = serde_json::to_vec_pretty(&checkpoint.stored_metadata())
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         body.push(b'\n');
-        lingxi_core::host::rooted_fs::atomic_write(
+        let result = lingxi_core::host::rooted_fs::atomic_write(
             &self.root,
             relative,
             &body,
             lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
-        .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
+        .map_err(|error| DurableTurnStoreError::Storage(error.to_string()));
+        #[cfg(test)]
+        let result = result.and_then(|()| {
+            if self
+                .fail_next_metadata_after_publish
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                Err(DurableTurnStoreError::Storage(
+                    "synthetic parent fsync failure after metadata publication".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+        if result.is_err() {
+            // A rename may already have published the target before parent
+            // fsync fails. The next scan must discover that uncertain outcome.
+            self.session_turn_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&checkpoint.session_id);
+            self.scan_summaries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(relative);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_metadata_after_publish_for_test(&self) {
+        self.fail_next_metadata_after_publish
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn append_journal_relative(
@@ -2301,6 +2452,333 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = DurableTurnStore::new(temp.path().join("turns"));
         (temp, store)
+    }
+
+    #[test]
+    fn uncertain_queue_publication_is_visible_to_warm_and_cold_recovery_before_and_after_retry() {
+        for retry in [false, true] {
+            let (temp, store) = store();
+            assert!(store.scan_pending("owner").unwrap().is_empty());
+            store.fail_next_metadata_after_publish_for_test();
+            assert!(store
+                .admit_queued_prompt(
+                    "owner",
+                    Some(17),
+                    None,
+                    "RETAIN_AFTER_RENAME".into(),
+                    None,
+                    Vec::new()
+                )
+                .is_err());
+            assert!(temp.path().join("turns/owner/17.json").exists());
+            if retry {
+                let accepted = store
+                    .admit_queued_prompt(
+                        "owner",
+                        Some(17),
+                        None,
+                        "RETAIN_AFTER_RENAME".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap();
+                assert_eq!(accepted.turn_id, 17);
+            }
+            let warm = store.scan_pending("owner").unwrap();
+            let cold = DurableTurnStore::new(temp.path().join("turns"))
+                .scan_pending("owner")
+                .unwrap();
+            assert_eq!(warm.len(), 1, "retry={retry}");
+            assert_eq!(warm, cold);
+            assert_eq!(warm[0].prompt.string_at(""), Some("RETAIN_AFTER_RENAME"));
+            assert!(store.scan_pending("other-owner").unwrap().is_empty());
+            store.cancel_pending("owner", 17).unwrap();
+            assert!(store.scan_pending("owner").unwrap().is_empty());
+            assert!(DurableTurnStore::new(temp.path().join("turns"))
+                .scan_pending("owner")
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn private_queue_retirement_preserves_cross_session_pending_payloads() {
+        let (_temp, store) = store();
+        let first = store
+            .admit_queued_prompt("a", Some(1), None, "a1".into(), None, Vec::new())
+            .unwrap();
+        let second = store
+            .admit_queued_prompt("a", Some(2), None, "a2".into(), None, Vec::new())
+            .unwrap();
+        store
+            .prepare_mid_turn_batch("a", &[first.turn_id, second.turn_id])
+            .unwrap();
+        store
+            .acknowledge_mid_turn_batch("a", first.turn_id, &[first.turn_id, second.turn_id])
+            .unwrap();
+        assert!(store.lock.lock().unwrap().is_empty());
+        store.load("a", first.turn_id).unwrap();
+        let images = vec![ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "AQID".repeat(1024),
+        }];
+        store
+            .admit_queued_prompt(
+                "b",
+                Some(2),
+                None,
+                "B_MUST_SURVIVE".into(),
+                None,
+                images.clone(),
+            )
+            .unwrap();
+        store
+            .begin("b", 3, "live".into(), None, Vec::new())
+            .unwrap();
+        store
+            .transition("b", 3, TurnRecoveryStateDto::PausedRecoverable, true, None)
+            .unwrap();
+        let pending = store.scan_pending("b").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].prompt.string_at(""), Some("B_MUST_SURVIVE"));
+        assert_eq!(pending[0].images, images);
+        assert!(store.scan_pending("a").unwrap().is_empty());
+        store.cancel_pending("b", 2).unwrap();
+        assert!(store.scan_pending("b").unwrap().is_empty());
+        let slash = store
+            .admit_queued_slash("b", Some(4), None, "/fixture".into(), Vec::new())
+            .unwrap();
+        store.claim_queued_slash("b", slash.turn_id).unwrap();
+        store
+            .complete_claimed_slash("b", slash.turn_id, None)
+            .unwrap();
+        assert!(!store
+            .lock
+            .lock()
+            .unwrap()
+            .contains_key(&relative_path("b", 4).unwrap()));
+        assert_eq!(
+            store.load("b", 4).unwrap().queue_delivery,
+            QueueDeliveryState::Delivered
+        );
+    }
+
+    #[test]
+    fn explicit_reloads_of_delivered_private_commands_keep_at_most_one_retired_payload() {
+        let (_temp, store) = store();
+        for id in 1..=24 {
+            let command = store
+                .admit_queued_slash(
+                    "session",
+                    Some(id),
+                    None,
+                    format!("/fixture {}", "x".repeat(4096)).into(),
+                    Vec::new(),
+                )
+                .unwrap();
+            store
+                .claim_queued_slash("session", command.turn_id)
+                .unwrap();
+            store
+                .complete_claimed_slash("session", command.turn_id, None)
+                .unwrap();
+        }
+        for id in 1..=24 {
+            let loaded = store.load("session", id).unwrap();
+            assert_eq!(loaded.queue_delivery, QueueDeliveryState::Delivered);
+            assert!(loaded.prompt.string_at("").unwrap().len() > 4096);
+            assert!(store.lock.lock().unwrap().len() <= 1);
+        }
+    }
+
+    #[test]
+    fn explicit_coalesced_member_reloads_retire_payloads_without_evicting_pending_inputs() {
+        let (temp, store) = store();
+        for index in 0..24 {
+            let ids = [index * 2 + 1, index * 2 + 2];
+            for id in ids {
+                store
+                    .admit_queued_prompt(
+                        "session",
+                        Some(id),
+                        None,
+                        format!("member-{id}-{}", "x".repeat(4096)).into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap();
+            }
+            store.prepare_mid_turn_batch("session", &ids).unwrap();
+            store
+                .acknowledge_mid_turn_batch("session", ids[0], &ids)
+                .unwrap();
+        }
+        store
+            .admit_queued_prompt(
+                "other",
+                Some(2),
+                None,
+                "PENDING_MUST_SURVIVE".into(),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        for store in [&store, &cold] {
+            assert!(store.scan_pending("session").unwrap().is_empty());
+            assert_eq!(
+                store.scan_pending("other").unwrap()[0].prompt.string_at(""),
+                Some("PENDING_MUST_SURVIVE")
+            );
+            for member in (2..=48).step_by(2) {
+                let loaded = store.load("session", member).unwrap();
+                assert!(loaded.prompt.string_at("").unwrap().len() > 4096);
+                let cache = store.lock.lock().unwrap();
+                assert!(
+                    cache.len() <= 2,
+                    "one requested retired member plus the live pending input"
+                );
+                assert_eq!(
+                    cache[&relative_path("other", 2).unwrap()]
+                        .checkpoint
+                        .prompt
+                        .string_at(""),
+                    Some("PENDING_MUST_SURVIVE")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retired_scan_facts_release_event_and_image_backing_allocations() {
+        let (_temp, store) = store();
+        store
+            .begin("a", 1, "payload".into(), None, Vec::new())
+            .unwrap();
+        for index in 0..128 {
+            store
+                .append_event(
+                    "a",
+                    1,
+                    format!(r#"{{"type":"text_delta","text":"{index}"}}"#),
+                )
+                .unwrap();
+        }
+        store
+            .transition("a", 1, TurnRecoveryStateDto::Completed, false, None)
+            .unwrap();
+        let summaries = store.scan_summaries.lock().unwrap();
+        let summary = &summaries[&relative_path("a", 1).unwrap()];
+        assert_eq!(summary.events.capacity(), 0);
+        assert_eq!(summary.images.capacity(), 0);
+        drop(summaries);
+        assert_eq!(store.load("a", 1).unwrap().events.len(), 128);
+    }
+
+    #[test]
+    fn failed_terminal_metadata_update_evicts_hot_running_state() {
+        let (temp, store) = store();
+        store
+            .begin(
+                "session-a",
+                901,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        store
+            .append_event(
+                "session-a",
+                901,
+                r#"{"type":"turn_ended","outcome":{"type":"end_turn"}}"#.into(),
+            )
+            .unwrap();
+        let path = temp.path().join("turns/session-a/901.json");
+        let metadata = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(store
+            .transition(
+                "session-a",
+                901,
+                TurnRecoveryStateDto::Completed,
+                false,
+                None
+            )
+            .is_err());
+        assert!(!store
+            .lock
+            .lock()
+            .unwrap()
+            .contains_key(&relative_path("session-a", 901).unwrap()));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, metadata).unwrap();
+        let hot = store
+            .load_cached_turn(
+                &mut store.lock.lock().unwrap(),
+                &relative_path("session-a", 901).unwrap(),
+            )
+            .unwrap()
+            .checkpoint
+            .clone();
+        let cold = DurableTurnStore::new(temp.path().join("turns"))
+            .read_relative(&relative_path("session-a", 901).unwrap())
+            .unwrap()
+            .checkpoint;
+        assert_eq!(hot.state, cold.state);
+        assert_eq!(hot.state, Some(TurnRecoveryStateDto::Completed));
+    }
+
+    #[test]
+    fn completed_payloads_retire_and_repeated_scans_use_lightweight_facts() {
+        let (temp, store) = store();
+        for id in 1..=24 {
+            store
+                .begin(
+                    "session-a",
+                    id,
+                    Utf16JsonProjection::from("large ".repeat(16384)),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap();
+            store
+                .transition(
+                    "session-a",
+                    id,
+                    TurnRecoveryStateDto::Completed,
+                    false,
+                    None,
+                )
+                .unwrap();
+        }
+        assert!(store.lock.lock().unwrap().is_empty());
+        assert_eq!(store.scan_summaries.lock().unwrap().len(), 24);
+        assert!(store.scan_pending("session-a").unwrap().is_empty());
+        // Once indexed, a queue scan must not reopen any completed journal.
+        for id in 1..=24 {
+            std::fs::rename(
+                temp.path().join(format!("turns/session-a/{id}.json")),
+                temp.path().join(format!("turns/session-a/{id}.saved")),
+            )
+            .unwrap();
+        }
+        assert!(store.scan_pending("session-a").unwrap().is_empty());
+        for summary in store.scan_summaries.lock().unwrap().values() {
+            assert_eq!(summary.prompt.string_at(""), Some(""));
+            assert!(summary.events.is_empty());
+            assert!(summary.images.is_empty());
+        }
+        std::fs::rename(
+            temp.path().join("turns/session-a/1.saved"),
+            temp.path().join("turns/session-a/1.json"),
+        )
+        .unwrap();
+        let reloaded = store
+            .read_relative(&relative_path("session-a", 1).unwrap())
+            .unwrap();
+        assert!(reloaded.checkpoint.prompt.string_at("").unwrap().len() > 90000);
     }
 
     #[test]

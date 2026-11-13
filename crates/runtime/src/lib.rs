@@ -43,6 +43,8 @@ pub mod app_agent_input;
 /// Shared immutable Local App Skill verification and workspace materialization.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod app_agent_skills;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod credential_provider;
 pub mod models;
 /// Unified media composition usable without a conversation engine.
 pub use media_runtime as media;

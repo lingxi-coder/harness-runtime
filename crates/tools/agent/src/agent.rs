@@ -4616,6 +4616,10 @@ impl Tool for AgentTool {
         "Launch a new agent".into()
     }
 
+    fn prompt_is_dynamic(&self) -> bool {
+        true
+    }
+
     async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // claude-code builds the Agent tool prompt dynamically (getPrompt,
         // AgentTool/prompt.ts:66-287): it injects the live agent catalog (one

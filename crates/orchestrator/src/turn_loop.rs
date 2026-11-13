@@ -22,7 +22,10 @@ where
 /// Keep preparation cancelable until the initial typed attachment batch starts
 /// writing. Once a durable append has begun, wait for the batch finalizer to
 /// update the transcript tip before returning cancellation; dropping the rest
-/// of preparation is safe after that checkpoint.
+/// of preparation is safe after that checkpoint. Continuation Read state and
+/// its file-change reminders have their own, shorter publication boundary.
+/// Post-compact auxiliary state and later catalog supplements likewise finish
+/// their short history/JSONL transactions before this future can be dropped.
 pub(crate) async fn await_prepare_with_ingress_commit_boundary<F, T>(
     future: F,
     cancel: Option<&lingxi_core::host::CancellationToken>,
@@ -33,26 +36,47 @@ where
     let Some(cancel) = cancel else {
         return future.await;
     };
+    let cancelled = || OrchestratorError::Internal("model request cancelled".into());
     tokio::pin!(future);
     tokio::select! {
         biased;
         () = cancel.cancelled() => {}
         result = &mut future => return result,
     }
-    if crate::request_context::prompt_ingress_batch_append_started()
-        && !crate::request_context::prompt_ingress_batch_finalized()
-    {
-        let finalized = crate::request_context::wait_for_prompt_ingress_batch_finalized();
-        tokio::pin!(finalized);
-        tokio::select! {
-            biased;
-            () = &mut finalized => {}
-            _ = &mut future => {}
+    loop {
+        if let Some(commit) = crate::request_context::pending_preparation_commit() {
+            tokio::select! {
+                biased;
+                () = commit.wait_for_completion() => {}
+                _ = &mut future => return Err(cancelled()),
+            }
+            continue;
         }
+        if let Some(publication) = crate::request_context::pending_changed_files_publication() {
+            tokio::select! {
+                biased;
+                () = publication.wait_for_completion() => {}
+                _ = &mut future => return Err(cancelled()),
+            }
+            continue;
+        }
+        if crate::request_context::prompt_ingress_batch_append_started()
+            && !crate::request_context::prompt_ingress_batch_finalized()
+        {
+            let finalized = crate::request_context::wait_for_prompt_ingress_batch_finalized();
+            tokio::pin!(finalized);
+            tokio::select! {
+                biased;
+                () = &mut finalized => {}
+                _ = &mut future => return Err(cancelled()),
+            }
+            continue;
+        }
+        // Polling one phase through completion may already have entered the
+        // next transaction. Recheck every protection before dropping prepare.
+        break;
     }
-    Err(OrchestratorError::Internal(
-        "model request cancelled".into(),
-    ))
+    Err(cancelled())
 }
 
 pub(crate) mod api_recovery;

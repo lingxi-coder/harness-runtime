@@ -12,6 +12,17 @@ use lingxi_core::types::{
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+#[path = "request_context/changed_files_publication.rs"]
+mod changed_files_publication;
+pub(crate) use changed_files_publication::{
+    changed_files_publication_scope, mark_changed_files_publication_started,
+    pending_changed_files_publication,
+};
+
+#[path = "request_context/preparation_commit.rs"]
+mod preparation_commit;
+pub(crate) use preparation_commit::{pending_preparation_commit, preparation_commit_scope};
+
 #[path = "request_context/deferred_tools_projection.rs"]
 mod deferred_tools_projection;
 
@@ -19,6 +30,23 @@ pub(crate) use deferred_tools_projection::{
     cached_rendered_row_count, render_deferred_tools_delta_for_request,
     DeferredToolsProjectionFacts,
 };
+
+tokio::task_local! {
+    static PHYSICAL_CACHE_CAPTURE: llm_runtime::prompt_cache::RequestCapture;
+}
+
+pub(crate) fn physical_cache_capture() -> Option<llm_runtime::prompt_cache::RequestCapture> {
+    PHYSICAL_CACHE_CAPTURE.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn with_physical_cache_capture<F: Future>(
+    capture: llm_runtime::prompt_cache::RequestCapture,
+    future: F,
+) -> F::Output {
+    PHYSICAL_CACHE_CAPTURE
+        .scope(capture, Box::pin(future))
+        .await
+}
 
 /// A prompt-ingress attachment row with the exact rendered cache Native writes
 /// beside its typed payload. The message ID is reused as the JSONL attachment
@@ -28,6 +56,20 @@ pub(crate) struct PromptIngressAttachment {
     pub(crate) message: ConversationMessage,
     pub(crate) payload: Utf16JsonProjection,
     pub(crate) rendered: Utf16JsonProjection,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum PromptListingMembership {
+    Skills {
+        generation: u64,
+        before: std::collections::HashSet<Vec<u16>>,
+        after: std::collections::HashSet<Vec<u16>>,
+    },
+    Agents {
+        generation: u64,
+        before: std::collections::HashSet<String>,
+        after: std::collections::HashSet<String>,
+    },
 }
 
 /// A prompt-history append that must remain behind the current Native NAr
@@ -123,6 +165,21 @@ struct PromptContext {
 
 #[derive(Default)]
 struct PromptIngressBatch {
+    /// The current prepared step's exact Native tool-change rows. Physical
+    /// retries reuse their identities and before-human placement; a later
+    /// preparation replaces this slot rather than replaying initial deltas.
+    current_tool_change_rows: Vec<ConversationMessage>,
+    /// Compaction and later-step supplement commits settle before preparation
+    /// may be dropped by its caller's cancellation race.
+    preparation_commit: Option<std::sync::Arc<preparation_commit::PreparationCommit>>,
+    /// Catalog membership is acknowledged only when its candidate row joins
+    /// accepted history. A blocked/cancelled initial input leaves sent sets alone.
+    stage_listing_membership: bool,
+    listing_memberships: Vec<(MessageId, PromptListingMembership)>,
+    /// A later model step owns a separate Read-to-reminder commit boundary;
+    /// its notices must not be cached in the already-finalized ingress batch.
+    changed_files_publication:
+        Option<std::sync::Arc<changed_files_publication::ChangedFilesPublication>>,
     /// Attachment producers in the order they ran; empty vectors represent a
     /// producer that ran once and emitted no row.
     producer_rows: Vec<(String, Vec<PromptIngressAttachment>)>,
@@ -130,9 +187,9 @@ struct PromptIngressBatch {
     /// batch. They are durable conversation messages but are not attachment
     /// candidates for the NAr placement selector.
     api_system_rows: Vec<(String, Vec<ConversationMessage>)>,
-    /// Producers with a post-processing step (currently the deferred row's
-    /// prompt attachment hook) are cached before that step and marked complete
-    /// after it. A retry can finish the cached row without recomputing its diff.
+    /// Producers whose source admission is completed during preparation are
+    /// cached before that boundary. A retry can finish the cached row without
+    /// recomputing its stateful diff. Mod rendering only touches request copies.
     completed_producers: std::collections::HashSet<String>,
     /// Filled exactly once before the first durable attachment append.
     selected_before_closing_line_ids: Option<std::collections::HashSet<MessageId>>,
@@ -167,6 +224,10 @@ struct PromptIngressBatch {
 
 tokio::task_local! {
     static REQUEST_CONTEXT: PromptContext;
+}
+
+pub(crate) fn has_prompt_context() -> bool {
+    REQUEST_CONTEXT.try_with(|_| ()).is_ok()
 }
 
 pub(crate) fn prompt_policy_cell(
@@ -300,11 +361,20 @@ impl PromptIngressAppendTestGate {
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static PROMPT_INGRESS_APPEND_TEST_GATE: std::sync::Arc<PromptIngressAppendTestGate>;
+    pub(crate) static PROMPT_INGRESS_ADMISSION_TEST_GATE: std::sync::Arc<PromptIngressAppendTestGate>;
+    pub(crate) static PROMPT_INGRESS_PLACEMENT_TEST_GATE: std::sync::Arc<PromptIngressAppendTestGate>;
 }
 
 #[cfg(test)]
 pub(crate) async fn pause_after_first_ingress_append_for_test() {
     if let Ok(gate) = PROMPT_INGRESS_APPEND_TEST_GATE.try_with(std::sync::Arc::clone) {
+        gate.pause_once().await;
+    }
+}
+
+#[cfg(test)]
+async fn pause_after_ingress_admission_for_test() {
+    if let Ok(gate) = PROMPT_INGRESS_ADMISSION_TEST_GATE.try_with(std::sync::Arc::clone) {
         gate.pause_once().await;
     }
 }
@@ -338,15 +408,13 @@ impl ConversationOrchestrator {
                     pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
-                    let outcome = self
-                        .run_turn_streaming_with_cancel_image_sources_and_message_id(
-                            prompt,
-                            Vec::new(),
-                            cancel,
-                            Some(prompt_id),
-                        )
-                        .await;
-                    finalize_prompt_context_output(self, outcome).await
+                    self.run_turn_streaming_with_cancel_image_sources_and_message_id(
+                        prompt,
+                        Vec::new(),
+                        cancel,
+                        Some(prompt_id),
+                    )
+                    .await
                 },
             )
             .await
@@ -377,15 +445,13 @@ impl ConversationOrchestrator {
                     pending_prompt_source_vector: std::sync::Mutex::new(None),
                 },
                 async {
-                    let outcome = self
-                        .run_turn_with_cancel_image_sources_and_message_id(
-                            prompt,
-                            Vec::new(),
-                            cancel,
-                            Some(prompt_id),
-                        )
-                        .await;
-                    finalize_prompt_context_output(self, outcome).await
+                    self.run_turn_with_cancel_image_sources_and_message_id(
+                        prompt,
+                        Vec::new(),
+                        cancel,
+                        Some(prompt_id),
+                    )
+                    .await
                 },
             )
             .await
@@ -561,7 +627,10 @@ pub(crate) async fn scope_if_missing<T, F: Future<Output = Result<T, Orchestrato
     future: F,
 ) -> Result<T, OrchestratorError> {
     if REQUEST_CONTEXT.try_with(|_| ()).is_ok() {
-        future.await
+        // Explicit request-context wrappers own the state, while this driver
+        // owns turn_gate. Settle their accepted batch before releasing it too.
+        let output = future.await;
+        finalize_prompt_context_output(orchestrator, output).await
     } else {
         REQUEST_CONTEXT
             .scope(
@@ -880,6 +949,13 @@ pub(crate) async fn persist_prompt_ingress_after_user(
         })
         .unwrap_or(false);
     if !staged_already {
+        let _ = REQUEST_CONTEXT.try_with(|context| {
+            context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stage_listing_membership = true;
+        });
         let mut staged = Vec::new();
         staged.extend(orchestrator.environment_prompt_ingress_attachments().await);
         if let Some(model) = orchestrator.model_prompt_ingress_attachment().await {
@@ -1204,11 +1280,6 @@ async fn finalize_prompt_ingress_batch_with_enabled(
             session.native_request_history.synthetic_closing_ids.clone(),
         )
     };
-    for attachment in &staged {
-        orchestrator
-            .append_accepted_prompt_ingress_reminder(attachment)
-            .await;
-    }
     let mut typed_attachment_ids = std::collections::HashSet::new();
     let mut raw_attachment_types = std::collections::HashMap::new();
     {
@@ -1280,9 +1351,37 @@ async fn finalize_prompt_ingress_batch_with_enabled(
     // Cancellation at the placement boundary must leave the selected ID set
     // intact while deferring every durable append. A retry in this same ingress
     // scope reuses that selection and the producer caches above.
+    #[cfg(test)]
+    if let Ok(gate) = PROMPT_INGRESS_PLACEMENT_TEST_GATE.try_with(std::sync::Arc::clone) {
+        gate.pause_once().await;
+    }
     if cancel.is_some_and(CancellationToken::is_cancelled) {
         return Ok(());
     }
+
+    // Placement uses the staged candidates above; admission itself is an
+    // effect. Publish nothing when cancellation won the placement boundary.
+    // Once admission starts, finish the same ordered history/JSONL transaction
+    // before the driver may append its interruption row. The guard also covers
+    // the interval before the first writer sets append_started.
+    let ingress_commit = preparation_commit_scope();
+    if !api_system_rows.is_empty() {
+        let mut session = orchestrator.session.lock().await;
+        for row in &api_system_rows {
+            if !session
+                .history
+                .iter()
+                .any(|message| message.id() == row.id())
+            {
+                session.history.push(row.clone());
+            }
+        }
+    }
+    orchestrator
+        .append_accepted_prompt_ingress_reminders(&staged)
+        .await;
+    #[cfg(test)]
+    pause_after_ingress_admission_for_test().await;
 
     // API-system tool changes are request-normalization rows, not Native NAr
     // attachments. Even though they are excluded from the placement selector,
@@ -1336,6 +1435,15 @@ async fn finalize_prompt_ingress_batch_with_enabled(
                 .await;
         }
     }
+
+    // Retire delivered identities before later fallible hook-history work.
+    // A failure there must not offer already-published rows to the next query.
+    for membership in take_prompt_listing_memberships(&staged) {
+        orchestrator
+            .commit_prompt_listing_membership(membership)
+            .await;
+    }
+    orchestrator.complete_changed_file_reminders(&staged);
 
     // NAr rows are now live and durable. Qe's current hook history follows
     // them in both Native request and transcript order.
@@ -1421,6 +1529,7 @@ async fn finalize_prompt_ingress_batch_with_enabled(
         batch.finalized = true;
         batch.finalized_notify.notify_one();
     });
+    drop(ingress_commit);
     Ok(())
 }
 
@@ -1461,10 +1570,11 @@ pub(crate) fn staged_prompt_ingress_attachments() -> Option<Vec<PromptIngressAtt
 pub(crate) fn prompt_ingress_producer_rows(producer: &str) -> Option<Vec<PromptIngressAttachment>> {
     REQUEST_CONTEXT
         .try_with(|context| {
-            context
+            let batch = context
                 .ingress_batch
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            batch
                 .producer_rows
                 .iter()
                 .find(|(name, _)| name == producer)
@@ -1485,6 +1595,39 @@ pub(crate) async fn prompt_ingress_api_system_rows_or_else<F>(
 where
     F: FnOnce() -> Vec<ConversationMessage>,
 {
+    let fresh_step = if prompt_ingress_batch_finalized() {
+        let session = orchestrator.session.lock().await;
+        !prompt_ingress_owner_is_current(&session.history, |id| {
+            session.injected_message_sources.contains_key(id)
+        })
+    } else {
+        false
+    };
+    if fresh_step {
+        let rows = produce();
+        remember_current_tool_change_rows(&rows);
+        if rows.is_empty() {
+            return rows;
+        }
+        let commit = preparation_commit_scope();
+        {
+            let mut session = orchestrator.session.lock().await;
+            for row in &rows {
+                if !session
+                    .history
+                    .iter()
+                    .any(|current| current.id() == row.id())
+                {
+                    session.history.push(row.clone());
+                }
+            }
+        }
+        for row in &rows {
+            orchestrator.persist_message_to_jsonl(row).await;
+        }
+        drop(commit);
+        return rows;
+    }
     let cached = REQUEST_CONTEXT
         .try_with(|context| {
             context
@@ -1525,35 +1668,61 @@ where
             .unwrap_or_else(|_| produced.clone())
     };
 
-    if !rows.is_empty() {
-        let prompt_id = match REQUEST_CONTEXT.try_with(|context| {
-            *context
-                .prompt_id
+    // Initial API-system rows stay staged beside the NAr batch. Their live
+    // admission and JSONL append share the finalizer's short commit boundary.
+    remember_current_tool_change_rows(&rows);
+    rows
+}
+
+fn remember_current_tool_change_rows(rows: &[ConversationMessage]) {
+    let _ = REQUEST_CONTEXT.try_with(|context| {
+        context
+            .ingress_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_tool_change_rows = rows.to_vec();
+    });
+}
+
+pub(crate) fn clear_current_tool_change_rows() {
+    remember_current_tool_change_rows(&[]);
+}
+
+/// Apply the same current-step tool-change placement after initial assembly
+/// and a physical retry rebuilt from durable history. Older steps stay put.
+pub(crate) fn project_current_tool_change_rows(messages: &mut Vec<ConversationMessage>) {
+    let rows = REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .ingress_batch
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-        }) {
-            Ok(prompt_id) => prompt_id,
-            Err(_) => return rows,
-        };
-        let mut session = orchestrator.session.lock().await;
-        let mut insert_at = session
-            .history
-            .iter()
-            .position(|message| message.id() == prompt_id)
-            .map_or(session.history.len(), |index| index + 1);
-        for row in &rows {
-            if session
-                .history
-                .iter()
-                .any(|message| message.id() == row.id())
-            {
-                continue;
-            }
-            session.history.insert(insert_at, row.clone());
-            insert_at += 1;
-        }
+                .current_tool_change_rows
+                .clone()
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return;
     }
-    rows
+    let ids = rows
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<std::collections::HashSet<_>>();
+    messages.retain(|message| !ids.contains(&message.id()));
+    let insertion_index = messages
+        .iter()
+        .rposition(|message| {
+            matches!(
+                message,
+                ConversationMessage::User {
+                    is_meta: false,
+                    is_compact_summary: false,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(messages.len());
+    messages.splice(insertion_index..insertion_index, rows);
 }
 
 /// Record one producer result before any later async hook or durable append can
@@ -1633,6 +1802,60 @@ pub(crate) fn prompt_ingress_producer_is_complete(producer: &str) -> bool {
                 .contains(producer)
         })
         .unwrap_or(false)
+}
+
+/// Record a candidate's acknowledgement beside its stable row identity. The
+/// returned false keeps unscoped/transient consumers on their immediate path.
+pub(crate) fn stage_prompt_listing_membership(
+    id: MessageId,
+    membership: PromptListingMembership,
+) -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let mut batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !batch.stage_listing_membership || batch.finalized {
+                return false;
+            }
+            if !batch
+                .listing_memberships
+                .iter()
+                .any(|(current, _)| *current == id)
+            {
+                batch.listing_memberships.push((id, membership));
+            }
+            true
+        })
+        .unwrap_or(false)
+}
+
+fn take_prompt_listing_memberships(
+    accepted: &[PromptIngressAttachment],
+) -> Vec<PromptListingMembership> {
+    let ids = accepted
+        .iter()
+        .map(|row| row.message.id())
+        .collect::<std::collections::HashSet<_>>();
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let mut batch = context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ready = Vec::new();
+            batch.listing_memberships.retain(|(id, membership)| {
+                if ids.contains(id) {
+                    ready.push(membership.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            ready
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) async fn complete_prompt_ingress_producer_rows(
@@ -1803,6 +2026,46 @@ pub(crate) fn prompt_ingress_batch_finalized() -> bool {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .finalized
+        })
+        .unwrap_or(false)
+}
+
+/// A later human prompt shares the outer query's task-local context, but does
+/// not own its initial attachment cache or before-prompt projection. Preserve
+/// the pending batch's existing admission behavior until it has been finalized.
+pub(crate) fn prompt_ingress_owner_is_current(
+    history: &[ConversationMessage],
+    mut is_injected: impl FnMut(&MessageId) -> bool,
+) -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            if !context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finalized
+            {
+                return true;
+            }
+            let prompt_id = *context
+                .prompt_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for row in history.iter().rev() {
+                if row.id() == prompt_id {
+                    return true;
+                }
+                if matches!(row, ConversationMessage::User {
+                    id, content, is_meta: false, is_compact_summary: false,
+                    turn_companion, ..
+                } if *turn_companion != Some(Some(true))
+                    && !is_injected(id)
+                    && !content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+                {
+                    return false;
+                }
+            }
+            false
         })
         .unwrap_or(false)
 }

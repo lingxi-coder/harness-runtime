@@ -295,7 +295,39 @@ impl ToolInvoker for RegistryToolInvoker {
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        let call = self.invoke_registered_or_supplied(name, input, ctx, None);
+        let call = self.invoke_registered_or_supplied(name, input, ctx, None, None);
+        if let Some(state) = &self.memory_fork_state {
+            state.scope(call).await
+        } else {
+            call.await
+        }
+    }
+
+    async fn output_parser_snapshot(
+        &self,
+        name: &str,
+    ) -> Result<Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>, ToolInvokerError>
+    {
+        let tool = self
+            .registry
+            .find_by_name(name)
+            .ok_or_else(|| ToolInvokerError::NotFound(name.to_owned()))?;
+        tool.output_parser_snapshot()
+            .await
+            .map_err(|error| match error {
+                crate::ToolError::InvalidInput(detail) => ToolInvokerError::InvalidInput(detail),
+                other => ToolInvokerError::Internal(other.model_facing_message()),
+            })
+    }
+
+    async fn invoke_detailed_with_output_parser(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        capture: lingxi_core::host::tool_invoker::ToolOutputParserCapture,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        let call = self.invoke_registered_or_supplied(name, input, ctx, None, Some(capture));
         if let Some(state) = &self.memory_fork_state {
             state.scope(call).await
         } else {
@@ -323,7 +355,7 @@ impl ToolInvoker for RegistryToolInvoker {
         if tool.name() != name && !tool.aliases().contains(&name) {
             return Err(ToolInvokerError::NotFound(name.into()));
         }
-        self.invoke_registered_or_supplied(name, input, ctx, Some(tool))
+        self.invoke_registered_or_supplied(name, input, ctx, Some(tool), None)
             .await
     }
 
@@ -339,6 +371,7 @@ impl RegistryToolInvoker {
         mut input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         supplied: Option<Arc<dyn crate::Tool>>,
+        output_parser_capture: Option<lingxi_core::host::tool_invoker::ToolOutputParserCapture>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         let tool = supplied
             .or_else(|| self.registry.find_by_name(name))
@@ -880,7 +913,12 @@ impl RegistryToolInvoker {
                 result.model_content = model_content;
                 Ok(result)
             } else {
-                tool.call(input, tool_use_ctx, progress_tx).await
+                if let Some(capture) = output_parser_capture {
+                    tool.call_with_output_parser(input, tool_use_ctx, progress_tx, capture)
+                        .await
+                } else {
+                    tool.call(input, tool_use_ctx, progress_tx).await
+                }
             }
         };
         let result = if let Some(original) = memory_scope_source.as_ref() {
@@ -2528,7 +2566,11 @@ mod tests {
         let mut ctx = no_ctx();
         ctx.tool_execution_policy =
             lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel;
-        match invoker.invoke("TestEcho", json!({ "a": 1 }), ctx).await {
+        let capture = lingxi_core::host::tool_invoker::ToolOutputParserCapture::default();
+        match invoker
+            .invoke_detailed_with_output_parser("TestEcho", json!({ "a": 1 }), ctx, capture.clone())
+            .await
+        {
             Err(ToolInvokerError::Internal(reason)) => {
                 assert!(
                     reason
@@ -2540,6 +2582,8 @@ mod tests {
             }
             other => panic!("expected Internal(deny), got {other:?}"),
         }
+        // Denial never reaches the physical-call parser capture or lazy dial.
+        assert!(capture.snapshot().is_none());
         // Gate was consulted; the tool was NOT run (echo would have returned data).
         assert_eq!(seen.lock().unwrap().as_slice(), ["TestEcho"]);
     }

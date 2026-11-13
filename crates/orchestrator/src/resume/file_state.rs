@@ -193,6 +193,16 @@ pub(super) fn restore_file_state(
         }
     }
     for message in &history {
+        // A diff is not a full snapshot. Never revive an older Write/Read
+        // baseline after the transcript proves it was superseded.
+        if let Some(source) = attachments
+            .get(&message.id())
+            .filter(|source| source.string_at("/type") == Some("edited_text_file"))
+        {
+            if let Some(path) = exact_path(source, "/filename", cwd) {
+                cache.remove(&path);
+            }
+        }
         if let Some((path, entry)) = attachment_snapshot(message, attachments, cwd) {
             if let Some(entry) = entry {
                 entry.publish(&mut cache, path);
@@ -274,6 +284,32 @@ pub(super) fn restore_file_state(
             ConversationMessage::System { .. } => {}
         }
     }
+}
+
+/// Complete text evidence usable by the post-compact instruction cursor.
+/// Path-only references and diffs cannot grant instruction visibility.
+pub(crate) fn complete_file_attachment_path(source: &Utf16JsonProjection) -> Option<PathBuf> {
+    if source.string_at("/type") != Some("file") {
+        return None;
+    }
+    let filename = String::from_utf16(&source.string_units("/filename")?).ok()?;
+    if !Path::new(&filename).is_absolute()
+        || source.string_units("/filename") != source.string_units("/content/file/filePath")
+        || source
+            .at_pointer("/content/file/truncatedByTokenCap")
+            .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return None;
+    }
+    let units = source.string_units("/content/file/content")?;
+    let lines = units.iter().filter(|unit| **unit == 10).count() as u64 + 1;
+    if unsigned(source.at_pointer("/content/file/startLine")?)? != 1
+        || unsigned(source.at_pointer("/content/file/numLines")?)? != lines
+        || unsigned(source.at_pointer("/content/file/totalLines")?)? != lines
+    {
+        return None;
+    }
+    Some(PathBuf::from(filename))
 }
 
 fn attachment_snapshot(

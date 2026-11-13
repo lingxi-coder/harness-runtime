@@ -77,6 +77,7 @@ pub mod model;
 pub mod model_attempt;
 mod prefix_lock_recovery;
 pub mod prompt_cache;
+mod prompt_projection;
 pub mod protocol;
 pub mod provider_settings;
 pub mod reasoning_controls;

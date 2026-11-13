@@ -22,6 +22,9 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 
+#[path = "request_context/lifecycle_regression_tests.rs"]
+mod lifecycle_regressions;
+
 fn orchestrator(
     cwd: &Path,
     transcript: &Path,
@@ -3391,11 +3394,15 @@ async fn prepared_native_tool_addition_obeys_mctc_and_inline_gate_snapshot() {
         let filesystem: Arc<dyn FileSystem> =
             Arc::new(PosixFileSystem::new(root.path().to_owned()));
 
-        for (profile, mctc_gate, inline_gate, expected_tool_kind) in [
+        for ((profile, mctc_gate, inline_gate, expected_tool_kind), path) in [
             ("native-mctc-off", false, false, None),
             ("native-inline-off", true, false, Some("tool_reference")),
             ("native-inline-on", true, true, Some("tool_definition")),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|case| {
+            [ModelCallPath::Batched, ModelCallPath::Streaming].map(move |path| (case, path))
+        }) {
             let api = Arc::new(MockApiClient::new(Vec::new()));
             api.set_native_request_route(
                 Some(llm_runtime::ProtocolFamily::AnthropicMessages),
@@ -3456,7 +3463,7 @@ async fn prepared_native_tool_addition_obeys_mctc_and_inline_gate_snapshot() {
                     .is_some());
 
                     let prepared = orchestrator
-                        .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
+                        .prepare_turn_step(path, None, true, true, None)
                         .await
                         .expect("the actual Native request preparation completes");
                     let addition = prepared.snapshot.iter().find_map(|message| {
@@ -3500,6 +3507,12 @@ async fn prepared_native_tool_addition_obeys_mctc_and_inline_gate_snapshot() {
                                 .is_none(),
                             "the references-only path must not leak a tool schema"
                         );
+                    }
+                    let api_system_ids = prepared.snapshot.iter().filter(|message| matches!(message, ConversationMessage::System { api_system: Some(_), .. })).map(ConversationMessage::id).collect::<Vec<_>>();
+                    orchestrator.inject_user_text("steering after initial tool catalog", false).await;
+                    let steered = orchestrator.prepare_turn_step(path, None, true, true, None).await.unwrap();
+                    for id in api_system_ids {
+                        assert_eq!(steered.snapshot.iter().filter(|message| message.id() == id).count(), 1, "MCTC cached system rows must appear once after steering");
                     }
                     let request_facts = prepared
                         .native_anthropic_request_context

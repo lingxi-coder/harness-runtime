@@ -1547,6 +1547,7 @@ fn open_rooted_file(
 }
 
 struct LoadedRead {
+    identity: Option<tool_api::read_file_state::ReadFileIdentity>,
     snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot,
     stream_source: Option<std::fs::File>,
 }
@@ -1604,6 +1605,7 @@ fn load_rooted_read(
     use std::io::{Seek, SeekFrom};
 
     let mut file = open_rooted_file(requested, approved, trusted_dirs)?;
+    let identity = tool_api::read_file_state::opened_read_file_identity(&file).ok();
     let metadata = file
         .metadata()
         .map_err(|error| RootedFsError::Fs(FsError::Io(error.to_string())))?;
@@ -1696,6 +1698,7 @@ fn load_rooted_read(
         None
     };
     Ok(LoadedRead {
+        identity,
         snapshot: lingxi_core::host::rooted_fs::RootedFileSnapshot {
             bytes,
             size,
@@ -2401,6 +2404,16 @@ impl Tool for FileReadTool {
         TOOL_NAME
     }
 
+    fn read_state_io_path(&self, requested: &Path) -> Result<PathBuf, ToolError> {
+        let requested =
+            crate::normalize_model_file_path(&requested.to_string_lossy(), &self.ctx.cwd());
+        if is_device_file(&requested.to_string_lossy()) {
+            return Err(ToolError::PathBlocked { path: requested });
+        }
+        translate_model_path(&self.ctx.fs, requested, false)
+            .map_err(|message| ToolError::InvalidInput(message.into()))
+    }
+
     async fn open_file_for_compaction(
         &self,
         requested: &Path,
@@ -2410,11 +2423,39 @@ impl Tool for FileReadTool {
         if is_device_file(&requested.to_string_lossy()) {
             return Err(ToolError::PathBlocked { path: requested });
         }
-        let path = translate_model_path(&self.ctx.fs, requested, false)
-            .map_err(|message| ToolError::InvalidInput(message.into()))?;
+        let path = self.read_state_io_path(&requested)?;
         let trusted_dirs = self.ctx.read_roots().await;
         let approved = canonicalize_and_validate(&path, &trusted_dirs)
             .map_err(|_| ToolError::PathBlocked { path: path.clone() })?;
+        let policy = self
+            .ctx
+            .permission_gate
+            .as_ref()
+            .map(|gate| gate.read_path_policy_snapshot())
+            .unwrap_or_else(|| {
+                permission::read_deny_globs::read_deny_search_snapshot(
+                    self.ctx.permission_policy.clone(),
+                    Some(&self.ctx.cwd()),
+                )
+            });
+        use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+        for spelling in [&requested, &path, &approved] {
+            let check = policy.check_path(spelling);
+            if check.denied_by_read_rule != ReadPathPolicyMatch::NoMatch
+                // Working-directory holds apply to the translated I/O route;
+                // a guest spelling need not exist in the host namespace.
+                || ((spelling == &path || spelling == &approved)
+                    && check.held_outside != ReadPathPolicyMatch::NoMatch)
+                // Unlike changed-file path sets, this entry point has not
+                // enumerated symlink landing spellings. The direct-Read rule
+                // matcher checks those forms as well as the supplied spelling.
+                || policy.denied_search_path(spelling) != ReadPathPolicyMatch::NoMatch
+            {
+                return Err(ToolError::PathBlocked {
+                    path: requested.clone(),
+                });
+            }
+        }
         tokio::task::spawn_blocking(move || open_rooted_file(&path, &approved, &trusted_dirs))
             .await
             .map_err(|error| ToolError::Io(error.to_string().into()))?
@@ -2610,6 +2651,12 @@ impl Tool for FileReadTool {
                 return Err(ToolError::PathBlocked { path });
             }
         };
+        if tool_api::read_file_state::reminder_read_target(&requested_path)
+            .is_some_and(|approved| approved != canon)
+        {
+            self.emit_failed(&invocation_id, "path_blocked").await;
+            return Err(ToolError::PathBlocked { path });
+        }
 
         // The permission check above approved `canon`; all bytes and metadata
         // now come from a no-follow handle opened relative to the approved
@@ -2640,9 +2687,11 @@ impl Tool for FileReadTool {
         })
         .await?;
         let mut stream_source = None;
+        let read_identity;
         let snapshot = match loaded {
             Ok(loaded) => {
                 stream_source = loaded.stream_source;
+                read_identity = loaded.identity;
                 loaded.snapshot
             }
             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
@@ -2652,7 +2701,9 @@ impl Tool for FileReadTool {
                 // tries the macOS-screenshot AM/PM space variant (regular space ⇄
                 // thin space, U+202F), then reports the friendly message if that
                 // variant is also absent.
-                if let Some(alt) = get_alternate_screenshot_path(&requested_path) {
+                if let Some(alt) = get_alternate_screenshot_path(&requested_path).filter(|_| {
+                    tool_api::read_file_state::reminder_read_target(&requested_path).is_none()
+                }) {
                     let alternate = run_read_job(&read_cancel, {
                         let trusted_dirs = trusted_dirs.clone();
                         move |cancel| {
@@ -2676,6 +2727,7 @@ impl Tool for FileReadTool {
                             Ok(loaded) => {
                                 canon = alt_canon;
                                 stream_source = loaded.stream_source;
+                                read_identity = loaded.identity;
                                 loaded.snapshot
                             }
                             Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
@@ -2950,7 +3002,7 @@ impl Tool for FileReadTool {
             .await;
 
             check_read_cancelled(&ctx)?;
-            tool_api::read_file_state::set_with_requested_aliases_and_units(
+            tool_api::read_file_state::set_from_opened_file(
                 &self.ctx.read_file_state,
                 requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
@@ -2962,9 +3014,9 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
-                true,
                 vec![requested_path.clone(), path.clone()],
                 Some(slice_units.clone()),
+                read_identity,
             );
 
             let mut file = json!({
@@ -3123,7 +3175,7 @@ impl Tool for FileReadTool {
 
             // Native stores serialized cells, offset one and no line limit.
             check_read_cancelled(&ctx)?;
-            tool_api::read_file_state::set_with_requested_aliases(
+            tool_api::read_file_state::set_from_opened_file(
                 &self.ctx.read_file_state,
                 requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
@@ -3135,8 +3187,9 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
-                true,
                 vec![requested_path.clone(), path.clone()],
+                None,
+                read_identity,
             );
 
             ctx.nested_memory_triggers.enqueue(requested_path.clone());
@@ -3278,7 +3331,7 @@ impl Tool for FileReadTool {
         // records its returned line count as `limit`; route aliases remain
         // separate from canonical rooted-I/O authority.
         check_read_cancelled(&ctx)?;
-        tool_api::read_file_state::set_with_requested_aliases_and_units(
+        tool_api::read_file_state::set_from_opened_file(
             &self.ctx.read_file_state,
             requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
@@ -3309,9 +3362,9 @@ impl Tool for FileReadTool {
                 // full one.
                 is_partial_view: partial_note.is_some(),
             },
-            true,
             vec![requested_path.clone(), path.clone()],
             Some(slice_units.clone()),
+            read_identity,
         );
 
         ctx.nested_memory_triggers.enqueue(requested_path.clone());
@@ -3757,6 +3810,95 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retarget_after_read_before_publication_does_not_authorize_unseen_file() {
+        struct RetargetAtPublication {
+            route: PathBuf,
+            clipped: PathBuf,
+            once: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait::async_trait]
+        impl telemetry::sink::AnalyticsSink for RetargetAtPublication {
+            async fn log_event(&self, name: &str, _: telemetry::sink::LogEventMetadata) {
+                if name == "tengu_session_file_read"
+                    && self.once.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    std::fs::remove_file(&self.route).unwrap();
+                    std::fs::hard_link(&self.clipped, &self.route).unwrap();
+                }
+            }
+            async fn log_event_async(
+                &self,
+                name: &str,
+                metadata: telemetry::sink::LogEventMetadata,
+            ) {
+                self.log_event(name, metadata).await;
+            }
+            fn name(&self) -> &str {
+                "retarget-at-read-publication"
+            }
+        }
+        for limit in [None, Some(100)] {
+            let tmp = TempDir::new().unwrap();
+            let route = tmp.path().join("route.txt");
+            let clipped = tmp.path().join("clipped.txt");
+            std::fs::write(&route, "the complete A snapshot").unwrap();
+            std::fs::write(&clipped, "B prefix and its unseen suffix").unwrap();
+            let (ctx, _) = make_ctx(&tmp);
+            tool_api::read_file_state::mark_start_only(&ctx.read_file_state, clipped.clone());
+            ctx.bus
+                .attach_sink(Arc::new(RetargetAtPublication {
+                    route: route.clone(),
+                    clipped: clipped.clone(),
+                    once: std::sync::atomic::AtomicBool::new(true),
+                }))
+                .await;
+            let read = FileReadTool::new(ctx.clone());
+            let mut input = json!({"file_path":route});
+            if let Some(limit) = limit {
+                input["limit"] = json!(limit);
+            }
+            let result = read
+                .call(crate::generated_result(&input), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            assert!(crate::test_data(&result.data)["file"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("complete A"));
+            assert!(tool_api::read_file_state::start_only_write_guard(
+                &ctx.read_file_state,
+                &route,
+                &route
+            )
+            .is_some());
+            let write = crate::write::FileWriteTool::new(ctx.clone());
+            let replace =
+                crate::generated_result(&json!({"file_path":route,"content":"replacement"}));
+            assert!(write
+                .call(replace.clone(), fresh_ctx(), fresh_tx())
+                .await
+                .is_err());
+            assert_eq!(
+                std::fs::read_to_string(&clipped).unwrap(),
+                "B prefix and its unseen suffix"
+            );
+            read.call(
+                crate::generated_result(&json!({"file_path":route})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+            write
+                .call(replace.clone(), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            write.call(replace, fresh_ctx(), fresh_tx()).await.unwrap();
+        }
+    }
+
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let fs = make_dummy_fs();
         let bus = Arc::new(AnalyticsBus::new());
@@ -3765,6 +3907,40 @@ mod tests {
             tool_api::test_support::ctx_for_file_tools(fs, bus, vec![tmp.path().to_path_buf()]),
             sink,
         )
+    }
+
+    #[cfg(not(feature = "image-read"))]
+    #[tokio::test]
+    async fn reminder_binding_cannot_read_an_alternate_screenshot_target() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let requested = root.join("Screenshot 2026-11-12 at 9.00.00 AM.png");
+        let alternate = get_alternate_screenshot_path(&requested).unwrap();
+        std::fs::write(&alternate, "ALTERNATE_SECRET").unwrap();
+        let (context, _) = make_ctx(&tmp);
+        let map = context.read_file_state.clone();
+        let tool = FileReadTool::new(context);
+        let input = crate::generated_result(&json!({"file_path":requested}));
+        let result = tool_api::read_file_state::with_reminder_read_target(
+            requested.clone(),
+            requested.clone(),
+            tool.call(input.clone(), fresh_ctx(), fresh_tx()),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "internal Read may not switch to an unchecked alternate target"
+        );
+        assert!(tool_api::read_file_state::get(&map, &requested).is_none());
+        let explicit = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+        assert!(
+            explicit
+                .data
+                .string_at("/file/content")
+                .unwrap()
+                .contains("ALTERNATE_SECRET"),
+            "ordinary explicit Read keeps its screenshot fallback"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

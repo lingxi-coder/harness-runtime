@@ -186,7 +186,11 @@ pub fn render_changed_file_message(
 ///
 /// `.length` is UTF-16 code units in JS, so the accumulator counts those.
 pub fn apply_snippet_budget(files: &mut [ChangedFile]) {
-    let mut acc = 0usize;
+    apply_snippet_budget_after(files, 0);
+}
+
+/// Continue the same source-order budget after retained, undelivered notices.
+pub(crate) fn apply_snippet_budget_after(files: &mut [ChangedFile], mut acc: usize) {
     for file in files.iter_mut() {
         if file.image.is_some() {
             continue;

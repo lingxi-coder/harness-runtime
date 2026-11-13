@@ -911,6 +911,31 @@ pub struct ReadMcpResourceTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
+struct McpDispatchOutputParser(mcp::client::McpOutputSchemaSnapshot);
+
+#[async_trait]
+impl lingxi_core::host::tool_invoker::ToolOutputParser for McpDispatchOutputParser {
+    async fn parse_output(
+        &self,
+        output: &UJP,
+    ) -> Result<UJP, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.0
+            .parse_output(output)
+            .await
+            .map_err(|error| match error {
+                McpClientError::OutputSchemaInvalid { detail, .. }
+                | McpClientError::OutputSchemaCompileInvalid { detail, .. } => {
+                    lingxi_core::host::tool_invoker::ToolInvokerError::Validation(detail)
+                }
+                other => lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+                    other
+                        .source_diagnostic()
+                        .unwrap_or_else(|| other.to_string().into()),
+                ),
+            })
+    }
+}
+
 impl MCPTool {
     /// Construct the generic MCP dispatcher over the supplied context.
     ///
@@ -2024,6 +2049,53 @@ impl Tool for MCPTool {
         ctx: ToolUseContext,
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        self.call_with_parser_capture(input, ctx, progress, None)
+            .await
+    }
+
+    async fn call_with_output_parser(
+        &self,
+        input: UJP,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+        capture: lingxi_core::host::tool_invoker::ToolOutputParserCapture,
+    ) -> Result<ToolCallResult, ToolError> {
+        self.call_with_parser_capture(input, ctx, progress, Some(capture))
+            .await
+    }
+
+    async fn output_parser_snapshot(
+        &self,
+    ) -> Result<Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>, ToolError> {
+        match self.output_schema_parser.as_ref() {
+            Some(parser) => parser
+                .snapshot(self.bound_output_schema.as_ref())
+                .await
+                .map(|snapshot| {
+                    Some(Arc::new(McpDispatchOutputParser(snapshot))
+                        as Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>)
+                })
+                .map_err(|error| ToolError::Io(error.to_string().into())),
+            None if self.bound_output_schema.is_none() => Ok(None),
+            None => Err(ToolError::InvalidInput(
+                "MCP output parser is not bound".into(),
+            )),
+        }
+    }
+}
+
+impl MCPTool {
+    async fn call_with_parser_capture(
+        &self,
+        input: UJP,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+        output_parser_capture: Option<lingxi_core::host::tool_invoker::ToolOutputParserCapture>,
+    ) -> Result<ToolCallResult, ToolError> {
+        let output_schema_capture = output_parser_capture.map(|capture| {
+            Arc::new(move |snapshot| capture.set(Arc::new(McpDispatchOutputParser(snapshot))))
+                as mcp::client::McpOutputSchemaCallback
+        });
         let started = Instant::now();
         let inline_chat = self.ctx.is_persistent_app_chat()
             || ctx.tool_execution_policy
@@ -2255,7 +2327,7 @@ impl Tool for MCPTool {
         };
         let Some(task_registry) = bg_registry else {
             let res = registry
-                .call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
+                .call_tool_with_output_schema_capture(
                     &dispatch_key,
                     &dispatch_full_name,
                     arguments,
@@ -2264,6 +2336,7 @@ impl Tool for MCPTool {
                     dispatch_guard,
                     key_is_internal,
                     sdk_verdict,
+                    output_schema_capture,
                 )
                 .await;
             return process_mcp_call_result(
@@ -2320,17 +2393,17 @@ impl Tool for MCPTool {
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let call_fut = registry
-                    .call_tool_with_auth_retry_guarded_with_key_hint_and_sdk_verdict(
-                        &call_server,
-                        &dispatch_full_name,
-                        arguments,
-                        tool_use_id_str.as_deref(),
-                        on_progress,
-                        dispatch_guard,
-                        key_is_internal,
-                        sdk_verdict,
-                    );
+                let call_fut = registry.call_tool_with_output_schema_capture(
+                    &call_server,
+                    &dispatch_full_name,
+                    arguments,
+                    tool_use_id_str.as_deref(),
+                    on_progress,
+                    dispatch_guard,
+                    key_is_internal,
+                    sdk_verdict,
+                    output_schema_capture,
+                );
                 tokio::pin!(call_fut);
                 // Fires on the mcp_task cancel token (`TaskStop`, once
                 // registered) OR the parent turn/abort token (`ctx.cancel`).
@@ -5343,6 +5416,7 @@ pub(crate) mod cached_resource_test_support {
 #[cfg(test)]
 mod input_missing_required_preflight_tests {
     use super::*;
+    include!("output_schema_dispatch_tests.rs");
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
     use lingxi_core::host::{

@@ -2163,9 +2163,7 @@ impl ModelRuntime {
             .as_ref()
             .zip(prompt_cache_account_epoch_before)
         {
-            use lingxi_llm_client::providers::anthropic::system_prompt::{
-                project_system_prompt, PromptCacheSubscriberState,
-            };
+            use lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheSubscriberState;
             let caching_enabled = request.execution.enable_prompt_caching.unwrap_or(true)
                 && lingxi_llm_client::providers::anthropic::system_prompt::prompt_caching_enabled(
                     &request.input.model,
@@ -2232,62 +2230,13 @@ impl ModelRuntime {
                 && (context.overage_for_scope)(&prompt_cache_scope, account_epoch);
 
             let request_for_encoding = owned.get_or_insert_with(|| request.clone());
-            request_for_encoding.input.system.clear();
-            request_for_encoding
-                .input
-                .prompt_cache
-                .breakpoints
-                .retain(|point| {
-                    !matches!(
-                        point.position,
-                        lingxi_llm_client::protocol::CachePosition::System { .. }
-                    )
-                });
-            if request.execution.classifier_system_blocks {
-                let projection = lingxi_llm_client::providers::anthropic::system_prompt::project_classifier_system_blocks(
-                    &request.input.system, Some(&selected_profile), effective_protocol, cache_policy,
-                );
-                request_for_encoding.input.system =
-                    projection.iter().map(|item| item.block.clone()).collect();
-                request_for_encoding.input.prompt_cache.breakpoints.extend(
-                    projection
-                        .into_iter()
-                        .filter_map(|item| item.cache_breakpoint),
-                );
-            } else {
-                let include_native_identity =
-                    request.execution.anthropic_request_kind
-                        == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-                    || (request.execution.anthropic_request_kind
-                        == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery
-                        && request.execution.include_native_system_identity_for_side_query
-                        && request.execution.query_source.as_deref() == Some("insights"));
-                let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
-                    if include_native_identity {
-                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &selected_profile)
-                    } else {
-                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &selected_profile)
-                    }
-                });
-                if let Some(system) = prefixed_system.as_ref().or(context.system.as_ref()) {
-                    let projection = project_system_prompt(
-                        system,
-                        Some(&selected_profile),
-                        &request.input.model,
-                        effective_protocol,
-                        cache_policy,
-                    );
-                    request_for_encoding.input.system =
-                        projection.iter().map(|item| item.block.clone()).collect();
-                    if caching_enabled {
-                        request_for_encoding.input.prompt_cache.breakpoints.extend(
-                            projection
-                                .into_iter()
-                                .filter_map(|item| item.cache_breakpoint),
-                        );
-                    }
-                }
-            }
+            crate::prompt_projection::apply_system(
+                request_for_encoding,
+                Some(&selected_profile),
+                effective_protocol,
+                cache_policy,
+                caching_enabled || request.execution.classifier_system_blocks,
+            );
             if request.execution.query_source.as_deref() == Some("prompt_suggestion") {
                 use lingxi_llm_client::providers::anthropic::system_prompt::ForkMessageCachePolicy;
                 let fork_point = request.execution.fork_point_message_id.and_then(|id| {
@@ -2314,6 +2263,22 @@ impl ModelRuntime {
                     &mut request_for_encoding.input,
                     caching_enabled,
                 );
+            }
+            if request.input.prompt_cache == Default::default() {
+                crate::classifier_cache::adapt_generated_claude_cache(
+                    &mut request_for_encoding.input,
+                    &selected_profile,
+                    &resolved_route.request_model,
+                    if request.stream {
+                        lingxi_llm_client::RequestMode::Stream
+                    } else {
+                        lingxi_llm_client::RequestMode::Complete
+                    },
+                );
+            } else if crate::classifier_cache::requires_cache_adaptation(&selected_profile) {
+                // Restricted providers must validate the caller's explicit
+                // policy rather than silently degrading it with generated hints.
+                request_for_encoding.input.prompt_cache = request.input.prompt_cache.clone();
             }
             prepared_prompt_cache = Some(PreparedPromptCacheContext {
                 scope: prompt_cache_scope.clone(),
@@ -2862,6 +2827,55 @@ impl ModelRuntime {
         host.body_bytes = Some(call.request().body.to_vec());
         Ok(host)
     }
+    /// Resolve only content/route facts; no credential, dispatch or generation
+    /// policy is evaluated while estimating an input budget.
+    pub(crate) fn estimate_input_tokens_for_route(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<u64, LlmError> {
+        if let Some(tokens) = request
+            .execution
+            .context_usage_estimate
+            .as_ref()
+            .and_then(|usage| usage.tokens_for(request))
+        {
+            return Ok(tokens);
+        }
+        let route = self
+            .registry
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let mut projected = request.clone();
+        projected.execution.context_usage_protocol = Some(entry.protocol);
+        projected.execution.prompt_projection_profile = Some(entry.profile.clone());
+        Ok(crate::model::count_tokens::estimate_input_tokens(
+            &projected,
+        ))
+    }
+
+    pub(crate) fn bind_context_usage_for_route(
+        &self,
+        request: &mut LlmRequest,
+    ) -> Result<(), LlmError> {
+        let Some(binding) = request.execution.context_usage_binding.clone() else {
+            return Ok(());
+        };
+        let route = self
+            .registry
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        request.execution.context_usage_protocol = Some(entry.protocol);
+        request.execution.prompt_projection_profile = Some(entry.profile.clone());
+        binding.bind(request);
+        Ok(())
+    }
+
     async fn count_draft(
         &self,
         request: &LlmRequest,
@@ -2902,6 +2916,9 @@ impl ModelRuntime {
                 message: "count_tokens is only available on AnthropicMessages routes".into(),
             });
         }
+        let projected =
+            crate::prompt_projection::for_count(request, Some(&entry.profile), entry.protocol);
+        let request = projected.as_ref();
         let failure = Arc::new(Mutex::new(None));
         let auth = Arc::new(
             crate::execution::HostAuthenticator::for_request(

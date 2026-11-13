@@ -235,6 +235,7 @@ pub(super) fn process_visible_response<'a>(
             // consumer selects K and dispatches its original ToolUse blocks.
             assistant_blocks.clone_from(content);
         }
+        orch.acknowledge_step_reminders(&request_history).await;
         orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,
             &response.model,

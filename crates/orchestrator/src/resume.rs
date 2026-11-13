@@ -54,7 +54,7 @@ mod deferred_authority_tests;
 mod deferred_checkpoint;
 #[cfg(test)]
 mod deferred_state_replay_tests;
-mod file_state;
+pub(crate) mod file_state;
 #[cfg(test)]
 mod file_state_tests;
 mod plan_files;
@@ -2052,14 +2052,19 @@ fn prompt_ingress_sent_sets_from_payloads<'a>(
                 }
             }
             Some("skill_listing") => {
-                if let Some(names) = attachment.at_pointer("/names") {
-                    if let Some(count) = names.array_len() {
-                        for index in 0..count {
-                            if let Some(units) = names
-                                .get_index(index)
-                                .and_then(|value| value.code_units().map(|units| units.to_vec()))
-                            {
-                                skills.insert(units);
+                for (pointer, remove) in [("/removedNames", true), ("/names", false)] {
+                    if let Some(names) = attachment.at_pointer(pointer) {
+                        if let Some(count) = names.array_len() {
+                            for index in 0..count {
+                                if let Some(units) = names.get_index(index).and_then(|value| {
+                                    value.code_units().map(|units| units.to_vec())
+                                }) {
+                                    if remove {
+                                        skills.remove(&units);
+                                    } else {
+                                        skills.insert(units);
+                                    }
+                                }
                             }
                         }
                     }

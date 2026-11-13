@@ -32,7 +32,7 @@ pub async fn count_tokens(
 ) -> Result<u64, LlmError> {
     match try_count_tokens_exact(client, transport, request).await? {
         Some(tokens) => Ok(tokens),
-        None => Ok(estimate_input_tokens(request)),
+        None => client.estimate_input_tokens_for_route(request),
     }
 }
 
@@ -87,6 +87,8 @@ pub async fn try_count_tokens_exact(
 /// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
+    let projected = crate::prompt_projection::for_estimate(request);
+    let request = projected.as_ref();
     let input = &request.input;
     let mut byte_len = 0u64;
     for block in &input.system {

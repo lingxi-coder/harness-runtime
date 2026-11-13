@@ -2989,6 +2989,10 @@ impl Tool for BashTool {
         }
     }
 
+    fn prompt_is_dynamic(&self) -> bool {
+        true
+    }
+
     async fn prompt(
         &self,
         opts: &PromptOptions,

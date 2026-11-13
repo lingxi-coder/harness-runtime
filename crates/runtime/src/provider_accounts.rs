@@ -586,10 +586,10 @@ impl ProviderAccountStore {
         })
         .await
         .map_err(|_| "account directory worker failed")??;
-        if let Some((recovered, same_operation)) = self
-            .recover_pending(&command, credential.as_deref(), &registry)
-            .await?
-        {
+        let (lock, recovered) = self
+            .recover_pending(lock, &command, credential.as_deref(), &registry)
+            .await?;
+        if let Some((recovered, same_operation)) = recovered {
             let result = self.commit_transaction(lock, recovered, None, None).await?;
             return if same_operation {
                 Ok(result)
@@ -1302,7 +1302,8 @@ pub struct AccountOAuthCoordinator {
     catalog: Option<ProviderAccountCatalog>,
     credentials: std::sync::Weak<CredentialManager>,
     openai: Arc<llm_runtime::auth::openai::AccountOAuthClient>,
-    pending_grants: std::sync::Mutex<std::collections::HashMap<String, Arc<AccountCredential>>>,
+    pending_grants:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AccountCredential>>>>,
     flows: tokio::sync::Mutex<std::collections::HashMap<String, Arc<AccountOAuthFlow>>>,
     device_flows: tokio::sync::Mutex<std::collections::HashMap<String, Arc<AccountDeviceFlow>>>,
     starts: tokio::sync::Mutex<()>,
@@ -1334,7 +1335,7 @@ impl AccountOAuthCoordinator {
             catalog: store.catalog.clone(),
             credentials: Arc::downgrade(&store.credentials),
             openai,
-            pending_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_grants: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             flows: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             device_flows: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             starts: tokio::sync::Mutex::new(()),
@@ -1821,7 +1822,7 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
         let root = store.data_dir.clone();
         let id = account.account_id.clone();
         let scope = account.credential_ref.store_scope.clone();
-        let lock = tokio::task::spawn_blocking(move || {
+        let mut lock = tokio::task::spawn_blocking(move || {
             lingxi_core::host::rooted_fs::lock_exclusive(
                 &root,
                 &PathBuf::from("provider-accounts/refresh")
@@ -1840,7 +1841,7 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
             .map_err(|_| CredentialError::Unavailable)?;
         let Some(current) = store
             .credentials
-            .get_account_credential(&account.credential_ref)
+            .get_account_credential_uncached(&account.credential_ref)
             .await?
         else {
             return Ok(None);
@@ -1873,6 +1874,8 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
             let version_account = account.clone();
             let revision = current.credential_revision;
             tokio::task::spawn_blocking(move || {
+                let _refresh_lock = lock;
+                let _directory_lock = _directory_lock;
                 provider_config::write_account_credential_version_locked(
                     &root,
                     &version_account,
@@ -1914,9 +1917,11 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
         }) {
             let root = store.data_dir.clone();
             let path = relative.clone();
-            tokio::task::spawn_blocking(move || {
+            lock = tokio::task::spawn_blocking(move || {
+                let lock = lock;
                 lingxi_core::host::rooted_fs::remove_file(&root, &path)
-                    .map_err(|_| CredentialError::Unavailable)
+                    .map_err(|_| CredentialError::Unavailable)?;
+                Ok::<_, CredentialError>(lock)
             })
             .await
             .map_err(|_| CredentialError::Unavailable)??;
@@ -1929,8 +1934,9 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
             .get(&account.account_id)
             .cloned();
         let pending = pending.filter(|pending| {
-            if pending.identity_generation == current.identity_generation
-                && pending.credential_revision <= current.credential_revision
+            if pending.identity_generation < current.identity_generation
+                || (pending.identity_generation == current.identity_generation
+                    && pending.credential_revision <= current.credential_revision)
             {
                 self.pending_grants
                     .lock()
@@ -1960,14 +1966,16 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
                 account.identity_generation,
             ))
             .map_err(|_| CredentialError::Unavailable)?;
-            tokio::task::spawn_blocking(move || {
+            lock = tokio::task::spawn_blocking(move || {
+                let lock = lock;
                 lingxi_core::host::rooted_fs::atomic_write(
                     &root,
                     &intent_path,
                     &intent,
                     lingxi_core::host::AtomicWriteOptions::default(),
                 )
-                .map_err(|_| CredentialError::Unavailable)
+                .map_err(|_| CredentialError::Unavailable)?;
+                Ok::<_, CredentialError>(lock)
             })
             .await
             .map_err(|_| CredentialError::Unavailable)??;
@@ -2004,43 +2012,48 @@ impl secret::AccountCredentialRefresher for AccountOAuthCoordinator {
                 .remove(&account.account_id);
             return Err(CredentialError::Unavailable);
         }
-        if store
-            .credentials
-            .store_account_credential(&account.credential_ref, &grant)
+        // A backend may keep a started mutation alive after its waiter is
+        // cancelled. The account transaction must retain both cross-process
+        // locks through that real completion and all publication afterwards.
+        let pending_grants = self.pending_grants.clone();
+        tokio::spawn(async move {
+            let _refresh_lock = lock;
+            store
+                .credentials
+                .store_account_credential(&account.credential_ref, &grant)
+                .await?;
+            let version_root = store.data_dir.clone();
+            let version_account = account.clone();
+            let version_revision = grant.credential_revision;
+            let directory_lock = tokio::task::spawn_blocking(move || {
+                provider_config::write_account_credential_version_locked(
+                    &version_root,
+                    &version_account,
+                    version_revision,
+                )
+                .map_err(|_| CredentialError::Unavailable)?;
+                Ok::<_, CredentialError>(directory_lock)
+            })
             .await
-            .is_err()
-        {
-            return Err(CredentialError::Unavailable);
-        }
-        let version_root = store.data_dir.clone();
-        let version_account = account.clone();
-        let version_revision = grant.credential_revision;
-        tokio::task::spawn_blocking(move || {
-            provider_config::write_account_credential_version_locked(
-                &version_root,
-                &version_account,
-                version_revision,
-            )
-        })
-        .await
-        .map_err(|_| CredentialError::Unavailable)?
-        .map_err(|_| CredentialError::Unavailable)?;
-        self.pending_grants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&account.account_id);
-        drop(directory_lock);
-        let root = store.data_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            let _lock = lock;
-            lingxi_core::host::rooted_fs::remove_file(&root, &relative)
+            .map_err(|_| CredentialError::Unavailable)??;
+            pending_grants
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&account.account_id);
+            let root = store.data_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                let _directory_lock = directory_lock;
+                lingxi_core::host::rooted_fs::remove_file(&root, &relative)
+                    .map_err(|_| CredentialError::Unavailable)
+            })
+            .await
+            .map_err(|_| CredentialError::Unavailable)??;
+            Arc::try_unwrap(grant)
+                .map(Some)
                 .map_err(|_| CredentialError::Unavailable)
         })
         .await
-        .map_err(|_| CredentialError::Unavailable)??;
-        Arc::try_unwrap(grant)
-            .map(Some)
-            .map_err(|_| CredentialError::Unavailable)
+        .map_err(|_| CredentialError::Unavailable)?
     }
 }
 
@@ -2894,6 +2907,580 @@ mod tests {
             },
         }
     }
+
+    #[tokio::test]
+    async fn cancelled_refresh_ledger_writers_hold_the_directory_lock_through_publication() {
+        use secret::AccountCredentialRefresher;
+        for repair_only in [false, true] {
+            let (directory, credentials, store) = fixture();
+            let account = store
+                .execute_metadata(add(AccountAuthKind::OAuth, 0))
+                .await
+                .unwrap()
+                .accounts[0]
+                .clone();
+            let mut grant = initial_device_grant();
+            if repair_only {
+                grant.credential_revision = 2;
+            }
+            credentials
+                .store_account_credential(&account.credential_ref, &grant)
+                .await
+                .unwrap();
+            publish_account_credential_version(
+                directory.path().to_owned(),
+                "test_scope".into(),
+                AccountCredentialVersion {
+                    account_id: account.account_id.clone(),
+                    identity_generation: 1,
+                    credential_revision: 1,
+                },
+            )
+            .await
+            .unwrap();
+            let pause = provider_config::account_versions::pause_next_account_version_write(
+                directory.path(),
+            );
+            let (authority, http) = device_coordinator(store.clone());
+            let refreshing = {
+                let authority = authority.clone();
+                let account = account.clone();
+                tokio::spawn(async move { authority.refresh(account, 1).await })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered())
+                .await
+                .unwrap();
+            refreshing.abort();
+            assert!(refreshing.await.unwrap_err().is_cancelled());
+            assert!(
+                matches!(
+                    lingxi_core::host::rooted_fs::try_lock_exclusive(
+                        directory.path(),
+                        Path::new("provider-accounts/test_scope.lock"),
+                        0o700,
+                        0o600
+                    ),
+                    Err(lingxi_core::host::FsError::AlreadyExists(_))
+                ),
+                "the cancelled waiter must leave the directory lock with its blocking writer"
+            );
+
+            let mut reconnecting = Box::pin(store.commit_oauth(&account, initial_device_grant()));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(reconnecting.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            // This guard also releases on assertion failure, so no blocking
+            // worker is stranded if the regression fails before this point.
+            pause.release();
+            let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), reconnecting)
+                .await
+                .unwrap()
+                .unwrap();
+            let current = &snapshot.accounts[0];
+            assert_eq!(current.identity_generation, 2);
+            assert_eq!(
+                provider_config::read_account_credential_version(directory.path(), current)
+                    .unwrap(),
+                Some(3)
+            );
+            assert_eq!(
+                http.requests.lock().unwrap().len(),
+                usize::from(!repair_only)
+            );
+            assert_eq!(
+                credentials
+                    .get_account_credential(&account.credential_ref)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .identity_generation,
+                2
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn cached_broker_pair(root: &Path) -> [Arc<dyn lingxi_core::host::SecureStorage>; 2] {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("synthetic-credential-broker");
+        let program = r#"#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(ROOT)
+request = json.load(sys.stdin)
+state = root / request.get('account', 'unused')
+reply = {'ok': True, 'protocol_version': 1}
+pause = root / ('pause-next-' + request['op'])
+if request['op'] in ('store', 'delete') and pause.exists():
+    pause.rename(root / 'mutation-entered')
+    while not (root / 'release-mutation').exists(): time.sleep(0.01)
+if request['op'] == 'store': state.write_text(request['payload'])
+elif request['op'] == 'delete': state.unlink(missing_ok=True)
+elif request['op'] == 'retrieve' and state.exists(): reply['payload'] = state.read_text()
+elif request['op'] == 'contains': reply['present'] = state.exists()
+json.dump(reply, sys.stdout)
+"#
+        .replace(
+            "ROOT",
+            &serde_json::to_string(root.to_str().unwrap()).unwrap(),
+        );
+        std::fs::write(&script, program).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::array::from_fn(|_| {
+            Arc::new(
+                platform_posix::secure_storage::MacOsKeychainStorage::with_broker_for_test(
+                    root.to_owned(),
+                    root.to_owned(),
+                    script.clone(),
+                ),
+            ) as Arc<dyn lingxi_core::host::SecureStorage>
+        })
+    }
+
+    #[cfg(unix)]
+    struct BrokerMutationPause(PathBuf);
+
+    #[cfg(unix)]
+    impl BrokerMutationPause {
+        fn arm(root: &Path, operation: &str) -> Self {
+            std::fs::write(root.join(format!("pause-next-{operation}")), b"").unwrap();
+            Self(root.to_owned())
+        }
+
+        async fn entered(&self) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !self.0.join("mutation-entered").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("synthetic broker mutation did not start");
+        }
+
+        fn release(&self) {
+            std::fs::write(self.0.join("release-mutation"), b"").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for BrokerMutationPause {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("release-mutation"), b"");
+        }
+    }
+
+    #[cfg(unix)]
+    fn independent_broker_stores(
+        root: &Path,
+    ) -> [(Arc<CredentialManager>, Arc<ProviderAccountStore>); 2] {
+        cached_broker_pair(root).map(|backend| {
+            let credentials = Arc::new(CredentialManager::new(
+                backend,
+                Arc::new(platform_posix::PosixClock::new()),
+                Arc::new(platform_posix::PosixHttp::new()),
+            ));
+            let store = Arc::new(ProviderAccountStore::new(
+                root.to_owned(),
+                "test_scope".into(),
+                credentials.clone(),
+            ));
+            (credentials, store)
+        })
+    }
+
+    #[cfg(unix)]
+    fn assert_account_lock_held(root: &Path, relative: &Path) {
+        assert!(matches!(
+            lingxi_core::host::rooted_fs::try_lock_exclusive(root, relative, 0o700, 0o600),
+            Err(lingxi_core::host::FsError::AlreadyExists(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    async fn check_cancelled_account_mutation(delete: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let [(_, store_a), (credentials_b, store_b)] = independent_broker_stores(directory.path());
+        let initial = store_a
+            .execute(add(AccountAuthKind::ApiKey, 0), Some("synthetic-K1".into()))
+            .await
+            .unwrap();
+        let account = initial.accounts[0].clone();
+        let pause =
+            BrokerMutationPause::arm(directory.path(), if delete { "delete" } else { "store" });
+        let first = tokio::spawn({
+            let account_id = account.account_id.clone();
+            async move {
+                store_a
+                    .execute(
+                        ProviderAccountCommand {
+                            expected_revision: initial.config_revision,
+                            operation_id: None,
+                            action: if delete {
+                                ProviderAccountAction::ClearCredential { account_id }
+                            } else {
+                                ProviderAccountAction::SetCredential { account_id }
+                            },
+                        },
+                        (!delete).then(|| "synthetic-K2".into()),
+                    )
+                    .await
+            }
+        });
+        pause.entered().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_account_lock_held(
+            directory.path(),
+            Path::new("provider-accounts/test_scope.lock"),
+        );
+        let mut replacement = Box::pin(store_b.execute(
+            ProviderAccountCommand {
+                expected_revision: initial.config_revision + 1,
+                operation_id: None,
+                action: ProviderAccountAction::SetCredential {
+                    account_id: account.account_id.clone(),
+                },
+            },
+            Some("synthetic-K3".into()),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(replacement.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        pause.release();
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), replacement)
+            .await
+            .unwrap()
+            .unwrap();
+        let live = &snapshot.accounts[0];
+        let record = credentials_b
+            .get_account_credential_uncached(&account.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.identity_generation, 3);
+        assert_eq!(record.identity_generation, live.identity_generation);
+        assert_eq!(
+            provider_config::read_account_credential_version(directory.path(), live).unwrap(),
+            Some(record.credential_revision)
+        );
+        let AccountCredentialKind::ApiKey { key } = record.kind else {
+            panic!("replacement must retain the API key")
+        };
+        assert_eq!(key.expose_secret(), "synthetic-K3");
+        assert!(!directory
+            .path()
+            .join("provider-accounts/test_scope.pending")
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_account_store_keeps_the_lock_until_a_later_storage_can_replace_it() {
+        check_cancelled_account_mutation(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_account_delete_cannot_erase_a_later_storage_replacement() {
+        check_cancelled_account_mutation(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_refresh_secure_store_keeps_both_locks_until_reconnect_can_commit() {
+        use secret::AccountCredentialRefresher;
+        let directory = tempfile::tempdir().unwrap();
+        let [(credentials_a, store_a), (credentials_b, store_b)] =
+            independent_broker_stores(directory.path());
+        let account = store_a
+            .execute_metadata(add(AccountAuthKind::OAuth, 0))
+            .await
+            .unwrap()
+            .accounts[0]
+            .clone();
+        credentials_a
+            .store_account_credential(&account.credential_ref, &initial_device_grant())
+            .await
+            .unwrap();
+        publish_account_credential_version(
+            directory.path().to_owned(),
+            "test_scope".into(),
+            AccountCredentialVersion {
+                account_id: account.account_id.clone(),
+                identity_generation: 1,
+                credential_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let authority = Arc::new(AccountOAuthCoordinator::new(
+            store_a,
+            Arc::new(llm_runtime::auth::openai::AccountOAuthClient::new(
+                Default::default(),
+                Arc::new(SingleUseRefreshHttp::default()),
+            )),
+        ));
+        let pause = BrokerMutationPause::arm(directory.path(), "store");
+        let refreshing = tokio::spawn({
+            let authority = authority.clone();
+            let account = account.clone();
+            async move { authority.refresh(account, 1).await }
+        });
+        pause.entered().await;
+        refreshing.abort();
+        assert!(refreshing.await.unwrap_err().is_cancelled());
+        assert_account_lock_held(
+            directory.path(),
+            Path::new("provider-accounts/test_scope.lock"),
+        );
+        assert_account_lock_held(
+            directory.path(),
+            &PathBuf::from("provider-accounts/refresh/test_scope")
+                .join(format!("{}.lock", account.account_id)),
+        );
+        let mut reconnect = Box::pin(store_b.commit_oauth(&account, initial_device_grant()));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(reconnect.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        pause.release();
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), reconnect)
+            .await
+            .unwrap()
+            .unwrap();
+        let record = credentials_b
+            .get_account_credential_uncached(&account.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.identity_generation, 2);
+        assert_eq!(record.credential_revision, 3);
+        assert_eq!(
+            provider_config::read_account_credential_version(
+                directory.path(),
+                &snapshot.accounts[0]
+            )
+            .unwrap(),
+            Some(3)
+        );
+        assert!(authority.pending_grants.lock().unwrap().is_empty());
+    }
+
+    #[derive(Default)]
+    struct SingleUseRefreshHttp(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for SingleUseRefreshHttp {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            assert!(request.url.ends_with("/oauth/token"));
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt != 0 {
+                return Err(lingxi_llm_client::protocol::LlmError::Authentication {
+                    message: "synthetic refresh token was already consumed".into(),
+                });
+            }
+            Ok(lingxi_llm_client::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::to_vec(&serde_json::json!({
+                    "access_token":"synthetic-rotated-access",
+                    "refresh_token":"synthetic-rotated-refresh",
+                    "expires_in":3600,
+                }))
+                .unwrap()
+                .into(),
+            }
+            .into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_keychain_caches_adopt_the_rotated_grant_under_the_refresh_file_lock() {
+        use secret::AccountCredentialRefresher;
+        let directory = tempfile::tempdir().unwrap();
+        let [backend_a, backend_b] = cached_broker_pair(directory.path());
+        let manager = |backend| {
+            Arc::new(CredentialManager::new(
+                backend,
+                Arc::new(platform_posix::PosixClock::new()),
+                Arc::new(platform_posix::PosixHttp::new()),
+            ))
+        };
+        let a = manager(backend_a);
+        let b = manager(backend_b);
+        let store = |credentials| {
+            Arc::new(ProviderAccountStore::new(
+                directory.path().to_owned(),
+                "test_scope".into(),
+                credentials,
+            ))
+        };
+        let store_a = store(a.clone());
+        let store_b = store(b.clone());
+        let account = store_a
+            .execute_metadata(add(AccountAuthKind::OAuth, 0))
+            .await
+            .unwrap()
+            .accounts[0]
+            .clone();
+        a.store_account_credential(&account.credential_ref, &initial_device_grant())
+            .await
+            .unwrap();
+        publish_account_credential_version(
+            directory.path().to_owned(),
+            "test_scope".into(),
+            AccountCredentialVersion {
+                account_id: account.account_id.clone(),
+                identity_generation: 1,
+                credential_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            b.get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            1
+        );
+        let http = Arc::new(SingleUseRefreshHttp::default());
+        let handle = Arc::new(llm_runtime::auth::openai::AccountOAuthClient::new(
+            Default::default(),
+            http.clone(),
+        ));
+        let authority_a = AccountOAuthCoordinator::new(store_a, handle.clone());
+        let authority_b = AccountOAuthCoordinator::new(store_b, handle);
+        assert_eq!(
+            authority_a
+                .refresh(account.clone(), 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            2
+        );
+        assert_eq!(
+            b.get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            1,
+            "the second process still has a hot r1 cache"
+        );
+        assert_eq!(
+            authority_b
+                .refresh(account.clone(), 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            2
+        );
+        assert_eq!(
+            http.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the shared refresh lock must adopt r2 instead of replaying the spent r1 token"
+        );
+        assert_eq!(
+            b.get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            2
+        );
+        assert!(!directory
+            .path()
+            .join("provider-accounts/refresh/test_scope")
+            .join(format!("{}.intent", account.account_id))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn reconnect_retires_a_pending_grant_from_the_old_account_generation() {
+        use secret::AccountCredentialRefresher;
+        let (directory, credentials, store) = fixture();
+        let account = store
+            .execute_metadata(add(AccountAuthKind::OAuth, 0))
+            .await
+            .unwrap()
+            .accounts[0]
+            .clone();
+        credentials
+            .store_account_credential(&account.credential_ref, &initial_device_grant())
+            .await
+            .unwrap();
+        publish_account_credential_version(
+            directory.path().to_owned(),
+            "test_scope".into(),
+            AccountCredentialVersion {
+                account_id: account.account_id.clone(),
+                identity_generation: 1,
+                credential_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let path = directory
+            .path()
+            .join("provider-accounts/versions/test_scope")
+            .join(format!("{}.json", account.account_id));
+        let original = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (authority, http) = device_coordinator(store);
+        assert!(authority.refresh(account.clone(), 1).await.is_err());
+        assert!(!authority.pending_grants.lock().unwrap().is_empty());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, original).unwrap();
+        let flow = authority
+            .begin_device(account.account_id.clone(), 1)
+            .await
+            .unwrap();
+        http.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        *authority
+            .device_flows
+            .lock()
+            .await
+            .get(&flow.flow_id)
+            .unwrap()
+            .gate
+            .lock()
+            .await = std::time::Instant::now();
+        let result = authority
+            .poll_device(&account.account_id, &flow.flow_id)
+            .await
+            .unwrap();
+        let reconnected = result.snapshot.unwrap().accounts[0].clone();
+        assert_eq!(reconnected.identity_generation, 2);
+        let current = credentials
+            .get_account_credential(&account.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        let requests_before = http.requests.lock().unwrap().len();
+        let refreshed = authority
+            .refresh(reconnected, current.credential_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.identity_generation, 2);
+        assert!(refreshed.credential_revision > current.credential_revision);
+        assert!(http.requests.lock().unwrap().len() > requests_before);
+        assert!(authority.pending_grants.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn ledger_publication_repair_does_not_reuse_already_persisted_pending_grant() {
         use secret::AccountCredentialRefresher;
@@ -3648,6 +4235,24 @@ impl ProviderAccountStore {
         mutation: Option<CredentialMutation>,
         fingerprint: Option<AccountCommandFingerprint>,
     ) -> Result<AccountSnapshot, String> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            store
+                .commit_transaction_owned(lock, snapshot, mutation, fingerprint)
+                .await
+        })
+        .await
+        .map_err(|_| "account transaction worker failed")?
+    }
+
+    async fn commit_transaction_owned(
+        &self,
+        lock: lingxi_core::host::RootedFileLock,
+        snapshot: AccountSnapshot,
+        mutation: Option<CredentialMutation>,
+        fingerprint: Option<AccountCommandFingerprint>,
+    ) -> Result<AccountSnapshot, String> {
+        let mut lock = lock;
         let credential_version = match &mutation {
             Some(CredentialMutation::Store(reference, credential)) => Some((
                 snapshot
@@ -3683,14 +4288,16 @@ impl ProviderAccountStore {
                 serde_json::to_vec(&intent).map_err(|_| "account transaction encoding failed")?;
             let root = self.data_dir.clone();
             let path = self.pending_path();
-            tokio::task::spawn_blocking(move || {
+            lock = tokio::task::spawn_blocking(move || {
+                let lock = lock;
                 lingxi_core::host::rooted_fs::atomic_write(
                     &root,
                     &path,
                     &bytes,
                     lingxi_core::host::AtomicWriteOptions::default(),
                 )
-                .map_err(|_| "account transaction intent failed")
+                .map_err(|_| "account transaction intent failed")?;
+                Ok::<_, &str>(lock)
             })
             .await
             .map_err(|_| "account transaction worker failed")??;
@@ -3743,10 +4350,17 @@ impl ProviderAccountStore {
     /// A mutating operation may finish an acknowledged secret commit. Reads never repair.
     async fn recover_pending(
         &self,
+        mut lock: lingxi_core::host::RootedFileLock,
         command: &ProviderAccountCommand,
         credential: Option<&str>,
         registry: &AccountRegistry,
-    ) -> Result<Option<(AccountSnapshot, bool)>, String> {
+    ) -> Result<
+        (
+            lingxi_core::host::RootedFileLock,
+            Option<(AccountSnapshot, bool)>,
+        ),
+        String,
+    > {
         let root = self.data_dir.clone();
         let path = self.pending_path();
         let pending = tokio::task::spawn_blocking(move || {
@@ -3765,11 +4379,11 @@ impl ProviderAccountStore {
         .await
         .map_err(|_| "account directory worker failed")??;
         let Some(pending) = pending else {
-            return Ok(None);
+            return Ok((lock, None));
         };
         let record = self
             .credentials
-            .get_account_credential(&pending.credential_ref)
+            .get_account_credential_uncached(&pending.credential_ref)
             .await
             .map_err(|_| "account transaction credential storage unavailable")?;
         let committed = match (
@@ -3798,10 +4412,12 @@ impl ProviderAccountStore {
                     .cloned()
                     .ok_or("account transaction identity invalid")?;
                 let root = self.data_dir.clone();
-                tokio::task::spawn_blocking(move || {
+                lock = tokio::task::spawn_blocking(move || {
+                    let lock = lock;
                     provider_config::write_account_credential_version_locked(
                         &root, &target, revision,
-                    )
+                    )?;
+                    Ok::<_, String>(lock)
                 })
                 .await
                 .map_err(|_| "account version worker failed")??;
@@ -3813,7 +4429,7 @@ impl ProviderAccountStore {
                 .map(|fingerprint| fingerprint.matches(command, credential))
                 .transpose()?
                 .unwrap_or(false);
-            return Ok(Some((pending.snapshot, same_operation)));
+            return Ok((lock, Some((pending.snapshot, same_operation))));
         }
         if matches!(&command.action, ProviderAccountAction::Add { .. })
             && pending
@@ -3823,7 +4439,7 @@ impl ProviderAccountStore {
                 .transpose()?
                 .unwrap_or(false)
         {
-            return Ok(None);
+            return Ok((lock, None));
         }
         // An explicit credential replacement/removal can retry a failed secure-store write.
         let target = match &command.action {
@@ -3840,7 +4456,7 @@ impl ProviderAccountStore {
                 .iter()
                 .any(|a| &a.account_id == id && a.credential_ref == pending.credential_ref)
         }) {
-            return Ok(None);
+            return Ok((lock, None));
         }
         Err("account credential transaction incomplete; retry replacement or removal".into())
     }

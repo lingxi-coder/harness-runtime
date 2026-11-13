@@ -19,6 +19,14 @@ pub struct NestedMemoryTriggers {
 }
 
 impl NestedMemoryTriggers {
+    /// Retire all queued, retracted and consumed paths with their session.
+    pub fn reset_for_session(&self) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = State::default();
+    }
+
     /// Native input retraction restores the saved array with push(...paths).
     pub fn restore(&self, paths: impl IntoIterator<Item = PathBuf>) {
         self.state
@@ -113,6 +121,22 @@ impl NestedMemoryTriggers {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn session_reset_retires_all_three_trigger_arrays() {
+        let queue = NestedMemoryTriggers::default();
+        queue.enqueue("old".into());
+        queue.append_pending(["pending".into()]);
+        queue.begin(false, false);
+        queue.append_pending(["late".into()]);
+        queue.reset_for_session();
+        assert!(!queue.begin(false, false));
+        assert!(queue.take_consumed().is_empty());
+        assert!(queue.queued().is_empty());
+        queue.enqueue("new".into());
+        let mut cursor = 0;
+        assert_eq!(queue.next(&mut cursor), Some("new".into()));
+    }
 
     #[test]
     fn native_287_consumer_goldens() {

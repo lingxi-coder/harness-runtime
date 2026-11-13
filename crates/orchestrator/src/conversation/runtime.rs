@@ -1087,9 +1087,18 @@ pub(crate) struct PromptRuntime {
     /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
     /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
+    /// Read may publish its cache before initial request assembly is accepted.
+    /// Keep those notices across cancellation until normal history admission.
+    pub(crate) task_notification_session: std::sync::Mutex<Option<SessionId>>,
+    pub(crate) pending_task_notification_reminders:
+        std::sync::Mutex<Vec<crate::request_context::PromptIngressAttachment>>,
+    pub(crate) pending_changed_file_reminders:
+        std::sync::Mutex<Vec<crate::request_context::PromptIngressAttachment>>,
     /// Read snapshots and persistent clipping fences belong to one admitted
     /// session. Rebuilding that session preserves fences across compaction.
     read_state_session: std::sync::Mutex<Option<SessionId>>,
+    pub(crate) agent_instruction_owners:
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, MessageId>>,
     pub(crate) nested_memory_triggers: Arc<tool_api::nested_memory_triggers::NestedMemoryTriggers>,
     /// SKILLLIST.1: supplies the model-invocable skill entries for the per-turn
     /// `skill_listing` reminder (TS `getSkillToolCommands` →
@@ -1164,6 +1173,9 @@ pub(crate) struct PromptRuntime {
     /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
     /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<Vec<u16>>>,
+    /// Fences listing candidates prepared before a session reset, including a
+    /// same-ID resume. Accepted candidates also compare their original set.
+    pub(crate) listing_membership_generation: std::sync::atomic::AtomicU64,
     /// `plan_mode` attachment cadence (2.1.238 `X4T` @296525982 + `txl`
     /// @296558044). See [`PlanReminderCadence`].
     pub(crate) plan_reminder_cadence: Mutex<PlanReminderCadence>,
@@ -1228,6 +1240,8 @@ pub(crate) struct PromptRuntime {
     /// [`Self::surfaced_memory_paths`], keyed on `name` (skill names are not
     /// files, so this does NOT consult `read_file_state`).
     pub(crate) surfaced_skill_names: Mutex<std::collections::HashSet<String>>,
+    pub(crate) pending_step_reminders:
+        std::sync::Mutex<Vec<super::pending_reminders::PendingReminder>>,
     /// User-approved app Agent Profile applied additively to the next turn.
     pub(crate) app_agent_prompt_profile: std::sync::RwLock<Option<AppAgentPromptProfile>>,
     /// Optional carved-slate snapshot of the static prompt and inline tool
@@ -1335,7 +1349,11 @@ impl PromptRuntime {
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
+            task_notification_session: std::sync::Mutex::new(None),
+            pending_task_notification_reminders: std::sync::Mutex::new(Vec::new()),
+            pending_changed_file_reminders: std::sync::Mutex::new(Vec::new()),
             read_state_session: std::sync::Mutex::new(None),
+            agent_instruction_owners: std::sync::Mutex::new(Default::default()),
             nested_memory_triggers: Arc::default(),
             skill_listing: None,
             async_hook_responses: None,
@@ -1354,6 +1372,7 @@ impl PromptRuntime {
             instruction_user_email_provider: None,
             nested_memory_roots: None,
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
+            listing_membership_generation: std::sync::atomic::AtomicU64::new(0),
             plan_reminder_cadence: Mutex::new(PlanReminderCadence::default()),
             date_change: std::sync::Mutex::new(DateChangeState::default()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
@@ -1363,6 +1382,7 @@ impl PromptRuntime {
             skill_discovery_prefetch: None,
             pending_skill_prefetch: Mutex::new(None),
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
+            pending_step_reminders: std::sync::Mutex::new(Vec::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
             pending_memory_prompt_snapshot: Mutex::new(None),
@@ -1422,6 +1442,15 @@ impl PromptRuntime {
 
     /// Clear the prompt-owned read registry at its original session-reset stage.
     pub(crate) fn reset_read_state(&self) {
+        self.agent_instruction_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.nested_memory_triggers.reset_for_session();
+        self.pending_changed_file_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1447,6 +1476,10 @@ impl PromptRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if owner.is_some_and(|owner| owner != session_id) {
+            self.pending_changed_file_reminders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
             state.reset_for_session();
         } else {
             state.drain().for_each(drop);
@@ -1476,6 +1509,12 @@ impl PromptRuntime {
     }
 
     pub(crate) async fn prepare_session_scoped_reset(&self) {
+        self.listing_membership_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.pending_step_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         *self.git_status_snapshot.lock().await = None;
         let mut sections = self.mod_prompt_sections.lock().await;
         sections.generation = sections.generation.wrapping_add(1);
@@ -1558,6 +1597,11 @@ impl PromptRuntime {
         &self,
         cursor: &mut Option<lingxi_core::host::instructions::InstructionContext>,
     ) {
+        self.agent_instruction_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.nested_memory_triggers.reset_for_session();
         self.instruction_cache.reset_session_context();
         *self
             .instruction_context_origin

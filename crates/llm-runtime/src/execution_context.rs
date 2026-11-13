@@ -389,6 +389,15 @@ pub struct ExecutionContext {
     /// Last provider usage plus new content, bound to this request's input.
     /// Host-only; never serialized into model input or carried across reroutes.
     pub context_usage_estimate: Option<crate::context_usage::ContextUsageEstimate>,
+    /// Original prompt/history identity persisted beside measured provider usage.
+    pub context_usage_prefix: Option<crate::context_usage::ContextUsagePrefix>,
+    /// Unbound logical evidence, verified after physical account selection.
+    pub context_usage_binding: Option<crate::context_usage::ContextUsageBinding>,
+    /// Selected physical protocol for context measurement and prompt projection.
+    /// Independent of input_protocol, which identifies native replay data.
+    pub context_usage_protocol: Option<lingxi_llm_client::protocol::ProtocolFamily>,
+    /// Selected build-time route for pure prompt projection outside generation.
+    pub prompt_projection_profile: Option<lingxi_llm_client::protocol::ProviderProfile>,
     /// Selected resource identity; token rotation keeps this identity stable.
     pub selected_account: Option<crate::accounts::AccountResourceScope>,
     /// Optional operation-wide physical API attempt budget. Host-only; never

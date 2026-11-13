@@ -978,6 +978,15 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
             crate::prompt::task_notification::NON_USER_INPUT_HEADER
         )
     );
+    let retained = orch
+        .task_notification_reminder_messages_in_turn(false)
+        .await;
+    assert_eq!(
+        retained.len(),
+        1,
+        "unpublished rows retain their original identity"
+    );
+    orch.persist_prompt_ingress_reminders(&retained).await;
     // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
     assert!(
         orch.task_notification_reminder_messages().await.is_empty(),

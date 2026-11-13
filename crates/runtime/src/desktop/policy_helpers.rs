@@ -856,9 +856,10 @@ impl NativePolicyHelperController {
             {
                 return;
             }
-            if let Some(mut current) = cache.snapshot() {
-                current.selection = base_selection.clone();
-                cache.replace(current);
+            let mut validated = snapshot.clone();
+            validated.selection = base_selection.clone();
+            if !cache.replace_if_current(&snapshot, validated) {
+                return;
             }
             if let Some(controller) = weak_controller.upgrade() {
                 controller.clear_semantic_worker_failure_after_success(source, generation);

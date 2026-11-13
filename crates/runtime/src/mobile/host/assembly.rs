@@ -1116,7 +1116,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     if !credentials.has_account_credential_refresher() {
         credentials.set_account_credential_refresher(account_authority.clone());
     }
-    client = client.with_credential_provider(Arc::new(composite));
+    client = client.with_credential_provider(crate::credential_provider::with_token_exchange(
+        Arc::new(composite),
+        llm_transport.clone(),
+    ));
     let (client, account_runtime) =
         crate::account_pool_store::attach_mobile_account_runtime(client, account_pool);
     let llm_runtime = Arc::new(client);
@@ -2308,16 +2311,17 @@ pub(super) async fn build_mobile_inner_with_ask(
             })
         }),
     );
-    let subagent_transcript_home = cfg.lingxi_home.clone();
-    let subagent_transcript_cwd = session_cwd.clone();
+    let subagent_transcript_writer = session_writer.clone();
     let subagent_active_session = active_session_uuid.clone();
     let subagents_dir_provider = Arc::new(move || {
         let session_uuid = subagent_active_session.lock().ok()?.clone();
-        Some(orchestrator::transcript_paths::subagents_dir(
-            &subagent_transcript_home,
-            &subagent_transcript_cwd.cwd().to_string_lossy(),
-            &session_uuid,
-        ))
+        let session = lingxi_core::types::SessionId::parse_prefixed(&session_uuid)?;
+        Some(
+            subagent_transcript_writer
+                .session_target_path(session)?
+                .with_extension("")
+                .join("subagents"),
+        )
     });
     let subagent_env_renderer = build_mobile_subagent_env_renderer(
         cwd.clone(),
@@ -2329,10 +2333,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         logical_cwd.to_string_lossy().into_owned(),
         subagents_dir_provider.clone(),
     ));
-    let session_agent_observer = Arc::new(MobileSessionAgentObserver::new(
-        event_sink.clone(),
-        active_session_uuid.clone(),
-    ));
+    let session_agent_observer = Arc::new(
+        MobileSessionAgentObserver::new(event_sink.clone(), active_session_uuid.clone())
+            .with_transcript_storage(session_writer.clone(), cfg.lingxi_home.join("projects")),
+    );
     let session_agent_transcript_cache = session_agent_observer.transcript_cache.clone();
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_forward_subagent_output(&output)
@@ -4574,8 +4578,6 @@ fn build_mobile_engine_on_worker(
                     if mobile_delivery.is_some() {
                         if let Err(error) = super::ensure_mobile_session_identity(
                             &session_writer,
-                            &lingxi_home,
-                            &session_cwd.cwd().to_string_lossy(),
                             &turn.session_id,
                         )
                         .await

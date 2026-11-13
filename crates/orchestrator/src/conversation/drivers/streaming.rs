@@ -3741,6 +3741,10 @@ impl StreamingTurnDriver<'_> {
         {
             return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
+        if partial_finalize.is_none() {
+            orch.acknowledge_step_reminders(&cache_request_history)
+                .await;
+        }
         orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,
             pumped.served_model.as_deref().unwrap_or(&model),

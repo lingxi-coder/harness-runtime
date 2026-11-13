@@ -90,8 +90,8 @@ pub enum JsonSchemaValidation {
 pub trait JsonSchemaValidator: Send + Sync {
     /// Create one Native validator instance scope.
     ///
-    /// MCP clients retain one session across all of their tools/list schemas so
-    /// Ajv's `$id` cache stays client-local. StructuredOutput callers create a
+    /// MCP clients use one session per complete tools/list catalog so
+    /// Ajv's `$id` cache stays catalog-local and retired plans can be released. StructuredOutput callers create a
     /// fresh session for each schema, matching Native's per-schema Ajv
     /// constructor.
     fn new_session(&self, profile: SchemaProfile) -> Arc<dyn JsonSchemaValidatorSession>;

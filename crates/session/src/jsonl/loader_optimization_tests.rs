@@ -204,6 +204,7 @@ pub(super) fn record_catalog_parse(path: &Path) {
 
 #[derive(Clone, Copy)]
 enum CatalogReadFault {
+    FullReadOnly,
     PermissionDenied,
     UnsupportedPrefix,
 }
@@ -218,6 +219,9 @@ pub(super) fn catalog_read_fault(path: &Path, prefix: bool) -> Option<lingxi_cor
         Some(CatalogReadFault::PermissionDenied) => Some(
             lingxi_core::host::FsError::PermissionDenied(path.display().to_string()),
         ),
+        Some(CatalogReadFault::FullReadOnly) if !prefix => Some(lingxi_core::host::FsError::Io(
+            "transient complete read failure".into(),
+        )),
         Some(CatalogReadFault::UnsupportedPrefix) if prefix => Some(
             lingxi_core::host::FsError::Io("prefix reads unsupported by test backend".into()),
         ),
@@ -484,6 +488,47 @@ async fn alias_index_retries_until_admission_and_keeps_all_destination_variants(
     );
 }
 
+#[tokio::test]
+async fn successful_prefix_and_transient_full_read_failure_does_not_poison_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd = cwd.to_str().unwrap();
+    let home = temp.path().join("home");
+    let dir = home.join("projects").join(project_dir_name(cwd));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_, path) = write_session(&dir, cwd);
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_owned()));
+    let revision = std::fs::metadata(&path).unwrap();
+    {
+        let _fault = ReadFaultGuard::new(&path, CatalogReadFault::FullReadOnly);
+        let rows = list_recent_sessions_in_scope_with_diagnostics(
+            &home,
+            cwd,
+            SessionDiscoveryScope::Current,
+            usize::MAX,
+            fs.clone(),
+        )
+        .await;
+        assert!(matches!(rows, Err(LoaderError::Io { .. })), "{rows:?}");
+    }
+    let restored = list_recent_sessions_in_scope_with_diagnostics(
+        &home,
+        cwd,
+        SessionDiscoveryScope::Current,
+        usize::MAX,
+        fs,
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.sessions.len(), 1);
+    assert_eq!(
+        revision.modified().unwrap(),
+        std::fs::metadata(&path).unwrap().modified().unwrap()
+    );
+    assert_eq!(revision.len(), std::fs::metadata(&path).unwrap().len());
+}
+
 fn alias_source_fixture() -> (
     tempfile::TempDir,
     Uuid,
@@ -674,6 +719,9 @@ async fn alias_capture_rechecks_access_and_keeps_unsupported_prefix_fallback() {
         .await
         .unwrap();
         match fault {
+            CatalogReadFault::FullReadOnly => {
+                unreachable!("full-read-only failures use the separate revision recovery fixture")
+            }
             CatalogReadFault::PermissionDenied => {
                 assert!(
                     rows.is_empty(),

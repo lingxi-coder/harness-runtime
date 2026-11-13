@@ -773,6 +773,62 @@ async fn discarded_body_restores_as_file_after_real_compaction_without_resume() 
 }
 
 #[tokio::test]
+async fn unconsumed_read_triggers_are_retired_by_clear_and_resume_for_both_drivers() {
+    for path in [
+        crate::conversation::ModelCallPath::Batched,
+        crate::conversation::ModelCallPath::Streaming,
+    ] {
+        for resume in [false, true] {
+            let fixture = Fixture::new("GUIDANCE_REQUIRES_A_CURRENT_SESSION_READ");
+            let root = fixture.root();
+            root.initialize_conversation_mode().await.unwrap();
+            read_trigger(&root, &fixture).await;
+            assert_eq!(
+                root.prompt_runtime.nested_memory_triggers.queued(),
+                vec![fixture.trigger.clone()]
+            );
+            if resume {
+                root.resume_session(
+                    fixture.session_id,
+                    Vec::new(),
+                    None,
+                    None,
+                    crate::test_support::code_resume_runtime_snapshot(fixture.session_id),
+                )
+                .await
+                .unwrap();
+            } else {
+                root.clear_session().await.unwrap();
+            }
+            assert!(root
+                .prompt_runtime
+                .nested_memory_triggers
+                .queued()
+                .is_empty());
+            persist_user(&root, "an unrelated prompt").await;
+            let prepared = root
+                .prepare_turn_step(path, None, true, true, None)
+                .await
+                .unwrap();
+            assert!(!prepared.snapshot.iter().any(|message| message
+                .text_content()
+                .contains("GUIDANCE_REQUIRES_A_CURRENT_SESSION_READ")));
+            read_trigger(&root, &fixture).await;
+            let messages = root.nested_memory_reminder_messages(&[]).await;
+            assert_eq!(
+                messages.len(),
+                1,
+                "a new session Read still discovers its guidance"
+            );
+            assert!(messages[0]
+                .text_content()
+                .contains("GUIDANCE_REQUIRES_A_CURRENT_SESSION_READ"));
+            assert!(root.nested_memory_reminder_messages(&[]).await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn later_memory_creation_requires_a_new_read_trigger() {
     let mut fixture = Fixture::new("new guidance");
     std::fs::remove_file(&fixture.memory).unwrap();
@@ -860,18 +916,20 @@ async fn a_cached_model_visible_entry_is_not_a_read_trigger() {
 }
 
 #[tokio::test]
-async fn failed_and_unchanged_reads_do_not_enqueue_nested_memory() {
+async fn failed_reads_do_not_enqueue_and_fresh_reads_reuse_the_existing_memory_body() {
     let fixture = Fixture::new("initial guidance");
     let root = fixture.root();
     read_trigger(&root, &fixture).await;
     assert_eq!(root.nested_memory_reminder_messages(&[]).await.len(), 1);
     read_trigger(&root, &fixture).await;
+    assert_eq!(
+        root.prompt_runtime.nested_memory_triggers.queued(),
+        vec![fixture.trigger.clone()],
+        "Native 322 performs a fresh Read even when the file bytes are unchanged"
+    );
     assert!(
-        root.prompt_runtime
-            .nested_memory_triggers
-            .queued()
-            .is_empty(),
-        "ordinary file_unchanged returns before the native enqueue site"
+        root.nested_memory_reminder_messages(&[]).await.is_empty(),
+        "the unchanged guidance remains deduplicated against model history"
     );
     let mut builtin = tool_api::test_support::ctx_for_file_tools(
         fixture.fs.clone(),

@@ -646,3 +646,82 @@ async fn successful_self_read_cursor_uses_only_original_range_inputs() {
         );
     }
 }
+
+#[tokio::test]
+async fn compacted_agents_hook_is_rediscovered_once_on_the_next_read() {
+    use crate::test_support::{with_scripted_compactor, MockApiClient};
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let agents = root.join("repo/pkg/AGENTS.md");
+    write(&agents, "RESTORE_AFTER_COMPACT");
+    let input = json!({"file_path":"pkg/main.rs"});
+    let api = Arc::new(MockApiClient::new(vec![
+        read_response("before", input.clone()),
+        finished_response(),
+        read_response("after", input),
+        finished_response(),
+    ]));
+    let orch = with_scripted_compactor(
+        read_fixture_orchestrator(api.clone(), &root).without_host_environment_probes(),
+        "Only a compact summary remains.",
+    );
+    orch.run_turn("read package").await.unwrap();
+    assert!(orch
+        .prompt_runtime
+        .instruction_context
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .sent_paths
+        .contains(&agents));
+    {
+        let mut session = orch.session.lock().await;
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "padding".into(),
+            ));
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "done".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+                per_turn_effort: None,
+            });
+    }
+    orch.force_compact_with_cancel(tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!orch
+        .snapshot_history()
+        .await
+        .iter()
+        .any(|message| message.text_content().contains("RESTORE_AFTER_COMPACT")));
+    assert!(!orch
+        .prompt_runtime
+        .instruction_context
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .sent_paths
+        .contains(&agents));
+    orch.run_turn("read package again").await.unwrap();
+    let calls = api.captured_msgs().await;
+    assert_eq!(
+        calls
+            .last()
+            .unwrap()
+            .iter()
+            .filter(|message| message.text_content().contains("RESTORE_AFTER_COMPACT"))
+            .count(),
+        1
+    );
+}

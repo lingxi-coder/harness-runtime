@@ -1966,6 +1966,7 @@ impl ConversationOrchestrator {
             model_supports_mid_conversation_system,
         )
         .await;
+        crate::request_context::project_current_tool_change_rows(messages);
         self.prepend_leading_context(messages, context_announcements)
             .await;
         if let Some(reminder) = deferred_tools_reminder {

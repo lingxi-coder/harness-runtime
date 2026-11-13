@@ -15,8 +15,8 @@ use tokio::sync::RwLock;
 
 use futures_util::stream::unfold;
 use lingxi_core::host::json_schema_validator::{
-    CompiledJsonSchema, JsonSchemaValidation, JsonSchemaValidator, JsonSchemaValidatorSession,
-    SchemaCompileError, SchemaProfile,
+    CompiledJsonSchema, JsonSchemaValidation, JsonSchemaValidator, SchemaCompileError,
+    SchemaProfile,
 };
 use lingxi_core::host::mcp_result::{
     connection_error_diagnostic, drive_modern_request, result_error_diagnostic, JsonrpcMcpResultIo,
@@ -761,7 +761,7 @@ pub struct McpClient {
     dropped_tools: RwLock<Vec<McpDroppedToolRecord>>,
     /// One connection-owned MCP output-schema session, plus the compiled
     /// plans from the latest `tools/list` response.
-    output_schema_session: Option<Arc<dyn JsonSchemaValidatorSession>>,
+    output_schema_validator: Option<Arc<dyn JsonSchemaValidator>>,
     output_schema_plans:
         RwLock<HashMap<String, Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>>,
     /// Wire names from the current catalog, indexed by canonical and
@@ -790,7 +790,139 @@ pub struct McpClient {
 #[derive(Debug, Clone)]
 enum OutputSchemaCompileFailure {
     Invalid(Utf16JsonProjection),
-    Worker(String),
+}
+
+/// Host-only handoff invoked immediately before a physical tool RPC.
+pub type McpOutputSchemaCallback = Arc<dyn Fn(McpOutputSchemaSnapshot) + Send + Sync>;
+
+/// Immutable validation decision captured for one tool dispatch, including a
+/// deterministic compilation failure or the absence of an output schema.
+/// Keeping this handle alive retains its catalog's compiled-plan lease.
+#[derive(Clone)]
+pub struct McpOutputSchemaSnapshot {
+    full_name: String,
+    plan: Option<Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>,
+}
+
+impl McpOutputSchemaSnapshot {
+    pub(crate) async fn compile_catalog(
+        tools: &[McpToolDto],
+        validator: Option<&Arc<dyn JsonSchemaValidator>>,
+    ) -> Result<HashMap<String, Self>, McpClientError> {
+        let session = if tools.iter().any(|tool| tool.output_schema.is_some()) {
+            Some(
+                validator
+                    .ok_or_else(|| {
+                        McpClientError::Rpc("MCP output schema validator is unavailable".into())
+                    })?
+                    .new_session(SchemaProfile::McpOutputSchema2020),
+            )
+        } else {
+            None
+        };
+        let mut plans = HashMap::new();
+        for tool in tools {
+            let plan = if let Some(schema) = &tool.output_schema {
+                Some(
+                    match session
+                        .as_ref()
+                        .expect("schema session")
+                        .compile(schema)
+                        .await
+                    {
+                        Ok(plan) => Ok(plan),
+                        Err(SchemaCompileError::InvalidSchema(detail)) => {
+                            Err(OutputSchemaCompileFailure::Invalid(detail))
+                        }
+                        Err(SchemaCompileError::Worker(detail)) => {
+                            return Err(McpClientError::Rpc(detail.into()))
+                        }
+                    },
+                )
+            } else {
+                None
+            };
+            plans.insert(
+                tool.full_name.clone(),
+                Self {
+                    full_name: tool.full_name.clone(),
+                    plan,
+                },
+            );
+        }
+        Ok(plans)
+    }
+
+    pub(crate) async fn compile(
+        full_name: &str,
+        schema: Option<&Utf16JsonProjection>,
+        validator: Option<&Arc<dyn JsonSchemaValidator>>,
+    ) -> Result<Self, McpClientError> {
+        let plan = if let Some(schema) = schema {
+            let validator = validator.ok_or_else(|| {
+                McpClientError::Rpc("MCP output schema validator is unavailable".into())
+            })?;
+            let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
+            Some(match session.compile(schema).await {
+                Ok(plan) => Ok(plan),
+                Err(SchemaCompileError::InvalidSchema(detail)) => {
+                    Err(OutputSchemaCompileFailure::Invalid(detail))
+                }
+                Err(SchemaCompileError::Worker(detail)) => {
+                    return Err(McpClientError::Rpc(detail.into()))
+                }
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            full_name: full_name.to_owned(),
+            plan,
+        })
+    }
+
+    /// Validate with the dispatch-time decision without consulting a live catalog.
+    pub async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpClientError> {
+        let Some(plan) = self.plan.as_ref() else {
+            return Ok(output.clone());
+        };
+        let full_name = &self.full_name;
+        let plan = plan.as_ref().map_err(|error| match error {
+            OutputSchemaCompileFailure::Invalid(detail) => {
+                McpClientError::OutputSchemaCompileInvalid {
+                    full_name: full_name.clone(),
+                    detail: detail.clone(),
+                }
+            }
+        })?;
+        match plan.validate(output).await.map_err(|error| {
+            McpClientError::Rpc(
+                format!("MCP output schema validation failed for {full_name}: {error}").into(),
+            )
+        })? {
+            JsonSchemaValidation::Valid => Ok(output.clone()),
+            JsonSchemaValidation::Invalid { detail, keywords } => {
+                Err(McpClientError::OutputSchemaInvalid {
+                    full_name: full_name.clone(),
+                    detail,
+                    keywords,
+                })
+            }
+        }
+    }
+
+    async fn validate_result(
+        &self,
+        mut result: McpToolResultDto,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        if let Some(output) = result.structured_content.as_ref() {
+            result.structured_content = Some(self.parse_output(output).await?);
+        }
+        Ok(result)
+    }
 }
 
 impl McpClient {
@@ -992,7 +1124,7 @@ impl McpClient {
             config_tool_permissions: BTreeMap::new(),
             effective_permission_ceilings: std::sync::RwLock::new(BTreeMap::new()),
             dropped_tools: RwLock::new(Vec::new()),
-            output_schema_session: None,
+            output_schema_validator: None,
             output_schema_plans: RwLock::new(HashMap::new()),
             wire_tool_names: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
@@ -1009,8 +1141,7 @@ impl McpClient {
     /// validation state and compiled plans remain connection-scoped.
     #[must_use]
     pub fn with_json_schema_validator(mut self, validator: Arc<dyn JsonSchemaValidator>) -> Self {
-        self.output_schema_session =
-            Some(validator.new_session(SchemaProfile::McpOutputSchema2020));
+        self.output_schema_validator = Some(validator);
         self
     }
 
@@ -1021,51 +1152,32 @@ impl McpClient {
         full_name: &str,
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, McpClientError> {
-        let plan = self
-            .output_schema_plans
-            .read()
+        self.output_schema_snapshot(full_name)
             .await
-            .get(full_name)
-            .cloned();
-        let Some(plan) = plan else {
-            return Ok(output.clone());
-        };
-        let plan = plan.map_err(|error| match error {
-            OutputSchemaCompileFailure::Invalid(detail) => {
-                McpClientError::OutputSchemaCompileInvalid {
-                    full_name: full_name.to_owned(),
-                    detail,
-                }
-            }
-            OutputSchemaCompileFailure::Worker(detail) => McpClientError::Rpc(
-                format!("MCP output schema for {full_name} could not compile: {detail}").into(),
-            ),
-        })?;
-        match plan.validate(output).await.map_err(|error| {
-            McpClientError::Rpc(
-                format!("MCP output schema validation failed for {full_name}: {error}").into(),
-            )
-        })? {
-            JsonSchemaValidation::Valid => Ok(output.clone()),
-            JsonSchemaValidation::Invalid { detail, keywords } => {
-                Err(McpClientError::OutputSchemaInvalid {
-                    full_name: full_name.to_owned(),
-                    detail,
-                    keywords,
-                })
-            }
-        }
+            .parse_output(output)
+            .await
     }
 
-    async fn validate_tool_result_output(
-        &self,
-        full_name: &str,
-        mut result: McpToolResultDto,
-    ) -> Result<McpToolResultDto, McpClientError> {
-        if let Some(output) = result.structured_content.as_ref() {
-            result.structured_content = Some(self.parse_tool_output(full_name, output).await?);
+    /// Retain the current plan, invalid-schema error, or schema absence for a call.
+    pub async fn output_schema_snapshot(&self, full_name: &str) -> McpOutputSchemaSnapshot {
+        let plans = self.output_schema_plans.read().await;
+        let prefix = format!(
+            "mcp__{}__",
+            crate::normalization::normalize_name_for_mcp(&self.server_name)
+        );
+        let canonical = full_name.strip_prefix(&prefix).map(|tool| {
+            format!(
+                "{prefix}{}",
+                crate::normalization::normalize_name_for_mcp(tool)
+            )
+        });
+        McpOutputSchemaSnapshot {
+            full_name: full_name.to_owned(),
+            plan: plans
+                .get(full_name)
+                .or_else(|| canonical.as_ref().and_then(|name| plans.get(name)))
+                .cloned(),
         }
-        Ok(result)
     }
 
     /// Builder that attaches the resolved per-server config options — the
@@ -1877,27 +1989,45 @@ impl McpClient {
                 })
             })
             .collect();
+
+        self.apply_config_permission_ceilings(&mut tools);
+        self.install_output_schemas(&tools).await?;
         *self.dropped_tools.write().await = dropped_tools;
         *self.wire_tool_names.write().await = wire_tool_names;
-        self.apply_config_permission_ceilings(&mut tools);
-        if let Some(session) = &self.output_schema_session {
-            let mut plans = HashMap::new();
-            for tool in &tools {
-                if let Some(schema) = &tool.output_schema {
-                    let compiled = session.compile(schema).await.map_err(|error| match error {
-                        SchemaCompileError::InvalidSchema(detail) => {
-                            OutputSchemaCompileFailure::Invalid(detail)
-                        }
-                        SchemaCompileError::Worker(detail) => {
-                            OutputSchemaCompileFailure::Worker(detail)
-                        }
-                    });
-                    plans.insert(tool.full_name.clone(), compiled);
-                }
-            }
-            *self.output_schema_plans.write().await = plans;
-        }
         Ok(tools)
+    }
+
+    /// Install a complete connection catalog atomically. Worker failures are
+    /// transient: leave the previous plans intact and let discovery retry.
+    pub(crate) async fn install_output_schemas(
+        &self,
+        tools: &[McpToolDto],
+    ) -> Result<(), McpClientError> {
+        let Some(validator) = &self.output_schema_validator else {
+            return Ok(());
+        };
+        if tools.iter().all(|tool| tool.output_schema.is_none()) {
+            self.output_schema_plans.write().await.clear();
+            return Ok(());
+        }
+        let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
+        let mut plans = HashMap::new();
+        for tool in tools {
+            if let Some(schema) = &tool.output_schema {
+                let compiled = match session.compile(schema).await {
+                    Ok(plan) => Ok(plan),
+                    Err(SchemaCompileError::InvalidSchema(detail)) => {
+                        Err(OutputSchemaCompileFailure::Invalid(detail))
+                    }
+                    Err(SchemaCompileError::Worker(detail)) => {
+                        return Err(McpClientError::Rpc(detail.into()))
+                    }
+                };
+                plans.insert(tool.full_name.clone(), compiled);
+            }
+        }
+        *self.output_schema_plans.write().await = plans;
+        Ok(())
     }
 
     /// Return the actual schema decisions from the most recent successful
@@ -2063,6 +2193,33 @@ impl McpClient {
             None,
             None,
             verdict,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn call_tool_with_output_schema_capture(
+        &self,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+        verdict: Option<(
+            &crate::sdk_verdict::SdkAutoModeVerdictAuthority,
+            &crate::McpServerConfig,
+        )>,
+        capture: Option<McpOutputSchemaCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta_and_wire_name(
+            full_name,
+            input,
+            mcp_tool_timeout_for(self.config_timeout_ms),
+            tool_use_id,
+            on_progress,
+            None,
+            None,
+            verdict,
+            capture,
         )
         .await
     }
@@ -2081,6 +2238,7 @@ impl McpClient {
             timeout,
             tool_use_id,
             on_progress,
+            None,
             None,
             None,
             None,
@@ -2112,6 +2270,7 @@ impl McpClient {
             Some(wire_name),
             None,
             None,
+            None,
         )
         .await
     }
@@ -2140,6 +2299,7 @@ impl McpClient {
             Some(wire_name),
             Some(cancellation_reason),
             None,
+            None,
         )
         .await
     }
@@ -2157,6 +2317,7 @@ impl McpClient {
             &crate::sdk_verdict::SdkAutoModeVerdictAuthority,
             &crate::McpServerConfig,
         )>,
+        output_schema_capture: Option<McpOutputSchemaCallback>,
     ) -> Result<McpToolResultDto, McpClientError> {
         // Strip the mcp__<server>__ prefix to recover the wire `name`. The
         // server token is normalized to match how `list_tools` built the FQN
@@ -2188,6 +2349,12 @@ impl McpClient {
             && sdk_verdict.is_some_and(|(authority, config)| {
                 authority.authorizes(config, &tool_source, &input, tool_use_id)
             });
+        // The RPC may outlive a complete tools/list refresh. Capture all three
+        // decisions (compiled, invalid, absent) before sending either protocol.
+        let output_schema = self.output_schema_snapshot(full_name).await;
+        if let Some(capture) = output_schema_capture {
+            capture(output_schema.clone());
+        }
         if self.modern() {
             let result = self
                 .call_modern_tool(
@@ -2205,7 +2372,7 @@ impl McpClient {
                     auto_mode_verdict,
                 )
                 .await?;
-            return self.validate_tool_result_output(full_name, result).await;
+            return output_schema.validate_result(result).await;
         }
 
         // MCP.3: assemble the request `_meta`. claude-code stamps
@@ -2371,7 +2538,7 @@ impl McpClient {
 
         drop(_forwarder_guard);
         let result = outcome?;
-        self.validate_tool_result_output(full_name, result).await
+        output_schema.validate_result(result).await
     }
 
     fn spawn_progress_forwarder(
@@ -3849,6 +4016,8 @@ mod constructor_tests {
     }
 
     include!("client/exact_name_tests.rs");
+    include!("client/output_schema_cache_tests.rs");
+    include!("client/output_schema_dispatch_tests.rs");
 
     #[tokio::test]
     async fn native_322_sdk_and_direct_control_cancellation_uses_owned_id_and_reason() {

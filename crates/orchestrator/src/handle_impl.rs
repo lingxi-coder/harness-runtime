@@ -625,6 +625,17 @@ impl ConversationOrchestrator {
                     crate::model_validation::TrimmedModelSource::from_projection(&validation_source)
                         .is_ok_and(|trimmed| trimmed.code_units() == option.as_slice())
                 });
+            let validation_cache =
+                self.model_runtime
+                    .native_model_validation_cache
+                    .for_route(format!(
+                        "{:?}:{:?}:{:?}",
+                        route.main,
+                        route_context
+                            .as_ref()
+                            .and_then(|context| context.route.endpoint.as_ref()),
+                        self.api.model_validation_account_generation()
+                    ));
             let decision = prepare_native_model_validation(
                 &validation_source,
                 NativeModelValidationFacts {
@@ -642,7 +653,7 @@ impl ConversationOrchestrator {
                             lingxi_llm_client::protocol::NativeModelSuggestionFacts::unobserved,
                         ),
                 },
-                &self.model_runtime.native_model_validation_cache,
+                &validation_cache,
             )
             .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
             match decision {
@@ -671,13 +682,10 @@ impl ConversationOrchestrator {
                     let probe_model = binding.route_anchor.model.clone();
                     let probe_profile = binding.route_anchor.profile.clone();
                     let probe_source = validation_source.clone();
-                    let mut task = self
-                        .model_runtime
-                        .native_model_validation_cache
-                        .spawn_probe(&payload, async move {
-                            api.probe_model(&probe_model, probe_profile.as_deref(), &probe_source)
-                                .await
-                        });
+                    let mut task = validation_cache.spawn_probe(&payload, async move {
+                        api.probe_model(&probe_model, probe_profile.as_deref(), &probe_source)
+                            .await
+                    });
                     let result = match validation {
                         ModelValidationMode::SlashOuterRaceDetached => task.wait().await,
                         ModelValidationMode::GzrAbortAfterFiveSeconds => {

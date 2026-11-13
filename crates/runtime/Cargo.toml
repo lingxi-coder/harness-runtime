@@ -300,7 +300,8 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 # Native replay fixtures verify their bytes in desktop-only test builds too.
 sha2 = "0.10"
 # Shared host-side filesystem fixtures also run with only the mobile feature.
-platform-posix = { path = "../platforms/posix" }
+platform-posix = { path = "../platforms/posix", features = ["test-support"] }
+provider-config = { path = "../provider-config", features = ["test-support"] }
 bytes.workspace = true
 permission = { path = "../permission", features = ["test-support"] }
 # the role-schema tests compile the plugin's JSON schemas the way the agent runner does

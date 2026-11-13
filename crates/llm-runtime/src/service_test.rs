@@ -74,6 +74,539 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_count_projects_deferred_system_through_real_service_paths() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({"input_tokens":2095}),
+        ));
+        let service = make_adapter(transport.clone());
+        assert_eq!(
+            service
+                .count_tokens(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    Some("count this system"),
+                    vec![],
+                    vec![]
+                )
+                .await
+                .unwrap(),
+            2095
+        );
+        assert_eq!(
+            transport
+                .seen_body(0)
+                .string_at("/system/0/text")
+                .as_deref(),
+            Some("count this system")
+        );
+        service
+            .count_tokens_exact(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("count exact system"),
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            transport
+                .seen_body(1)
+                .string_at("/system/0/text")
+                .as_deref(),
+            Some("count exact system")
+        );
+        let source = SystemPromptInput::source_vector(
+            vec![PromptText::from_utf16(vec![
+                b'A' as u16,
+                0xd800,
+                b'B' as u16,
+            ])],
+            Some(PromptText::from_string("dynamic source")),
+            None,
+        );
+        for stream in [false, true] {
+            let (request, _) = service
+                .build_main_message_request(
+                    MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        Some(source.clone()),
+                        vec![ConversationMessage::user(
+                            lingxi_core::types::MessageId::new(),
+                            "hello".into(),
+                        )],
+                        vec![],
+                    ),
+                    stream,
+                )
+                .unwrap();
+            let generated = service.client().prepare(&request).await.unwrap();
+            let counted = service
+                .client()
+                .prepare_count_tokens(&request)
+                .await
+                .unwrap();
+            let generated = &generated.provider_request.body_json;
+            let text = counted.body_json.payload_at("/system/0/text").unwrap();
+            assert_eq!(text, generated.payload_at("/system/0/text").unwrap());
+            assert!(text.root_string_code_units().unwrap().starts_with(&[
+                b'A' as u16,
+                0xd800,
+                b'B' as u16
+            ]));
+            crate::model::count_tokens::try_count_tokens_exact(
+                service.client().as_ref(),
+                transport.clone(),
+                &request,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn non_messages_count_and_first_generation_admit_the_same_large_system() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+        let (service, transport) = context_policy_fixture(100);
+        let system = "large system ".repeat(200);
+        let without = service
+            .count_tokens("m", Some("context-policy-test"), None, vec![], vec![])
+            .await
+            .unwrap();
+        let with = service
+            .count_tokens(
+                "m",
+                Some("context-policy-test"),
+                Some(&system),
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(with > without + 100);
+        for stream in [false, true] {
+            let source = SystemPromptInput::custom_prompt(PromptText::from_string(system.clone()));
+            let (request, _) = service
+                .build_main_message_request(
+                    MessagesCreateRequest::new(
+                        "m",
+                        Some("context-policy-test"),
+                        Some(source.clone()),
+                        vec![ConversationMessage::user(
+                            lingxi_core::types::MessageId::new(),
+                            "hello".into(),
+                        )],
+                        vec![],
+                    ),
+                    stream,
+                )
+                .unwrap();
+            let error = if stream {
+                match service.stream_request(request).await {
+                    Ok(_) => panic!("large system must exceed the input budget"),
+                    Err(error) => error,
+                }
+            } else {
+                service
+                    .execute_non_stream_request(
+                        request,
+                        NonStreamingRequestClass::Main,
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                LlmError::InputBudgetExceeded {
+                    budget: 100,
+                    estimated: true,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(transport.seen_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn measured_context_rejects_a_changed_prompt_before_new_request_binding() {
+        use crate::model::count_tokens::estimate_input_tokens;
+        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+        let (service, transport) = context_policy_fixture(1000);
+        assert_eq!(
+            service
+                .protocol_for_model("m", Some("context-policy-test"))
+                .unwrap(),
+            ProtocolFamily::OpenAiResponses,
+        );
+        *transport.responses.lock().unwrap() = vec![FakeResponse::Ok(ProviderResponse::json(
+            200,
+            serde_json::json!({
+                "id":"measured", "object":"response", "model":"m", "status":"completed",
+                "output":[{
+                    "type":"message", "id":"measured-message", "role":"assistant", "status":"completed",
+                    "content":[{"type":"output_text","text":"ok","annotations":[]}]
+                }],
+                "usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}
+            }),
+        ))];
+        let original_history = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "hello".into(),
+        )];
+        let system = SystemPromptInput::custom_prompt(PromptText::from_string("original system"));
+        for stream in [false, true] {
+            let build = |system: &SystemPromptInput, tools| {
+                service
+                    .build_main_message_request(
+                        MessagesCreateRequest::new(
+                            "m",
+                            Some("context-policy-test"),
+                            Some(system.clone()),
+                            original_history.clone(),
+                            tools,
+                        ),
+                        stream,
+                    )
+                    .unwrap()
+                    .0
+            };
+            let original = build(&system, vec![]);
+            let response = service
+                .execute_non_stream_request(
+                    original,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.usage.counts().input_tokens, 8);
+            assert_eq!(response.usage.counts().output_tokens, 2);
+            let measured_tokens = response.usage.context_tokens().unwrap();
+            assert_eq!(measured_tokens, 10);
+            let prefix: crate::context_usage::ContextUsagePrefix = serde_json::from_str(
+                response
+                    .usage
+                    .provider_metadata
+                    .payload_at("/lingxi_context_usage_prefix")
+                    .unwrap()
+                    .as_json_source(),
+            )
+            .unwrap();
+            let estimator =
+                crate::context_usage::ContextUsageEstimator::with_prefix(move |_, _, history| {
+                    prefix
+                        .matches_history(history)
+                        .then(|| (measured_tokens, prefix.clone()))
+                });
+            let unchanged = estimator.scope(async { build(&system, vec![]) }).await;
+            assert_eq!(estimate_input_tokens(&unchanged), measured_tokens);
+            let tools = vec![crate::ToolDeclaration {
+                name: "new_live_tool".into(),
+                description: "schema ".repeat(1500).into(),
+                input_schema: lingxi_llm_client::protocol::JsonPayload::parse(
+                    "{\"type\":\"object\"}",
+                )
+                .unwrap(),
+                ..Default::default()
+            }];
+            let changed = estimator.scope(async { build(&system, tools) }).await;
+            assert!(changed.execution.context_usage_estimate.is_none());
+            assert!(estimate_input_tokens(&changed) > 1000);
+            assert!(matches!(
+                service.ensure_context_fit(&changed).await,
+                Err(LlmError::InputBudgetExceeded { .. })
+            ));
+            let new_system = SystemPromptInput::custom_prompt(PromptText::from_string(
+                "updated system ".repeat(1000),
+            ));
+            let changed_system = estimator.scope(async { build(&new_system, vec![]) }).await;
+            assert!(changed_system.execution.context_usage_estimate.is_none());
+            assert!(estimate_input_tokens(&changed_system) > 1000);
+        }
+    }
+
+    async fn pooled_context_usage_survives_physical_account_selection(streaming: bool) {
+        use crate::context_usage::{ContextUsageEstimator, ContextUsagePrefix};
+        use lingxi_core::types::{ContentBlock, MessageId};
+        let (seed, _) = context_policy_fixture(272_000);
+        let mut template = seed.client().configuration().providers.remove(0);
+        template.auth = crate::AuthStrategy::ApiKey;
+        let runtime = super::super::live_web_tests::pooled_runtime(
+            template,
+            Arc::new(super::super::live_web_tests::ApiKeyCredentials),
+        );
+        let response_json = serde_json::json!({
+            "id":"measured", "object":"response", "model":"m", "status":"completed",
+            "output":[{"type":"message","id":"answer","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"ok","annotations":[]}]}],
+            "usage":{"input_tokens":127_965,"output_tokens":2,"total_tokens":127_967}
+        });
+        let batched = FakeTransport::always(ProviderResponse::json(200, response_json.clone()));
+        let streamed = FakeStreamTransport::sequence((0..2).map(|_| FakeStreamResp::Frames {
+            status: 200, headers: Default::default(), frames: vec![
+                serde_json::to_vec(&serde_json::json!({"type":"response.created","response":{"id":"measured","model":"m","output":[]}})).unwrap(),
+                serde_json::to_vec(&serde_json::json!({"type":"response.completed","response":response_json})).unwrap(),
+            ],
+        }).collect());
+        let transport: Arc<dyn Transport> = if streaming {
+            streamed.clone()
+        } else {
+            batched.clone()
+        };
+        let service = ApiService::new(
+            Arc::new(runtime),
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "pooled-context",
+            None,
+            None,
+        )
+        .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let initial = vec![ConversationMessage::user(MessageId::new(), "hello".into())];
+        let make = |history, profile: &str, system: &str| {
+            MessagesCreateRequest::new(
+                "m",
+                Some(profile),
+                Some(crate::SystemPromptInput::custom_prompt(
+                    PromptText::from_string(system),
+                )),
+                history,
+                Vec::new(),
+            )
+        };
+        let first_request = make(initial.clone(), "context-policy-test", "stable system");
+        let first = if streaming {
+            service.messages_create_buffered_stream(first_request).await
+        } else {
+            service.messages_create(first_request).await
+        }
+        .unwrap();
+        let prefix: ContextUsagePrefix = serde_json::from_str(
+            first
+                .usage
+                .provider_metadata
+                .payload_at("/lingxi_context_usage_prefix")
+                .expect("physical response must retain its measured prompt identity")
+                .as_json_source(),
+        )
+        .unwrap();
+        assert_eq!(first.usage.context_tokens(), Some(127_967));
+        // Exercise the serialized replay boundary, including opaque provider
+        // blocks whose bytes are not proportional to measured occupancy.
+        let mut replay = initial;
+        replay.push(ConversationMessage::Assistant {
+            id: MessageId::new(), content: vec![ContentBlock::ProviderContent {
+                protocol: "open_ai_responses".into(), value: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"reasoning","encrypted_content":"x".repeat(900_000)})).unwrap(),
+            }], stop_reason: Some("end_turn".into()), per_turn_effort: None, resumable: None,
+        });
+        replay.push(ConversationMessage::user(
+            MessageId::new(),
+            "continue".into(),
+        ));
+        let replay: Vec<ConversationMessage> =
+            serde_json::from_slice(&serde_json::to_vec(&replay).unwrap()).unwrap();
+        let prefix: ContextUsagePrefix =
+            serde_json::from_slice(&serde_json::to_vec(&prefix).unwrap()).unwrap();
+        let estimator = ContextUsageEstimator::with_prefix(move |_, _, history| {
+            prefix
+                .matches_history(history)
+                .then(|| (127_969, prefix.clone()))
+        });
+        let second_request = make(replay.clone(), "context-policy-test", "stable system");
+        let second = estimator
+            .scope(async {
+                if streaming {
+                    service
+                        .messages_create_buffered_stream(second_request)
+                        .await
+                } else {
+                    service.messages_create(second_request).await
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.usage.context_tokens(), Some(127_967));
+        for (profile, system) in [
+            ("context-policy-test", "changed system"),
+            ("account.b", "stable system"),
+        ] {
+            let request = make(replay.clone(), profile, system);
+            let rejected = estimator
+                .scope(async {
+                    if streaming {
+                        service.messages_create_buffered_stream(request).await
+                    } else {
+                        service.messages_create(request).await
+                    }
+                })
+                .await;
+            assert!(
+                matches!(rejected, Err(LlmError::InputBudgetExceeded { .. })),
+                "changed physical prompt/account must not inherit measured occupancy: {rejected:?}"
+            );
+        }
+        if streaming {
+            assert_eq!(streamed.stream_call_count(), 2);
+            for index in 0..2 {
+                assert_eq!(
+                    streamed
+                        .seen_headers(index)
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .map(|(_, value)| value.as_str()),
+                    Some("Bearer synthetic-acct.a")
+                );
+            }
+        } else {
+            assert_eq!(batched.seen_count(), 2);
+            for index in 0..2 {
+                assert_eq!(
+                    batched
+                        .seen_headers(index)
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .map(|(_, value)| value.as_str()),
+                    Some("Bearer synthetic-acct.a")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_pooled_context_measurement_survives_route_selection_and_serialized_replay() {
+        pooled_context_usage_survives_physical_account_selection(false).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_pooled_context_measurement_survives_route_selection_and_serialized_replay() {
+        pooled_context_usage_survives_physical_account_selection(true).await;
+    }
+
+    fn two_context_beta_connections(transport: Arc<dyn Transport>, model: &str) -> ApiService {
+        let seed = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::BedrockClaude,
+            "https://a.bedrock.example.test",
+            "connection-a",
+            model,
+            transport.clone(),
+        );
+        let mut config = seed.client().configuration();
+        let mut second = config.providers[0].clone();
+        second.profile_name = "connection-b".into();
+        second.base_url = "https://b.bedrock.example.test".into();
+        config.providers.push(second);
+        ApiService::new(
+            Arc::new(ModelRuntime::from_config(config).unwrap()),
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn context_beta_refusal_isolated_between_physical_connections_nonstream() {
+        let _lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let transport = FakeTransport::sequence(vec![
+            context_1m_refusal_response("context-1m-2025-08-07 beta is not supported"),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let service = two_context_beta_connections(transport.clone(), model);
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        for profile in ["connection-a", "connection-b", "connection-a"] {
+            let mut request = LlmRequest::new(model)
+                .with_profile(profile)
+                .with_user_text("hello");
+            request.execution.thinking_recovery_scope = Some(scope.clone());
+            service
+                .execute_non_stream_request(
+                    request,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(transport.seen_count(), 4);
+        for (index, expected) in [true, false, true, false].into_iter().enumerate() {
+            assert_eq!(
+                request_body_has_beta(&transport.seen_body(index), crate::model::betas::CONTEXT_1M),
+                expected,
+                "request {index}"
+            );
+        }
+        let a = service
+            .context_1m_route_key(&LlmRequest::new(model).with_profile("connection-a"))
+            .unwrap();
+        let b = service
+            .context_1m_route_key(&LlmRequest::new(model).with_profile("connection-b"))
+            .unwrap();
+        assert!(scope.context_1m_refused_for(&a));
+        assert!(!scope.context_1m_refused_for(&b));
+        let mut other_endpoint = a.clone();
+        other_endpoint.endpoint = "https://replacement.bedrock.example.test".into();
+        assert!(!scope.context_1m_refused_for(&other_endpoint));
+    }
+
+    #[tokio::test]
+    async fn context_beta_refusal_isolated_between_physical_connections_stream() {
+        use futures::StreamExt;
+        let _lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
+        let model = "claude-sonnet-4-20250514[1m]";
+        let mut responses = vec![FakeStreamResp::Status {
+            status: 400,
+            headers: BTreeMap::new(),
+            body_json: Some(
+                serde_json::json!({"error":{"type":"invalid_request_error","message":"context-1m-2025-08-07 beta is not supported"}}),
+            ),
+        }];
+        responses.extend((0..3).map(|_| FakeStreamResp::Frames {
+            status: 200,
+            headers: BTreeMap::new(),
+            frames: successful_bedrock_anthropic_frames(model),
+        }));
+        let transport = FakeStreamTransport::sequence(responses);
+        let service = two_context_beta_connections(transport.clone(), model);
+        let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
+        for profile in ["connection-a", "connection-b", "connection-a"] {
+            let mut request = LlmRequest::new(model)
+                .with_profile(profile)
+                .with_user_text("hello");
+            request.execution.thinking_recovery_scope = Some(scope.clone());
+            let mut stream = service.stream_request(request).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        }
+        assert_eq!(transport.stream_call_count(), 4);
+        for (index, expected) in [true, false, true, false].into_iter().enumerate() {
+            assert_eq!(
+                request_body_has_beta(&transport.seen_body(index), crate::model::betas::CONTEXT_1M),
+                expected,
+                "request {index}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn context_policy_stops_oversized_custom_input_before_generation() {
         let (service, transport) = context_policy_fixture(100);
         let mut request = LlmRequest::new("m").with_user_text("x".repeat(1000));
