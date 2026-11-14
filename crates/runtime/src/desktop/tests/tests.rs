@@ -5640,7 +5640,16 @@ async fn build_resume_legacy_missing_agent_falls_back_to_default() {
         session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), session_id);
     let fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(platform_posix::fs::PosixFileSystem::new(cfg.cwd.clone()));
-    session::jsonl::JsonlWriter::new(transcript_path, fs)
+    let writer = session::jsonl::JsonlWriter::new(transcript_path, fs);
+    writer
+        .initialize_fixed_session_mode(
+            session_id,
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
+        )
+        .await
+        .expect("write the fixed session mode header");
+    writer
         .append_agent_setting(session_id, "tester")
         .await
         .expect("write legacy agent-setting");
