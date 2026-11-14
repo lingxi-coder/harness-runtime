@@ -29,7 +29,7 @@ By default (durable: false) the job lives only in this LingXi session — nothin
 
 ## Runtime behavior
 
-Jobs only fire while the REPL is idle (not mid-query). Durable jobs persist to the branded project session-cron store and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.
+Jobs only fire while the REPL is idle (not mid-query). Durable jobs persist to the branded project session-cron store and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. The scheduler shifts each job by a fixed per-job offset on top of whatever you pick: by default a recurring job runs up to 10% of its period late (max 15 min), and a one-shot job landing on :00 or :30 runs up to 90 s early. Picking an off-minute is still the bigger lever.
 
 Recurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.
 
