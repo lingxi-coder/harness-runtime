@@ -574,6 +574,7 @@ impl ReplayedSession {
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
             lifetime_guard: None,
+            pending_transient_reminder_authority: None,
             transcript_path: Some(self.transcript_path.clone()),
             transcript_source: None,
             working_directory: self.working_directory.clone(),
@@ -4120,6 +4121,12 @@ impl ConversationOrchestrator {
         session_id: &str,
         active_epoch: u64,
     ) {
+        if let Some(session) = SessionId::parse_prefixed(session_id) {
+            self.restore_consumed_reminders_metadata(
+                session,
+                &JsonlWriter::capture_session_metadata_source(source, session_id),
+            );
+        }
         let (snapshot, rendering) =
             prompt_state_for_epoch_from_source(source, session_id, active_epoch);
         self.prompt_runtime
@@ -4413,6 +4420,10 @@ impl ConversationOrchestrator {
             *orch.prompt_runtime.context_rendering_hint.lock().await =
                 replayed.runtime_metadata.context_rendering_hint;
             let history = orch.session.lock().await.history.clone();
+            orch.restore_consumed_reminders_metadata(
+                SessionId::from_uuid(session_id),
+                &replayed.transcript_metadata,
+            );
             orch.prompt_runtime.install_silent_clocks(
                 crate::prompt::silent_turn::restore_silent_clocks(&replayed.messages, &history),
             );

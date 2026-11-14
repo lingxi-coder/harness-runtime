@@ -770,6 +770,16 @@ mod tests {
         let mut request = LlmRequest::new("m").with_user_text("x".repeat(22000));
         request.profile = Some("context-count-test".into());
         request.input.max_tokens = Some(512);
+        // This fixture tests endpoint availability with an explicit output
+        // budget. Concurrent extra-body tests must not replace its input or
+        // generation controls while the count operation awaits its response.
+        request.execution.anthropic_extra_body = Some(
+            crate::anthropic_extra_body::CapturedAnthropicExtraBody::new(
+                None,
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+            )
+            .unwrap(),
+        );
         (service, transport, request)
     }
 
@@ -814,6 +824,10 @@ mod tests {
                 .unwrap()
                 .path()
                 .ends_with("/messages"));
+            assert_eq!(
+                seen[1].body_json.unsigned_integer_at("/max_tokens"),
+                Some(512)
+            );
         }
     }
 

@@ -665,6 +665,7 @@ fn mod_turn_step_stream(
                     components.reminders.messages = turn_reminders;
                     components.request_history = Some(snapshot.clone());
                     let diagnostic_ack = owner.pending_diagnostics_id_in_request(&snapshot);
+                    let consumed_ack = owner.consumed_reminder_ids_in_request(&snapshot);
                     *effective_model.lock().unwrap() = Some(CapturedModRequest::capture(
                         main_api.as_ref(),
                         components.clone(),
@@ -742,6 +743,7 @@ fn mod_turn_step_stream(
                         let chunk_refs = chunk_refs.clone();
                         let physical_error = physical_error.clone();
                         let diagnostic_owner = diagnostic_owner.clone();
+                        let consumed_ack = consumed_ack.clone();
                         async move {
                             match item {
                                 Ok(event) => {
@@ -751,6 +753,9 @@ fn mod_turn_step_stream(
                                     );
                                     if streamed_response.is_some() {
                                         diagnostic_owner.acknowledge_diagnostics_id(diagnostic_ack);
+                                        diagnostic_owner
+                                            .acknowledge_consumed_reminder_ids(&consumed_ack)
+                                            .await;
                                     }
                                     let held = {
                                         let mut wire = chunk_wire.lock().unwrap();
@@ -875,6 +880,8 @@ fn mod_turn_step_stream(
                             );
                         let diagnostic_ack =
                             fallback_owner.pending_diagnostics_id_in_request(&fallback_snapshot);
+                        let consumed_ack =
+                            fallback_owner.consumed_reminder_ids_in_request(&fallback_snapshot);
                         *fallback_model_state.lock().unwrap() = Some(CapturedModRequest::capture(
                             fallback_main_api.as_ref(),
                             fallback_components.clone(),
@@ -930,6 +937,9 @@ fn mod_turn_step_stream(
                                         {
                                             fallback_owner
                                                 .acknowledge_diagnostics_id(diagnostic_ack);
+                                            fallback_owner
+                                                .acknowledge_consumed_reminder_ids(&consumed_ack)
+                                                .await;
                                         }
                                     }
                                     let terminal = matches!(
@@ -3440,6 +3450,11 @@ impl StreamingTurnDriver<'_> {
             }
         };
         let assistant_id = pumped.replacement_message_id.unwrap_or(assistant_id);
+        if partial_finalize.is_none() && (!turn_step_hook_active || did_fall_back_to_non_streaming)
+        {
+            orch.acknowledge_consumed_reminders_in_request(&cache_request_history)
+                .await;
+        }
         let request_model = model.clone();
         let request_profile = model_profile.clone();
         let mut response_model = request_model.clone();

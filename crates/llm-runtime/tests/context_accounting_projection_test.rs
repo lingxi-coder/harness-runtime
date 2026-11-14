@@ -35,7 +35,12 @@ fn run(future: impl std::future::Future<Output = ()> + Send + 'static) {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-            let names = ["CLAUDE_CODE_EXTRA_BODY", branding::EFFORT_LEVEL_ENV];
+            let names = [
+                "CLAUDE_CODE_EXTRA_BODY",
+                branding::EFFORT_LEVEL_ENV,
+                branding::DISABLE_STRUCTURED_OUTPUTS_ENV,
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            ];
             let _restore = EnvRestore(
                 names
                     .iter()
@@ -68,6 +73,7 @@ struct LocalTransport {
     calls: Mutex<Vec<Observation>>,
     replace_env_on_count: Mutex<Option<String>>,
     fail_primary: bool,
+    count_status: Option<u16>,
 }
 
 #[async_trait]
@@ -99,6 +105,12 @@ impl llm_runtime::Transport for LocalTransport {
                 503,
                 "application/json",
                 serde_json::to_vec(&json!({"error":{"message":"retry next connection"}})).unwrap(),
+            )
+        } else if count && self.count_status.is_some_and(|status| status != 200) {
+            (
+                self.count_status.unwrap(),
+                "application/json",
+                serde_json::to_vec(&json!({"type":"error","error":{"type":"invalid_request_error","message":"CountTokens endpoint unavailable"}})).unwrap(),
             )
         } else if count {
             (
@@ -230,6 +242,238 @@ async fn execute(api: &ApiService, request: LlmRequest, stream: bool) {
         .await
         .unwrap();
     }
+}
+
+fn large_schema_request(profile: &str) -> LlmRequest {
+    let mut request = LlmRequest::new(MODEL)
+        .with_profile(profile)
+        .with_user_text("hello");
+    request.input.max_tokens = Some(64);
+    request.input.output_format = sdk::protocol::OutputFormat::JsonSchema {
+        name: "result".into(),
+        strict: true,
+        schema: sdk::protocol::JsonPayload::from_generated_value(&json!({
+            "type":"object", "description":"schema detail ".repeat(1000),
+            "properties":{}, "additionalProperties":false,
+        }))
+        .unwrap(),
+    };
+    request
+}
+
+#[test]
+fn suppressed_schema_uses_effective_input_when_count_endpoint_is_unavailable_in_both_flows() {
+    run(async {
+        const BUDGET: u64 = 1000;
+        for status in [404, 405, 501] {
+            let mut provider = profile("target", ProtocolFamily::AnthropicMessages, BUDGET);
+            provider.models[0].capabilities.structured_output = false;
+            let runtime = Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![provider],
+                })
+                .unwrap(),
+            );
+            let request = large_schema_request("target");
+            let mut text = request.clone();
+            text.input.output_format = sdk::protocol::OutputFormat::Text;
+            assert!(llm_runtime::model::count_tokens::approximate_tokens(&request) > BUDGET);
+            for body in [
+                runtime
+                    .prepare(&request)
+                    .await
+                    .unwrap()
+                    .provider_request
+                    .body_json,
+                runtime
+                    .prepare_count_tokens(&request)
+                    .await
+                    .unwrap()
+                    .body_json,
+            ] {
+                assert!(body.payload_at("/output_config/format").is_none());
+            }
+            let counter = Arc::new(LocalTransport {
+                count_status: Some(status),
+                ..Default::default()
+            });
+            let count =
+                llm_runtime::model::count_tokens::count_tokens(&runtime, counter.clone(), &request)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                count,
+                llm_runtime::model::count_tokens::count_tokens(&runtime, counter.clone(), &text)
+                    .await
+                    .unwrap(),
+                "{status}: the same effective input has the same fallback estimate"
+            );
+            assert!(count < BUDGET);
+            assert!(counter.calls.lock().unwrap().iter().all(|call| {
+                call.count && call.body.payload_at("/output_config/format").is_none()
+            }));
+            for stream in [false, true] {
+                let transport = Arc::new(LocalTransport {
+                    count_status: Some(status),
+                    ..Default::default()
+                });
+                execute(
+                    &api(runtime.clone(), transport.clone()),
+                    request.clone(),
+                    stream,
+                )
+                .await;
+                let calls = transport.calls.lock().unwrap();
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "{status}/{stream}: small input dispatches directly"
+                );
+                assert!(!calls[0].count);
+                assert_eq!(calls[0].body.bool_at("/stream") == Some(true), stream);
+                assert!(calls[0].body.payload_at("/output_config/format").is_none());
+            }
+            assert!(matches!(
+                request.input.output_format,
+                sdk::protocol::OutputFormat::JsonSchema { .. }
+            ));
+        }
+    });
+}
+
+#[test]
+fn supported_schema_remains_in_fallback_budget_and_is_rejected_in_both_flows() {
+    run(async {
+        const BUDGET: u64 = 1000;
+        for status in [404, 405, 501] {
+            let runtime = Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![profile("target", ProtocolFamily::AnthropicMessages, BUDGET)],
+                })
+                .unwrap(),
+            );
+            let request = large_schema_request("target");
+            let prepared = runtime.prepare(&request).await.unwrap();
+            let count = runtime.prepare_count_tokens(&request).await.unwrap();
+            let generation_format = prepared
+                .provider_request
+                .body_json
+                .payload_at("/output_config/format")
+                .unwrap();
+            assert!(generation_format
+                .semantically_eq(&count.body_json.payload_at("/output_config/format").unwrap())
+                .unwrap());
+            let estimated = llm_runtime::model::count_tokens::count_tokens(
+                &runtime,
+                Arc::new(LocalTransport {
+                    count_status: Some(status),
+                    ..Default::default()
+                }),
+                &request,
+            )
+            .await
+            .unwrap();
+            assert!(estimated > BUDGET);
+            for stream in [false, true] {
+                let transport = Arc::new(LocalTransport {
+                    count_status: Some(status),
+                    ..Default::default()
+                });
+                let service = api(runtime.clone(), transport.clone());
+                let result = if stream {
+                    async {
+                        let mut events = service.stream_request(request.clone()).await?;
+                        while let Some(event) = events.next().await {
+                            event?;
+                        }
+                        Ok::<(), llm_runtime::LlmError>(())
+                    }
+                    .await
+                } else {
+                    service
+                        .execute_non_stream_request(
+                            request.clone(),
+                            llm_runtime::NonStreamingRequestClass::Main,
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                assert!(
+                    matches!(result, Err(llm_runtime::LlmError::InputBudgetExceeded {
+                    input_tokens, budget: BUDGET, estimated: true,
+                }) if input_tokens == estimated),
+                    "{status}/{stream}: {result:?}"
+                );
+                let calls = transport.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert!(
+                    calls[0].count,
+                    "no generation when the retained schema exceeds the budget"
+                );
+                assert!(calls[0]
+                    .body
+                    .payload_at("/output_config/format")
+                    .unwrap()
+                    .semantically_eq(&generation_format)
+                    .unwrap());
+            }
+        }
+    });
+}
+
+#[test]
+fn schema_suppression_does_not_remove_supported_fallback_schema_in_both_flows() {
+    run(async {
+        for stream in [false, true] {
+            let mut primary = profile("primary", ProtocolFamily::AnthropicMessages, 1000);
+            primary.models[0].capabilities.structured_output = false;
+            let mut target = profile("target", ProtocolFamily::AnthropicMessages, 4000);
+            for (order, provider) in [&mut primary, &mut target].into_iter().enumerate() {
+                provider.connection.group = Some("schema-fallback".into());
+                provider.connection.connection_id = Some(provider.profile_name.clone());
+                provider.connection.order = order as u32;
+                provider.connection.failover = llm_runtime::FailoverTriggers::DEFAULT;
+            }
+            let runtime = Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![primary, target],
+                })
+                .unwrap(),
+            );
+            let transport = Arc::new(LocalTransport {
+                fail_primary: true,
+                ..Default::default()
+            });
+            let request = large_schema_request("primary");
+            let expected = runtime
+                .prepare_count_tokens(&large_schema_request("target"))
+                .await
+                .unwrap()
+                .body_json
+                .payload_at("/output_config/format")
+                .unwrap();
+            execute(&api(runtime, transport.clone()), request, stream).await;
+            let calls = transport.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                3,
+                "primary generation, target exact count, target generation"
+            );
+            assert!(!calls[0].count && calls[0].url.contains("primary.example.invalid"));
+            assert!(calls[0].body.payload_at("/output_config/format").is_none());
+            assert!(calls[1].count && !calls[2].count);
+            for call in &calls[1..] {
+                assert!(call.url.contains("target.example.invalid"));
+                assert!(call
+                    .body
+                    .payload_at("/output_config/format")
+                    .unwrap()
+                    .semantically_eq(&expected)
+                    .unwrap());
+            }
+        }
+    });
 }
 
 #[test]

@@ -56,7 +56,9 @@
 //! after the actual Read call returns `truncatedByTokenCap: true`; the cached
 //! `is_partial_view` flag is not used as a pre-read filter.
 
-use lingxi_core::types::{ConversationMessage, ImageSource, MessageId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ConversationMessage, ImageSource, MessageId,
+};
 
 /// `m3T = 16384` @296537358 — the per-turn snippet budget shared by every
 /// changed file.
@@ -78,6 +80,9 @@ pub struct ChangedFile {
     pub filename: String,
     /// The rendered text diff snippet, or `""` once the budget is exhausted.
     pub snippet: String,
+    /// Exact snippet text only when Rust's display string cannot represent it.
+    /// Ordinary Unicode snippets keep the existing String-only path.
+    snippet_units: Option<Vec<u16>>,
     /// Native's `edited_image_file` carries an image result as typed data. The
     /// current 2.1.291 default reminder renderer maps that variant to no model
     /// message, so this is retained as a typed result and is never flattened to
@@ -92,8 +97,41 @@ impl ChangedFile {
         Self {
             filename,
             snippet,
+            snippet_units: None,
             image: None,
         }
+    }
+
+    /// Keep exact JavaScript text through payload persistence and rendering.
+    #[must_use]
+    pub fn text_source(filename: String, snippet: Utf16JsonProjection) -> Self {
+        let display = snippet
+            .string_at("")
+            .expect("snippet is a root string")
+            .to_owned();
+        let units = snippet.string_units("").expect("snippet is a root string");
+        let snippet_units = display
+            .encode_utf16()
+            .ne(units.iter().copied())
+            .then_some(units);
+        Self {
+            filename,
+            snippet: display,
+            snippet_units,
+            image: None,
+        }
+    }
+
+    /// The typed sidecar and the model message must carry the same text.
+    #[must_use]
+    pub fn snippet_source(&self) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(
+            self.snippet.clone(),
+            self.snippet_units
+                .clone()
+                .unwrap_or_else(|| self.snippet.encode_utf16().collect()),
+        )
+        .expect("snippet display matches its exact units")
     }
 
     /// Preserve an actual current Read image result as a typed image source.
@@ -114,6 +152,7 @@ impl ChangedFile {
         Some(Self {
             filename,
             snippet: String::new(),
+            snippet_units: None,
             image: Some(ImageSource::Base64 {
                 media_type,
                 data: image_data,
@@ -172,6 +211,22 @@ pub fn render_changed_file_message(
         return None;
     }
     let body = render_changed_file(file, read_tool_name);
+    if let Some(snippet_units) = &file.snippet_units {
+        let prefix = format!(
+            "<system-reminder>\n{} Here are the relevant changes (shown with line numbers):\n",
+            changed_file_note(&file.filename),
+        );
+        let units = prefix
+            .encode_utf16()
+            .chain(snippet_units.iter().copied())
+            .chain("\n</system-reminder>".encode_utf16())
+            .collect();
+        return Some(ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+            units,
+        ));
+    }
     Some(ConversationMessage::user_meta(
         MessageId::new(),
         format!("<system-reminder>\n{body}\n</system-reminder>"),
@@ -197,8 +252,12 @@ pub(crate) fn apply_snippet_budget_after(files: &mut [ChangedFile], mut acc: usi
         }
         if acc >= CHANGED_FILE_SNIPPET_BUDGET {
             file.snippet.clear();
+            file.snippet_units = None;
         } else {
-            acc += utf16_len(&file.snippet);
+            acc += file
+                .snippet_units
+                .as_ref()
+                .map_or_else(|| utf16_len(&file.snippet), Vec::len);
         }
     }
 }
@@ -341,6 +400,93 @@ pub fn render_snippet(before: &str, after: &str, tab_aware_separator: bool) -> S
     truncate_snippet(&rendered)
 }
 
+/// The same line diff/context/numbering for text with unpaired UTF-16 units.
+/// Intern complete exact lines before using the existing structuredPatch port;
+/// this preserves its equality graph and hunk ordering without replacement
+/// decoding. Valid Unicode keeps the existing rendering and truncation bytes.
+#[must_use]
+pub fn render_snippet_units(
+    before: &[u16],
+    after: &[u16],
+    tab_aware_separator: bool,
+) -> Utf16JsonProjection {
+    if let (Ok(before), Ok(after)) = (String::from_utf16(before), String::from_utf16(after)) {
+        return render_snippet(&before, &after, tab_aware_separator).into();
+    }
+    let mut ids = std::collections::HashMap::<Vec<u16>, usize>::new();
+    let mut source = Vec::<Vec<u16>>::new();
+    let mut intern = |text: &[u16]| {
+        let mut encoded = String::new();
+        for line in text.split_inclusive(|unit| *unit == 10) {
+            let id = *ids.entry(line.to_vec()).or_insert_with(|| {
+                let id = source.len();
+                source.push(line.to_vec());
+                id
+            });
+            encoded.push_str(&id.to_string());
+            if line.last() == Some(&10) {
+                encoded.push('\n');
+            }
+        }
+        encoded
+    };
+    let before = intern(before);
+    let after = intern(after);
+    let hunks = tool_file::structured_patch::build_structured_patch_with_context(
+        &before,
+        &after,
+        tool_file::structured_patch::CHANGED_FILE_PATCH_CONTEXT,
+    );
+    let mut rendered = Vec::<u16>::new();
+    for (index, hunk) in hunks.iter().enumerate() {
+        if index > 0 {
+            rendered.extend(HUNK_SEPARATOR.encode_utf16());
+        }
+        let lines = hunk
+            .lines
+            .iter()
+            .filter(|line| !line.starts_with('-') && !line.starts_with('\\'))
+            .map(|line| {
+                let id = line[1..]
+                    .parse::<usize>()
+                    .expect("interned snippet line ID");
+                source[id].strip_suffix(&[10]).unwrap_or(&source[id])
+            })
+            .collect::<Vec<_>>();
+        let separator = if tab_aware_separator && lines.iter().any(|line| line.first() == Some(&9))
+        {
+            ':'
+        } else {
+            '\t'
+        };
+        let start = u64::try_from(hunk.old_start).unwrap_or(1);
+        for (line_index, line) in lines.into_iter().enumerate() {
+            if line_index > 0 {
+                rendered.push(10);
+            }
+            rendered.extend(format!("{}{separator}", start + line_index as u64).encode_utf16());
+            rendered.extend_from_slice(line.strip_suffix(&[13]).unwrap_or(line));
+        }
+    }
+    if rendered.len() > SNIPPET_CHAR_LIMIT {
+        let last_newline = rendered[..=SNIPPET_CHAR_LIMIT]
+            .iter()
+            .rposition(|unit| *unit == 10);
+        let end = last_newline
+            .filter(|index| *index > 0)
+            .unwrap_or(SNIPPET_CHAR_LIMIT);
+        let truncated_lines = rendered[end + 1..]
+            .iter()
+            .filter(|unit| **unit == 10)
+            .count()
+            + 1;
+        rendered.truncate(end);
+        rendered.extend(format!("\n\n... [{truncated_lines} lines truncated] ...").encode_utf16());
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&rendered), rendered)
+        .expect("exact snippet display matches its units")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +501,7 @@ mod tests {
             let file = ChangedFile {
                 filename: case["filename"].as_str().unwrap().to_owned(),
                 snippet: case["snippet"].as_str().unwrap().to_owned(),
+                snippet_units: None,
                 image: None,
             };
             assert_eq!(
@@ -368,6 +515,7 @@ mod tests {
         ChangedFile {
             filename: "/tmp/a.rs".into(),
             snippet: snippet.into(),
+            snippet_units: None,
             image: None,
         }
     }
@@ -580,5 +728,100 @@ mod tests {
             .expect("count parses");
         let head_lines = head.split('\n').count();
         assert_eq!(head_lines + reported, 900);
+    }
+
+    #[test]
+    fn exact_snippet_and_message_retain_changed_surrogates() {
+        let snippet = render_snippet_units(&[97, 10, 0xd800, 98], &[97, 10, 0xdc00, 98], false);
+        let expected = "1\ta\n2\t"
+            .encode_utf16()
+            .chain([0xdc00, 98])
+            .collect::<Vec<_>>();
+        assert_eq!(snippet.string_units(""), Some(expected.clone()));
+        let file = ChangedFile::text_source("/tmp/exact.txt".into(), snippet);
+        assert_eq!(
+            file.snippet_source().string_units(""),
+            Some(expected.clone())
+        );
+        let message = render_changed_file_message(&file, "Read").unwrap();
+        let prefix = format!(
+            "<system-reminder>\n{} Here are the relevant changes (shown with line numbers):\n",
+            changed_file_note("/tmp/exact.txt")
+        );
+        let expected_message = prefix
+            .encode_utf16()
+            .chain(expected)
+            .chain("\n</system-reminder>".encode_utf16())
+            .collect::<Vec<_>>();
+        let ConversationMessage::User { content, .. } = message else {
+            panic!("meta user row")
+        };
+        assert!(
+            matches!(&content[0], lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. } if *utf16_code_units == expected_message)
+        );
+    }
+
+    #[test]
+    fn exact_snippet_budget_clears_payload_units_with_the_display() {
+        let exact = Utf16JsonProjection::root_string(
+            "\u{fffd}".repeat(SNIPPET_CHAR_LIMIT),
+            vec![0xd800; SNIPPET_CHAR_LIMIT],
+        )
+        .unwrap();
+        let mut files = vec![
+            ChangedFile::text_source("first".into(), exact.clone()),
+            ChangedFile::text_source("second".into(), exact),
+            ChangedFile::text_source(
+                "last".into(),
+                render_snippet_units(&[0xd800], &[0xdc00], false),
+            ),
+        ];
+        apply_snippet_budget(&mut files);
+        assert_eq!(
+            files[0].snippet_source().string_units("").unwrap(),
+            vec![0xd800; SNIPPET_CHAR_LIMIT]
+        );
+        assert_eq!(
+            files[1].snippet_source().string_units("").unwrap(),
+            vec![0xd800; SNIPPET_CHAR_LIMIT]
+        );
+        assert_eq!(files[2].snippet_source().string_units(""), Some(vec![]));
+        assert!(render_changed_file_message(&files[2], "Read")
+            .unwrap()
+            .text_content()
+            .contains("The changes are not shown here"));
+    }
+
+    #[test]
+    fn exact_snippet_cap_keeps_units_and_unchanged_text_is_quiet() {
+        assert_eq!(
+            render_snippet_units(&[0xd800, 10], &[0xd800, 10], false).string_at(""),
+            Some("")
+        );
+        let mut after = vec![0xdc00; SNIPPET_CHAR_LIMIT + 20];
+        after.extend_from_slice(&[10, 98]);
+        let snippet = render_snippet_units(&[], &after, false)
+            .string_units("")
+            .unwrap();
+        let mut expected = "1\t".encode_utf16().collect::<Vec<_>>();
+        expected.resize(SNIPPET_CHAR_LIMIT, 0xdc00);
+        expected.extend("\n\n... [2 lines truncated] ...".encode_utf16());
+        assert_eq!(snippet, expected);
+        // Scalar rendering retains the exact existing hunk/truncation bytes.
+        for (before, after) in [
+            ("a\nb\nc\n", "a\nB\nc\n"),
+            ("", "🦀\n\t中文"),
+            ("a\nb", "a\nB"),
+        ] {
+            assert_eq!(
+                render_snippet_units(
+                    &before.encode_utf16().collect::<Vec<_>>(),
+                    &after.encode_utf16().collect::<Vec<_>>(),
+                    false
+                )
+                .string_at(""),
+                Some(render_snippet(before, after, false).as_str())
+            );
+        }
     }
 }

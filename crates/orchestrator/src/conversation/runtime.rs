@@ -1242,6 +1242,9 @@ pub(crate) struct PromptRuntime {
     pub(crate) surfaced_skill_names: Mutex<std::collections::HashSet<String>>,
     pub(crate) pending_step_reminders:
         std::sync::Mutex<Vec<super::pending_reminders::PendingReminder>>,
+    pub(crate) consumed_reminders:
+        Arc<std::sync::Mutex<super::consumed_reminders::ConsumedReminderState>>,
+    pub(crate) consumed_reminder_persistence: Arc<Mutex<()>>,
     /// User-approved app Agent Profile applied additively to the next turn.
     pub(crate) app_agent_prompt_profile: std::sync::RwLock<Option<AppAgentPromptProfile>>,
     /// Optional carved-slate snapshot of the static prompt and inline tool
@@ -1383,6 +1386,8 @@ impl PromptRuntime {
             pending_skill_prefetch: Mutex::new(None),
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             pending_step_reminders: std::sync::Mutex::new(Vec::new()),
+            consumed_reminders: Arc::new(std::sync::Mutex::new(Default::default())),
+            consumed_reminder_persistence: Arc::new(Mutex::new(())),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
             pending_memory_prompt_snapshot: Mutex::new(None),

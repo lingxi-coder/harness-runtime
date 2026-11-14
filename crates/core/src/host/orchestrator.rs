@@ -880,6 +880,32 @@ impl PartialEq for ResumeLifetimeGuard {
 
 impl Eq for ResumeLifetimeGuard {}
 
+/// Same-process reminder authority, intentionally absent from serialized
+/// transcript metadata. Hosts may carry it when rebuilding a live runtime.
+#[derive(Clone)]
+pub struct ResumeTransientReminderAuthority(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl ResumeTransientReminderAuthority {
+    pub fn new<T: Send + Sync + 'static>(state: T) -> Self {
+        Self(std::sync::Arc::new(state))
+    }
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for ResumeTransientReminderAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResumeTransientReminderAuthority(..)")
+    }
+}
+impl PartialEq for ResumeTransientReminderAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ResumeTransientReminderAuthority {}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -903,6 +929,8 @@ pub struct PinnedResumeSource {
 pub struct ResumeRuntimeSnapshot {
     /// Host reservation that must outlive detached resume work.
     pub lifetime_guard: Option<ResumeLifetimeGuard>,
+    /// Live consume-once source authority transferred only within one process.
+    pub pending_transient_reminder_authority: Option<ResumeTransientReminderAuthority>,
     /// Exact transcript selected by the loader. A cross-worktree resume keeps
     /// appending here even when the stored working directory no longer exists.
     pub transcript_path: Option<std::path::PathBuf>,
@@ -3935,6 +3963,15 @@ pub trait OrchestratorHandle: Send + Sync {
     ) -> Result<(), HandleError> {
         let _ = (session_id, history, last_jsonl_uuid, active_goal, runtime);
         Err(HandleError::Unimplemented("resume_session".into()))
+    }
+
+    /// Capture an idle owner's same-process reminder authority for transfer.
+    /// The host retires that owner before building its replacement; active
+    /// requests are not transferable through this snapshot API.
+    fn capture_pending_transient_reminder_authority(
+        &self,
+    ) -> Option<ResumeTransientReminderAuthority> {
+        None
     }
 
     /// Commit a host-authorized directory move after its permission and trust

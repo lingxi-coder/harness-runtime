@@ -2,7 +2,6 @@
 
 use super::*;
 use hooks::attachment::HookPublicationGuard;
-use hooks::ExactHookText;
 use std::sync::Arc;
 
 const NATIVE_MCP_POLICY_BLOCKED_ERRORS: [&str; 2] = [
@@ -863,12 +862,10 @@ async fn native_changed_file_route_is_unresolved(
 
 async fn attach_async_hook_response(
     orch: &ConversationOrchestrator,
-    text: ExactHookText,
+    message: ConversationMessage,
     hook_event: Option<String>,
     publication_guard: Option<Arc<dyn HookPublicationGuard>>,
 ) -> Option<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
-    let content = crate::prompt::async_hook_response::render_reminder(&[text])?;
-    let message = crate::prompt::async_hook_response::user_meta_message(MessageId::new(), content);
     let origin = hook_event.map(|event| serde_json::json!({"kind":"hook","event":event}));
     let attached = if let Some(origin) = origin {
         let work = orch.mod_prompt_attachment("async_hook_response", message, origin);
@@ -1454,47 +1451,77 @@ impl ConversationOrchestrator {
     pub(crate) async fn async_hook_response_mod_messages(
         &self,
     ) -> Vec<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
-        let Some(provider) = self.prompt_runtime.async_hook_responses.as_ref() else {
-            return Vec::new();
+        use super::consumed_reminders::ConsumedReminder;
+        let staged = crate::request_context::has_prompt_context();
+        let session = self.session.lock().await.session_id;
+        let responses = if let Some(provider) = self.prompt_runtime.async_hook_responses.as_ref() {
+            provider.take_pending_with_events().await
+        } else {
+            Vec::new()
         };
-        let mut output = Vec::new();
+        // Retain raw messages synchronously after the destructive source drain,
+        // before Mods or any later preparation await can be cancelled.
+        let mut fresh = Vec::new();
         let mut without_event = Vec::new();
-        for response in provider.take_pending_with_events().await {
-            let Some(publication_guard) = response.publication_guard else {
-                if response.hook_event.is_none() {
-                    without_event.push(response.text);
-                    continue;
-                }
-                if let Some(reminder) =
-                    attach_async_hook_response(self, response.text, response.hook_event, None).await
-                {
-                    output.push(reminder);
-                }
-                continue;
-            };
-            if let Some(reminder) = attach_async_hook_response(
-                self,
-                response.text,
-                response.hook_event,
-                Some(publication_guard),
-            )
-            .await
+        for response in responses {
+            if response
+                .publication_guard
+                .as_ref()
+                .is_some_and(|guard| !guard.is_current())
             {
-                output.push(reminder);
+                continue;
             }
-        }
-        // Older providers cannot identify an origin event. Preserve their
-        // established aggregate reminder without fabricating a hook origin.
-        if let Some(content) = crate::prompt::async_hook_response::render_reminder(&without_event) {
-            output.push(
-                crate::prompt::async_hook_response::GuardedAsyncHookReminder {
+            if response.hook_event.is_none() && response.publication_guard.is_none() {
+                without_event.push(response.text);
+                continue;
+            }
+            if let Some(content) =
+                crate::prompt::async_hook_response::render_reminder(&[response.text])
+            {
+                fresh.push(ConsumedReminder {
+                    kind: "async_hook_response",
                     message: crate::prompt::async_hook_response::user_meta_message(
                         MessageId::new(),
                         content,
                     ),
-                    publication_guard: None,
-                },
-            );
+                    hook_event: response.hook_event,
+                    publication_guard: response.publication_guard,
+                });
+            }
+        }
+        // Keep the existing event-less aggregate's placement after event rows.
+        if let Some(content) = crate::prompt::async_hook_response::render_reminder(&without_event) {
+            fresh.push(ConsumedReminder {
+                kind: "async_hook_response",
+                message: crate::prompt::async_hook_response::user_meta_message(
+                    MessageId::new(),
+                    content,
+                ),
+                hook_event: None,
+                publication_guard: None,
+            });
+        }
+        let pending = if staged {
+            self.retain_consumed_reminders(session, fresh);
+            let pending = self.consumed_reminders_for_kind(session, "async_hook_response");
+            self.persist_consumed_reminders(session).await;
+            pending
+        } else {
+            fresh
+        };
+        let mut output = Vec::new();
+        for row in pending {
+            let id = row.message.id();
+            if let Some(reminder) =
+                attach_async_hook_response(self, row.message, row.hook_event, row.publication_guard)
+                    .await
+            {
+                output.push(reminder);
+            } else if staged {
+                // Explicit Mod suppression and retired source authority are
+                // terminal filtering decisions, not an undelivered retry.
+                self.acknowledge_consumed_reminder_ids(&[id]).await;
+            }
         }
         output
     }
@@ -1570,7 +1597,7 @@ impl ConversationOrchestrator {
         &self,
         in_human_turn: bool,
     ) -> Vec<crate::request_context::PromptIngressAttachment> {
-        {
+        let session_id = {
             let session = self.session.lock().await;
             let mut owner = self
                 .prompt_runtime
@@ -1592,7 +1619,8 @@ impl ConversationOrchestrator {
                     .iter()
                     .any(|message| message.id() == row.message.id())
             });
-        }
+            session.session_id
+        };
         let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
             return Vec::new();
         };
@@ -1652,13 +1680,23 @@ impl ConversationOrchestrator {
                     .expect("task notification rendering yields a system-role cache"),
             );
         }
-        let mut pending = self
-            .prompt_runtime
-            .pending_task_notification_reminders
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pending.extend(rows);
-        pending.clone()
+        let output = {
+            let mut pending = self
+                .prompt_runtime
+                .pending_task_notification_reminders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.extend(rows);
+            pending.clone()
+        };
+        if crate::request_context::has_prompt_context() {
+            // The task producer has advanced, but memory rendering still has
+            // asynchronous filesystem work ahead. Commit its raw queue while
+            // this source publication remains protected from cancellation.
+            self.retain_unrendered_memory_updates(session_id);
+            self.persist_consumed_reminders(session_id).await;
+        }
+        output
     }
 
     /// Cap on [`Self::pending_memory_updates`]; oldest entries are dropped.
@@ -1744,81 +1782,121 @@ impl ConversationOrchestrator {
     ///
     /// Silent in a stock session: nothing queues unless a `dream` task completes.
     pub(crate) async fn memory_update_reminder_messages(&self) -> Vec<ConversationMessage> {
+        use super::consumed_reminders::ConsumedReminder;
+        let staged = crate::request_context::has_prompt_context();
+        let session = self.session.lock().await.session_id;
         let native_updates = self.native_memory_update_reminders().await;
-        let pending: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = {
-            let mut queue = self
-                .prompt_runtime
-                .pending_memory_updates
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *queue)
-        };
-        if pending.is_empty() {
-            return native_updates;
+        let mut fresh = Vec::new();
+        if staged {
+            self.retain_consumed_reminders(
+                session,
+                native_updates
+                    .into_iter()
+                    .map(ConsumedReminder::memory)
+                    .collect(),
+            );
+            // Native sources already advanced. Checkpoint before scanning the
+            // legacy directory so cancelling that I/O cannot lose their rows.
+            self.persist_consumed_reminders(session).await;
+        } else {
+            fresh.extend(native_updates);
         }
-        let Some(memdir) = self
+        let has_pending = !self
             .prompt_runtime
-            .memory_prefetch
-            .as_ref()
-            .and_then(|p| p.user_memdir())
-        else {
-            return native_updates;
-        };
-
-        // Which memdir files moved since the last scan.
-        let since = self
-            .prompt_runtime
-            .last_memory_scan_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
-        self.prompt_runtime
-            .last_memory_scan_ms
-            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
-        let mut paths: Vec<String> = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(&memdir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let Ok(meta) = entry.metadata().await else {
-                    continue;
-                };
-                if !meta.is_file() {
-                    continue;
+            .pending_memory_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if has_pending {
+            if let Some(memdir) = self
+                .prompt_runtime
+                .memory_prefetch
+                .as_ref()
+                .and_then(|p| p.user_memdir())
+            {
+                // Scan while the producer queue and cursor are still intact.
+                // Only after all awaits finish may we consume their snapshot.
+                let since = self
+                    .prompt_runtime
+                    .last_memory_scan_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now_ms =
+                    tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+                let mut paths = Vec::new();
+                if let Ok(mut entries) = tokio::fs::read_dir(&memdir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        let Ok(meta) = entry.metadata().await else {
+                            continue;
+                        };
+                        if !meta.is_file() {
+                            continue;
+                        }
+                        let Ok(modified) = meta.modified() else {
+                            continue;
+                        };
+                        if tool_api::read_file_state::mtime_ms_floor(modified) > since {
+                            paths.push(path.to_string_lossy().into_owned());
+                        }
+                    }
                 }
-                let Ok(modified) = meta.modified() else {
-                    continue;
+                paths.sort();
+                let in_context = {
+                    let state = self
+                        .prompt_runtime
+                        .read_state_map
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::prompt::memory_update::select_in_context_paths(&paths, |p| {
+                        state.contains(std::path::Path::new(p))
+                    })
                 };
-                if tool_api::read_file_state::mtime_ms_floor(modified) > since {
-                    paths.push(path.to_string_lossy().into_owned());
+                let pending = std::mem::take(
+                    &mut *self
+                        .prompt_runtime
+                        .pending_memory_updates
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                self.prompt_runtime
+                    .last_memory_scan_ms
+                    .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                for queued in pending {
+                    let body = crate::prompt::memory_update::render_memory_update(
+                        &crate::prompt::memory_update::MemoryUpdate {
+                            source: queued.source,
+                            summary: queued.summary,
+                            paths: paths.clone(),
+                            in_context_paths: in_context.clone(),
+                        },
+                    );
+                    fresh.push(source_user_meta(
+                        MessageId::new(),
+                        wrap_system_reminder_source(&body),
+                    ));
                 }
+            } else {
+                // No memory directory means this legacy surfacing channel is disabled.
+                self.prompt_runtime
+                    .pending_memory_updates
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
             }
         }
-        paths.sort();
-
-        let in_context = {
-            let guard = self
-                .prompt_runtime
-                .read_state_map
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::prompt::memory_update::select_in_context_paths(&paths, |p| {
-                guard.contains(std::path::Path::new(p))
-            })
-        };
-
-        native_updates
-            .into_iter()
-            .chain(pending.into_iter().map(|queued| {
-                let body = crate::prompt::memory_update::render_memory_update(
-                    &crate::prompt::memory_update::MemoryUpdate {
-                        source: queued.source,
-                        summary: queued.summary,
-                        paths: paths.clone(),
-                        in_context_paths: in_context.clone(),
-                    },
-                );
-                source_user_meta(MessageId::new(), wrap_system_reminder_source(&body))
-            }))
-            .collect()
+        if !staged {
+            return fresh;
+        }
+        self.retain_consumed_reminders(
+            session,
+            fresh.into_iter().map(ConsumedReminder::memory).collect(),
+        );
+        // No await separates queue consumption from replacing its checkpoint
+        // with the rendered rows (or explicit disabled-channel retirement).
+        self.retain_unrendered_memory_updates(session);
+        let pending = self.consumed_reminders_for_kind(session, "memory_update");
+        self.persist_consumed_reminders(session).await;
+        pending.into_iter().map(|row| row.message).collect()
     }
 
     /// Read the current reminder/tool gates without advancing its cadence.
@@ -2803,10 +2881,13 @@ message with multiple tool uses so they run concurrently."
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter_map(|row| row.payload.string_at("/snippet"))
-            .fold(0usize, |used, snippet| {
-                used.saturating_add(snippet.encode_utf16().count())
-            });
+            .filter_map(|row| {
+                row.payload
+                    .at_pointer("/snippet")?
+                    .code_units()
+                    .map(<[u16]>::len)
+            })
+            .fold(0usize, usize::saturating_add);
         let fresh = self
             .changed_files_reminder_messages_with_budget(cancel, retained_budget)
             .await;
@@ -2870,6 +2951,7 @@ message with multiple tool uses so they run concurrently."
         let candidates: Vec<(
             std::path::PathBuf,
             std::sync::Arc<tool_api::read_file_state::ReadFileEntry>,
+            Option<std::sync::Arc<[u16]>>,
             Vec<Vec<std::path::PathBuf>>,
         )> = {
             let guard = self
@@ -2881,9 +2963,9 @@ message with multiple tool uses so they run concurrently."
                 .changed_file_candidate_keys()
                 .into_iter()
                 .filter_map(|p| {
-                    guard
-                        .peek_snapshot(&p)
-                        .map(|entry| (p.clone(), entry, guard.requested_path_groups(&p)))
+                    guard.peek_snapshot_with_units(&p).map(|(entry, units)| {
+                        (p.clone(), entry, units, guard.requested_path_groups(&p))
+                    })
                 })
                 .collect()
         };
@@ -2910,7 +2992,7 @@ message with multiple tool uses so they run concurrently."
         // logical key. Once Read publishes that key, retire only the original
         // alias snapshots so their older mtimes cannot inject the notice again.
         let mut normalized_aliases = std::collections::HashMap::<_, Vec<_>>::new();
-        for (path, entry, _) in &candidates {
+        for (path, entry, _, _) in &candidates {
             let requested = read_tool.read_state_request_path(path);
             if requested.as_os_str() != path.as_os_str() {
                 normalized_aliases
@@ -2921,12 +3003,12 @@ message with multiple tool uses so they run concurrently."
         }
         let normalized_baselines = candidates
             .iter()
-            .filter(|(path, _, _)| normalized_aliases.contains_key(path))
-            .map(|(path, entry, _)| (path.clone(), entry.clone()))
+            .filter(|(path, _, _, _)| normalized_aliases.contains_key(path))
+            .map(|(path, entry, units, _)| (path.clone(), (entry.clone(), units.clone())))
             .collect::<std::collections::HashMap<_, _>>();
 
         let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
-        'files: for (path, original_entry, requested_path_groups) in candidates {
+        'files: for (path, original_entry, original_units, requested_path_groups) in candidates {
             if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
                 break;
             }
@@ -2944,9 +3026,9 @@ message with multiple tool uses so they run concurrently."
             // cannot replace the existing complete observation of the logical
             // file Read will actually open, including its timestamp and diff.
             let logical_path = read_tool.read_state_request_path(&path);
-            let entry = normalized_baselines
+            let (entry, entry_units) = normalized_baselines
                 .get(&logical_path)
-                .filter(|entry| {
+                .filter(|(entry, _)| {
                     entry.offset.unwrap_or(1) <= 1
                         && !entry.is_partial_view
                         && entry.limit.is_none_or(|limit| {
@@ -2955,7 +3037,7 @@ message with multiple tool uses so they run concurrently."
                         })
                 })
                 .cloned()
-                .unwrap_or_else(|| original_entry.clone());
+                .unwrap_or_else(|| (original_entry.clone(), original_units));
             // Drop vanished routes before filtering ranged snapshots: Read
             // records an offset even when refreshing a complete file.
             // The cache key is model-owned; only its registered reader knows
@@ -3215,16 +3297,43 @@ message with multiple tool uses so they run concurrently."
                     let Some(fresh) = file.string_at("/content") else {
                         continue;
                     };
-                    if fresh == entry.content {
+                    let Some(fresh_units) = file
+                        .at_pointer("/content")
+                        .and_then(|value| value.code_units())
+                    else {
+                        continue;
+                    };
+                    // Read has already replaced its registry slot. Compare
+                    // the exact old observation captured with `entry`, never
+                    // the refreshed slot or lossy U+FFFD display strings.
+                    if entry_units.as_deref().map_or_else(
+                        || entry.content.encode_utf16().eq(fresh_units.iter().copied()),
+                        |before| before == fresh_units,
+                    ) {
                         continue;
                     }
                     // (5) diff.
-                    let snippet =
-                        crate::prompt::changed_files::render_snippet(&entry.content, fresh, false);
-                    if snippet.is_empty() {
+                    let snippet = if entry_units.is_none()
+                        && fresh.encode_utf16().eq(fresh_units.iter().copied())
+                    {
+                        // Preserve the ordinary file path and rendered prefix
+                        // byte-for-byte without copying its body into UTF-16.
+                        crate::prompt::changed_files::render_snippet(&entry.content, fresh, false)
+                            .into()
+                    } else {
+                        let before = entry_units.unwrap_or_else(|| {
+                            entry.content.encode_utf16().collect::<Vec<_>>().into()
+                        });
+                        crate::prompt::changed_files::render_snippet_units(
+                            &before,
+                            fresh_units,
+                            false,
+                        )
+                    };
+                    if snippet.string_at("") == Some("") {
                         continue;
                     }
-                    changed.push(crate::prompt::changed_files::ChangedFile::text(
+                    changed.push(crate::prompt::changed_files::ChangedFile::text_source(
                         reminder_path.to_string_lossy().into_owned(),
                         snippet,
                     ));
@@ -3257,7 +3366,7 @@ message with multiple tool uses so they run concurrently."
                     file,
                     &read_tool_name,
                 )?;
-                let payload =
+                let mut payload =
                     lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
                         &serde_json::json!({
                             "type": "edited_text_file",
@@ -3266,6 +3375,7 @@ message with multiple tool uses so they run concurrently."
                         }),
                     )
                     .ok()?;
+                payload.set_field("snippet", file.snippet_source()).ok()?;
                 let rendered = crate::request_context::rendered_system_message(&message)?;
                 Some(crate::request_context::PromptIngressAttachment {
                     message,

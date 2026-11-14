@@ -265,6 +265,14 @@ impl ProviderAccountCatalog {
     }
 }
 
+/// Authority captured before dispatching a read-only account Test.
+struct AccountTestHealthFence {
+    credential_revision: u64,
+    health_key: String,
+    record_revision: Option<u64>,
+    completion_revision: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct ProviderAccountStore {
     catalog: Option<ProviderAccountCatalog>,
@@ -1056,6 +1064,24 @@ impl ProviderAccountStore {
         {
             return Err("account credential version unpublished".into());
         }
+        let health =
+            crate::account_pool_store::read_health(self.data_dir.clone(), self.store_scope.clone())
+                .await?;
+        let identity =
+            serde_json::to_string(&(self.store_scope.as_str(), account.account_id.as_str()))
+                .map_err(|_| "account health identity invalid")?;
+        let health_key = serde_json::to_string(&(
+            identity.as_str(),
+            account.identity_generation,
+            llm_runtime::accounts::FailureScope::Account,
+        ))
+        .map_err(|_| "account health identity invalid")?;
+        let fence = AccountTestHealthFence {
+            credential_revision: record.credential_revision,
+            record_revision: health.records.get(&health_key).map(|row| row.revision),
+            completion_revision: health.fences.get(&health_key).copied(),
+            health_key,
+        };
         let credential = match record.kind {
             AccountCredentialKind::ApiKey { key } => ProbeCredential {
                 token: llm_runtime::services::sdk::protocol::Secret::new(
@@ -1101,8 +1127,12 @@ impl ProviderAccountStore {
         self.verify_account(account).await?;
         match result.status {
             200..=299 => {
-                self.clear_verified_auth_health(account, result.model_ids.unwrap_or_default())
-                    .await?;
+                self.clear_verified_auth_health(
+                    account,
+                    fence,
+                    result.model_ids.unwrap_or_default(),
+                )
+                .await?;
                 self.snapshot().await
             }
             401 | 403 => Err("provider account authentication rejected".into()),
@@ -1114,6 +1144,7 @@ impl ProviderAccountStore {
     async fn clear_verified_auth_health(
         &self,
         account: &AccountMetadata,
+        tested: AccountTestHealthFence,
         discovered: Vec<String>,
     ) -> Result<(), String> {
         use llm_runtime::accounts::{FailureScope, HealthDocument, HealthStatus};
@@ -1131,6 +1162,14 @@ impl ProviderAccountStore {
         let account = account.clone();
         tokio::task::spawn_blocking(move || {
             let _directory_lock = directory_lock;
+            // Refresh/reconnect publication uses the same directory transaction.
+            // A completed probe only speaks for the exact credential it sent.
+            if provider_config::read_account_credential_version(&root, &account)
+                .map_err(|_| "account credential version unavailable")?
+                != Some(tested.credential_revision)
+            {
+                return Err("account credential changed during connection test");
+            }
             let hash = format!("{:x}", Sha256::digest(scope.as_bytes()));
             let directory = PathBuf::from("provider-accounts/health");
             let path = directory.join(format!("{hash}.json"));
@@ -1151,6 +1190,17 @@ impl ProviderAccountStore {
                 Err(lingxi_core::host::rooted_fs::FsError::NotFound(_)) => HealthDocument::default(),
                 Err(_) => return Err("account health storage unavailable"),
             };
+            // Keep a failure (or recovery completion) published after this Test
+            // started, including one on the same credential revision. Compare
+            // the exact account slot so unrelated account/model activity does
+            // not invalidate a successful connection test.
+            if document.records.get(&tested.health_key).map(|row| row.revision)
+                != tested.record_revision
+                || document.fences.get(&tested.health_key).copied()
+                    != tested.completion_revision
+            {
+                return Err("account health changed during connection test");
+            }
             let identity = serde_json::to_string(&(scope.as_str(), account.account_id.as_str()))
                 .map_err(|_| "account health identity invalid")?;
             let before = document.records.len();
@@ -1163,6 +1213,9 @@ impl ProviderAccountStore {
                 !(stored == identity
                     && generation == account.identity_generation
                     && failure_scope == FailureScope::Account
+                    && row
+                        .credential_revision
+                        .is_none_or(|revision| revision <= tested.credential_revision)
                     && matches!(
                         row.status,
                         HealthStatus::NeedsAuth | HealthStatus::StorageUnavailable
@@ -1186,6 +1239,11 @@ impl ProviderAccountStore {
                     .revision
                     .checked_add(1)
                     .ok_or("account health revision exhausted")?;
+                if document.records.len() != before {
+                    document
+                        .fences
+                        .insert(tested.health_key, document.revision);
+                }
                 let bytes =
                     serde_json::to_vec(&document).map_err(|_| "account health encoding failed")?;
                 lingxi_core::host::rooted_fs::atomic_write(
@@ -3363,6 +3421,428 @@ json.dump(reply, sys.stdout)
         );
         assert_eq!(broker_retrieve_count(root.path()), before + 1);
         assert_eq!(wire.sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    struct HeldAccountProbeHttp {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[cfg(unix)]
+    impl HeldAccountProbeHttp {
+        fn new() -> Self {
+            Self {
+                entered: Default::default(),
+                release: Default::default(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for HeldAccountProbeHttp {
+        async fn send(
+            &self,
+            request: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            assert!(request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization") && value == "Bearer synthetic-old-access"
+            }));
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(lingxi_llm_client::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"data":[]}"#.to_vec().into(),
+            }
+            .into())
+        }
+    }
+
+    #[cfg(unix)]
+    async fn account_test_health_fixture() -> (
+        tempfile::TempDir,
+        Arc<CredentialManager>,
+        Arc<ProviderAccountStore>,
+        AccountMetadata,
+    ) {
+        let (directory, credentials, store) = fixture();
+        let account = store
+            .execute_metadata(add(AccountAuthKind::OAuth, 0))
+            .await
+            .unwrap()
+            .accounts[0]
+            .clone();
+        credentials
+            .store_account_credential(&account.credential_ref, &initial_device_grant())
+            .await
+            .unwrap();
+        publish_account_credential_version(
+            directory.path().to_owned(),
+            account.credential_ref.store_scope.clone(),
+            AccountCredentialVersion {
+                account_id: account.account_id.clone(),
+                identity_generation: account.identity_generation,
+                credential_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        (directory, credentials, store, account)
+    }
+
+    #[cfg(unix)]
+    struct AccountTestPoolAttempt {
+        store: crate::account_pool_store::FileAccountPoolStore,
+        account: AccountMetadata,
+        model: String,
+        owner: String,
+        claimed_revision: u64,
+    }
+
+    #[cfg(unix)]
+    impl AccountTestPoolAttempt {
+        async fn claim(root: &Path, account: &AccountMetadata, model: &str, owner: &str) -> Self {
+            use llm_runtime::accounts::{AccountPoolStore, PoolOperation, PoolResult};
+            let store = crate::account_pool_store::FileAccountPoolStore::new(root.to_owned());
+            let PoolResult::Claimed { revision } = store
+                .transact(PoolOperation::Claim {
+                    account: account.clone(),
+                    model: model.into(),
+                    endpoint: "synthetic-account-test".into(),
+                    now_ms: 1_000,
+                    owner: owner.into(),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("the controlled inference must be admitted")
+            };
+            Self {
+                store,
+                account: account.clone(),
+                model: model.into(),
+                owner: owner.into(),
+                claimed_revision: revision,
+            }
+        }
+
+        async fn fail(
+            self,
+            scope: llm_runtime::accounts::FailureScope,
+            status: llm_runtime::accounts::HealthStatus,
+            credential_revision: Option<u64>,
+            reason: &str,
+        ) -> llm_runtime::accounts::PoolResult {
+            use llm_runtime::accounts::{AccountFailure, AccountPoolStore, PoolOperation};
+            self.store
+                .transact(PoolOperation::Finish {
+                    account: self.account,
+                    model: self.model,
+                    endpoint: "synthetic-account-test".into(),
+                    owner: self.owner,
+                    claimed_revision: self.claimed_revision,
+                    credential_revision,
+                    outcome: Some(AccountFailure {
+                        status,
+                        scope,
+                        reason: reason.into(),
+                        recovery_at_ms: None,
+                    }),
+                    now_ms: 1_001,
+                })
+                .await
+                .unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    async fn account_test_health(
+        root: &Path,
+        account: &AccountMetadata,
+    ) -> llm_runtime::accounts::HealthDocument {
+        crate::account_pool_store::read_health(
+            root.to_owned(),
+            account.credential_ref.store_scope.clone(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_preserves_a_later_auth_failure_on_the_same_or_new_credential() {
+        use llm_runtime::accounts::{FailureScope, HealthStatus, PoolResult};
+        for rotate in [false, true] {
+            let (directory, credentials, store, account) = account_test_health_fixture().await;
+            let probe = Arc::new(HeldAccountProbeHttp::new());
+            let mut testing_store = (*store).clone();
+            testing_store.probe_transport = Some(probe.clone());
+            let id = account.account_id.clone();
+            let testing = tokio::spawn(async move { testing_store.test_account(&id).await });
+            entered(&probe.entered).await;
+            let revision = if rotate {
+                let mut newer = initial_device_grant();
+                newer.credential_revision = 2;
+                if let AccountCredentialKind::OAuth { access_token, .. } = &mut newer.kind {
+                    *access_token = lingxi_core::types::Secret::new("synthetic-new-access".into());
+                }
+                credentials
+                    .store_account_credential(&account.credential_ref, &newer)
+                    .await
+                    .unwrap();
+                publish_account_credential_version(
+                    directory.path().to_owned(),
+                    account.credential_ref.store_scope.clone(),
+                    AccountCredentialVersion {
+                        account_id: account.account_id.clone(),
+                        identity_generation: account.identity_generation,
+                        credential_revision: 2,
+                    },
+                )
+                .await
+                .unwrap();
+                2
+            } else {
+                1
+            };
+            let result = AccountTestPoolAttempt::claim(
+                directory.path(),
+                &account,
+                "synthetic-model",
+                "later-inference",
+            )
+            .await
+            .fail(
+                FailureScope::Account,
+                HealthStatus::NeedsAuth,
+                Some(revision),
+                "later-auth-rejection",
+            )
+            .await;
+            assert!(matches!(result, PoolResult::Recorded { .. }));
+            let before = account_test_health(directory.path(), &account).await;
+            assert!(before.account_records(&account).iter().any(|row| {
+                row.status == HealthStatus::NeedsAuth && row.credential_revision == Some(revision)
+            }));
+            probe.release.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), testing)
+                .await
+                .unwrap()
+                .unwrap();
+            let message = result.unwrap_err();
+            assert!(
+                message.contains(if rotate {
+                    "credential changed"
+                } else {
+                    "health changed"
+                }),
+                "{message}"
+            );
+            let after = account_test_health(directory.path(), &account).await;
+            assert_eq!(
+                serde_json::to_value(&before).unwrap(),
+                serde_json::to_value(&after).unwrap(),
+                "a late successful probe must not mutate the newer failure or its fence"
+            );
+            let reopened = ProviderAccountStore::new(
+                directory.path().to_owned(),
+                account.credential_ref.store_scope.clone(),
+                credentials,
+            )
+            .snapshot()
+            .await
+            .unwrap();
+            assert!(
+                reopened.health.iter().any(|row| {
+                    row.account_id == account.account_id
+                        && row.status == AccountHealthStatus::NeedsAuth
+                }),
+                "a cold file-store reader must retain the later failure"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_recovers_existing_auth_failure_without_rejecting_unrelated_activity(
+    ) {
+        use llm_runtime::accounts::{FailureScope, HealthStatus, PoolResult};
+        let (directory, _credentials, store, account) = account_test_health_fixture().await;
+        let other = store
+            .execute(
+                add(AccountAuthKind::ApiKey, 1),
+                Some("synthetic-other-key".into()),
+            )
+            .await
+            .unwrap()
+            .accounts
+            .into_iter()
+            .find(|row| row.account_id != account.account_id)
+            .unwrap();
+        // These admitted model calls predate the account failure. Their later
+        // scoped outcome is independent of the account Test's recovery slot.
+        let model = "independent-model";
+        let model_attempt =
+            AccountTestPoolAttempt::claim(directory.path(), &account, model, "model-owner").await;
+        let late_attempt = AccountTestPoolAttempt::claim(
+            directory.path(),
+            &account,
+            "test-model",
+            "late-auth-owner",
+        )
+        .await;
+        assert!(matches!(
+            AccountTestPoolAttempt::claim(
+                directory.path(),
+                &account,
+                "test-model",
+                "old-auth-owner"
+            )
+            .await
+            .fail(
+                FailureScope::Account,
+                HealthStatus::NeedsAuth,
+                Some(1),
+                "old-auth-rejection"
+            )
+            .await,
+            PoolResult::Recorded { .. }
+        ));
+        let initial = account_test_health(directory.path(), &account).await;
+        let probe = Arc::new(HeldAccountProbeHttp::new());
+        let mut testing_store = (*store).clone();
+        testing_store.probe_transport = Some(probe.clone());
+        let id = account.account_id.clone();
+        let testing = tokio::spawn(async move { testing_store.test_account(&id).await });
+        entered(&probe.entered).await;
+        assert!(matches!(
+            model_attempt
+                .fail(
+                    FailureScope::Model(model.into()),
+                    HealthStatus::StorageUnavailable,
+                    None,
+                    "independent-model-failure"
+                )
+                .await,
+            PoolResult::Recorded { .. }
+        ));
+        assert!(matches!(
+            AccountTestPoolAttempt::claim(directory.path(), &other, "other-model", "other-owner")
+                .await
+                .fail(
+                    FailureScope::Account,
+                    HealthStatus::NeedsAuth,
+                    Some(1),
+                    "other-auth-failure"
+                )
+                .await,
+            PoolResult::Recorded { .. }
+        ));
+        let while_testing = account_test_health(directory.path(), &account).await;
+        let unrelated_model = while_testing.scoped_records(&account);
+        let unrelated_account = while_testing.account_records(&other);
+        probe.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), testing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let after = account_test_health(directory.path(), &account).await;
+        assert!(
+            after.account_records(&account).is_empty(),
+            "a current successful Test must restore an existing auth fault"
+        );
+        assert_eq!(
+            serde_json::to_value(after.scoped_records(&account)).unwrap(),
+            serde_json::to_value(unrelated_model).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(after.account_records(&other)).unwrap(),
+            serde_json::to_value(unrelated_account).unwrap()
+        );
+        assert!(
+            after.fences.iter().any(|(key, revision)| {
+                initial.records.contains_key(key) && *revision > initial.revision
+            }),
+            "the recovered account slot needs a durable completion fence"
+        );
+        assert!(matches!(
+            late_attempt
+                .fail(
+                    FailureScope::Account,
+                    HealthStatus::NeedsAuth,
+                    Some(1),
+                    "older-inference-auth-failure",
+                )
+                .await,
+            PoolResult::Stale
+        ));
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(account_test_health(directory.path(), &account).await).unwrap(),
+            "the Test's completion fence must prevent an older request from restoring the cleared fault"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_account_test_cancellation_preserves_health_and_allows_the_next_test() {
+        use llm_runtime::accounts::{FailureScope, HealthStatus, PoolResult};
+        let (directory, credentials, store, account) = account_test_health_fixture().await;
+        assert!(matches!(
+            AccountTestPoolAttempt::claim(directory.path(), &account, "test-model", "auth-owner")
+                .await
+                .fail(
+                    FailureScope::Account,
+                    HealthStatus::NeedsAuth,
+                    Some(1),
+                    "existing-auth-failure"
+                )
+                .await,
+            PoolResult::Recorded { .. }
+        ));
+        let before = account_test_health(directory.path(), &account).await;
+        let probe = Arc::new(HeldAccountProbeHttp::new());
+        let mut testing_store = (*store).clone();
+        testing_store.probe_transport = Some(probe.clone());
+        let id = account.account_id.clone();
+        let testing = tokio::spawn(async move { testing_store.test_account(&id).await });
+        entered(&probe.entered).await;
+        testing.abort();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), testing)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .is_cancelled()
+        );
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(account_test_health(directory.path(), &account).await).unwrap(),
+            "cancelling before the response must not clear or advance health"
+        );
+        let mut reopened = ProviderAccountStore::new(
+            directory.path().to_owned(),
+            account.credential_ref.store_scope.clone(),
+            credentials,
+        );
+        let immediate = Arc::new(AccountProbeHttp::new("synthetic-old-access"));
+        reopened.probe_transport = Some(immediate.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reopened.test_account(&account.account_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(immediate.sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(account_test_health(directory.path(), &account)
+            .await
+            .account_records(&account)
+            .is_empty());
     }
 
     #[cfg(unix)]

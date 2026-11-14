@@ -63,6 +63,7 @@ use telemetry::pii::Verified;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub mod callback;
+pub(crate) mod retry_storage;
 pub(crate) mod schemas;
 pub(crate) mod sdk_flow;
 pub(crate) mod session;
@@ -3237,7 +3238,7 @@ pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
 
 /// On-disk JSON shape for a stored MCP OAuth token set. The secret strings are
 /// the byte payload of a [`lingxi_core::types::SecureStorageData`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTokens {
     /// Bearer access token (plain string inside the encrypted blob).
     pub access_token: String,
@@ -3420,8 +3421,7 @@ pub async fn store_tokens_with_telemetry(
         kind: lingxi_core::types::SecretKindDto("mcp_oauth_tokens".into()),
     };
     let data = lingxi_core::types::SecureStorageData::new(bytes, metadata);
-    storage
-        .store(MCP_OAUTH_SERVICE, key, data)
+    retry_storage::write(storage, MCP_OAUTH_SERVICE, key, Some(data))
         .await
         .map_err(|e| {
             if let Some(ctx) = telemetry {
@@ -3668,7 +3668,7 @@ pub async fn revoke_server_tokens(
         tracing::debug!(%error,"mcp oauth: failed to clear session auth state");
     }
     // Always clear local tokens, regardless of server-side result (auth.ts:575).
-    if let Err(e) = storage.delete(MCP_OAUTH_SERVICE, key).await {
+    if let Err(e) = retry_storage::write(storage, MCP_OAUTH_SERVICE, key, None).await {
         tracing::debug!(error = %e, "mcp oauth: failed to clear local tokens after revocation");
     }
 }

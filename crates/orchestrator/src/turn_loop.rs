@@ -828,6 +828,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                     orch.acknowledge_diagnostics_id(
                         orch.pending_diagnostics_id_in_request(request_history),
                     );
+                    orch.acknowledge_consumed_reminders_in_request(request_history).await;
                 }
                 outcome
             }

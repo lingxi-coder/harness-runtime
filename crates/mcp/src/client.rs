@@ -784,6 +784,7 @@ pub struct McpClient {
     server_url: Option<String>,
     /// Protocol result envelope selected by the transport handshake.
     negotiated: McpNegotiatedProtocol,
+    oauth_credential: Option<crate::oauth::retry_storage::OAuthCredentialIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -1188,11 +1189,26 @@ impl McpClient {
             wire_tool_names: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
+            oauth_credential: None,
             negotiated: McpNegotiatedProtocol {
                 era: McpProtocolEra::Legacy,
                 version: "2025-11-25".to_string(),
             },
         }
+    }
+
+    pub(crate) fn with_oauth_credential_identity(
+        mut self,
+        identity: Option<crate::oauth::retry_storage::OAuthCredentialIdentity>,
+    ) -> Self {
+        self.oauth_credential = identity;
+        self
+    }
+
+    pub(crate) fn oauth_credential_identity(
+        &self,
+    ) -> Option<&crate::oauth::retry_storage::OAuthCredentialIdentity> {
+        self.oauth_credential.as_ref()
     }
 
     /// Attach the host's shared validator service and create this live

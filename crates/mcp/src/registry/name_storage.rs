@@ -31,6 +31,15 @@ impl SecureStorage for RawNameOAuthStorage {
     ) -> Result<Option<SecureStorageData>, SecureStorageError> {
         self.base.retrieve(&service_name(service), account).await
     }
+    async fn retrieve_uncached(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        self.base
+            .retrieve_uncached(&service_name(service), account)
+            .await
+    }
     async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
         self.base.contains(&service_name(service), account).await
     }
@@ -45,6 +54,9 @@ impl SecureStorage for RawNameOAuthStorage {
     }
     fn backend(&self) -> SecureStorageBackend {
         self.base.backend()
+    }
+    fn account_ownership_backend(&self) -> SecureStorageBackend {
+        self.base.account_ownership_backend()
     }
 }
 

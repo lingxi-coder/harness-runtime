@@ -1710,6 +1710,8 @@ impl ConversationOrchestrator {
             // Task completion can enqueue memory updates, so this must follow the
             // notification drain and persistence above.
             for reminder in self.memory_update_reminder_messages().await {
+                let id = reminder.id();
+                let previous_len = transient.len();
                 self.push_engine_attachment(
                     &mut transient,
                     &mut engine_reminder_sources,
@@ -1717,6 +1719,9 @@ impl ConversationOrchestrator {
                     reminder,
                 )
                 .await;
+                if transient.len() == previous_len {
+                    self.acknowledge_consumed_reminder_ids(&[id]).await;
+                }
             }
             for reminder in self.relevant_memory_reminder_messages().await {
                 self.push_engine_attachment(

@@ -143,11 +143,11 @@ fn portable_local_tool_discovery(
 /// Pure physical-input projection shared by generation, counting and fit
 /// estimates. Borrow unchanged inputs; only a real route/content rewrite owns
 /// a clone, with replay provenance and exact-string positions kept together.
-fn project_route_input(
-    request: &LlmRequest,
+fn project_route_input<'a>(
+    request: &'a LlmRequest,
     protocol: ProtocolFamily,
-    reasoning_supported: bool,
-) -> Result<std::borrow::Cow<'_, LlmRequest>, LlmError> {
+    route: &crate::registry::ResolvedRoute,
+) -> Result<std::borrow::Cow<'a, LlmRequest>, LlmError> {
     let mut projected = if crate::anthropic_extra_body::is_anthropic(protocol) {
         std::borrow::Cow::Borrowed(request)
     } else {
@@ -170,7 +170,7 @@ fn project_route_input(
                 | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
         )
     };
-    if !reasoning_supported
+    if !route.capabilities.reasoning
         && (projected.input.thinking.is_some()
             || projected
                 .input
@@ -185,6 +185,19 @@ fn project_route_input(
             |_, block| !reasoning_block(block),
             None,
         );
+    }
+    // A route can discard an automatically requested schema before encoding.
+    // Fit estimates and exact counts must see that same input, while retaining
+    // the caller's canonical schema for a later supported fallback route.
+    if crate::structured_output::disabled_for(
+        projected.as_ref(),
+        &route.provider_id,
+        protocol,
+        &route.request_model,
+        route.capabilities.structured_output,
+        crate::anthropic_extra_body::body(projected.as_ref(), protocol),
+    ) {
+        projected.to_mut().input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
     }
     Ok(projected)
 }
@@ -1927,11 +1940,7 @@ impl ModelRuntime {
             &resolved_route.request_model,
             native_route_admitted,
         );
-        let projected = project_route_input(
-            request,
-            effective_protocol,
-            resolved_route.capabilities.reasoning,
-        )?;
+        let projected = project_route_input(request, effective_protocol, &resolved_route)?;
         let request = projected.as_ref();
         let host_failure = Arc::new(Mutex::new(None));
         let authenticator = Arc::new(
@@ -1992,18 +2001,7 @@ impl ModelRuntime {
             == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
             && !fast_mode_allowed;
 
-        // Evaluate the native structured-output kill switch per selected route,
-        // before capability validation and SDK encoding. Keep the caller's
-        // schema intact so a fallback to another provider can still use it.
         let extra_body = crate::anthropic_extra_body::body(request, effective_protocol).cloned();
-        let suppress_schema = crate::structured_output::disabled_for(
-            request,
-            &resolved_route.provider_id,
-            effective_protocol,
-            &resolved_route.request_model,
-            resolved_route.capabilities.structured_output,
-            extra_body.as_ref(),
-        );
         let native_per_turn_effort = should_project_native_per_turn_effort(
             &resolved_route.provider_id,
             effective_protocol,
@@ -2021,17 +2019,10 @@ impl ModelRuntime {
         })
         .flatten();
         let mut owned: Option<LlmRequest> = None;
-        if needs_speed_degrade
-            || suppress_schema
-            || effort_policy.is_some()
-            || native_per_turn_effort.is_some()
-        {
+        if needs_speed_degrade || effort_policy.is_some() || native_per_turn_effort.is_some() {
             let mut r = request.clone();
             if needs_speed_degrade {
                 r.input.service_tier = None;
-            }
-            if suppress_schema {
-                r.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
             }
             if effort_policy.is_some() {
                 if let Some(thinking) = r.input.thinking.as_mut() {
@@ -2849,7 +2840,7 @@ impl ModelRuntime {
                 return Ok(tokens);
             }
         }
-        let projected = project_route_input(request, protocol, route.capabilities.reasoning)?;
+        let projected = project_route_input(request, protocol, &route)?;
         Ok(crate::model::count_tokens::approximate_tokens_for_route(
             projected.as_ref(),
             Some(&entry.profile),
@@ -2898,24 +2889,9 @@ impl ModelRuntime {
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let protocol = entry.effective_protocol(&route);
-        let mut owned;
         crate::anthropic_extra_body::validate(request, protocol)?;
-        let visible = project_route_input(request, protocol, route.capabilities.reasoning)?;
+        let visible = project_route_input(request, protocol, &route)?;
         let request = visible.as_ref();
-        let request = if crate::structured_output::disabled_for(
-            request,
-            &route.provider_id,
-            protocol,
-            &route.request_model,
-            route.capabilities.structured_output,
-            crate::anthropic_extra_body::body(request, protocol),
-        ) {
-            owned = request.clone();
-            owned.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
-            &owned
-        } else {
-            request
-        };
         validate_capabilities(request, route.capabilities)?;
         if !matches!(protocol, ProtocolFamily::AnthropicMessages) {
             return Err(LlmError::InvalidRequest {
@@ -3405,6 +3381,66 @@ pub struct PreparedLlmCall {
     registered_attempt: bool,
     pub route: Route,
     pub provider_request: ProviderRequest,
+}
+
+#[cfg(test)]
+mod physical_input_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_input_stays_borrowed_and_measured_prefix_precedes_cold_projection() {
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|provider| provider.profile_name == "anthropic")
+            .unwrap();
+        provider.profile_name = "projection-test".into();
+        provider.auth = AuthStrategy::None;
+        provider.credential = CredentialConfig::None;
+        provider.wire_profile = None;
+        provider.models.truncate(1);
+        let model = &mut provider.models[0];
+        model.display_model = "claude-sonnet-4-6".into();
+        model.request_model = "claude-sonnet-4-6".into();
+        model.billing_model = "claude-sonnet-4-6".into();
+        model.aliases.clear();
+        model.capabilities.reasoning = true;
+        let runtime = ModelRuntime::from_config(ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let route = runtime
+            .registry
+            .resolve_in("claude-sonnet-4-6", Some("projection-test"))
+            .unwrap();
+        let mut request = LlmRequest::new("claude-sonnet-4-6")
+            .with_profile("projection-test")
+            .with_user_text("opaque retained history ".repeat(50_000));
+        let projected =
+            project_route_input(&request, ProtocolFamily::AnthropicMessages, &route).unwrap();
+        assert!(matches!(projected, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(projected.as_ref(), &request));
+        drop(projected);
+
+        request.execution.context_usage_protocol = Some(ProtocolFamily::AnthropicMessages);
+        request.execution.prompt_projection_profile =
+            Some(runtime.routes["projection-test"].profile.clone());
+        request.execution.context_usage_estimate =
+            crate::context_usage::ContextUsageEstimate::bind(&request, 321);
+        request.input.max_tokens = Some(64);
+        request.input.metadata = lingxi_llm_client::protocol::JsonPayload::parse(
+            r#"{"user_id":"new diagnostic metadata"}"#,
+        )
+        .unwrap();
+        request.input.prompt_cache.automatic =
+            Some(lingxi_llm_client::protocol::CacheTtl::FiveMinutes);
+        assert_eq!(
+            runtime.estimate_input_tokens_for_route(&request).unwrap(),
+            321
+        );
+        request.execution.context_usage_estimate = None;
+        assert!(runtime.estimate_input_tokens_for_route(&request).unwrap() > 100_000);
+    }
 }
 
 #[cfg(test)]

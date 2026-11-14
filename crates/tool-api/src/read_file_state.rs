@@ -372,6 +372,22 @@ impl ReadFileStateLru {
         self.map.get(path).map(|node| Arc::clone(&node.entry))
     }
 
+    /// Capture metadata and its nonredundant exact text under one observation,
+    /// without promoting recency or copying ordinary cached file bodies.
+    /// A later Read may replace this slot; callers must keep these units beside
+    /// this exact Arc rather than fetching the new slot after asynchronous I/O.
+    #[must_use]
+    pub fn peek_snapshot_with_units(
+        &self,
+        path: &Path,
+    ) -> Option<(Arc<ReadFileEntry>, Option<Arc<[u16]>>)> {
+        let node = self.map.get(path)?;
+        Some((
+            Arc::clone(&node.entry),
+            node.content_units.as_deref().map(Arc::from),
+        ))
+    }
+
     /// Mark a snapshot stale only if no concurrent Read/Edit/Write replaced
     /// it. Preserve content, source routes, visibility, byte accounting and LRU
     /// order; the sentinel timestamp forces the file tools' content check.
@@ -2710,5 +2726,53 @@ mod tests {
         assert_eq!(guard.keys(), vec![PathBuf::from("/seed")]);
         assert_eq!(guard.model_context_keys(), Vec::<PathBuf>::new());
         assert_eq!(guard.total_bytes(), 4);
+    }
+
+    #[test]
+    fn exact_snapshot_keeps_its_original_units_and_eviction_order() {
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/exact");
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xd800]),
+        );
+        set(&map, PathBuf::from("/ordinary"), entry("ordinary"));
+        let (snapshot, units) = {
+            let state = map.lock().unwrap();
+            let order = state.keys();
+            let capture = state.peek_snapshot_with_units(&path).unwrap();
+            assert!(Arc::ptr_eq(
+                &capture.0,
+                &state.peek_snapshot(&path).unwrap()
+            ));
+            assert!(state
+                .peek_snapshot_with_units(Path::new("/ordinary"))
+                .unwrap()
+                .1
+                .is_none());
+            assert_eq!(
+                state.keys(),
+                order,
+                "a scan must not promote either observation"
+            );
+            capture
+        };
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xdc00]),
+        );
+        assert_eq!(units.as_deref(), Some(&[0xd800][..]));
+        let state = map.lock().unwrap();
+        let (current, current_units) = state.peek_snapshot_with_units(&path).unwrap();
+        assert!(!Arc::ptr_eq(&snapshot, &current));
+        assert_eq!(current_units.as_deref(), Some(&[0xdc00][..]));
     }
 }

@@ -184,6 +184,7 @@ pub fn compact_persistence(record_type: &str) -> CompactPersistence {
         | "attribution-snapshot"
         | "mode"
         | "permission-mode"
+        | "pending-transient-reminders"
         | "isolation-latch"
         | "atis-latch"
         | "worktree-state"
@@ -389,6 +390,20 @@ pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> Plan
                 };
                 match last_meta.iter().position(|(k, _)| *k == key) {
                     Some(pos) => {
+                        if record_type == "pending-transient-reminders" {
+                            let previous_revision =
+                                serde_json::from_str::<Value>(&last_meta[pos].1.line)
+                                    .ok()
+                                    .and_then(|value| value.get("revision").and_then(Value::as_u64))
+                                    .unwrap_or(0);
+                            let incoming_revision =
+                                record.get("revision").and_then(Value::as_u64).unwrap_or(0);
+                            if incoming_revision <= previous_revision {
+                                superseded.insert(idx);
+                                continue;
+                            }
+                            superseded.insert(last_meta[pos].1.idx);
+                        }
                         // Only these two types have their SUPERSEDED copy
                         // actively deleted; for every other last-wins type the
                         // older copy simply falls out of `keepIdx` (and a

@@ -1473,3 +1473,454 @@ fn cold_partial_edit_replay_preserves_write_fence_both_drivers() {
         }
     });
 }
+
+const EXACT_CHANGED_NOTE: &str = "changed on disk since you last read it.";
+
+fn save_exact_utf16(path: &Path, units: &[u16], seconds: u64) {
+    let bytes = std::iter::once(0xfeffu16)
+        .chain(units.iter().copied())
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    std::fs::write(path, bytes).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+        )
+        .unwrap();
+}
+
+fn exact_changed_rows(rows: &[ConversationMessage]) -> Vec<(MessageId, Vec<u16>)> {
+    rows.iter()
+        .filter(|row| row.text_content().contains(EXACT_CHANGED_NOTE))
+        .map(|row| {
+            let ConversationMessage::User { content, .. } = row else {
+                panic!("meta user notice")
+            };
+            let units = match &content[0] {
+                HistoryBlock::Text { text, .. } => text.encode_utf16().collect(),
+                HistoryBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => utf16_code_units.clone(),
+                _ => panic!("text notice"),
+            };
+            (row.id(), units)
+        })
+        .collect()
+}
+
+struct ExactReadCancellation {
+    reader: Arc<tool_file::FileReadTool>,
+    armed: Arc<AtomicBool>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait]
+impl Tool for ExactReadCancellation {
+    fn name(&self) -> &str {
+        self.reader.name()
+    }
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        self.reader.input_schema()
+    }
+    fn input_repair_metadata(&self) -> tool_api::ToolInputRepairMetadata {
+        self.reader.input_repair_metadata()
+    }
+    fn is_enabled(&self, ctx: &tool_api::ToolStaticContext) -> bool {
+        self.reader.is_enabled(ctx)
+    }
+    fn max_result_size_chars(&self) -> usize {
+        self.reader.max_result_size_chars()
+    }
+    fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
+        self.reader.is_concurrency_safe(input)
+    }
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
+        self.reader.is_read_only(input)
+    }
+    fn read_state_request_path(&self, path: &Path) -> PathBuf {
+        self.reader.read_state_request_path(path)
+    }
+    fn read_state_io_path(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        self.reader.read_state_io_path(path)
+    }
+    async fn open_file_for_compaction(
+        &self,
+        path: &Path,
+    ) -> Result<Option<std::fs::File>, ToolError> {
+        self.reader.open_file_for_compaction(path).await
+    }
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> permission::PermissionResult {
+        self.reader.check_permissions(input, ctx).await
+    }
+    async fn description(
+        &self,
+        input: &Utf16JsonProjection,
+        options: &tool_api::DescriptionOptions,
+    ) -> String {
+        self.reader.description(input, options).await
+    }
+    async fn prompt(&self, options: &tool_api::PromptOptions) -> Utf16JsonProjection {
+        self.reader.prompt(options).await
+    }
+    async fn call(
+        &self,
+        input: Utf16JsonProjection,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        let result = self.reader.call(input, ctx, progress).await?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.cancel.cancel();
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactDelivery {
+    Normal,
+    Cancel,
+    Steering,
+}
+
+struct ExactSteering {
+    path: PathBuf,
+    units: Vec<u16>,
+    api: Arc<MockApiClient>,
+    stream: Arc<MockStreamingApiClient>,
+    streaming: bool,
+    armed: AtomicBool,
+}
+
+#[async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for ExactSteering {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        if !self.armed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let calls = if self.streaming {
+            self.stream.captured_calls().await.len()
+        } else {
+            self.api.captured_msgs().await.len()
+        };
+        if calls < 3 || !self.armed.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        save_exact_utf16(&self.path, &self.units, 2_000_000);
+        Some("human steering after external UTF16 save".into())
+    }
+}
+
+async fn exact_file_change_delivery(streaming: bool, delivery: ExactDelivery) {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+    let cases: &[(&[u16], &[u16], usize)] = if delivery == ExactDelivery::Normal {
+        &[
+            (&[97, 10, 0xd800, 98], &[97, 10, 0xdc00, 98], 1),
+            (&[97, 10, 0xd800, 98], &[97, 10, 0xfffd, 98], 1),
+            (&[97, 10, 65, 98], &[97, 10, 66, 98], 1),
+            (&[97, 10, 0xd800, 98], &[97, 10, 0xd800, 98], 0),
+        ]
+    } else {
+        &[
+            (&[97, 10, 0xd800, 98], &[97, 10, 0xdc00, 98], 1),
+            (&[97, 10, 0xd800, 98], &[97, 10, 0xfffd, 98], 1),
+        ]
+    };
+    for &(before, after, expected_notices) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let path = cwd.join("exact-utf16.txt");
+        let other = cwd.join("other.txt");
+        save_exact_utf16(&path, before, 1_000_000);
+        std::fs::write(&other, "continue real tool execution\n").unwrap();
+        let transcript = cwd.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let armed = Arc::new(AtomicBool::new(false));
+        let mut steps = vec![
+            Step::Tool("Read", serde_json::json!({"file_path":path})),
+            Step::Done,
+        ];
+        if delivery == ExactDelivery::Steering {
+            steps.push(Step::Tool("Read", serde_json::json!({"file_path":other})));
+        }
+        steps.extend([Step::Done, Step::Done, Step::Done]);
+        let fixture = Fixture::with_recording(
+            &cwd,
+            fs.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            Arc::new(NoOpPermissionGate),
+            steps,
+            |reader| {
+                Arc::new(ExactReadCancellation {
+                    reader,
+                    armed: armed.clone(),
+                    cancel: cancel.clone(),
+                })
+            },
+            Some(Arc::new(session::JsonlWriter::new(
+                transcript.clone(),
+                fs.clone(),
+            ))),
+        )
+        .await;
+        // The ordinary model driver invokes the real Read before compaction.
+        fixture.run(streaming).await;
+        assert_eq!(fixture.requests(streaming).await.len(), 2);
+        assert_eq!(
+            reads::get_content_units(&fixture.map, &path).as_deref(),
+            Some(before)
+        );
+        for index in 0..8 {
+            let row = if index % 2 == 0 {
+                ConversationMessage::user(MessageId::new(), format!("prior question {index}"))
+            } else {
+                ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![HistoryBlock::Text {
+                        text: format!("prior answer {index}"),
+                        citations: None,
+                    }],
+                    stop_reason: Some("end_turn".into()),
+                    resumable: None,
+                    per_turn_effort: None,
+                }
+            };
+            fixture.orch.append_external_history_message(row).await;
+        }
+        fixture
+            .orch
+            .force_compact_with_cancel(tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        let baseline = reads::get(&fixture.map, &path).unwrap();
+        assert_eq!((baseline.offset, baseline.limit), (None, None));
+        assert!(!baseline.is_partial_view);
+        assert_eq!(
+            reads::get_content_units(&fixture.map, &path).as_deref(),
+            Some(before)
+        );
+        if delivery == ExactDelivery::Steering {
+            fixture.orch.set_mid_turn_input(Arc::new(ExactSteering {
+                path: path.clone(),
+                units: after.to_vec(),
+                api: fixture.api.clone(),
+                stream: fixture.streaming_api.clone(),
+                streaming,
+                armed: AtomicBool::new(true),
+            }));
+        } else {
+            save_exact_utf16(&path, after, 2_000_000);
+            if expected_notices > 0 {
+                let disk = std::fs::read(&path).unwrap();
+                let error = fixture
+                    .writer
+                    .call(
+                        source(serde_json::json!({"file_path":path,"content":"overwrite"})),
+                        tool_api::test_support::fresh_ctx(),
+                        tool_api::test_support::fresh_tx(),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.model_facing_message().string_at(""),
+                    Some(tool_file::FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+                );
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    disk,
+                    "exact change cannot grant stale Write authority"
+                );
+            }
+        }
+        if delivery == ExactDelivery::Cancel {
+            armed.store(true, Ordering::SeqCst);
+            let prompt = Utf16JsonProjection::from("inspect then cancel before sending");
+            if streaming {
+                let outcome = OrchestratorHandle::run_turn_streaming_with_cancel(
+                    fixture.orch.as_ref(),
+                    &prompt,
+                    cancel.clone(),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(outcome, lingxi_core::host::TurnOutcome::Cancelled));
+            } else {
+                let outcome = fixture
+                    .orch
+                    .run_turn_with_cancel(&prompt, cancel.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(outcome, orchestrator::TurnOutcome::Cancelled);
+            }
+            assert_eq!(
+                fixture.requests(streaming).await.len(),
+                2,
+                "cancelled preparation never dispatches"
+            );
+        }
+        fixture.run(streaming).await;
+        fixture.run(streaming).await;
+        let requests = fixture.requests(streaming).await;
+        let delivered = exact_changed_rows(&requests[requests.len() - 2]);
+        assert_eq!(
+            delivered.len(),
+            expected_notices,
+            "streaming={streaming}, delivery={delivery:?}"
+        );
+        assert_eq!(
+            delivered,
+            exact_changed_rows(requests.last().unwrap()),
+            "one stable notice identity and exact prefix on continuation"
+        );
+        assert_eq!(
+            reads::get_content_units(&fixture.map, &path).as_deref(),
+            Some(after)
+        );
+        if delivery == ExactDelivery::Steering {
+            assert!(
+                exact_changed_rows(&requests[2]).is_empty(),
+                "the file changes during the running turn"
+            );
+            assert!(requests[3].iter().any(|row| row
+                .text_content()
+                .contains("human steering after external UTF16 save")));
+        }
+        if let Some((_, units)) = delivered.first() {
+            let exact_snippet = "1\ta\n2\t"
+                .encode_utf16()
+                .chain(after[2..].iter().copied())
+                .collect::<Vec<_>>();
+            assert!(
+                units
+                    .windows(exact_snippet.len())
+                    .any(|window| window == exact_snippet),
+                "changed snippet must preserve exact units"
+            );
+        }
+        let id = fixture.orch.current_session_id().await.as_uuid();
+        let raw = std::fs::read_to_string(&transcript).unwrap();
+        let routed = session::jsonl::route_lines(&raw);
+        let replayed = orchestrator::resume::replay_captured_session(
+            transcript.clone(),
+            raw.clone(),
+            routed,
+            id,
+        )
+        .unwrap();
+        let persisted = replayed
+            .messages
+            .iter()
+            .filter(|row| {
+                row.message_type == "attachment"
+                    && row
+                        .attachment_projection
+                        .as_ref()
+                        .and_then(|source| source.string_at("/type"))
+                        == Some("edited_text_file")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            persisted.len(),
+            expected_notices,
+            "retained notice is persisted exactly once"
+        );
+        if let Some(row) = persisted.first() {
+            let snippet = row
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_units("/snippet")
+                .unwrap();
+            assert_eq!(
+                snippet,
+                "1\ta\n2\t"
+                    .encode_utf16()
+                    .chain(after[2..].iter().copied())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                row.extra.string_units("/rendered/0/content"),
+                Some(delivered[0].1.clone())
+            );
+        }
+        let runtime = replayed.handle_runtime_snapshot();
+        OrchestratorHandle::resume_session(
+            fixture.orch.as_ref(),
+            lingxi_core::types::SessionId::from_uuid(id),
+            replayed.state.history,
+            replayed.last_message_uuid.map(|id| id.to_string()),
+            None,
+            runtime,
+        )
+        .await
+        .unwrap();
+        fixture.run(streaming).await;
+        assert_eq!(
+            exact_changed_rows(fixture.requests(streaming).await.last().unwrap()),
+            delivered,
+            "hot restore keeps exact notice and dedup"
+        );
+        let cold = Fixture::new(
+            &cwd,
+            fs,
+            Arc::new(StaticMemoryProvider::empty()),
+            Arc::new(NoOpPermissionGate),
+            vec![Step::Done],
+        )
+        .await;
+        let routed = session::jsonl::route_lines(&raw);
+        cold.orch
+            .restore_captured_session_history(
+                id,
+                &replayed.messages,
+                &routed.messages_in_order,
+                true,
+                permission::PermissionMode::Default,
+                ConversationMode::Code,
+                &raw,
+            )
+            .await
+            .unwrap();
+        cold.run(streaming).await;
+        assert_eq!(
+            exact_changed_rows(&cold.requests(streaming).await[0]),
+            delivered,
+            "cold restore matches the exact hot request prefix"
+        );
+    }
+}
+
+#[tokio::test]
+async fn batched_exact_utf16_changes_keep_notices_and_recovery() {
+    exact_file_change_delivery(false, ExactDelivery::Normal).await;
+}
+#[tokio::test]
+async fn streaming_exact_utf16_changes_keep_notices_and_recovery() {
+    exact_file_change_delivery(true, ExactDelivery::Normal).await;
+}
+#[tokio::test]
+async fn batched_cancelled_exact_utf16_changes_survive_continue() {
+    exact_file_change_delivery(false, ExactDelivery::Cancel).await;
+}
+#[tokio::test]
+async fn streaming_cancelled_exact_utf16_changes_survive_continue() {
+    exact_file_change_delivery(true, ExactDelivery::Cancel).await;
+}
+#[tokio::test]
+async fn batched_mid_turn_exact_utf16_changes_keep_steering_and_notice() {
+    exact_file_change_delivery(false, ExactDelivery::Steering).await;
+}
+#[tokio::test]
+async fn streaming_mid_turn_exact_utf16_changes_keep_steering_and_notice() {
+    exact_file_change_delivery(true, ExactDelivery::Steering).await;
+}

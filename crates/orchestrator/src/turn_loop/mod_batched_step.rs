@@ -485,6 +485,8 @@ pub(super) async fn dispatch(
                         orch.acknowledge_diagnostics_id(
                             orch.pending_diagnostics_id_in_request(&request_history),
                         );
+                        orch.acknowledge_consumed_reminders_in_request(&request_history)
+                            .await;
                         let physical = PhysicalStepResponse::capture(
                             orch,
                             response.as_ref().clone(),

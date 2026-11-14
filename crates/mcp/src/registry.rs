@@ -2848,8 +2848,42 @@ impl McpRegistry {
         sdk_verdict: Option<crate::sdk_verdict::SdkAutoModeVerdictAuthority>,
         output_schema_capture: Option<crate::client::McpOutputSchemaCallback>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
-        self.verify_tool_dispatch_guard(server, full_name, &guard)
-            .await?;
+        if guard.is_some() {
+            loop {
+                // Inspect slot + state under the same lifecycle lock used by
+                // Cached -> Connecting publication. The strict check cannot
+                // race the owner's slot installation or reject a valid waiter.
+                let waiter = {
+                    let lifecycle = self.lifecycle_lock(server);
+                    let _lifecycle = lifecycle.lock().await;
+                    let slot = self.lazy_upgrade_slot(server).await;
+                    if let Some(slot) = slot {
+                        let connecting = matches!(
+                            self.connections.read().await.get(server),
+                            Some(McpConnectionState::Connecting { config, .. })
+                                if Self::same_config_snapshot(config, &slot.expected_config)
+                        );
+                        if connecting {
+                            Some(slot)
+                        } else {
+                            self.verify_tool_dispatch_guard(server, full_name, &guard)
+                                .await?;
+                            None
+                        }
+                    } else {
+                        self.verify_tool_dispatch_guard(server, full_name, &guard)
+                            .await?;
+                        None
+                    }
+                };
+                let Some(slot) = waiter else { break };
+                // Waiting never grants authority. Recheck the new catalog and
+                // revocable lease after settlement, including supersession.
+                slot.wait().await.map_err(|error| {
+                    crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
+                })?;
+            }
+        }
         let mut lazy_dialed = false;
         let client = if let Some(client) = self.client_for_guarded_dispatch(server, true).await {
             Some(client)
@@ -2994,7 +3028,8 @@ impl McpRegistry {
         if session_expired {
             self.reconnect_preserving_auth(&raw_name).await
         } else {
-            self.reconnect(&raw_name).await
+            self.reconnect_after_auth_rejection(&raw_name, &client)
+                .await
         }
         .map_err(|retry_error| {
             crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
@@ -4077,6 +4112,16 @@ impl McpRegistry {
         config: &McpServerConfig,
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<LiveDiscovery, McpError> {
+        self.discover_live_connection_with_oauth(config, negotiation_mode, None)
+            .await
+    }
+
+    async fn discover_live_connection_with_oauth(
+        &self,
+        config: &McpServerConfig,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+        recovered_oauth: Option<(McpTransportSpec, Option<GrantProvenance>)>,
+    ) -> Result<LiveDiscovery, McpError> {
         Self::validate_connectable_config(config)?;
         if let Some(refusal) = self.connection_refusal(config) {
             return Err(refusal.as_mcp_error());
@@ -4101,6 +4146,7 @@ impl McpRegistry {
             )
             .await?;
         resolved_config.spec = helper_spec;
+        let is_recovered_oauth = recovered_oauth.is_some();
         let (connect_spec, oauth_key, mut grant_provenance) =
             if has_user_auth_header || helper_minted_authorization {
                 (
@@ -4108,9 +4154,23 @@ impl McpRegistry {
                     None,
                     Some(GrantProvenance::unbound()),
                 )
+            } else if let Some((spec, grant)) = recovered_oauth {
+                (
+                    spec,
+                    Some(oauth::server_key(config.storage_name(), &config.spec)),
+                    grant,
+                )
             } else {
                 self.resolve_oauth_spec(&resolved_config).await?
             };
+        let mut oauth_credential = oauth_key.as_ref().and_then(|_| {
+            oauth::retry_storage::OAuthCredentialIdentity::from_spec(
+                &connect_spec,
+                grant_provenance
+                    .as_ref()
+                    .map(|grant| grant.fingerprint.clone()),
+            )
+        });
 
         tracing::debug!(
             server = %config.name,
@@ -4124,7 +4184,7 @@ impl McpRegistry {
 
         let (conn, caps, negotiated) = match attempt(connect_spec.clone()).await {
             Ok(pair) => pair,
-            Err(e) if oauth_key.is_some() => {
+            Err(e) if oauth_key.is_some() && !is_recovered_oauth => {
                 let resource_metadata_url = error_resource_metadata_url(&e);
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
                     let (stepped, stepped_grant) = self
@@ -4135,6 +4195,12 @@ impl McpRegistry {
                         )
                         .await?;
                     grant_provenance = stepped_grant;
+                    oauth_credential = oauth::retry_storage::OAuthCredentialIdentity::from_spec(
+                        &stepped,
+                        grant_provenance
+                            .as_ref()
+                            .map(|grant| grant.fingerprint.clone()),
+                    );
                     attempt(stepped).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -4147,6 +4213,12 @@ impl McpRegistry {
                         .reauth_oauth_spec(&resolved_config, resource_metadata_url.as_deref())
                         .await?;
                     grant_provenance = refreshed_grant;
+                    oauth_credential = oauth::retry_storage::OAuthCredentialIdentity::from_spec(
+                        &refreshed,
+                        grant_provenance
+                            .as_ref()
+                            .map(|grant| grant.fingerprint.clone()),
+                    );
                     attempt(refreshed).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -4253,6 +4325,7 @@ impl McpRegistry {
                             config.tool_permissions.clone(),
                         )
                         .with_transport_kind(config.spec.transport_kind())
+                        .with_oauth_credential_identity(oauth_credential.clone())
                         .with_negotiated_protocol(negotiated.clone())
                         .with_elicitation_capabilities(elicitation)
                         .with_handshake_state(
@@ -6287,6 +6360,88 @@ impl McpRegistry {
         self.connect_locked(config, Some(name.to_string()))
             .await
             .map(|_| ())
+    }
+
+    /// A transport rejection is not a user logout. Keep concurrent OAuth
+    /// publications, and never revoke whatever happens to be current now.
+    async fn reconnect_after_auth_rejection(
+        &self,
+        name: &str,
+        rejected_client: &Arc<McpClient>,
+    ) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        match self.clients.read().await.get(name) {
+            Some(entry) if Arc::ptr_eq(&entry.client, rejected_client) => {}
+            Some(_) => return Ok(()),
+            None => {
+                return Err(McpError::Connection(
+                    "MCP rejected connection was retired".into(),
+                ))
+            }
+        }
+        let config = self
+            .connections
+            .read()
+            .await
+            .get(name)
+            .map(|state| state.config().clone())
+            .ok_or_else(|| McpError::Connection("MCP authentication owner was removed".into()))?;
+        self.disconnect_locked_inner(name, false, false).await?;
+        let Some(rejected) = rejected_client.oauth_credential_identity() else {
+            return self
+                .connect_locked(config, Some(name.to_owned()))
+                .await
+                .map(|_| ());
+        };
+        let recovered = match self.recover_oauth_spec(&config, rejected).await {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                self.connections.write().await.insert(
+                    name.to_owned(),
+                    Self::connection_failure_state(config.clone(), &error),
+                );
+                return Err(error);
+            }
+        };
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &config.spec,
+            config.metadata.transport.as_deref(),
+            mcp_connection_timeout().as_millis() as u64,
+        );
+        self.connections.write().await.insert(
+            name.to_owned(),
+            McpConnectionState::Connecting {
+                config: config.clone(),
+                started_at: SystemTime::now(),
+            },
+        );
+        let result = match self
+            .discover_live_connection_with_oauth(&config, negotiation_mode, Some(recovered))
+            .await
+        {
+            Ok(discovery) => {
+                self.install_live_discovery(
+                    name.to_owned(),
+                    config.clone(),
+                    discovery,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = &result {
+            self.record_connection_failure_diagnostic(&config, error)
+                .await;
+            self.connections.write().await.insert(
+                name.to_owned(),
+                Self::connection_failure_state(config, error),
+            );
+        }
+        result.map(|_| ())
     }
 
     /// Re-establish a stale Streamable HTTP session without revoking the

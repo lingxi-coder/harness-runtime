@@ -352,8 +352,9 @@ pub use orchestrator::{
     PromptSnapshot, PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription,
     RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
     RecapOutcome, RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage,
-    SkillInfo, StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
+    RegisterRepoRootRequest, ResumeRuntimeSnapshot, ResumeTransientReminderAuthority,
+    RewindRowData, ServerFallbackTombstoneMessage, SkillInfo, StatusSnapshot, SummarizeDirection,
+    ToolResultProjection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{

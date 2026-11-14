@@ -1523,6 +1523,7 @@ impl ConversationOrchestrator {
                 self.prompt_runtime
                     .commit_instruction_session_reset(&mut instruction_context);
                 s.session_id = new_session_id_value;
+                self.restore_consumed_reminders_metadata(new_session_id_value, &[]);
                 reports.activate(new_session_id_value);
                 let new_session_id = new_session_id_value.to_string();
                 self.compaction_runtime
@@ -1954,6 +1955,13 @@ impl ConversationOrchestrator {
                 drop(s);
                 drop(reports);
                 *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+                self.restore_consumed_reminders_metadata(
+                    session_id,
+                    runtime.transcript_metadata.as_deref().unwrap_or_default(),
+                );
+                if let Some(authority) = runtime.pending_transient_reminder_authority.as_ref() {
+                    self.import_consumed_reminder_authority(session_id, authority);
+                }
                 drop(append);
                 self.sync_thinking_signature_strip_flag_to_api().await;
                 self.restore_main_loop_latest_assistant_usage(
@@ -2145,6 +2153,11 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    fn capture_pending_transient_reminder_authority(
+        &self,
+    ) -> Option<lingxi_core::host::ResumeTransientReminderAuthority> {
+        self.export_consumed_reminder_authority()
+    }
     async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
         self.conversation_profile().await
     }
@@ -6836,6 +6849,7 @@ mod tests {
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
                 lifetime_guard: None,
+                pending_transient_reminder_authority: None,
                 transcript_path: None,
                 transcript_source: None,
                 working_directory: None,

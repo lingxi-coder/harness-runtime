@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-const SERVICE: &str = "mcp-oauth-session";
+pub(super) const SERVICE: &str = "mcp-oauth-session";
 
 /// Native Bve/rcr attach configured non-Authorization headers only to the
 /// protected resource's exact origin. Redirects repeat that origin check.
@@ -399,21 +399,21 @@ pub(crate) async fn save(
     state: &OAuthSessionState,
 ) -> Result<(), OAuthError> {
     let bytes = serde_json::to_vec(state).map_err(|error| OAuthError::Token(error.to_string()))?;
-    storage
-        .store(
-            SERVICE,
-            key,
-            SecureStorageData::new(
-                bytes,
-                SecureStorageMetadata {
-                    created_at: clock.now(),
-                    last_accessed: None,
-                    kind: SecretKindDto("mcp_oauth_session".into()),
-                },
-            ),
-        )
-        .await
-        .map_err(|error| OAuthError::Token(format!("storage store OAuth session: {error}")))
+    super::retry_storage::write(
+        storage,
+        SERVICE,
+        key,
+        Some(SecureStorageData::new(
+            bytes,
+            SecureStorageMetadata {
+                created_at: clock.now(),
+                last_accessed: None,
+                kind: SecretKindDto("mcp_oauth_session".into()),
+            },
+        )),
+    )
+    .await
+    .map_err(|error| OAuthError::Token(format!("storage store OAuth session: {error}")))
 }
 
 pub(crate) async fn clear_auth(
@@ -425,27 +425,26 @@ pub(crate) async fn clear_auth(
     state.invalidate("all");
     state.discovery = None;
     if state.configured_client_secret.is_none() {
-        return storage
-            .delete(SERVICE, key)
+        return super::retry_storage::write(storage, SERVICE, key, None)
             .await
             .map_err(|error| OAuthError::Token(error.to_string()));
     }
     let bytes = serde_json::to_vec(&state).map_err(|error| OAuthError::Token(error.to_string()))?;
-    storage
-        .store(
-            SERVICE,
-            key,
-            SecureStorageData::new(
-                bytes,
-                SecureStorageMetadata {
-                    created_at: SystemTime::now(),
-                    last_accessed: None,
-                    kind: SecretKindDto("mcp_oauth_session".into()),
-                },
-            ),
-        )
-        .await
-        .map_err(|error| OAuthError::Token(error.to_string()))
+    super::retry_storage::write(
+        storage,
+        SERVICE,
+        key,
+        Some(SecureStorageData::new(
+            bytes,
+            SecureStorageMetadata {
+                created_at: SystemTime::now(),
+                last_accessed: None,
+                kind: SecretKindDto("mcp_oauth_session".into()),
+            },
+        )),
+    )
+    .await
+    .map_err(|error| OAuthError::Token(error.to_string()))
 }
 
 /// Configure a confidential MCP client secret in the MCP secure namespace.

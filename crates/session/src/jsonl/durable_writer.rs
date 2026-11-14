@@ -1293,7 +1293,7 @@ impl DurableTranscriptWriter {
     }
 
     #[cfg(test)]
-    fn fail_next_existing_sync_for_test(&self) {
+    pub(crate) fn fail_next_existing_sync_for_test(&self) {
         self.fail_next_existing_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -1301,6 +1301,12 @@ impl DurableTranscriptWriter {
     #[cfg(test)]
     pub(crate) fn sync_count_for_test(&self) -> usize {
         self.syncs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_sync_for_test(&self) {
+        self.fail_next_append_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -1667,6 +1673,26 @@ impl DurableTranscriptTransaction<'_> {
         self.writer
             .bind_transcript_authority(&root.join(relative), Some(next))?;
         Ok(())
+    }
+
+    /// A visible recovery checkpoint is an acknowledgment only after the
+    /// existing file and directory have been synced under the same authority.
+    pub(crate) fn sync_existing_metadata_at(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+    ) -> Result<(), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
+        self.writer
+            .verify_authoritative_target(transcript_root, transcript_relative)?;
+        self.writer.sync_existing_match(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+        )?;
+        self.writer
+            .confirm_authoritative_target_after_write(transcript_root, transcript_relative)
     }
 
     /// Append one source JSON value while this transaction owns the session
