@@ -20,7 +20,7 @@ pub(super) fn persistent_identity(
     identity: RootIdentity,
 ) -> Result<RootIdentity, FsError> {
     let mut attributes = libc::attrlist {
-        bitmapcount: libc::ATTR_BIT_MAP_COUNT as u16,
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
         commonattr: 0,
         volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,

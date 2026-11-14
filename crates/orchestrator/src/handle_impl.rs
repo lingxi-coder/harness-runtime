@@ -8656,7 +8656,7 @@ mod background_context_tests {
                     stderr: String::new().into(),
                     exit_code: None,
                     response: Some(hooks::HookResponse {
-                        decision: Some(self.0.clone()),
+                        decision: Some(self.0),
                         reason: Some("denied".into()),
                         ..Default::default()
                     }),

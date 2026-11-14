@@ -129,7 +129,7 @@ static AUTO_MODEL_DATE: LazyLock<Regex> =
 
 fn native_legacy_four_fallback(value: &str, family: &str) -> bool {
     value.match_indices(family).any(|(offset, _)| {
-        let tail = value[offset + family.len()..].as_bytes();
+        let tail = &value.as_bytes()[offset + family.len()..];
         !(tail.first() == Some(&b'-')
             && tail.get(1).is_some_and(u8::is_ascii_digit)
             && !tail.get(2).is_some_and(u8::is_ascii_digit))

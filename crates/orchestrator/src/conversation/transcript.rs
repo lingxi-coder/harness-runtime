@@ -2017,6 +2017,7 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn release_tool_frame_with_publication(
         &self,
         id: &lingxi_core::types::ToolUseId,

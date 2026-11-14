@@ -3384,20 +3384,18 @@ impl ConversationOrchestrator {
                 if reason
                     .string_units("")
                     .is_some_and(|units| !units.is_empty())
-                {
-                    if !self
+                    && !self
                         .append_stop_hook_feedback(&reason, goal_control.as_ref())
                         .await
-                    {
-                        let Some(fallback) = goal_control
-                            .as_ref()
-                            .and_then(|control| control.ordinary_fallback.clone())
-                        else {
-                            return StopHookFlow::FallThrough;
-                        };
-                        self.append_stop_hook_feedback(&fallback, None).await;
-                        goal_control = None;
-                    }
+                {
+                    let Some(fallback) = goal_control
+                        .as_ref()
+                        .and_then(|control| control.ordinary_fallback.clone())
+                    else {
+                        return StopHookFlow::FallThrough;
+                    };
+                    self.append_stop_hook_feedback(&fallback, None).await;
+                    goal_control = None;
                 }
                 if let Some(control) = goal_control.as_ref() {
                     if !control.owns(&*self.session.lock().await) {

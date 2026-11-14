@@ -291,6 +291,8 @@ pub async fn secure_storage_for_policy(
                 "Warning: native credential storage unavailable during init."
             );
         }
+        // Each per-OS block returns; on Linux this one happens to be last.
+        #[allow(clippy::needless_return)]
         return Ok(native_or_fallback_storage(
             primary,
             SecureStorageBackend::LinuxLibsecret,

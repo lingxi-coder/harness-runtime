@@ -1080,6 +1080,9 @@ impl ProcessRunner for PosixProcess {
         true
     }
 
+    // On macOS the leader is reaped only after the group stops, so the exit
+    // status read inside the loop is always replaced there.
+    #[cfg_attr(target_os = "macos", allow(unused_assignments))]
     async fn run_inline_foreground(
         &self,
         cmd: &SandboxedCommand,

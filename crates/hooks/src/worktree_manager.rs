@@ -90,8 +90,7 @@ impl WorktreeHookResult {
         text.utf16_code_units
             .split(|unit| *unit == u16::from(b'\n'))
             .map(|line| ExactHookText::from_utf16(line.to_vec()).trim_js())
-            .filter(|line| !line.is_empty())
-            .next_back()
+            .rfind(|line| !line.is_empty())
     }
 }
 

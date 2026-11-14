@@ -2120,7 +2120,7 @@ fn native_class_glob_regex(source: &[char]) -> Result<String, SourceGlobBuildErr
                 &slashes[..slashes.len() - slashes.len() % 2],
                 &caps[4]
             )
-        } else if &caps[4] == "]" && slashes.len() % 2 == 0 {
+        } else if &caps[4] == "]" && slashes.len().is_multiple_of(2) {
             strip_native_reversed_ascii_ranges(&format!("[{}{slashes}]", &caps[2]))
         } else {
             "[]".to_owned()
@@ -2228,7 +2228,7 @@ fn fold_native_regex_escape(chars: &[char]) -> Result<(String, usize), SourceGlo
         return Ok((regex::escape(r"\c"), 1));
     }
     let (unit, consumed) = native_regex_scalar_escape(chars)?;
-    let mapped = if unit >= 0x80 && unit <= 0xffff {
+    let mapped = if (0x80..=0xffff).contains(&unit) {
         0xf0000 + unit - 0x80
     } else {
         unit

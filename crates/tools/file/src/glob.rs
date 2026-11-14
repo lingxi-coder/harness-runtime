@@ -987,7 +987,7 @@ mod tests {
         std::fs::write(&unreadable, "private contents").unwrap();
         std::fs::write(tmp.path().join("public.txt"), "public").unwrap();
         let original = std::fs::metadata(&unreadable).unwrap().permissions();
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o0)).unwrap();
         let (ctx, _) = make_ctx(&tmp);
         let outcome = GlobTool::new(ctx)
             .call(

@@ -65,9 +65,9 @@ pdf-render = ["pdf-read", "image-read", "tokio/process", "tokio/time"]
 
 [target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos"))))'.dependencies]
 # Owned system-rg process groups are a desktop opt-out; embedded search stays
-# independent of desktop transports on mobile. WNOWAIT keeps PID ownership.
+# independent of desktop transports on mobile. WNOWAIT keeps PID ownership, and
+# the group is stopped with killpg here: a tool may not depend on a platform.
 rustix = { version = "0.38", features = ["process"] }
-platform-posix = { path = "../../platforms/posix" }
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

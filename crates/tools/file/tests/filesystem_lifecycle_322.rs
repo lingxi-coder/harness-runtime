@@ -148,8 +148,7 @@ async fn a_new_context_requires_its_own_observed_file_snapshot() {
     let error = FileEditTool::new(second.clone())
         .call(input(change.clone()), fresh_ctx(), fresh_tx())
         .await
-        .err()
-        .expect("a new session may not inherit another session's file knowledge");
+        .expect_err("a new session may not inherit another session's file knowledge");
     assert!(matches!(error, ToolError::InvalidInput(message)
         if message.string_at("") == Some(tool_file::FILE_NOT_READ_ERROR)));
     assert_eq!(

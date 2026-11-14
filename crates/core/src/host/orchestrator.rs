@@ -4905,7 +4905,6 @@ pub trait OutputStream: Send + Sync {
     /// **Default no-op**: only the stream-json sink overrides this (and only
     /// re-emits when its `--forward-subagent-text` gate is on); every other sink
     /// (TUI, mocks) ignores it, so they compile unchanged.
-
     async fn emit_forwarded_subagent_message(
         &self,
         _message: &Utf16JsonProjection,

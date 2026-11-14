@@ -9,8 +9,8 @@
     "error_template": "File content ({size}) exceeds maximum allowed size ({max}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
   },
   "binary_detection": {
-    "scan_window_bytes": 8192,
-    "note": "Primary detection is by extension (BINARY_EXTENSIONS, constants/files.ts) before any read; the 8 KB NUL scan is the fallback for extensionless/non-listed binaries. Message is byte-VERBATIM to FileReadTool.ts:479 with the lowercased extension interpolated.",
+    "scan_window_bytes": 8000,
+    "note": "Primary detection is by extension (BINARY_EXTENSIONS, constants/files.ts) before any read; the decimal 8 KB (8000-byte, Native 2.1.322) NUL scan is the fallback for extensionless/non-listed binaries. Message is byte-VERBATIM to FileReadTool.ts:479 with the lowercased extension interpolated.",
     "error_template": "This tool cannot read binary files. The file appears to be a binary {ext} file. Please use appropriate tools for binary file analysis."
   },
   "path_blocked_error": {
@@ -35,10 +35,6 @@
   "glob_cap": {
     "value": 100,
     "note": "MAX_GLOB_MATCHES. Excess returns truncated=true."
-  },
-  "grep_records_cap": {
-    "value": 10000,
-    "note": "GREP_RECORDS_CAP. Memory valve on RECORDED content-mode lines per file; never caps the count (claude-code/rg have no per-file cap). head_limit (default 250) is the real truncation; count mode reports the true total."
   },
   "line_indexing_base": {
     "value": 1,

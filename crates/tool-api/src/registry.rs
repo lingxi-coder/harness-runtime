@@ -1267,7 +1267,7 @@ mod tests {
 
     #[test]
     fn ordinary_mcp_name_collisions_are_unadvertised_undispatchable_and_recover_on_refresh() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         let id = McpConnectionId::new();
         let first: Arc<dyn Tool> = Arc::new(ProvenanceTool {
             name: "mcp__srv__a_b",

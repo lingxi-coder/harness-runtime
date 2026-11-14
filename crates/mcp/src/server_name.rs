@@ -26,8 +26,8 @@ impl McpServerName {
             key
         });
         Self {
-            display,
             units,
+            display,
             storage_identity,
         }
     }

@@ -1087,7 +1087,7 @@ async fn utf16_compaction_restores_exact_read_content(streaming: bool) {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().canonicalize().unwrap();
     let path = cwd.join("utf16.txt");
-    let exact = vec![97, 13, 10, 0xd800, 98];
+    let exact = [97, 13, 10, 0xd800, 98];
     let raw = std::iter::once(0xfeffu16)
         .chain(exact.iter().copied())
         .flat_map(u16::to_le_bytes)

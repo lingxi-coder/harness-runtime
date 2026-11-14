@@ -1,3 +1,6 @@
+// Shared by several test binaries; each one uses only some of these helpers.
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::unfold;

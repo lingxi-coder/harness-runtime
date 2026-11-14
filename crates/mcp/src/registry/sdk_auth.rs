@@ -94,7 +94,7 @@ impl McpRegistry {
         let oauth = match &config.spec {
             McpTransportSpec::Http { oauth, .. } | McpTransportSpec::Sse { oauth, .. } => oauth
                 .clone()
-                .unwrap_or_else(|| lingxi_core::host::McpOAuthConfigDto {
+                .unwrap_or(lingxi_core::host::McpOAuthConfigDto {
                     client_id: None,
                     callback_port: None,
                     auth_server_metadata_url: None,

@@ -393,6 +393,12 @@ pub fn strip_all_leading_env_vars(command: &str, blocklist: Option<fn(&str) -> b
 
 /// Native `eRt`: argv-derived candidates are only used for Deny/Ask. Wrapper
 /// flags and mini-command strings must never broaden an Allow rule.
+/// A `timeout`-style duration argument (`5`, `1.5s`, `2m`).
+fn duration_regex() -> &'static Regex {
+    static DURATION: OnceLock<Regex> = OnceLock::new();
+    DURATION.get_or_init(|| Regex::new(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$").unwrap())
+}
+
 fn deny_ask_argv_candidates(argv: &[String]) -> Vec<String> {
     fn base(value: &str) -> &str {
         value.rsplit(['/', '\\']).next().unwrap_or(value)
@@ -475,12 +481,7 @@ fn deny_ask_argv_candidates(argv: &[String]) -> Vec<String> {
                         break;
                     }
                 }
-                static DURATION: OnceLock<Regex> = OnceLock::new();
-                if !args.get(at).is_some_and(|a| {
-                    DURATION
-                        .get_or_init(|| Regex::new(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$").unwrap())
-                        .is_match(a)
-                }) {
+                if !args.get(at).is_some_and(|a| duration_regex().is_match(a)) {
                     break;
                 }
                 Some(at + 1)

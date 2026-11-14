@@ -454,7 +454,7 @@ async fn alias_index_retries_until_admission_and_keeps_all_destination_variants(
         false,
         &[],
         &[],
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &mut skipped,
     )
     .await
@@ -566,7 +566,7 @@ async fn unchanged_alias_admission_and_enrichment_share_one_full_read_and_parse(
         false,
         &[],
         &[],
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &mut skipped,
     )
     .await
@@ -608,7 +608,7 @@ async fn alias_capture_refreshes_late_relocation_before_final_membership_check()
         false,
         &[],
         &[],
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &mut skipped,
     )
     .await
@@ -663,7 +663,7 @@ async fn alias_capture_refreshes_replacements_rewrites_and_truncation() {
             false,
             &[],
             &[],
-            &[path.clone()],
+            std::slice::from_ref(&path),
             &mut skipped,
         )
         .await
@@ -713,7 +713,7 @@ async fn alias_capture_rechecks_access_and_keeps_unsupported_prefix_fallback() {
             false,
             &[],
             &[],
-            &[path.clone()],
+            std::slice::from_ref(&path),
             &mut skipped,
         )
         .await

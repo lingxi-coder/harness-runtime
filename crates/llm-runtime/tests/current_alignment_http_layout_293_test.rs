@@ -342,6 +342,8 @@ async fn capture_anthropic(
             std::collections::HashSet::new(),
             std::collections::HashMap::new(),
             None,
+            // Its one user turn is a plain string, not a scalar-content row.
+            std::collections::HashSet::new(),
         ),
     )
     .await

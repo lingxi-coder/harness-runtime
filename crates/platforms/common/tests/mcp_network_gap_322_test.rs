@@ -113,11 +113,7 @@ async fn native_322_network_case_process() {
             assert_eq!(case, "tls-mtls-wrong-pair", "{case}: {error}");
             assert!(!expected_success);
             assert!(error.to_string().contains("builder error"), "{error}");
-            std::fs::write(
-                output.join("client-construction-error.txt"),
-                error.to_string(),
-            )
-            .unwrap();
+            std::fs::write(output.join("client-construction-error.txt"), &error).unwrap();
             None
         }
     };

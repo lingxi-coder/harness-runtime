@@ -5768,7 +5768,7 @@ mod tests {
             let relative = Path::new("unreadable.txt");
             let target = root.join(relative);
             std::fs::write(&target, b"not opened for content").unwrap();
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o0)).unwrap();
             let actual = metadata_file_after_permission(&root, relative, &target, &target).unwrap();
             assert_eq!(actual.size, 22);
             assert_eq!(actual.mode.unwrap() & 0o777, 0);

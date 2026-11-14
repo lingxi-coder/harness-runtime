@@ -45,12 +45,28 @@ impl OwnedChild {
         }
     }
 
+    /// SIGKILL rg's process group. rg runs with `--no-config` and no
+    /// preprocessor, so the group is rg alone: an empty group (ESRCH) or, on
+    /// Darwin, a zombie-only group (EPERM while the leader has exited) is
+    /// already stopped.
+    fn stop_group(&self) -> std::io::Result<()> {
+        use rustix::process::{kill_process_group, Pid, Signal};
+        let child = self.0.as_ref().expect("owned child is unreaped");
+        let raw =
+            i32::try_from(child.id()).map_err(|_| std::io::Error::other("child PID overflow"))?;
+        let pgid = Pid::from_raw(raw).ok_or_else(|| std::io::Error::other("invalid child PID"))?;
+        match kill_process_group(pgid, Signal::Kill) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") && self.exited()? => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn finish(&mut self) -> Result<ExitStatus, SearchWalkError> {
-        let child = self.0.as_mut().expect("owned child is unreaped");
         // The leader is still unreaped, including on natural success. Its PID
-        // therefore cannot be reused before all group members are retired.
-        platform_posix::process::kill_tree::kill_tree_force(child.id())
-            .map_err(|error| SearchWalkError::Engine(error.to_string()))?;
+        // therefore cannot be reused before the group is stopped.
+        self.stop_group().map_err(engine_error)?;
+        let child = self.0.as_mut().expect("owned child is unreaped");
         let status = child.wait().map_err(engine_error)?;
         self.0 = None;
         Ok(status)
@@ -59,8 +75,10 @@ impl OwnedChild {
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
+        if self.0.is_some() {
+            let _ = self.stop_group();
+        }
         if let Some(child) = &mut self.0 {
-            let _ = platform_posix::process::kill_tree::kill_tree_force(child.id());
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -109,7 +127,9 @@ pub(super) fn search(
     let mut stdout = tempfile::tempfile().map_err(engine_error)?;
     let mut stderr = tempfile::tempfile().map_err(engine_error)?;
     let mut command = Command::new(options.command);
-    command.args(["--max-columns", "500"]);
+    // A user ripgrep config could add `--pre`/`--search-zip`, which start
+    // child processes and change output; this search owns its whole command.
+    command.args(["--no-config", "--max-columns", "500"]);
     if options.files_mode {
         command.args(["--files-with-matches", "--null"]);
     } else if options.count_mode {
@@ -264,9 +284,10 @@ mod tests {
 
     fn system_rg() -> Option<PathBuf> {
         let found = crate::ripgrep_mode::find_rg_on_path();
-        if found.is_none() && std::env::var_os("LINGXI_REQUIRE_SYSTEM_RG_TESTS").is_some() {
-            panic!("system-rg validation requested but no executable rg is installed");
-        }
+        assert!(
+            found.is_some() || std::env::var_os("LINGXI_REQUIRE_SYSTEM_RG_TESTS").is_none(),
+            "system-rg validation requested but no executable rg is installed"
+        );
         if found.is_none() {
             eprintln!("system-rg runtime test skipped: rg not installed");
         }

@@ -9274,11 +9274,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // The kill-switch defeats every local background arm. The public
         // Agent boundary rejects explicit teammate background requests before
         // reaching this pure decision helper.
-        for d in [BackgroundDecision {
-            wants_background: Some(true),
-            background_tasks_disabled: true,
-            ..base()
-        }] {
+        {
+            let d = BackgroundDecision {
+                wants_background: Some(true),
+                background_tasks_disabled: true,
+                ..base()
+            };
             assert!(!should_run_in_background(d));
         }
     }

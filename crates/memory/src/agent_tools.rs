@@ -20,8 +20,11 @@ fn poisoned<T>(error: std::sync::PoisonError<T>) -> T {
 /// The shell capability actually advertised by the parent host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryAgentShell {
+    /// The parent advertises `Bash`.
     Bash,
+    /// The parent advertises `PowerShell` (Windows without Bash).
     PowerShell,
+    /// The mobile host's `Shell` tool.
     Mobile,
 }
 
@@ -45,6 +48,7 @@ impl MemoryAgentShell {
             .unwrap_or_default()
     }
 
+    /// The tool name the parent advertises for this shell.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -54,6 +58,7 @@ impl MemoryAgentShell {
         }
     }
 
+    /// Whether commands for this shell use POSIX syntax.
     #[must_use]
     pub fn is_posix(self) -> bool {
         self != Self::PowerShell

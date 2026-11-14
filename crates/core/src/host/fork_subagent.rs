@@ -133,8 +133,8 @@ fn fork_subagent_inputs(is_coordinator: bool, is_non_interactive: bool) -> ForkS
     };
     ForkSubagentGateInputs {
         is_coordinator,
-        is_non_interactive,
         environment,
+        is_non_interactive,
         ..Default::default()
     }
 }

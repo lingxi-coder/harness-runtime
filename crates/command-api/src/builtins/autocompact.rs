@@ -290,7 +290,7 @@ fn format_tokens_compact(n: u64) -> String {
         return n.to_string();
     };
     let tenths = n.saturating_add(divisor / 20) / (divisor / 10);
-    if tenths % 10 == 0 {
+    if tenths.is_multiple_of(10) {
         format!("{}{suffix}", tenths / 10)
     } else {
         format!("{}.{digits}{suffix}", tenths / 10, digits = tenths % 10)

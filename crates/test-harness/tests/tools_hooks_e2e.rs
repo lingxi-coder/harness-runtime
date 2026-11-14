@@ -76,6 +76,10 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 reload_skills: None,
                 async_rewake: false,
                 async_backgrounded: false,
+                // WorktreeCreate folder / legacy MCP rewrite: neither applies to
+                // a PreToolUse Block mock.
+                worktree_path: None,
+                legacy_mcp_rewrite_suppressed: false,
             }),
         }
     }

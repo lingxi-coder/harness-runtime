@@ -499,7 +499,7 @@ mod tests {
         }
         let request = crate::LlmRequest::new("m");
         let prefix = ContextUsagePrefix::capture(&request, &[exact.clone()]).unwrap();
-        assert!(prefix.matches_history(&[plain.clone()]));
+        assert!(prefix.matches_history(std::slice::from_ref(&plain)));
         let mut changed = exact.clone();
         if let ConversationMessage::User { content, .. } = &mut changed {
             let ContentBlock::TextJsUtf16 {

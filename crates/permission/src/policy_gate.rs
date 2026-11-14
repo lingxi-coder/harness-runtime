@@ -4866,6 +4866,7 @@ fn mod_check_rule(
 #[path = "policy_gate_test.rs"]
 mod policy_gate_test;
 
+#[cfg(test)]
 #[path = "read_search_policy_test.rs"]
 mod read_search_policy_test;
 #[cfg(test)]
