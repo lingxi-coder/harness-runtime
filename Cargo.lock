@@ -7009,7 +7009,6 @@ dependencies = [
  "lopdf",
  "once_cell",
  "permission",
- "platform-posix",
  "rustix 0.38.44",
  "serde",
  "serde_json",
